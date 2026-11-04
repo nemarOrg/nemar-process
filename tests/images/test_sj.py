@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,31 @@ def test_the_validator_reads_the_vendored_directory_and_names_a_version():
 
 def test_an_empty_schema_directory_fails_loudly_and_never_falls_back(tmp_path, monkeypatch):
     monkeypatch.setattr(sj, "SCHEMA_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError, match="vendored"):
+        sj.validator()
+
+
+@pytest.fixture
+def vendored_copy(tmp_path, monkeypatch):
+    """A private copy of the vendored schema directory that `sj` is pointed at, to damage."""
+    copy = tmp_path / "schema"
+    shutil.copytree(sj.SCHEMA_DIR, copy)
+    monkeypatch.setattr(sj, "SCHEMA_DIR", copy)
+    return copy
+
+
+def test_a_schema_that_does_not_resolve_every_ref_is_refused(vendored_copy):
+    # the validator prints a warning and carries on with the $ref unresolved, which would leave part
+    # of the schema unchecked; the vendored directory's own files make it happen when one is missing
+    victim = next((vendored_copy / "versions").rglob("definitions/*.schema.json"))
+    victim.unlink()
+    with pytest.raises(RuntimeError, match=r"Warning: \$ref"):
+        sj.validator()
+
+
+def test_a_versions_directory_with_no_version_is_refused(vendored_copy):
+    shutil.rmtree(vendored_copy / "versions")
+    (vendored_copy / "versions").mkdir()
     with pytest.raises(FileNotFoundError, match="vendored"):
         sj.validator()
 

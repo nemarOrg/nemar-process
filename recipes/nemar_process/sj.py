@@ -21,13 +21,14 @@ SCHEMA_DIR = Path(__file__).resolve().parent / "_vendor" / "signalJourney" / "sc
 def validator() -> Validator:
     """A ``Validator`` over the vendored schema directory.
 
-    Raises ``FileNotFoundError`` when the vendored directory holds no schema version, and
-    ``RuntimeError`` when the validator could not resolve every ``$ref`` (it prints a warning and
-    carries on, which would leave part of the schema unchecked). Its progress lines are not printed.
+    Raises ``FileNotFoundError`` when the vendored directory holds no schema version (no
+    ``versions/<version>/signalJourney.schema.json``), and ``RuntimeError`` when the validator could
+    not resolve every ``$ref`` (it prints a warning and carries on, which would leave part of the
+    schema unchecked). Its progress lines are not printed.
     """
-    if not (SCHEMA_DIR / "versions").is_dir():
+    if not any((SCHEMA_DIR / "versions").glob("*/signalJourney.schema.json")):
         raise FileNotFoundError(
-            "the vendored signalJourney schema has no versions directory: {}".format(SCHEMA_DIR)
+            "the vendored signalJourney schema holds no schema version: {}".format(SCHEMA_DIR)
         )
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
