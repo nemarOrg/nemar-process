@@ -25,10 +25,12 @@ Exit number: 0, or 10 to 16 for the seven failure codes (``codes.exit_number``).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -198,7 +200,28 @@ def _do_work(
             raise outcome.failure
         log.info("runtime {} finished the entry".format(runtime_name))
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        if not remove_scratch(scratch):
+            log.warning("scratch could not be removed completely")
+
+
+def remove_scratch(path: str) -> bool:
+    """Remove the node-local scratch tree, whatever the entry did to it (it can reach the part bound
+    at ``/tmp``): every directory is first made owner-readable, writable and searchable so a
+    mode-000 or read-only directory does not leave its files behind on a shared node. True when
+    nothing is left. Never raises."""
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            info = os.lstat(current)
+            if stat.S_ISDIR(info.st_mode):
+                os.chmod(current, stat.S_IMODE(info.st_mode) | 0o700)
+                stack.extend(os.path.join(current, name) for name in os.listdir(current))
+        except OSError:
+            continue
+    with contextlib.suppress(RecursionError):  # a tree nested deeper than the interpreter will walk
+        shutil.rmtree(path, ignore_errors=True)
+    return not os.path.lexists(path)
 
 
 def _unexpected(code: str, error: Exception, log: Log) -> Failure:

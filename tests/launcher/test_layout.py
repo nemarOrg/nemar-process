@@ -246,3 +246,29 @@ def test_a_launcher_directory_made_unwritable_during_the_run_is_uploaded_from_me
     assert b'"o"' in uploaded["launcher/manifest.json"]
     assert rig.callbacks.events[-1] == "complete"
     assert not (rig.out / "launcher" / "result.json").exists()
+
+
+def test_a_scratch_tree_the_entry_made_unremovable_is_still_removed(tmp_path):
+    from nemar_launch import __main__ as launcher_main
+
+    tree = tmp_path / "scratch"
+    (tree / "tmp" / "closed" / "deeper").mkdir(parents=True)
+    (tree / "tmp" / "closed" / "deeper" / "f").write_text("x")
+    (tree / "tmp" / "readonly").mkdir()
+    (tree / "tmp" / "readonly" / "g").write_text("y")
+    (tree / "tmp" / "readonly").chmod(0o500)  # its entries cannot be unlinked
+    (tree / "tmp" / "closed").chmod(0o000)  # it cannot even be listed
+    launcher_main.remove_scratch(str(tree))
+    assert not tree.exists()
+
+
+def test_the_scratch_of_a_finished_job_does_not_outlive_it(rig):
+    # The entry (the stand-in runs it on the host) reaches the scratch that is bound at /tmp and
+    # leaves a directory nobody can list; the launcher must still clean the node's scratch.
+    script = (
+        'S=$(ls -d "$NEMAR_OUT"/../../../scratch/nemar-launch-*/tmp)\n'
+        'mkdir "$S/closed"\nprintf x > "$S/closed/f"\nchmod 000 "$S/closed"\n'
+    )
+    launch = rig.launch(rig.script_spec(script))
+    assert launch.exit == 0, launch.log
+    assert list(rig.scratch.iterdir()) == []
