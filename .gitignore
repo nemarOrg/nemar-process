@@ -9,3 +9,6 @@ htmlcov/
 dist/
 *.sif
 .claude/*.local.md
+.nemar-cli/
+.nemar-cli-dev/
+.cache/

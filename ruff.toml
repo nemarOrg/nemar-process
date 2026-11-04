@@ -1,6 +1,6 @@
 target-version = "py312"
 line-length = 100
-extend-exclude = ["tests/fixtures"]
+extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev"]
 
 # The launcher and the observer run on a compute node under whatever Python the host has; the
 # floor is 3.9. The launcher tests run on 3.9 too, so they keep to the same syntax.
