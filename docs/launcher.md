@@ -199,7 +199,7 @@ Once the specification parsed, however a phase ends, **including an unexpected e
 - the exit number is 0, or 10 to 16 for the first failure.
 - an unexpected error is `runtime_error` (or `result_upload_failed` during the upload) with detail `internal_error`, and only the exception's class name is logged.
 
-Not guaranteed: a specification that does not parse has no API address, so nothing is uploaded (the three files are still written); a refused output directory gets no file written into it; a launcher killed with SIGKILL, or a node that dies, leaves what it had written and nothing else.
+Not guaranteed: a specification that does not parse has no API address, so nothing is uploaded (the three files are still written); a refused output directory gets no file written into it; a launcher killed with SIGKILL (the kill signal, which no program can catch), or a node that dies, leaves what it had written and nothing else.
 A SIGTERM that arrives after the container exited is still recorded: the record never says success for a job Slurm terminated, and once the stop event is set no further output upload starts.
 
 ## Upload
