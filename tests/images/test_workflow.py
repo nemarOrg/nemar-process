@@ -260,23 +260,17 @@ def test_publish_refuses_a_commit_that_is_not_on_main_before_it_logs_in_or_pushe
     assert "exit 1" in steps[guard]["run"]
 
 
-def test_publish_never_overwrites_an_existing_version_tag():
+def test_publish_checks_the_version_tag_before_it_pushes():
     steps = publish_steps()
-    check = step_index(steps, "imagetools inspect")
-    assert (
-        step_index(steps, "docker/login-action")
-        < check
-        < step_index(steps, "docker/build-push-action")
-    )
-    assert "already exists" in steps[check]["run"]
-    assert "nemar-python:${VERSION}-cpu" in steps[check]["run"]
+    check = step_index(steps, "scripts/check_tag_absent.py nemarorg/nemar-python ")
+    assert check < step_index(steps, "docker/build-push-action")
+    assert '"${VERSION}-cpu"' in steps[check]["run"]
 
 
-def test_the_sif_tag_is_never_overwritten_either():
+def test_the_sif_tag_is_checked_before_it_is_pushed():
     sign = workflow()["jobs"]["sign"]["steps"]
-    check = step_index(sign, "imagetools inspect")
+    check = step_index(sign, "scripts/check_tag_absent.py nemarorg/nemar-python-sif")
     assert check < step_index(sign, "apptainer push")
-    assert "already exists" in sign[check]["run"]
 
 
 def signing_identity() -> str:

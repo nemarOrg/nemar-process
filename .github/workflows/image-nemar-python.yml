@@ -27,6 +27,7 @@ on:
       - "images/nemar-python/**"
       - "recipes/**"
       - "scripts/check_smoke_pins.py"
+      - "scripts/check_tag_absent.py"
       - "scripts/make_image_digests.py"
       - "tests/fixtures/smoke/**"
       - ".dockerignore"
@@ -182,21 +183,16 @@ jobs:
         id: lock
         run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      # A version is published once: the tag <version>-cpu is never moved to a new image.
+      # A version is published once: the tag <version>-cpu is never moved to a new image. Only a
+      # manifest HEAD answered with exactly 404 lets the run go on; any other reply stops it.
       - name: Refuse to overwrite an existing version tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ref="ghcr.io/nemarorg/nemar-python:${VERSION}-cpu"
-          if output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
-            echo "::error::${ref} already exists: a version is never overwritten, publish a new version"
-            exit 1
-          fi
-          if ! grep -qiE 'not found|unknown|404' <<< "$output"; then
-            echo "::error::could not tell whether ${ref} exists, so nothing is pushed: ${output}"
-            exit 1
-          fi
+          python3 scripts/check_tag_absent.py nemarorg/nemar-python "${VERSION}-cpu"
 
       # No provenance or SBOM attestation: either would make the pushed manifest an index, and the
       # digest every consumer pins is then the index's, not the image's.
@@ -287,18 +283,14 @@ jobs:
           apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
           python3 scripts/check_smoke_pins.py --image smoke-sif.json
 
+      # The same rule for the SIF's tag, which is the image digest.
       - name: Refuse to overwrite an existing SIF tag
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ref="ghcr.io/nemarorg/nemar-python-sif:sha256-${IMAGE_DIGEST#sha256:}"
-          if output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
-            echo "::error::${ref} already exists: a SIF tag is never overwritten"
-            exit 1
-          fi
-          if ! grep -qiE 'not found|unknown|404' <<< "$output"; then
-            echo "::error::could not tell whether ${ref} exists, so nothing is pushed: ${output}"
-            exit 1
-          fi
+          python3 scripts/check_tag_absent.py nemarorg/nemar-python-sif "sha256-${IMAGE_DIGEST#sha256:}"
 
       # The artifact is tagged with the image digest, because the SIF file is named by it: the launcher
       # looks for <64 hex digits of the image digest>.sif under NEMAR_SIF_ROOT.
