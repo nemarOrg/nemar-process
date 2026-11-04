@@ -59,7 +59,7 @@ uv sync --frozen
 uv run pre-commit install        # once per clone: ruff on the staged files, with --fix --unsafe-fixes
 uv run ruff check . && uv run ruff format --check . && uv run ty check
 uv run pytest --cov=launcher --cov-fail-under=85
-uv run --no-project --python 3.9 --with pytest pytest tests/launcher   # the launcher on its floor
+uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher   # the launcher on its floor
 uv run python scripts/build_launcher_zip.py --check
 ```
 
