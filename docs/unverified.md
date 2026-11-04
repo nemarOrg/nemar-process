@@ -65,4 +65,4 @@ None of this has been observed on the node's runtime, which may be a commercial 
 
 - No image is built or pushed (the runtime image is phase 3); the container tests use a small public image.
 - No Tapis application or system definition is written, validated or registered, and no observer exists (phase 6).
-- A symlink or special file that cannot be unlinked even after the directory's permissions are widened, and a directory that cannot be listed even after the same, have no test: an unprivileged test cannot make either.
+- A symlink or special file that cannot be unlinked even after the directory's permissions are widened, a directory that cannot be listed even after the same, and an entry that vanishes between the directory listing and its `lstat`, have no test: an unprivileged test cannot make any of them on demand (the walk records each as `outputs_unreadable` or skips it, and the code paths are read, not run).
