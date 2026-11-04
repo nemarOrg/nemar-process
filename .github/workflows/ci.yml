@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: ["feature/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  apptainer-probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Kernel and user namespace facts
+        run: |
+          uname -a
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces || true
+          unshare -Ur true && echo "unshare -Ur works" || echo "unshare -Ur refused"
+      - name: Install Apptainer
+        env:
+          VERSION: "1.5.5"
+          DEB_SHA256: "25095d3711504b3e8657dbb2e172ef8db9db43c4503d940c9c36b105db8dce77"
+          SUID_SHA256: "d9dd6b26540f200f394465bf870dcf7c3a392effa57d5786f8682cde2dafa493"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${VERSION}/apptainer_${VERSION}_amd64.deb"
+          curl -fsSL -o apptainer-suid.deb "https://github.com/apptainer/apptainer/releases/download/v${VERSION}/apptainer-suid_${VERSION}_amd64.deb"
+          echo "${DEB_SHA256}  apptainer.deb" | sha256sum -c -
+          echo "${SUID_SHA256}  apptainer-suid.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y ./apptainer.deb
+          apptainer --version
+      - name: Pull and run (as installed)
+        continue-on-error: true
+        run: |
+          set -x
+          apptainer exec docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 python -c 'print("hello from the container")'
+      - name: Pull and run (user namespaces relaxed)
+        continue-on-error: true
+        run: |
+          set -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          apptainer exec docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 python -c 'print("hello from the container")'
+      - name: Pull and run (setuid install)
+        continue-on-error: true
+        run: |
+          set -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          sudo apt-get install -y "$RUNNER_TEMP/apptainer-suid.deb"
+          ls -l /usr/libexec/apptainer/bin/starter-suid || true
+          apptainer exec docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 python -c 'print("hello from the container")'
