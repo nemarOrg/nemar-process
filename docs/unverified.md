@@ -10,10 +10,11 @@ Observed on the hosted runner with Apptainer 1.5.5 (the community build), and pi
 
 - An entry killed by SIGKILL (the kill signal, the one the kernel's out-of-memory killer sends) is reported with exit status 137, and the launcher records `out_of_memory` with `entry_exit_code` 137.
   Any other signal death is reported as 128 plus the signal (SIGSEGV, 11, is 139) and is `runtime_error`.
-- A SIGTERM (the termination signal) sent to the launcher reaches the container and the entry stops, so the job ends `time_limit` or `terminated` as the end time dictates, with the launcher files uploaded.
-  The container's process group is killed after 10 seconds if the entry has not stopped.
+- A SIGTERM (the termination signal) sent to the container's process group stops `sleep 60` at once, run directly or through a shell, and the runtime reports exit status 143 (128 plus 15); so the job ends `time_limit` or `terminated` as the end time dictates, with the launcher files uploaded.
+  The container's process group is killed after 10 seconds if the entry has not stopped (an entry that ignores SIGTERM is the case for that; the stand-in runtime tests it).
 - A container started with `--containall` has a process identifier (PID) namespace of its own, a private `/dev/shm`, no view of the host's home directory, and `oom_score_adj` 1000 as the launcher set it.
-- A `bind path` line in the runtime's system configuration is a host directory mounted into every container unless `--no-mount bind-paths` is given (the control run shows it; see `tests/launcher/test_runtime_config.py`).
+- A `bind path` line in the runtime's system configuration mounts a host directory into every container unless the container is contained (`--contain`, so `--containall`) or `--no-mount bind-paths` is given; the control runs show each case (see `tests/launcher/test_runtime_config.py`).
+  The launcher gives both, so on this runtime either alone would do; the node's runtime may differ.
 - A configuration with `allow pid ns = no` is refused by the launcher before any user code runs.
 
 None of this has been observed on the node's runtime, which may be a commercial Singularity.

@@ -103,23 +103,36 @@ PROBE = (
 )
 
 
-def test_a_site_bind_path_is_visible_without_the_flag_and_invisible_with_it(
-    runtime_config, canary, tmp_path, test_sif
-):
-    runtime_config(add=("bind path = " + CANARY_DIR,))
-    # Control: the runtime as the site configured it, with the launcher's other flags but NOT
-    # `--no-mount bind-paths`, shows the canary. Without this the test could pass by the
-    # configuration line doing nothing.
-    flags = [f for f in run.ISOLATION_FLAGS if f not in ("--no-mount", "bind-paths")]
-    seen = subprocess.run(
+def listing(test_sif, flags):
+    """`ls` of the canary directory inside the real runtime with the given flags."""
+    return subprocess.run(
         [binary(), "exec", *flags, str(test_sif), "ls", CANARY_DIR],
         capture_output=True,
         text=True,
         check=False,
+        cwd="/",
     )
+
+
+def test_a_site_bind_path_reaches_every_container_unless_it_is_turned_off(
+    runtime_config, canary, tmp_path, test_sif
+):
+    runtime_config(add=("bind path = " + CANARY_DIR,))
+    # Control: with the site's configuration and no containment, the canary is mounted. Without
+    # this the test could pass by the configuration line doing nothing.
+    seen = listing(test_sif, ["--cleanenv"])
     assert seen.returncode == 0, seen.stderr
     assert "canary.txt" in seen.stdout
-    # The launcher's container, flags and all: not there.
+    # `--no-mount bind-paths` alone turns the site's binds off.
+    off = listing(test_sif, ["--cleanenv", "--no-mount", "bind-paths"])
+    assert off.returncode != 0
+    assert "canary.txt" not in off.stdout
+    # Observed on Apptainer 1.5.5: `--contain` (so `--containall`) also skips the site's binds, so
+    # the launcher's `--no-mount bind-paths` is a second, explicit guard (the exact-argument test
+    # pins it) and not the only one.
+    contained = listing(test_sif, ["--containall"])
+    assert contained.returncode != 0
+    # The launcher's own container, flags and all: not there.
     rig = real_rig(tmp_path, test_sif)
     try:
         bundle = rig.set_bundle(make_bundle({"probe.py": PROBE}))
