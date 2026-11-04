@@ -51,7 +51,7 @@ def scenario_dataset_fetch(rig):
     from dataplane import Fault
 
     rig.plane.fault("README", Fault.lost())
-    dataset = [{"id": "nm000104", "version": "1.0.2"}]
+    dataset = [{"id": "nm000104", "version": "v1.0.2"}]
     return rig.script_spec("true\n", datasets=dataset), 11, "dataset_fetch_failed"
 
 

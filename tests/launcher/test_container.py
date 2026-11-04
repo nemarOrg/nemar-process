@@ -17,7 +17,7 @@ import shutil
 import uuid
 
 import pytest
-from harness import DATASET_ID, DATASET_VERSION, TOKEN, Rig, make_bundle
+from harness import DATASET_ID, DATASET_VERSION, SIF_NAME, TOKEN, Rig, make_bundle
 
 pytestmark = pytest.mark.apptainer
 
@@ -65,7 +65,7 @@ TRICKY_VALUE = 'a,b "c" d=e  f'
 def probed(tmp_path_factory, test_sif):
     tmp = tmp_path_factory.mktemp("container")
     rig = Rig(tmp, "apptainer")
-    shutil.copy(test_sif, rig.sif_root / "runtime.sif")
+    shutil.copy(test_sif, rig.sif_root / SIF_NAME)
     bundle = rig.set_bundle(make_bundle({"probe.py": PROBE}))
     # A marker in the real home directory: the container must not be able to see it.
     marker = os.path.join(

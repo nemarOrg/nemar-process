@@ -26,12 +26,12 @@ def base(rig=None) -> dict:
         "entry": "run.py",
         "args": ["--n", "3"],
         "bundle": {"sha256": "a" * 64, "size": 10},
-        "datasets": [{"id": "nm000104", "version": "1.0.2", "include": ["sub-01/**"]}],
+        "datasets": [{"id": "nm000104", "version": "v1.0.2", "include": ["sub-01/**"]}],
         "api_base": "https://api.example.test",
         "image": {
             "uri": "docker://ghcr.io/example/runtime@sha256:" + "b" * 64,
             "digest": "sha256:" + "b" * 64,
-            "sif": "runtime.sif",
+            "sif": "b" * 64 + ".sif",
         },
         "env": {"OMP_NUM_THREADS": "4"},
         "resources": {"gpus": 0},
@@ -197,10 +197,58 @@ def test_an_entry_needs_the_bundle_that_holds_it_and_a_command_does_not():
 def test_duplicate_dataset_ids_are_refused():
     document = base()
     document["datasets"] = [
-        {"id": "nm000104", "version": "1.0.2"},
-        {"id": "nm000104", "version": "1.0.3"},
+        {"id": "nm000104", "version": "v1.0.2"},
+        {"id": "nm000104", "version": "v1.0.3"},
     ]
     refused(document)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["1.0.2", "v1.0", "V1.0.2", "latest2", "v1.0.2-rc1", "main", "1.0", "v1.0.x", "v1.0.2 "],
+)
+def test_a_dataset_version_that_is_not_a_data_plane_tag_is_refused(version):
+    # The launch specification's version IS the data-plane tag, used verbatim: `latest` or `vN.N.N`.
+    document = base()
+    document["datasets"][0]["version"] = version
+    refused(document)
+
+
+@pytest.mark.parametrize("version", ["latest", "v1.0.2", "v10.20.30"])
+def test_the_data_plane_tags_are_accepted(version):
+    document = base()
+    document["datasets"][0]["version"] = version
+    assert spec_mod.parse(encode_spec(document)).datasets[0]["version"] == version
+
+
+@pytest.mark.parametrize(
+    "sif",
+    [
+        "runtime.sif",
+        "c" * 64 + ".sif",
+        "b" * 64 + ".SIF",
+        "b" * 64,
+        "sub/" + "b" * 64 + ".sif",
+        "B" * 64 + ".sif",
+    ],
+)
+def test_the_image_file_must_be_named_by_the_digest(sif):
+    # `image.sif` is the basename `<64 hex of image.digest>.sif`, relative to NEMAR_SIF_ROOT.
+    document = base()
+    document["image"]["sif"] = sif
+    refused(document)
+
+
+def test_the_image_file_named_by_the_digest_is_accepted():
+    assert spec_mod.parse(encode_spec(base())).image["sif"] == "b" * 64 + ".sif"
+
+
+def test_a_version_in_the_bare_form_is_refused_through_the_entry_point(rig):
+    spec = rig.spec(command=["true"], datasets=[{"id": "nm000104", "version": "1.0.2"}])
+    launch = rig.launch(spec)
+    assert launch.exit == 13
+    assert launch.result["detail"] == "invalid_spec"
+    assert rig.server.requests == []
 
 
 def test_non_ascii_bytes_are_refused_but_the_escape_is_accepted():
@@ -234,11 +282,6 @@ def test_a_float_or_a_boolean_is_not_an_integer():
         document = base()
         patch(document)
         refused(document)
-
-
-def test_a_missing_environment_variable_is_refused():
-    with pytest.raises(spec_mod.SpecError):
-        spec_mod.read_raw({})
 
 
 # ---- responses are open, requests and documents are closed ---------------------------------------
@@ -290,7 +333,7 @@ PROVENANCE = {
     "bundle_digest": None,
     "image": {"uri": "docker://ghcr.io/x/y@sha256:" + "b" * 64, "digest": "sha256:" + "b" * 64},
     "runtime_version": "apptainer 1; python 3.9",
-    "staging": [{"id": "nm000104", "version": "1.0.2", "mode": "bind", "files": 1, "bytes": 2}],
+    "staging": [{"id": "nm000104", "version": "v1.0.2", "mode": "bind", "files": 1, "bytes": 2}],
     "timings": {"run": 1.5},
     "slurm_job_id": None,
     "entry_exit_code": 0,

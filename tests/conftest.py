@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from harness import Rig
+from harness import SIF_NAME, Rig
 
 REQUIRE = os.environ.get("NEMAR_REQUIRE_APPTAINER") == "1"
 BINARY = shutil.which("apptainer") or shutil.which("singularity")
@@ -60,7 +60,7 @@ def rig(tmp_path):
 def real_rig(tmp_path, test_sif):
     """A rig that runs the real container runtime against the test image."""
     made = Rig(tmp_path, "apptainer")
-    shutil.copy(test_sif, made.sif_root / "runtime.sif")
+    shutil.copy(test_sif, made.sif_root / SIF_NAME)
     yield made
     made.close()
 
@@ -73,6 +73,6 @@ def either_rig(request, tmp_path):
     else:
         sif = request.getfixturevalue("test_sif")
         made = Rig(tmp_path, "apptainer")
-        shutil.copy(sif, made.sif_root / "runtime.sif")
+        shutil.copy(sif, made.sif_root / SIF_NAME)
     yield made
     made.close()

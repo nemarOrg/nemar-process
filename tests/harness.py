@@ -31,9 +31,10 @@ LAUNCH_SCRIPT = ROOT / "launcher" / "tapisjob_app.sh"
 JOB_ID = "job_0123456789abcdef01234567"
 TOKEN = "tok_" + "a1b2c3d4e5f6" * 4
 DATASET_ID = "nm000104"
-DATASET_VERSION = "1.0.2"
-SIF_NAME = "runtime.sif"
-IMAGE_DIGEST = "sha256:" + "b" * 64
+DATASET_VERSION = "v1.0.2"  # the data-plane tag: `latest` or `vN.N.N`
+IMAGE_HEX = "b" * 64
+IMAGE_DIGEST = "sha256:" + IMAGE_HEX
+SIF_NAME = IMAGE_HEX + ".sif"  # the launch specification names the image file by its digest
 IMAGE_URI = "docker://ghcr.io/example/runtime@" + IMAGE_DIGEST
 
 

@@ -25,6 +25,7 @@ Fault injection (``faults``) is per path, consumed one request at a time:
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from urllib.parse import quote, unquote
 
 from server import Request, Response, StandinServer, parse_range
 
+TAG_FORM = re.compile(r"^(?:latest|v[0-9]+\.[0-9]+\.[0-9]+)$")
 FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "fixtures" / "dataset"
 PUBLISHED_FILE_MISSING_ERROR = "Published file is missing from storage"
 
@@ -78,7 +80,7 @@ class DataPlane:
         self,
         root: Path = FIXTURE_ROOT,
         dataset_id: str = "nm000104",
-        version: str = "1.0.2",
+        version: str = "v1.0.2",
     ) -> None:
         self.root = Path(root)
         self.dataset_id = dataset_id
@@ -136,16 +138,29 @@ class DataPlane:
 
     # ---- serving ----------------------------------------------------------------------------
 
+    def serves(self, version: str) -> bool:
+        """The real data plane accepts only `latest` or a tag `vN.N.N`; a bare `1.0.2` is a 404."""
+        return TAG_FORM.match(version) is not None and version in (self.version, "latest")
+
     def handle(self, request: Request) -> Response | None:
-        manifest_path = "/data/{}/{}/manifest.json".format(self.dataset_id, self.version)
-        if request.method == "GET" and request.path == manifest_path:
+        parts = request.path.split("/")
+        if (
+            request.method == "GET"
+            and len(parts) == 5
+            and parts[:2] == ["", "data"]
+            and parts[2] == self.dataset_id
+            and parts[4] == "manifest.json"
+        ):
+            if not self.serves(parts[3]):
+                return Response.json_body(404, {"error": "no such version"})
             with self._lock:
                 if self.manifest_status:
                     return Response.json_body(self.manifest_status.pop(0), {"error": "unavailable"})
             return Response.json_body(200, self.manifest())
-        prefix = "/files/{}/{}/".format(self.dataset_id, self.version)
-        if request.method in ("GET", "HEAD") and request.path.startswith(prefix):
-            return self._file(request, request.path[len(prefix) :])
+        for version in (self.version, "latest"):
+            prefix = "/files/{}/{}/".format(self.dataset_id, version)
+            if request.method in ("GET", "HEAD") and request.path.startswith(prefix):
+                return self._file(request, request.path[len(prefix) :])
         return None
 
     def _next_fault(self, path: str) -> Fault | None:

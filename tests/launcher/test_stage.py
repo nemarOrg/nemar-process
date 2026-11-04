@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import urllib.error
+import urllib.request
 
 import pytest
 from dataplane import FIXTURE_ROOT, Fault
@@ -58,7 +60,7 @@ def test_the_manifest_request_is_the_data_plane_route_without_the_token(rig):
     launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
     assert launch.exit == 0, launch.log
     manifest = manifest_requests(rig)
-    assert [r.path for r in manifest] == ["/data/nm000104/1.0.2/manifest.json"]
+    assert [r.path for r in manifest] == ["/data/nm000104/v1.0.2/manifest.json"]
     assert "x-compute-job-token" not in manifest[0].headers
 
 
@@ -261,10 +263,35 @@ def test_a_manifest_with_more_entries_than_the_data_plane_allows_is_refused(rig)
 
 
 def test_an_unknown_dataset_is_dataset_not_found(rig):
-    spec = rig.script_spec(LIST_DATA, datasets=[{"id": "nm000999", "version": "1.0.0"}])
+    spec = rig.script_spec(LIST_DATA, datasets=[{"id": "nm000999", "version": "v1.0.0"}])
     launch = rig.launch(spec)
     assert launch.exit == 11
     assert launch.result["detail"] == "dataset_not_found"
+
+
+@pytest.mark.parametrize(
+    ("version", "status"),
+    [("v1.0.2", 200), ("latest", 200), ("1.0.2", 404), ("v1.0", 404), ("v1.0.3", 404)],
+)
+def test_the_stand_in_data_plane_serves_only_latest_and_vn_n_n(rig, version, status):
+    # The real data plane answers a bare `1.0.2` with a 404; the stand-in must too, or a launcher
+    # that passed a bare version would pass its tests and fail in production.
+    url = "{}/data/{}/{}/manifest.json".format(rig.server.base_url, DATASET_ID, version)
+    try:
+        with urllib.request.urlopen(url) as response:
+            got = response.status
+    except urllib.error.HTTPError as error:
+        got = error.code
+    assert got == status
+
+
+def test_latest_is_staged_like_a_tag(rig):
+    launch = rig.launch(
+        rig.script_spec(LIST_DATA, datasets=[{"id": DATASET_ID, "version": "latest"}])
+    )
+    assert launch.exit == 0, launch.log
+    assert launch.provenance["staging"][0]["version"] == "latest"
+    assert launch.provenance["staging"][0]["files"] == len(fixture_files())
 
 
 def test_the_manifest_request_retries_a_503(rig):

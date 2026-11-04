@@ -24,15 +24,13 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
 from typing import Any
-
-from .codes import ENV_SPEC
 
 MAX_SPEC_BYTES = 64 * 1024
 SCHEMA_FILE = "launch-spec.v1.json"
 PLACEHOLDER_JOB_ID = "job_" + "0" * 24
 _JOB_ID = re.compile(r"^job_[0-9a-f]{24}$")
+_DATASET_TAG = re.compile(r"latest|v[0-9]+\.[0-9]+\.[0-9]+")
 
 
 class SpecError(Exception):
@@ -271,11 +269,9 @@ def schema_def(name: str) -> dict[str, Any]:
 # ---- reading and parsing the specification ---------------------------------------------------------
 
 
-def read_raw(environ: Mapping[bytes, bytes]) -> bytes:
-    raw = environ.get(ENV_SPEC.encode("ascii"))
-    if raw is None:
-        raise SpecError("invalid_spec")
-    return raw
+def digest_of(raw: bytes) -> str:
+    """``launch_spec_digest``: the SHA-256 (lowercase hex) of the raw bytes, however they parse."""
+    return hashlib.sha256(raw).hexdigest()
 
 
 def recover_job_id(raw: bytes) -> str:
@@ -319,14 +315,13 @@ class Spec:
     __str__ = __repr__
 
 
-def parse(raw: bytes) -> Spec:
-    """Validate the raw bytes of ``NEMAR_LAUNCH_SPEC`` and return the specification.
+def decode(raw: bytes) -> dict[str, Any]:
+    """The launcher's reading of the raw bytes, before any validation against the schema.
 
-    The digest is taken from ``raw`` first. Order of refusal: size, ASCII, JSON (no duplicate key,
-    no NaN, no float), an unsupported runtime, the schema, then the one rule the schema cannot
-    state (a dataset id once).
+    Refused as ``invalid_spec``: more than 64 KiB, a byte above 0x7F (the document is ASCII-only),
+    a duplicate key, NaN or an infinity, a float (the Worker writes none), nesting too deep to
+    read, or anything that is not one JSON object.
     """
-    digest = hashlib.sha256(raw).hexdigest()
     if len(raw) > MAX_SPEC_BYTES:
         raise SpecError("invalid_spec")
     try:
@@ -344,6 +339,18 @@ def parse(raw: bytes) -> Spec:
         raise SpecError("invalid_spec") from None
     if not isinstance(document, dict):
         raise SpecError("invalid_spec")
+    return document
+
+
+def parse(raw: bytes) -> Spec:
+    """Validate the raw bytes of ``NEMAR_LAUNCH_SPEC`` and return the specification.
+
+    Order of refusal: ``decode``, an unsupported runtime, the schema, then the rules the schema
+    does not state: a dataset id once; each dataset version is the data-plane tag, used verbatim
+    (``latest`` or ``vN.N.N``, the Worker resolves the user's spelling); the image file is named by
+    the image digest (``<64 hex>.sif``, relative to ``NEMAR_SIF_ROOT``).
+    """
+    document = decode(raw)
     schema = load_schema()
     runtimes = schema["properties"]["runtime"]["enum"]
     if "runtime" in document and not any(_equal(document["runtime"], r) for r in runtimes):
@@ -353,4 +360,9 @@ def parse(raw: bytes) -> Spec:
     ids = [d["id"] for d in document["datasets"]]
     if len(ids) != len(set(ids)):
         raise SpecError("invalid_spec")
-    return Spec(document, digest)
+    if not all(_DATASET_TAG.fullmatch(d["version"]) for d in document["datasets"]):
+        raise SpecError("invalid_spec")
+    image = document["image"]
+    if image["sif"] != image["digest"].split(":", 1)[1] + ".sif":
+        raise SpecError("invalid_spec")
+    return Spec(document, digest_of(raw))

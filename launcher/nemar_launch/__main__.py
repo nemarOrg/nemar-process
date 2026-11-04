@@ -11,7 +11,6 @@ Exit number: 0, or 10 to 16 for the seven failure codes (``codes.exit_number``).
 
 from __future__ import annotations
 
-import hashlib
 import os
 import platform
 import re
@@ -209,12 +208,12 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         state.slurm_job_id = slurm_id if slurm_id and _SLURM_ID.match(slurm_id) else None
         raw = env.raw(ENV_SPEC)
         if raw is None:
-            state.digest = hashlib.sha256(b"").hexdigest()  # the digest of no bytes
+            state.digest = spec.digest_of(b"")  # the digest of no bytes
             state.fail(
                 Failure("runtime_error", "invalid_spec", "the launch specification is not set")
             )
         else:
-            state.digest = hashlib.sha256(raw).hexdigest()
+            state.digest = spec.digest_of(raw)
             try:
                 job = spec.parse(raw)
                 state.job_id = job.job_id
