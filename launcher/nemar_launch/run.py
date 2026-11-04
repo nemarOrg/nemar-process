@@ -147,6 +147,15 @@ def entry_argv(job: spec.Spec) -> list[str]:
     return [entry, *list(job.args)]
 
 
+def env_argument(name: str, value: str) -> str:
+    """One ``--env`` argument. The runtime reads the flag as a CSV record, so a value holding a
+    comma or a double quote is quoted as CSV (the quote doubled); anything else is passed as is."""
+    pair = "{}={}".format(name, value)
+    if any(c in pair for c in ',"\r\n'):
+        pair = '"' + pair.replace('"', '""') + '"'
+    return pair
+
+
 def build_argv(
     runtime: str,
     job: spec.Spec,
@@ -165,8 +174,8 @@ def build_argv(
     if job.gpus > 0:
         argv.append("--nv")
     for name, value in job.env.items():
-        argv += ["--env", "{}={}".format(name, value)]
-    argv += ["--env", "{}={}".format(ENV_OUT, CONTAINER_OUTPUTS)]
+        argv += ["--env", env_argument(name, value)]
+    argv += ["--env", env_argument(ENV_OUT, CONTAINER_OUTPUTS)]
     argv.append(sif)
     argv += entry_argv(job)
     return argv

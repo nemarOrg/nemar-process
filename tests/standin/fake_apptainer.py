@@ -21,6 +21,7 @@ What it does, given ``exec [options] <image> <command...>``:
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import sys
@@ -73,7 +74,13 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
         elif name == "--pwd":
             pwd = value
         elif name == "--env":
-            key, _, val = value.partition("=")
+            # The real runtime reads --env as a CSV record, strictly: a bare quote is an error.
+            try:
+                (pair,) = next(csv.reader([value], strict=True))
+            except (csv.Error, ValueError):
+                print('invalid argument for "--env" flag', file=sys.stderr)
+                return 2
+            key, _, val = pair.partition("=")
             env[key] = val
     binds.sort(key=lambda b: -len(b[0]))
 

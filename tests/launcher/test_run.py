@@ -295,3 +295,27 @@ def test_a_missing_specification_still_leaves_valid_launcher_files(rig):
     assert launch.result["detail"] == "invalid_spec"
     assert len(launch.provenance["launch_spec_digest"]) == 64
     assert rig.server.requests == []
+
+
+TRICKY = 'a,b "c" d=e  f'
+
+
+def test_an_env_value_with_a_comma_or_a_quote_is_quoted_as_csv_the_way_the_runtime_reads_it(rig):
+    launch = rig.launch(
+        rig.script_spec(
+            'printf "%s" "$MPLBACKEND" > "$NEMAR_OUT/value"\n', env={"MPLBACKEND": TRICKY}
+        )
+    )
+    assert launch.exit == 0, launch.log
+    argv = rig.runtime_calls()[0]["argv"]
+    assert argv[argv.index('"MPLBACKEND=a,b ""c"" d=e  f"') - 1] == "--env"
+    assert (launch.out / "work" / "outputs" / "value").read_text() == TRICKY
+
+
+def test_env_arguments_are_quoted_only_when_they_must_be():
+    from nemar_launch.run import env_argument
+
+    assert env_argument("OMP_NUM_THREADS", "4") == "OMP_NUM_THREADS=4"
+    assert env_argument("MPLBACKEND", "a b = c") == "MPLBACKEND=a b = c"
+    assert env_argument("X", "1,2") == '"X=1,2"'
+    assert env_argument("X", 'say "hi"') == '"X=say ""hi"""'
