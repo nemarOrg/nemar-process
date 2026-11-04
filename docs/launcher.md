@@ -122,6 +122,7 @@ It selects the files the `include` globs name (`**` crosses directories, `*` and
 
 - **bind**: when `NEMAR_LOCAL_DATASETS_ROOT` holds `<id>/<version>/` and every selected file there matches the manifest by size and checksum (`SHA256E` sha256, or the git blob SHA-1 for `git`), that directory is mounted read-only; no file is requested.
   A symlink, a missing file, a wrong size, a different byte or an entry without a checksum falls back to download.
+  The whole directory is mounted, so files the `include` globs did not select are visible too; only the selected files are verified.
 - **download**: each file from its `bytes_url` into scratch, five attempts with backoff and jitter, `Range` resume after a truncated body, size and checksum checks, four files at a time.
   A 502 whose `error` is "Published file is missing from storage" is lost content: it is not retried and its path is logged.
   Any other 502 is a transport fault and is retried.

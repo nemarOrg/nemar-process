@@ -15,6 +15,10 @@ These are the facts it depends on that nobody has confirmed on the node or again
   `--containall`, `--cleanenv`, `--no-home`, `--env`, `--bind ...:ro` and `--nv` are common to both, but the isolation tests have not run there.
   The runtime's site configuration may bind paths into every container; the launcher does not disable them (`--no-mount`), so check the site's `apptainer.conf` or `singularity.conf` for `bind path` entries.
 - **How `--env` is parsed.** Apptainer 1.5.5 reads the flag as a CSV record, and the launcher quotes values accordingly; whether the commercial Singularity on the node parses it the same way is unconfirmed (a value with a comma is the case to try).
+- **The network.** `--containall` does not isolate the network: the entry can reach whatever the node can.
+  The container has no job token (its environment is the allowlist), so it cannot call NEMAR's job routes, but it is not cut off from them or from the node's network; isolating it would need `--net` and privileges the community account may not have.
+- **Manifest addresses.** A manifest entry's `bytes_url` may name any `http` or `https` host; the launcher trusts NEMAR's data plane to name its own.
+  Restricting the hosts would need a list in the application definition.
 - **GPU visibility.** `CUDA_VISIBLE_DEVICES` is not passed into the container (the environment is the allowlist only), so a GPU job relies on the scheduler's device cgroup to show the container only the GPUs it was given.
 - **The image file.** `image.sif` is resolved relative to `NEMAR_SIF_ROOT`, else the working directory.
   That variable is this phase's choice, not nemar-cli's (it is not in `LAUNCHER_ENV`): the application definition has to set it, or stage the file next to the job.
