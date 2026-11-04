@@ -16,6 +16,9 @@ env:
   TEST_IMAGE: "docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
   TEST_IMAGE_KEY: "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
   UV_VERSION: "0.13.4"
+  # The workflow linter the image tests run (tests/images/test_workflow.py); bump version and hash together.
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 jobs:
   lint:
@@ -109,8 +112,53 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
           uv run ty check
-          uv run pytest --cov=launcher --cov-fail-under=85
+          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images
           uv run python scripts/build_launcher_zip.py --check
+
+  images:
+    # The runtime image's declaration, lock, vendored schema, smoke fixture, Dockerfile and workflows.
+    # The image itself is built and smoke-tested by image-nemar-python.yml.
+    runs-on: ubuntu-24.04
+    env:
+      # In CI neither the workflow linter nor the comparison with signalJourney may be skipped unnoticed.
+      NEMAR_REQUIRE_ACTIONLINT: "1"
+      NEMAR_REQUIRE_SIGNALJOURNEY: "1"
+      NEMAR_SIGNALJOURNEY_DIR: ${{ github.workspace }}/.signaljourney
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the vendored signalJourney commit
+        id: sj
+        run: |
+          echo "ref=$(sed -n 's/^commit: //p' recipes/nemar_process/_vendor/signalJourney/SOURCE)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out signalJourney at that commit (the vendored copy is compared with it)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: signalJourney/signalJourney
+          ref: ${{ steps.sj.outputs.ref }}
+          path: .signaljourney
+          fetch-depth: 1
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Gates
+        run: |
+          uv sync --frozen
+          uv lock --check
+          uv run pytest tests/images --cov
 
   nemar-cli-latest:
     # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.

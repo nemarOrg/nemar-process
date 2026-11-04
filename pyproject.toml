@@ -80,7 +80,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["launcher"]
+source = ["launcher", "recipes", "scripts"]
 omit = ["launcher/schema/*"]
 # The launcher also runs as a child process of the tests (signals, the shell wrapper); count those.
 patch = ["subprocess"]
