@@ -10,9 +10,12 @@ real one alike.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
+import time
+from pathlib import Path
 
 import pytest
 from harness import JOB_ID, encode_spec, make_bundle
@@ -348,10 +351,15 @@ def test_an_output_that_changed_after_hashing_is_not_uploaded(rig, tmp_path):
 # ---- finalize_outputs itself ---------------------------------------------------------------------------
 
 
-def finalize(work, **limits):
-    arguments = {"max_files": 100, "max_file_bytes": 10**9}
-    arguments.update(limits)
-    return run.finalize_outputs(str(work), Log(None), job_id=JOB_ID, **arguments)
+def finalize(work, *, stop=None, max_files=100, max_file_bytes=10**9):
+    return run.finalize_outputs(
+        str(work),
+        Log(None),
+        job_id=JOB_ID,
+        max_files=max_files,
+        max_file_bytes=max_file_bytes,
+        stop=stop,
+    )
 
 
 @pytest.mark.parametrize("mode", [0o000, 0o100, 0o300, 0o500])
@@ -390,6 +398,120 @@ def test_an_output_exactly_at_the_per_file_limit_is_taken(tmp_path):
     done = finalize(work, max_file_bytes=10)
     assert done.failure is None
     assert [f["size"] for f in done.files] == [10]
+
+
+# ---- a SIGTERM during finalization --------------------------------------------------------------------
+
+GIB = 1 << 30
+STOP_BOUND = 1.5  # seconds; hashing a GiB takes longer than this on any runner we use
+
+
+def sparse(path, size):
+    with open(path, "wb") as handle:
+        handle.truncate(size)
+
+
+def stop_after(seconds):
+    event = threading.Event()
+    timer = threading.Timer(seconds, event.set)
+    timer.start()
+    return event, timer
+
+
+def test_the_stop_event_ends_the_hashing_of_a_large_output_at_once(tmp_path):
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    sparse(work / "outputs" / "big", GIB)
+    stop, timer = stop_after(0.2)
+    started = time.monotonic()
+    try:
+        done = finalize(work, stop=stop, max_file_bytes=10 * GIB)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < STOP_BOUND
+    assert done.stopped is True
+    assert done.files == []
+    assert done.failure is None  # the termination is recorded by the caller, which knows which kind
+
+
+def test_a_stop_event_already_set_hashes_nothing_but_still_makes_work_safe(tmp_path):
+    work = tmp_path / "work"
+    (work / "outputs" / "d").mkdir(parents=True)
+    (work / "outputs" / "d" / "ok").write_bytes(b"x")
+    secret = work / "outputs" / "secret"
+    secret.write_bytes(b"y")
+    secret.chmod(0o000)  # hashing it would be outputs_unreadable
+    (work / "outputs" / "link").symlink_to("/etc/hostname")
+    stop = threading.Event()
+    stop.set()
+    try:
+        done = finalize(work, stop=stop)
+    finally:
+        secret.chmod(0o600)
+    assert done.stopped is True
+    assert done.files == []
+    assert done.failure is None
+    assert not os.path.lexists(work / "outputs" / "link")  # the archive stays safe
+
+
+def test_without_a_stop_event_everything_is_hashed_as_before(tmp_path):
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    (work / "outputs" / "f").write_bytes(b"x")
+    done = finalize(work, stop=threading.Event())  # never set
+    assert done.stopped is False
+    assert [f["path"] for f in done.files] == ["f"]
+
+
+def terminated_run(tmp_path, *, end_in=None, earlier=None):
+    from nemar_launch import __main__ as launcher_main
+    from nemar_launch.codes import Env
+
+    (tmp_path / "out").mkdir()
+    layout = run.prepare_layout(str(tmp_path / "out"))
+    sparse(os.path.join(layout.outputs, "big"), GIB)
+    log = Log(None)
+    state = launcher_main.Run(str(tmp_path / "out"), layout, log, Documents(layout.launcher, log))
+    if earlier is not None:
+        state.fail(earlier)
+    terminator = run.Terminator()
+    terminator.received = time.time()
+    terminator.stop.set()
+    mapping = {b"PATH": b"/"}
+    if end_in is not None:
+        mapping[b"SLURM_JOB_END_TIME"] = str(int(time.time()) + end_in).encode()
+    started = time.monotonic()
+    launcher_main._finish(state, None, Env(mapping), terminator, lambda _seconds: None)
+    return state, time.monotonic() - started, layout
+
+
+def test_a_sigterm_before_finalization_skips_hashing_and_records_the_termination(tmp_path):
+    state, elapsed, layout = terminated_run(tmp_path)
+    assert elapsed < STOP_BOUND
+    assert (state.failure.code, state.failure.detail) == ("runtime_error", "terminated")
+    assert state.files == []
+    assert state.outputs_blocked is True
+    result = json.loads(Path(layout.launcher, "result.json").read_text())
+    assert (result["failure_code"], result["detail"]) == ("runtime_error", "terminated")
+    manifest = json.loads(Path(layout.launcher, "manifest.json").read_text())
+    assert manifest["files"] == []
+
+
+def test_a_sigterm_at_the_time_limit_is_time_limit_and_nothing_is_hashed(tmp_path):
+    state, elapsed, _layout = terminated_run(tmp_path, end_in=60)
+    assert elapsed < STOP_BOUND
+    assert state.failure.code == "time_limit"
+    assert state.outputs_blocked is True
+
+
+def test_the_first_failure_wins_over_the_termination_and_no_outputs_go(tmp_path):
+    from nemar_launch.codes import Failure
+
+    earlier = Failure("runtime_error", "entry_failed", "x")
+    state, elapsed, _layout = terminated_run(tmp_path, earlier=earlier)
+    assert elapsed < STOP_BOUND
+    assert state.failure is earlier
+    assert state.outputs_blocked is True
 
 
 # ---- hashing opens without following a link ----------------------------------------------------------

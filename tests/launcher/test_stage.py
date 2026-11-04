@@ -396,6 +396,59 @@ def test_a_wrong_size_a_missing_file_and_a_symlink_each_fall_back(rig, local_cop
     assert run_with_local_root(rig).provenance["staging"][0]["mode"] == "download"
 
 
+def test_verifying_the_local_copy_honours_the_stop_event(tmp_path):
+    # Bind-mode hashing can read gigabytes: a SIGTERM must end it, not wait for it.
+    import threading
+    import time
+
+    from nemar_launch import stage
+    from nemar_launch.codes import Stopped
+    from nemar_launch.provenance import Log
+
+    size = 1 << 30
+    with open(tmp_path / "big", "wb") as handle:
+        handle.truncate(size)
+    entry = stage.Entry("big", size, "0" * 64, "SHA256E", "https://data.example.test/big")
+    stop = threading.Event()
+    timer = threading.Timer(0.2, stop.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(Stopped):
+            stage.verify_local(str(tmp_path), [entry], Log(None), stop)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 1.5
+
+
+def test_a_stop_event_already_set_verifies_nothing(tmp_path):
+    import threading
+
+    from nemar_launch import stage
+    from nemar_launch.codes import Stopped
+    from nemar_launch.provenance import Log
+
+    (tmp_path / "f").write_bytes(b"x")
+    entry = stage.Entry("f", 1, "0" * 64, "SHA256E", "https://data.example.test/f")
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(Stopped):
+        stage.verify_local(str(tmp_path), [entry], Log(None), stop)
+
+
+def test_without_a_stop_event_verification_is_as_before(tmp_path):
+    import hashlib
+    import threading
+
+    from nemar_launch import stage
+    from nemar_launch.provenance import Log
+
+    (tmp_path / "f").write_bytes(b"x")
+    good = hashlib.sha256(b"x").hexdigest()
+    entry = stage.Entry("f", 1, good, "SHA256E", "https://data.example.test/f")
+    assert stage.verify_local(str(tmp_path), [entry], Log(None), threading.Event()) is True
+
+
 def test_a_local_root_without_the_dataset_downloads(rig):
     rig.local_root.mkdir()
     launch = run_with_local_root(rig)

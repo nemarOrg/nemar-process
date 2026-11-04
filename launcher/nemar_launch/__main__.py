@@ -325,10 +325,16 @@ def _finish(
                 job_id=state.job_id,
                 max_files=MAX_OUTPUT_FILES,
                 max_file_bytes=MAX_OUTPUT_FILE_BYTES,
+                stop=terminator.stop,
             )
             state.files = finalized.files
             if finalized.failure is not None:
                 state.fail(finalized.failure)
+                state.outputs_blocked = True
+            if finalized.stopped:
+                # A SIGTERM during finalization: nothing was hashed and no output goes, so the
+                # record can be written and uploaded inside the scheduler's grace period.
+                state.fail(run.terminated_failure(terminator, env))
                 state.outputs_blocked = True
         except Exception as error:  # noqa: BLE001
             state.fail(_unexpected("runtime_error", error, log))

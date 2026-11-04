@@ -54,6 +54,7 @@ from .codes import (
     LOG_FILE,
     Env,
     Failure,
+    Stopped,
 )
 from .provenance import Log
 from .stage import Staged
@@ -636,6 +637,7 @@ class Finalized(NamedTuple):
 
     files: list[dict[str, Any]]
     failure: Failure | None
+    stopped: bool = False  # the stop event ended it: nothing was hashed, the caller records why
 
 
 def output_path_ok(relative: str, job_id: str) -> bool:
@@ -660,11 +662,14 @@ def _output_path_schema() -> dict[str, Any]:
     return spec.schema_def("manifest")["properties"]["files"]["items"]["properties"]["path"]
 
 
-def _hash_regular(name: str, expected_size: int) -> tuple[int, str]:
+def _hash_regular(
+    name: str, expected_size: int, stop: threading.Event | None = None
+) -> tuple[int, str]:
     """SHA-256 of a regular file opened WITHOUT following a link, relative to the cwd.
 
     ``fstat`` on the open descriptor must still say a regular file of ``expected_size`` and the
-    bytes read must add up to it, or ``net.OutputChanged``; ``PermissionError`` propagates.
+    bytes read must add up to it, or ``net.OutputChanged``; ``PermissionError`` propagates. A set
+    ``stop`` event ends it with ``Stopped`` at the next chunk.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(name, flags)
@@ -675,6 +680,8 @@ def _hash_regular(name: str, expected_size: int) -> tuple[int, str]:
         digest = hashlib.sha256()
         total = 0
         while True:
+            if stop is not None and stop.is_set():
+                raise Stopped
             chunk = os.read(fd, net.CHUNK)
             if not chunk:
                 break
@@ -694,6 +701,7 @@ def finalize_outputs(
     job_id: str,
     max_files: int,
     max_file_bytes: int,
+    stop: threading.Event | None = None,
 ) -> Finalized:
     """Make ``work`` safe to archive and hash ``work/outputs`` into the manifest.
 
@@ -717,10 +725,15 @@ def finalize_outputs(
     * An output that cannot be read (a mode-000 file, a directory that cannot be listed even after
       the ``chmod``) is NOT skipped: the job ends ``runtime_error``, detail ``outputs_unreadable``.
     * In either failure the manifest is empty and no output is uploaded.
+    * ``stop`` is the SIGTERM event. Once it is set nothing more is hashed (a hash of gigabytes can
+      outlast the scheduler's grace period, and the record must be written inside it): the walk
+      still finishes making ``work`` safe (links and special files are removed, which is quick),
+      the manifest is empty and ``stopped`` is True. The caller records the termination.
     """
     removed = 0
     skipped = 0
     failure: Failure | None = None
+    stopped = False
     files: list[dict[str, Any]] = []
 
     def note(kind: str, relative: str) -> None:
@@ -812,7 +825,7 @@ def finalize_outputs(
                 except OSError:
                     log.warning("could not remove {} {}; it is left out".format(kind, shown))
                 continue
-            if not in_outputs or failure is not None:
+            if not in_outputs or failure is not None or stopped:
                 continue
             relative = "/".join([*parts[1:], name])
             if not output_path_ok(relative, job_id):
@@ -830,8 +843,14 @@ def finalize_outputs(
             if info.st_size > max_file_bytes:
                 block(Failure("result_upload_failed", "results_too_large", "outputs too large"))
                 continue
+            if stop is not None and stop.is_set():
+                stopped = True
+                continue
             try:
-                size, sha256 = _hash_regular(name, info.st_size)
+                size, sha256 = _hash_regular(name, info.st_size, stop)
+            except Stopped:
+                stopped = True
+                continue
             except (OSError, net.OutputChanged):
                 log.warning("outputs/{} could not be read".format(relative))
                 block(Failure("runtime_error", "outputs_unreadable", "an output cannot be read"))
@@ -842,6 +861,9 @@ def finalize_outputs(
         os.close(home)
     if removed > _LOG_LIMIT:
         log.warning("... and {} more removed".format(removed - _LOG_LIMIT))
+    if stopped:
+        log.warning("outputs: not hashed, the job was terminated ({} removed)".format(removed))
+        return Finalized([], failure, True)
     if failure is not None:
         log.info("outputs: none uploaded ({} removed, {} skipped)".format(removed, skipped))
         return Finalized([], failure)

@@ -170,10 +170,12 @@ def select(entries: list[Entry], patterns: list[str] | None) -> list[Entry]:
 # ---- binding NEMAR's own copy ---------------------------------------------------------------------
 
 
-def _hash_file(path: str, checker: net.Checker) -> bool:
+def _hash_file(path: str, checker: net.Checker, stop: threading.Event) -> bool:
     hasher = checker.new()
     with open(path, "rb") as handle:
         while True:
+            if stop.is_set():
+                raise Stopped
             chunk = handle.read(net.CHUNK)
             if not chunk:
                 break
@@ -183,15 +185,19 @@ def _hash_file(path: str, checker: net.Checker) -> bool:
     return checker.matches(hasher)
 
 
-def verify_local(base: str, selected: list[Entry], log: Log) -> bool:
+def verify_local(base: str, selected: list[Entry], log: Log, stop: threading.Event) -> bool:
     """Whether every selected file under ``base`` matches the manifest by size AND checksum.
 
     An entry with no checksum, or an algorithm this launcher cannot compute, cannot be verified and
-    so is never bound. A symlink is a mismatch: it would dangle inside the container.
+    so is never bound. A symlink is a mismatch: it would dangle inside the container. A set ``stop``
+    event ends the hashing at the next chunk with ``Stopped``: a SIGTERM is not made to wait for
+    gigabytes to be read.
     """
     real_base = os.path.realpath(base)
 
     def check(entry: Entry) -> str | None:
+        if stop.is_set():
+            raise Stopped
         checker = net.Checker(entry.size, entry.algorithm, entry.checksum)
         if not checker.verifiable:
             return "cannot be verified"
@@ -205,7 +211,7 @@ def verify_local(base: str, selected: list[Entry], log: Log) -> bool:
         if os.path.commonpath([real_base, os.path.realpath(path)]) != real_base:
             return "outside the dataset directory"
         try:
-            return None if _hash_file(path, checker) else "checksum differs"
+            return None if _hash_file(path, checker, stop) else "checksum differs"
         except OSError:
             return "unreadable"
 
@@ -323,7 +329,7 @@ def stage_all(
         source = None
         if local_root:
             candidate = os.path.join(local_root, dataset["id"], dataset["version"])
-            if os.path.isdir(candidate) and verify_local(candidate, selected, log):
+            if os.path.isdir(candidate) and verify_local(candidate, selected, log, stop):
                 record["mode"] = "bind"
                 source = candidate
                 log.info("{}: bound the local copy".format(dataset["id"]))
