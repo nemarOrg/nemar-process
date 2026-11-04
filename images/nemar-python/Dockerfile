@@ -7,7 +7,9 @@
 #
 # Every base is a digest: a tag moves, a digest does not. Bump a digest together with its tag in the
 # comment, and the uv version together with UV_VERSION in .github/workflows (a test compares them).
-# python:3.12-slim (Python 3.12.16, Debian trixie), image index as of 2026-11-04.
+# python:3.12-slim (Python 3.12.16, Debian trixie), image index as of 2026-11-04. Its digest is
+# written twice, in the builder and in the final stage, and both must be changed together (the
+# virtual environment is copied between them; a test requires the two to be equal).
 # uv 0.13.4, image index as of 2026-11-04.
 #
 # There is no MATLAB, no Octave and no eegprep `eeglab` extra here, by rule (see AGENTS.md).
@@ -57,10 +59,12 @@ ARG LOCK_SHA256=unverified
 LABEL org.opencontainers.image.title="nemar-python" \
       org.opencontainers.image.description="NEMAR runtime image, CPU flavor: Python 3.12, eegprep, MNE-Python, pamica, signalJourney validator" \
       org.opencontainers.image.source="https://github.com/nemarOrg/nemar-process" \
-      org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \
       io.nemar.lock-sha256="${LOCK_SHA256}" \
       io.nemar.flavor="cpu"
+
+# No `org.opencontainers.image.licenses` label: the repository's code is MIT, but the image also
+# holds eegprep, MNE-Python, pamica, torch and others under their own licences (docs/images.md).
 
 # A non-root user. Apptainer runs as the invoking user whatever this says; Docker honours it.
 RUN groupadd --system --gid 10001 nemar \

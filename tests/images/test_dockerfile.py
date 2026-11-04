@@ -180,3 +180,29 @@ def test_the_pinned_python_series_matches_the_project():
     requires = PYPROJECT.read_text(encoding="utf-8")
     assert 'requires-python = ">=3.12"' in requires
     assert (ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.12"
+
+
+def test_every_python_base_is_the_same_digest():
+    # the builder and the final stage must run the same interpreter, or the copied venv breaks
+    digests = {
+        image.split("@", 1)[1] for image, _ in froms() if image.startswith("python:3.12-slim@")
+    }
+    count = sum(1 for image, _ in froms() if image.startswith("python:3.12-slim@"))
+    assert count >= 2
+    assert len(digests) == 1, digests
+
+
+def test_the_python_digest_rule_fires_on_two_different_digests():
+    mixed = (
+        "FROM python:3.12-slim@sha256:" + "a" * 64 + " AS builder\n"
+        "FROM python:3.12-slim@sha256:" + "b" * 63 + "c AS final\n"
+    )
+    digests = {image.split("@", 1)[1] for image, _ in froms(mixed)}
+    assert len(digests) == 2
+
+
+def test_the_licence_label_is_not_claimed_for_the_image_contents():
+    # the repository's code is MIT; eegprep, MNE-Python and pamica inside the image are not
+    labels = " ".join(rest for keyword, rest in instructions() if keyword == "LABEL")
+    assert "image.licenses" not in labels
+    assert "org.opencontainers.image.source" in labels
