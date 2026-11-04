@@ -33,7 +33,7 @@ testpaths = ["tests"]
 # `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `tests/standin` holds
 # the stdlib HTTP stand-ins. Neither is installed, so both go on the path here, which also makes
 # `uv run --no-project --python 3.9 --with pytest pytest tests/launcher` work.
-pythonpath = ["launcher", "tests/standin", "tests"]
+pythonpath = ["launcher", "scripts", "tests/standin", "tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
@@ -52,6 +52,8 @@ skip_covered = true
 
 [tool.ty.environment]
 python-version = "3.12"
+# The launcher package, the zip builder and the stand-ins are imported by name, not installed.
+extra-paths = ["launcher", "scripts", "tests/standin", "tests"]
 
 [tool.ty.src]
 include = ["launcher", "observer", "scripts", "tests"]

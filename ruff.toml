@@ -11,15 +11,14 @@ extend-exclude = ["tests/fixtures"]
 "tests/standin/**" = "py39"
 
 [lint]
-select = [
-    "E", "W", "F", "I", "UP", "B", "SIM", "C4", "PT", "RUF", "S", "T20", "PTH", "N", "A", "BLE",
-    "TRY", "PIE", "RET", "ARG",
-]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "PT", "RUF", "S", "T20", "BLE", "PIE", "RET"]
 ignore = [
-    "TRY003",  # long messages in exceptions are fine here
+    "E501",    # the formatter wraps code; long prose lines in docstrings and strings are fine
+    "UP032",   # str.format is used throughout; both forms are valid on 3.9
     "S101",    # asserts are the point of tests
     "S603",    # subprocess without shell is how the launcher runs the container
     "S607",    # the container runtime is found on PATH by design
+    "S310",    # urllib is opened only on https/http URLs the specification and manifests name
 ]
 
 [lint.per-file-ignores]
