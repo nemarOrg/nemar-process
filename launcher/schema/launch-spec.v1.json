@@ -26,7 +26,7 @@
       "enum": ["python", "image"]
     },
     "entry": {
-      "description": "A path inside the bundle. Exactly one of entry and command is present.",
+      "description": "A path inside the bundle. With runtime python the launcher runs python /code/<entry> followed by args; with runtime image and an entry it runs /code/<entry> directly, followed by args, which needs the executable bit that the bundle packer must preserve. The runtime image must provide python on its PATH for the python runtime. A bundle archive's member names may carry a leading ./; absolute names, .. segments, links, devices and FIFOs are refused by the launcher. Exactly one of entry and command is present.",
       "type": "string",
       "maxLength": 240,
       "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
@@ -35,7 +35,7 @@
       }
     },
     "command": {
-      "description": "An argument vector for an image job, run as given.",
+      "description": "An argument vector, run as given, with args appended. Exactly one of entry and command is present.",
       "type": "array",
       "minItems": 1,
       "maxItems": 64,
@@ -46,6 +46,7 @@
       }
     },
     "args": {
+      "description": "Arguments, each as one argument: after python /code/<entry> (runtime python with an entry), after /code/<entry> (runtime image with an entry) or after the command.",
       "type": "array",
       "maxItems": 64,
       "items": {
@@ -83,10 +84,13 @@
             "pattern": "^[a-z]{2}[0-9]{6}(?![\\s\\S])"
           },
           "version": {
+            "description": "The data-plane tag of the dataset version: latest, or v<major>.<minor>.<patch>, exactly what the data plane accepts.",
             "type": "string",
-            "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}(?![\\s\\S])"
+            "maxLength": 64,
+            "pattern": "^(latest|v[0-9]+\\.[0-9]+\\.[0-9]+)(?![\\s\\S])"
           },
           "include": {
+            "description": "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: **/ matches zero or more directories (so a/**/b matches a/b); ** elsewhere matches any run of characters including /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; a character class never matches /, so like * and ? it stays inside one path segment, and a negated class [!a] matches any single character except a and /; an unterminated [ is a literal [; an empty class [] and an inverted range such as [z-a] are refused, and bad_include is exactly the set of patterns this dialect refuses; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).",
             "type": "array",
             "maxItems": 64,
             "items": {
@@ -113,7 +117,7 @@
       "required": ["uri", "digest", "sif"],
       "properties": {
         "uri": {
-          "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character.",
+          "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character. Cross-field rule this schema cannot express (a zod-only rule, like the one for sif): the @sha256:<hex> it ends with must equal image.digest.",
           "type": "string",
           "maxLength": 512,
           "pattern": "^(?:docker://)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}(?![\\s\\S])"
@@ -123,13 +127,9 @@
           "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "sif": {
-          "description": "The Singularity image file on the node that the launcher runs: a relative path of non-empty segments of letters, digits and ._+-, not starting with '-', with no . or .. segment and no leading or trailing slash.",
+          "description": "The Singularity image file the launcher runs: exactly the basename <64 lowercase hex>.sif, the file name of the SIF built from the image's digest, relative to the directory in the environment variable NEMAR_SIF_ROOT. NEMAR_SIF_ROOT is required: the launcher has no fallback and ends image_missing when it is unset. Cross-field rule this schema cannot express (a zod-only rule): the 64 hex digits of image.digest followed by .sif must equal this value. The launcher does not verify the file's content hash: the name is all that ties the file to the digest.",
           "type": "string",
-          "maxLength": 256,
-          "pattern": "^(?!-)[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*(?![\\s\\S])",
-          "not": {
-            "pattern": "(?:^|/)\\.\\.?(?:/|$)"
-          }
+          "pattern": "^[0-9a-f]{64}\\.sif(?![\\s\\S])"
         }
       }
     },

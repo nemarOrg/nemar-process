@@ -214,6 +214,24 @@ def test_a_dataset_version_that_is_not_a_data_plane_tag_is_refused(version):
     refused(document)
 
 
+def test_a_tag_is_at_most_sixty_four_characters():
+    document = base()
+    document["datasets"][0]["version"] = "v" + "1" * 59 + ".0.0"  # 64
+    assert spec_mod.parse(encode_spec(document))
+    document["datasets"][0]["version"] = "v" + "1" * 60 + ".0.0"  # 65
+    refused(document)
+
+
+def test_the_image_reference_must_end_with_the_image_digest():
+    # NEMAR's encoder refuses a document that breaks this, so a launch specification never does; the
+    # launcher records `image.uri` as the image's and runs the file the digest names.
+    document = base()
+    document["image"]["uri"] = "docker://ghcr.io/example/runtime@sha256:" + "c" * 64
+    refused(document)
+    document["image"]["uri"] = "docker://ghcr.io/example/runtime@sha256:" + "b" * 64
+    assert spec_mod.parse(encode_spec(document))
+
+
 @pytest.mark.parametrize("version", ["latest", "v1.0.2", "v10.20.30"])
 def test_the_data_plane_tags_are_accepted(version):
     document = base()

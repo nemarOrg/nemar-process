@@ -21,49 +21,51 @@ GOLDEN_SPEC = {
     "entry": "run.py",
     "args": ["--label", 'caf\u00e9 "q" \U0001f600'],
     "bundle": {"sha256": "a" * 64, "size": 1234},
-    "datasets": [{"id": "nm000104", "version": "1.0.2"}],
+    "datasets": [{"id": "nm000104", "version": "v1.0.2"}],
     "api_base": "https://api.example.test",
     "image": {
         "uri": "docker://ghcr.io/example/runtime@sha256:" + "b" * 64,
         "digest": "sha256:" + "b" * 64,
-        "sif": "runtime.sif",
+        "sif": "b" * 64 + ".sif",
     },
     "env": {"OMP_NUM_THREADS": "4"},
     "resources": {"gpus": 0},
     "limits": {"max_files": 38000, "max_total_bytes": 1073741824},
     "job_token": "t" * 43,
 }
-GOLDEN_TEXT = r"""{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"runtime.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}"""
-GOLDEN_SHA256 = "68ef4653b8745eebf16427cd87a01e6d672b8062f8bfef819fcd1d745f0e346a"
+GOLDEN_TEXT = r"""{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"v1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}"""
+GOLDEN_SHA256 = "88fcf9a4d6e63ae7bbedc9be536989fd7f2c263bb2b1c2fb6cfd706f49efe857"
 
 
 def test_the_literals_are_the_published_ones():
-    assert len(GOLDEN_TEXT) == 708
+    assert len(GOLDEN_TEXT) == 766
     assert hashlib.sha256(GOLDEN_TEXT.encode("ascii")).hexdigest() == GOLDEN_SHA256
     assert json.loads(GOLDEN_TEXT) == GOLDEN_SPEC
     assert all(0x20 <= ord(c) <= 0x7E for c in GOLDEN_TEXT)
 
 
-def test_the_launcher_reports_the_golden_digest_and_decodes_the_text_back():
-    # `decode` is the launcher's own reading of the raw bytes (size, ASCII, one JSON object, no
-    # duplicate key): everything `parse` does before it validates. The published vector's dataset
-    # version (`1.0.2`) and image file name (`runtime.sif`) predate two rules the launcher now
-    # enforces (a data-plane tag, and `<digest>.sif`), so `parse` refuses it until the shared
-    # contract moves; the re-pin to nemar-cli's next contract commit restores `parse` here.
+def test_the_launcher_reports_the_golden_digest_and_parses_the_text_back():
     raw = GOLDEN_TEXT.encode("ascii")
     assert spec_mod.digest_of(raw) == GOLDEN_SHA256
-    decoded = spec_mod.decode(raw)
-    assert decoded == GOLDEN_SPEC
-    assert decoded["args"] == ["--label", 'caf\u00e9 "q" \U0001f600']
+    assert spec_mod.decode(raw) == GOLDEN_SPEC
+    job = spec_mod.parse(raw)  # the whole of it: schema, tag, image file, https
+    assert job.digest == GOLDEN_SHA256
+    assert (job.job_id, job.runtime, job.entry) == (GOLDEN_SPEC["job_id"], "python", "run.py")
+    assert job.args == ["--label", 'caf\u00e9 "q" \U0001f600']
+    assert job.datasets == [{"id": "nm000104", "version": "v1.0.2"}]
+    assert job.image["sif"] == "b" * 64 + ".sif"
 
 
 def test_the_golden_digest_is_what_lands_in_provenance_json_through_the_entry_point(rig):
     # The digest is taken from the raw bytes BEFORE the specification is validated, so it is
-    # recorded even for a text the launcher refuses, and nothing is fetched for it.
-    launch = rig.launch(spec_bytes=GOLDEN_TEXT.encode("ascii"))
+    # recorded even for a text the launcher refuses, and nothing is fetched for it. The golden text
+    # itself would pass, and its `api_base` is a name nobody serves: one more byte makes it unknown.
+    raw = GOLDEN_TEXT.encode("ascii")[:-1] + b',"extra":1}'
+    launch = rig.launch(spec_bytes=raw)
     assert launch.exit == 13
     assert launch.result["detail"] == "invalid_spec"
-    assert launch.provenance["launch_spec_digest"] == GOLDEN_SHA256
+    assert launch.provenance["launch_spec_digest"] == sha256_hex(raw)
+    assert launch.provenance["launch_spec_digest"] != GOLDEN_SHA256
     assert launch.provenance["job_id"] == GOLDEN_SPEC["job_id"]
     assert rig.server.requests == []
 

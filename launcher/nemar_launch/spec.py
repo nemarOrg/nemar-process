@@ -32,7 +32,6 @@ MAX_SPEC_BYTES = 64 * 1024
 SCHEMA_FILE = "launch-spec.v1.json"
 PLACEHOLDER_JOB_ID = "job_" + "0" * 24
 _JOB_ID = re.compile(r"^job_[0-9a-f]{24}$")
-_DATASET_TAG = re.compile(r"latest|v[0-9]+\.[0-9]+\.[0-9]+")
 
 
 class SpecError(Exception):
@@ -348,10 +347,10 @@ def parse(raw: bytes) -> Spec:
     """Validate the raw bytes of ``NEMAR_LAUNCH_SPEC`` and return the specification.
 
     Order of refusal: ``decode``, an unsupported runtime, the schema, then the rules the schema
-    does not state: a dataset id once; each dataset version is the data-plane tag, used verbatim
-    (``latest`` or ``vN.N.N``, the Worker resolves the user's spelling); ``api_base`` is https
-    (plain http only on loopback, for the tests' stand-ins); the image file is named by the image
-    digest (``<64 hex>.sif``, relative to ``NEMAR_SIF_ROOT``).
+    does not state: a dataset id once; ``api_base`` is https (plain http only on loopback, for the
+    tests' stand-ins); the image file is named by the image digest (``<64 hex>.sif``, relative to
+    ``NEMAR_SIF_ROOT``) and the image reference ends with that digest. The schema itself says that
+    a dataset version is the data-plane tag (``latest`` or ``vN.N.N``), used verbatim.
     """
     document = decode(raw)
     schema = load_schema()
@@ -363,11 +362,11 @@ def parse(raw: bytes) -> Spec:
     ids = [d["id"] for d in document["datasets"]]
     if len(ids) != len(set(ids)):
         raise SpecError("invalid_spec")
-    if not all(_DATASET_TAG.fullmatch(d["version"]) for d in document["datasets"]):
-        raise SpecError("invalid_spec")
     if not url_allowed(document["api_base"]):
         raise SpecError("invalid_spec")
     image = document["image"]
     if image["sif"] != image["digest"].split(":", 1)[1] + ".sif":
+        raise SpecError("invalid_spec")
+    if not image["uri"].endswith(image["digest"]):
         raise SpecError("invalid_spec")
     return Spec(document, digest_of(raw))
