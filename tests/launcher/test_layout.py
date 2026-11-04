@@ -171,6 +171,22 @@ def test_documents_are_written_exclusively_and_replace_a_planted_link_not_its_ta
     assert (tmp_path / "result.json").read_bytes() == docs.data["result.json"]
 
 
+def test_a_document_never_writes_through_a_hard_link_planted_at_its_temporary_name(tmp_path):
+    # `O_NOFOLLOW` does not stop a hard link, `O_EXCL` does: the temporary name is `<file>.<pid>.<n>.tmp`
+    # and nothing may already be there. The document is then sent from memory and the victim is intact.
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched")
+    directory = tmp_path / "launcher"
+    directory.mkdir()
+    os.link(victim, directory / "result.json.{}.0.tmp".format(os.getpid()))
+    log = Log(None)
+    docs = Documents(str(directory), log)
+    docs.put("result.json", {"a": 1})
+    assert victim.read_text() == "untouched"
+    assert docs.data["result.json"] == b'{"a":1}\n'
+    assert any("from memory" in line for line in log.snapshot(log.size()).decode().splitlines())
+
+
 def test_a_document_that_cannot_be_written_is_kept_in_memory(tmp_path):
     directory = tmp_path / "launcher"
     directory.mkdir()
