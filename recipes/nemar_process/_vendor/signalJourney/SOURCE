@@ -1,0 +1,8 @@
+# Vendored from the repository below; never edit these files by hand.
+# Regenerate with: python scripts/vendor_signaljourney.py --source <checkout> --commit <sha>
+# The signalJourney package is not on PyPI with its schema (docs/upstream.md).
+repository: https://github.com/signalJourney/signalJourney
+commit: 169c3261d044039c359bab7e121e78157a4f5af9
+path: schema/
+license: BSD-3-Clause (see LICENSE)
+tree-sha256: d7bde496b931555f858c77d84e75373e72c08fe536d3325b34c83ac3159428cb

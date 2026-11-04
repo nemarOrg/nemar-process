@@ -1,0 +1,100 @@
+{
+  "sj_version": "0.1.0",
+  "schema_version": "0.1.0",
+  "description": "Pipeline focused on quality metric reporting.",
+  "pipelineInfo": {
+    "name": "Quality Check Pipeline",
+    "description": "Pipeline focused on quality metric reporting and data assessment",
+    "version": "1.0.0",
+    "pipelineType": "quality_assessment",
+    "executionDate": "2024-05-02T08:00:00Z"
+  },
+  "processingSteps": [
+    {
+      "stepId": "data-qc",
+      "name": "Initial Data Quality Check",
+      "description": "Assess initial data quality.",
+      "software": {
+        "name": "CustomScript", 
+        "version": "1.0",
+        "functionCall": "data_qc_analysis(raw_data)"
+      },
+      "parameters": {
+        "assessment_type": "initial",
+        "include_impedances": false
+      },
+      "inputSources": [
+        {
+          "sourceType": "file",
+          "location": "../sourcedata/sub-01/eeg/sub-01_task-rest_raw.fif",
+          "entityLabels": {
+            "sub": "01",
+            "task": "rest"
+          }
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "in-memory",
+          "format": "quality_report",
+          "description": "Initial data quality assessment results."
+        }
+      ],
+      "qualityMetrics": {
+        "channelVariance": {
+           "value": [10.5, 12.1, 9.8, 25.3],
+           "unit": "uV^2",
+           "description": "Variance per channel (first 4 channels)"
+        },
+        "percentBadChannels": 8.5,
+        "bridgeImpedances": null 
+      }
+    },
+    {
+      "stepId": "filtering",
+      "name": "Band-pass Filter",
+      "description": "Apply filter 0.5 - 40 Hz.",
+      "software": {
+        "name": "MNE-Python", 
+        "version": "1.6.0",
+        "functionCall": "raw.filter(l_freq=0.5, h_freq=40.0, method='fir')"
+      },
+      "parameters": {
+        "l_freq": 0.5,
+        "h_freq": 40.0,
+        "method": "fir"
+      },
+      "inputSources": [
+        {
+          "sourceType": "previousStepOutput",
+          "stepId": "data-qc",
+          "outputId": "Initial data quality assessment results."
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "file",
+          "location": "./derivatives/signaljourney/sub-01/eeg/sub-01_task-rest_desc-filtered_eeg.fif",
+          "format": "FIF",
+          "description": "Band-pass filtered EEG data file."
+        }
+      ],
+      "dependsOn": ["data-qc"],
+      "qualityMetrics": {
+         "filterRipple": 0.01,
+         "passbandAttenuation_dB": 1
+      }
+    }
+  ],
+  "summaryMetrics": {
+     "overallSubjectRating": "good",
+     "pipelineRuntimeMinutes": 5.7,
+     "diskUsageGB": 1.2,
+     "eeg:muscleArtifactLevel": {
+         "value": 3,
+         "unit": "scale 1-5",
+         "threshold": 4,
+         "description": "Subjective rating of muscle artifact"
+     }
+  }
+} 

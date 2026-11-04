@@ -1,0 +1,190 @@
+{
+  "sj_version": "0.1.0",
+  "schema_version": "0.1.0",
+  "description": "Complex pipeline: Preprocessing, ICA, and Epoching.",
+  "pipelineInfo": {
+    "name": "EEG Preprocessing + ICA",
+    "description": "Complex pipeline for EEG preprocessing, ICA decomposition, and epoching for Study X",
+    "version": "1.0.0",
+    "pipelineType": "preprocessing",
+    "executionDate": "2024-05-02T10:00:00Z"
+  },
+  "processingSteps": [
+    {
+      "stepId": "load",
+      "name": "Load Data",
+      "description": "Load raw EEG data.",
+      "software": {
+        "name": "EEGLAB", 
+        "version": "2023.1",
+        "functionCall": "EEG = pop_loadset('filename', 'sub-01_task-rest_raw.set')"
+      },
+      "parameters": {
+        "filename": "sub-01_task-rest_raw.set"
+      },
+      "inputSources": [
+        {
+          "sourceType": "file",
+          "location": "../sourcedata/sub-01/eeg/sub-01_task-rest_raw.set",
+          "entityLabels": {
+            "sub": "01",
+            "task": "rest"
+          }
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "in-memory",
+          "format": "EEGLAB.EEG",
+          "description": "Loaded raw EEG dataset."
+        }
+      ]
+    },
+    {
+      "stepId": "filter",
+      "name": "Band-pass Filter",
+      "description": "Apply 1-45 Hz filter.",
+      "software": {"name": "EEGLAB", "version": "2023.1"},
+      "parameters": {
+        "locutoff": 1.0,
+        "hicutoff": 45.0
+      },
+      "inputSources": [
+        {
+          "sourceType": "previousStepOutput",
+          "stepId": "load",
+          "outputId": "Loaded raw EEG dataset."
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "in-memory",
+          "format": "EEGLAB.EEG",
+          "description": "Band-pass filtered EEG data."
+        }
+      ],
+      "dependsOn": ["load"]
+    },
+    {
+      "stepId": "resample",
+      "name": "Resample Data",
+      "description": "Resample to 250 Hz.",
+      "software": {"name": "EEGLAB", "version": "2023.1"},
+      "parameters": {
+        "freq": 250
+      },
+      "inputSources": [
+        {
+          "sourceType": "previousStepOutput",
+          "stepId": "filter",
+          "outputId": "Band-pass filtered EEG data."
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "in-memory",
+          "format": "EEGLAB.EEG",
+          "description": "Resampled EEG data."
+        }
+      ],
+      "dependsOn": ["filter"]
+    },
+    {
+      "stepId": "ica",
+      "name": "Run ICA",
+      "description": "Run Independent Component Analysis.",
+      "software": {"name": "EEGLAB", "version": "2023.1"},
+      "parameters": {
+        "icatype": "runica",
+        "extended": 1
+      },
+      "inputSources": [
+        {
+          "sourceType": "previousStepOutput",
+          "stepId": "resample",
+          "outputId": "Resampled EEG data."
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "in-memory",
+          "format": "EEGLAB.EEG",
+          "description": "EEG data with ICA decomposition."
+        }
+      ],
+      "dependsOn": ["resample"],
+      "qualityMetrics": {
+        "eeg:percentVarianceAccounted": 95.2
+      }
+    },
+    {
+      "stepId": "ic_reject",
+      "name": "Reject ICs",
+      "description": "Reject artifactual independent components using ICLabel.",
+      "software": {"name": "ICLabel", "version": "1.4"},
+      "parameters": {
+        "thresholds": [0, 0, 0.9, 0.9, 0.9, 0, 0]
+      },
+      "inputSources": [
+        {
+          "sourceType": "previousStepOutput",
+          "stepId": "ica",
+          "outputId": "EEG data with ICA decomposition."
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "in-memory",
+          "format": "EEGLAB.EEG",
+          "description": "ICA-cleaned EEG data."
+        }
+      ],
+      "dependsOn": ["ica"],
+      "qualityMetrics": {
+        "numICsRejected": 5,
+        "eeg:percentVarianceRemoved": 12.1
+      }
+    },
+    {
+      "stepId": "epoch",
+      "name": "Epoch Data",
+      "description": "Create epochs around stimulus events.",
+      "software": {"name": "EEGLAB", "version": "2023.1"},
+      "parameters": {
+        "eventtype": ["S 1", "S 2"],
+        "timelim": [-0.5, 1.5]
+      },
+      "inputSources": [
+        {
+          "sourceType": "previousStepOutput",
+          "stepId": "ic_reject",
+          "outputId": "ICA-cleaned EEG data."
+        }
+      ],
+      "outputTargets": [
+        {
+          "targetType": "file",
+          "location": "./derivatives/signaljourney/sub-01/eeg/sub-01_task-rest_desc-epoched_eeg.set",
+          "format": "EEGLAB",
+          "description": "Epoched EEG data file."
+        }
+      ],
+      "dependsOn": ["ic_reject"]
+    }
+  ],
+  "summaryMetrics": {
+    "finalSamplingRateHz": 250,
+    "totalChannels": 64,
+    "numEpochs": 120,
+    "numICAComponentsRemoved": 5
+  },
+  "extensions": {
+    "eeg": {
+      "channelLocationsFile": "/path/to/standard_1020.elc",
+      "referenceChannels": ["TP9", "TP10"]
+    },
+    "nemar": {
+      "nemarPipelineId": "uuid-1234-abcd-5678"
+    }
+  }
+} 
