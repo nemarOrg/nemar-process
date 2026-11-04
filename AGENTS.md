@@ -58,7 +58,7 @@ Worker secrets, Tapis registrations and cloud buckets are the owner's.
 uv sync --frozen
 uv run pre-commit install        # once per clone: ruff on the staged files, with --fix --unsafe-fixes
 uv run ruff check . && uv run ruff format --check . && uv run ty check
-uv run pytest --cov=launcher --cov-fail-under=85
+uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images   # the launcher gate; tests/images syncs a ~1 GB runtime environment
 uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher   # the launcher on its floor
 uv run python scripts/build_launcher_zip.py --check
 uv lock --check && uv run pytest tests/images --cov   # the runtime image's declaration, lock, fixture, Dockerfile, workflows

@@ -90,7 +90,7 @@ jobs:
           LOCK_SHA256: ${{ steps.lock.outputs.sha256 }}
         run: |
           set -euo pipefail
-          label() { docker inspect --format "{{ index .Config.Labels \"$1\" }}" nemar-python:ci; }
+          label() { docker inspect --format "{{ index .Config.Labels \"${1}\" }}" nemar-python:ci; }
           test "$(label io.nemar.lock-sha256)" = "$LOCK_SHA256"
           test "$(label org.opencontainers.image.revision)" = "$GITHUB_SHA"
           test "$(label io.nemar.flavor)" = "cpu"
