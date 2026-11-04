@@ -11,14 +11,43 @@ license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+# The CPU flavor of the runtime image (the only flavor in this phase). The extra exists so that
+# `[tool.uv.sources]` can send torch to the CPU index; a CUDA flavor adds its own extra later.
+# The floor is pamica 0.4.0's own.
+cpu = ["torch>=2.12.1"]
+
 [dependency-groups]
 dev = [
     "jsonschema>=4.23",
+    "packaging>=24.2",
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
+    "pyyaml>=6.0",
     "ruff>=0.17",
     "ty>=0.0.89",
+    { include-group = "signaljourney" },
+]
+
+# The signalJourney validator is not on PyPI and finds its schema relative to its own source tree,
+# so it is installed from a pinned commit and pointed at the schema vendored into
+# `recipes/nemar_process/_vendor/signalJourney/` (docs/upstream.md). The development environment
+# and the runtime image share this one declaration.
+signaljourney = [
+    "signaljourney-validator @ git+https://github.com/signalJourney/signalJourney@169c3261d044039c359bab7e121e78157a4f5af9",
+]
+
+# The runtime image's packages (`images/nemar-python/`). Exact pins for what NEMAR chose; NumPy and
+# SciPy are left to the lock. eegprep takes four extras and never `eeglab` (it installs the Octave
+# bridge `oct2py`) or `full` and `all` (they include it): there is no MATLAB path in the image.
+runtime = [
+    "eegprep[mne,pybids,picard,torch]==0.5.0",
+    "mne==1.13.2",
+    "pamica==0.4.0",
+    "numpy",
+    "scipy",
+    { include-group = "signaljourney" },
 ]
 
 # The repository is a set of directories, not one installable package: the launcher ships as a zip
@@ -27,13 +56,23 @@ dev = [
 [tool.uv]
 package = false
 
+# torch comes from the CPU index only, never from PyPI (whose Linux wheels carry the CUDA runtime).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-# `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `tests/standin` holds
-# the stdlib HTTP stand-ins. Neither is installed, so both go on the path here, which also makes
+# `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `recipes` holds the
+# package `nemar_process`; `tests/standin` holds the stdlib HTTP stand-ins. None is installed, so
+# all go on the path here, which also makes
 # `uv run --no-project --python 3.9 --with pytest pytest tests/launcher` work.
-pythonpath = ["launcher", "scripts", "tests/standin", "tests"]
+pythonpath = ["launcher", "recipes", "scripts", "tests/standin", "tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
@@ -53,7 +92,15 @@ skip_covered = true
 [tool.ty.environment]
 python-version = "3.12"
 # The launcher package, the zip builder and the stand-ins are imported by name, not installed.
-extra-paths = ["launcher", "scripts", "tests/standin", "tests"]
+extra-paths = ["launcher", "recipes", "scripts", "tests/standin", "tests"]
 
 [tool.ty.src]
-include = ["launcher", "observer", "scripts", "tests"]
+include = ["images", "launcher", "observer", "recipes", "scripts", "tests"]
+
+# The runtime image's packages (eegprep, NumPy, torch) are installed in the runtime environment, not
+# in the development one, so the two files that run only there import them unresolved on purpose.
+[[tool.ty.overrides]]
+include = ["images/nemar-python/smoke.py", "scripts/make_smoke_fixture.py"]
+
+[tool.ty.overrides.rules]
+import-not-found = "ignore"
