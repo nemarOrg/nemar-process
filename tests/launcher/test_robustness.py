@@ -83,6 +83,7 @@ def test_a_document_that_cannot_be_built_still_leaves_result_json(tmp_path):
     launcher_main._finish(
         state, None, Env({b"PATH": b"/"}), run.Terminator(), lambda _seconds: None
     )
+    assert state.failure is not None
     assert (state.failure.code, state.failure.detail) == ("runtime_error", "internal_error")
     result = json.loads((tmp_path / "result.json").read_text())
     assert (result["failure_code"], result["detail"]) == ("runtime_error", "internal_error")
