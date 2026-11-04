@@ -286,8 +286,16 @@ class Rig:
         return self.tmp / "etc" / "apptainer" / "apptainer.conf"
 
     def point_buildcfg_at(self, directory: Path) -> None:
-        """Make `apptainer buildcfg` name this SYSCONFDIR."""
+        """Make `apptainer buildcfg` name this SYSCONFDIR (by default: the stand-in's own)."""
         Path(str(self.runtime_record) + ".sysconfdir").write_text(str(directory))
+
+    def buildcfg_names_no_directory(self) -> None:
+        """`apptainer buildcfg` answers but prints no SYSCONFDIR."""
+        Path(str(self.runtime_record) + ".sysconfdir").write_text("")
+
+    def buildcfg_is_unavailable(self) -> None:
+        """`apptainer buildcfg` fails, as on a runtime that has no such command."""
+        Path(str(self.runtime_record) + ".sysconfdir").unlink()
 
     def runtime_calls(self) -> list:
         if not self.runtime_record.exists():

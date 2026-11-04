@@ -199,4 +199,8 @@ def test_the_runtimes_own_configuration_is_readable_by_the_launcher(runtime_conf
     # real directory (where it does not say, the usual places are still tried).
     named = run.buildcfg_sysconfdir(path, Env())
     assert named is None or os.path.isdir(named)
+    if named is not None:  # the runtime's own directory is authoritative: that file and no other
+        base = os.path.basename(path)
+        assert setting.source == os.path.join(named, base, base + ".conf")
+        assert run.runtime_config_paths(path, Env()) == [setting.source]
     assert run.runtime_config_paths(path, Env())

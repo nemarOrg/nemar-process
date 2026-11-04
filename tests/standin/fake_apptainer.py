@@ -43,18 +43,20 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
             time.sleep(0.2)
         return 0
     if argv[:1] == ["buildcfg"]:
-        # The real runtime prints its compile-time settings, SYSCONFDIR among them, one KEY=value a
-        # line. This one answers only when a test names the directory.
+        # The real runtime prints its compile-time settings, one KEY=value a line, SYSCONFDIR among
+        # them. The directory is the one in the marker file: `install` writes the stand-in's own,
+        # a test can name another, make the answer carry no SYSCONFDIR (an empty marker), or remove
+        # the marker so that `buildcfg` is not available at all (exit 2).
         named = record_path + ".sysconfdir"
         if not os.path.exists(named):
             print("fake apptainer: no buildcfg here", file=sys.stderr)
             return 2
         with open(named, encoding="utf-8") as handle:
-            print(
-                "PACKAGE_NAME={}\nSYSCONFDIR={}\nLOCALSTATEDIR=/var".format(
-                    name, handle.read().strip()
-                )
-            )
+            directory = handle.read().strip()
+        print("PACKAGE_NAME={}".format(name))
+        if directory:
+            print("SYSCONFDIR={}".format(directory))
+        print("LOCALSTATEDIR=/var")
         return 0
     if argv[:1] != ["exec"]:
         print(
@@ -161,6 +163,9 @@ def install(bin_dir: str, record_path: str, name: str = "apptainer") -> str:
     os.makedirs(conf_dir, exist_ok=True)
     with open(os.path.join(conf_dir, name + ".conf"), "w", encoding="utf-8") as handle:
         handle.write("# the stand-in's configuration\nallow pid ns = yes\n")
+    # `buildcfg` names the directory that holds it, as the real runtime names its own SYSCONFDIR.
+    with open(record_path + ".sysconfdir", "w", encoding="utf-8") as handle:
+        handle.write(os.path.dirname(conf_dir))
     return path
 
 

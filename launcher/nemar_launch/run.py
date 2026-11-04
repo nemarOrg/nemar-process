@@ -302,31 +302,38 @@ def buildcfg_sysconfdir(runtime_path: str, env: Env) -> str | None:
 
 
 def runtime_config_paths(runtime_path: str, env: Env) -> list[str]:
-    """Where the runtime's configuration may be: where the runtime itself says (``buildcfg``), then
-    beside the install prefix and the usual places."""
+    """Where the launcher looks for the runtime's configuration.
+
+    If ``<runtime> buildcfg`` names the runtime's own ``SYSCONFDIR``, that directory is
+    AUTHORITATIVE: the one path ``<SYSCONFDIR>/<runtime>/<runtime>.conf`` and nothing else, because
+    another installation's file in ``/etc`` says nothing about this runtime. Only when ``buildcfg``
+    is unavailable, or prints no ``SYSCONFDIR``, are the guesses used: beside the install prefix,
+    ``/usr/local/etc`` and ``/etc``.
+    """
     name = os.path.basename(runtime_path)
-    prefix = os.path.dirname(os.path.dirname(os.path.realpath(runtime_path)))
-    paths = []
     sysconfdir = buildcfg_sysconfdir(runtime_path, env)
     if sysconfdir:
-        paths.append(os.path.join(sysconfdir, name, name + ".conf"))
-    paths += [
+        return [os.path.join(sysconfdir, name, name + ".conf")]
+    prefix = os.path.dirname(os.path.dirname(os.path.realpath(runtime_path)))
+    return [
         os.path.join(prefix, "etc", name, name + ".conf"),
         "/usr/local/etc/{0}/{0}.conf".format(name),
         "/etc/{0}/{0}.conf".format(name),
     ]
-    return paths
 
 
 def pid_namespace_setting(runtime_path: str, env: Env) -> PidNamespaceSetting:
-    """``allow pid ns`` from the first runtime configuration that exists.
+    """``allow pid ns`` from the runtime's configuration (see ``runtime_config_paths``).
 
     ``no`` is False and ``yes`` is True; a configuration that does not mention it is the runtime's
-    default, which is ``yes``. None, with the reason, when nothing can be relied on: no file found,
-    the file exists but cannot be read, or the setting is neither ``yes`` nor ``no`` (a later line
-    wins, as the runtime reads it).
+    default, which is ``yes``. None, with the reason, when nothing can be relied on: no file found
+    (where the runtime itself says its file is, that one missing is the answer and no other place
+    is tried), a file that exists but cannot be read, or a setting that is neither ``yes`` nor
+    ``no`` (a later line wins, as the runtime reads it).
     """
-    for path in runtime_config_paths(runtime_path, env):
+    paths = runtime_config_paths(runtime_path, env)
+    authoritative = len(paths) == 1
+    for path in paths:
         if not os.path.exists(path):
             continue
         try:
@@ -344,7 +351,11 @@ def pid_namespace_setting(runtime_path: str, env: Env) -> PidNamespaceSetting:
         if value == "no":
             return PidNamespaceSetting(False, path)
         return PidNamespaceSetting(None, "{} has an ambiguous allow pid ns setting".format(path))
-    return PidNamespaceSetting(None, "configuration not found")
+    if authoritative:
+        return PidNamespaceSetting(
+            None, "configuration not found at {}, where the runtime says it is".format(paths[0])
+        )
+    return PidNamespaceSetting(None, "configuration not found in the usual places")
 
 
 def own_pid_namespace() -> str | None:

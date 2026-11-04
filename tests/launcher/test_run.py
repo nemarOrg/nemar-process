@@ -555,7 +555,7 @@ def test_a_configuration_that_forbids_it_is_refused_before_anything(rig):
     refused_before_user_code(rig, rig.launch(rig.script_spec("true\n")))
 
 
-def test_the_configuration_is_found_through_buildcfg_when_the_usual_places_have_none(rig):
+def test_the_configuration_is_found_through_buildcfg(rig):
     elsewhere = rig.tmp / "elsewhere"
     (elsewhere / "apptainer").mkdir(parents=True)
     (elsewhere / "apptainer" / "apptainer.conf").write_text("allow pid ns = yes\n")
@@ -572,6 +572,41 @@ def test_the_configuration_buildcfg_names_wins_over_a_guess_beside_the_prefix(ri
     (elsewhere / "apptainer" / "apptainer.conf").write_text("allow pid ns = no\n")
     rig.point_buildcfg_at(elsewhere)  # the prefix guess says yes; the runtime's own place says no
     refused_before_user_code(rig, rig.launch(rig.script_spec("true\n")))
+
+
+def test_the_directory_buildcfg_names_is_authoritative_and_no_other_place_is_consulted(rig):
+    # A configuration that says yes sits where the launcher's guess would look (beside the install
+    # prefix, as /etc and /usr/local/etc would be on a real host). The runtime itself says its
+    # configuration is in a directory that has none: that is "cannot be verified", not a reason to
+    # try the other places, which belong to some other installation.
+    assert "allow pid ns = yes" in rig.conf_path().read_text()
+    empty = rig.tmp / "empty-sysconfdir"
+    empty.mkdir()
+    rig.point_buildcfg_at(empty)
+    launch = rig.launch(rig.script_spec("true\n"))
+    refused_before_user_code(rig, launch)
+    assert "configuration not found" in launch.log
+    assert str(empty) in launch.log
+
+
+@pytest.mark.parametrize("how", ["no_directory", "unavailable"])
+def test_the_usual_places_are_tried_only_when_buildcfg_does_not_name_a_directory(rig, how):
+    if how == "no_directory":
+        rig.buildcfg_names_no_directory()
+    else:
+        rig.buildcfg_is_unavailable()
+    launch = rig.launch(rig.script_spec("true\n"))
+    assert launch.exit == 0, launch.log
+    assert str(rig.conf_path()) in launch.log  # found beside the install prefix
+
+
+def test_nothing_found_in_the_usual_places_either_is_refused(rig):
+    rig.buildcfg_is_unavailable()
+    rig.conf_path().unlink()
+    launch = rig.launch(rig.script_spec("true\n"))
+    if launch.exit == 0:  # a host with a system-wide configuration of its own
+        pytest.skip("this host has a runtime configuration in a usual place")
+    refused_before_user_code(rig, launch)
 
 
 @pytest.mark.skipif(HAS_PID_NS, reason="the probe can prove it here")
@@ -618,8 +653,8 @@ def test_without_any_configuration_the_setting_is_unknown_and_says_why(rig):
     from nemar_launch import run as run_module
     from nemar_launch.codes import Env
 
-    rig.conf_path().unlink()
+    rig.conf_path().unlink()  # buildcfg names the directory that held it, so nothing else is read
     setting = run_module.pid_namespace_setting(str(rig.bin_dir / "apptainer"), Env({}))
-    if setting.allowed is not None:  # a host that has a system-wide configuration of its own
-        pytest.skip("this host has a runtime configuration in a usual place")
-    assert "not found" in setting.source
+    assert setting.allowed is None
+    assert "configuration not found" in setting.source
+    assert str(rig.tmp / "etc") in setting.source
