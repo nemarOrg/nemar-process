@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nemar-process"
+version = "0.1.0"
+description = "NEMAR's processing repository: the launcher, runtime images, recipes and Tapis definitions."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.23",
+    "pre-commit>=4.0",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.17",
+    "ty>=0.0.89",
+]
+
+# The repository is a set of directories, not one installable package: the launcher ships as a zip
+# (scripts/build_launcher_zip.py), and the recipes package arrives with phase 4. Nothing here is
+# built into a wheel yet, so uv installs the dependency groups only.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `tests/standin` holds
+# the stdlib HTTP stand-ins. Neither is installed, so both go on the path here, which also makes
+# `uv run --no-project --python 3.9 --with pytest pytest tests/launcher` work.
+pythonpath = ["launcher", "tests/standin", "tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["launcher"]
+omit = ["launcher/schema/*"]
+# The launcher also runs as a child process of the tests (signals, the shell wrapper); count those.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["launcher", "observer", "scripts", "tests"]
