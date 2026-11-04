@@ -194,7 +194,7 @@ class Registry:
 
             do_GET = do_HEAD = respond
 
-            def log_message(self, *args):
+            def log_message(self, format: str, *args) -> None:  # silence the access log
                 return
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
