@@ -321,3 +321,26 @@ def test_an_output_that_changed_after_hashing_is_not_uploaded(rig, tmp_path):
     (out / "link").symlink_to(out / "f")
     with pytest.raises(net.OutputChanged):
         net.put_file("http://127.0.0.1:1/x", str(out / "link"), 5)  # never through a link
+
+
+# ---- hashing opens without following a link ----------------------------------------------------------
+
+
+def test_an_output_is_hashed_without_following_a_link_and_only_if_it_is_what_was_measured(
+    tmp_path, monkeypatch
+):
+    from nemar_launch import net
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "real").write_bytes(b"12345")
+    (tmp_path / "link").symlink_to("real")
+    size, digest = run._hash_regular("real", 5)
+    assert size == 5
+    assert digest == "5994471abb01112afcc18159f6cc74b4f511b99806da59b3caf5a9c173cacfc5"
+    with pytest.raises(OSError):  # ELOOP: O_NOFOLLOW
+        run._hash_regular("link", 5)
+    with pytest.raises(net.OutputChanged):  # it is no longer the size that was measured
+        run._hash_regular("real", 4)
+    (tmp_path / "dir").mkdir()
+    with pytest.raises(net.OutputChanged):  # not a regular file
+        run._hash_regular("dir", 0)

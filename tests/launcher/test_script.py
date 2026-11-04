@@ -388,3 +388,23 @@ def test_terminated_failure_by_the_end_time_with_an_injected_timestamp():
     assert failure(end - 10, None).detail == "terminated"  # no end time: a cancellation
     assert failure(end - 10, "not a number").detail == "terminated"
     assert failure(None, end).detail == "terminated"
+
+
+def test_an_entry_that_ignores_sigterm_is_killed_after_the_grace_period(rig):
+    # `trap '' TERM` is inherited across `exec`, so the sleep ignores the SIGTERM the launcher
+    # forwards, as a process that is PID 1 of its namespace does. After TERM_GRACE_SECONDS the
+    # whole group is killed, and the record is still written.
+    from nemar_launch import run
+
+    script = "trap '' TERM\n: > started\nexec sleep 60\n"
+    proc = start_long_job(rig, rig.script_spec(script))
+    began = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    finish(proc)
+    elapsed = time.monotonic() - began
+    assert run.TERM_GRACE_SECONDS - 1 <= elapsed < run.TERM_GRACE_SECONDS + 25
+    assert proc.returncode == 13
+    log = (rig.out / "launcher" / "launcher.log").read_text()
+    assert "did not stop" in log
+    assert '"terminated"' in (rig.out / "launcher" / "result.json").read_text()
+    assert rig.callbacks.events[-1] == "put:launcher/result.json"
