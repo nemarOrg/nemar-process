@@ -125,6 +125,15 @@ def test_a_short_body_is_rejected_by_the_size_check_alone(rig):
     assert EDF1 in launch.log
 
 
+def test_a_long_body_is_rejected_by_the_size_check_alone(rig):
+    rig.plane.omit_checksum.add(EDF1)
+    rig.plane.fault(EDF1, Fault.long())
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["detail"] == "size_mismatch"
+    assert EDF1 in launch.log
+
+
 def test_a_file_the_data_plane_lost_names_its_path_and_is_not_retried(rig):
     rig.plane.fault(EDF2, Fault.lost())
     launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))

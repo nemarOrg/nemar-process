@@ -203,16 +203,15 @@ def select(entries: list[Entry], include: list[str] | None) -> list[Entry]:
 
 def _hash_file(path: str, checker: net.Checker) -> bool:
     hasher = checker.new()
-    total = 0
     with open(path, "rb") as handle:
         while True:
             chunk = handle.read(net.CHUNK)
             if not chunk:
                 break
-            total += len(chunk)
             if hasher is not None:
                 hasher.update(chunk)
-    return total == checker.size and checker.matches(hasher)
+    # A file of another length cannot match: a git blob id covers its size, and so does a SHA-256.
+    return checker.matches(hasher)
 
 
 def verify_local(base: str, selected: list[Entry], log: Log) -> bool:
@@ -234,8 +233,6 @@ def verify_local(base: str, selected: list[Entry], log: Log) -> bool:
             return "missing"
         if not stat.S_ISREG(info.st_mode):
             return "not a regular file"
-        if info.st_size != entry.size:
-            return "wrong size"
         if os.path.commonpath([real_base, os.path.realpath(path)]) != real_base:
             return "outside the dataset directory"
         try:

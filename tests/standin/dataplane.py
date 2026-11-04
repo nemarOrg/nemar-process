@@ -19,6 +19,7 @@ Fault injection (``faults``) is per path, consumed one request at a time:
 ``Fault.lost()``            502 with the error word for a file missing from storage, always
 ``Fault.corrupt()``         serve the file with one byte changed (same length), always
 ``Fault.short()``           serve one byte fewer with an honest Content-Length, always
+``Fault.long()``            serve one byte more with an honest Content-Length, always
 """
 
 from __future__ import annotations
@@ -58,6 +59,10 @@ class Fault:
     @staticmethod
     def corrupt() -> Fault:
         return Fault("corrupt", times=10**9)
+
+    @staticmethod
+    def long() -> Fault:
+        return Fault("long", times=10**9)
 
     @staticmethod
     def short() -> Fault:
@@ -181,6 +186,10 @@ class DataPlane:
                 data = bytes([data[0] ^ 0xFF]) + data[1:]
             if fault.kind == "short":
                 data = data[:-1]
+            if fault.kind == "long":
+                data = data + b"x"
+            if fault.kind == "long":
+                data = data + b"x"
             if fault.kind == "truncate":
                 return Response(
                     status=200,

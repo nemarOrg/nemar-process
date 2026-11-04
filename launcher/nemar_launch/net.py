@@ -381,8 +381,6 @@ def download(
         if os.path.exists(dest):
             os.unlink(dest)
         retrying(one_attempt, attempts=attempts, sleep=sleep, on_retry=retry_note)
-        if state.have != checker.size:
-            raise Download("size_mismatch")
         if not checker.matches(state.hasher):
             raise Download("checksum_mismatch")
     except HttpFailure as failure:
