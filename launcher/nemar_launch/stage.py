@@ -252,7 +252,6 @@ def verify_local(base: str, selected: list[Entry], log: Log) -> bool:
 
 
 def download_dataset(
-    dataset_id: str,
     selected: list[Entry],
     root: str,
     *,
@@ -267,8 +266,10 @@ def download_dataset(
     either = net.AnyStop(stop, cancel)
 
     def one(entry: Entry) -> None:
-        if either.is_set():
-            return
+        if stop.is_set():
+            raise Stopped  # a cancel: never report the dataset as staged
+        if cancel.is_set():
+            return  # a sibling failed; its failure is what is raised
         checker = net.Checker(entry.size, entry.algorithm, entry.checksum)
 
         def note(attempt: int, word: str, delay: float) -> None:
@@ -360,6 +361,6 @@ def stage_all(
         if source is None:
             source = os.path.join(scratch, "data", dataset["id"])
             log.info("{}: downloading {} files".format(dataset["id"], len(selected)))
-            download_dataset(dataset["id"], selected, source, sleep=sleep, log=log, stop=stop)
+            download_dataset(selected, source, sleep=sleep, log=log, stop=stop)
         staged.append(Staged(record, source))
     return staged

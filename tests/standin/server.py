@@ -12,6 +12,7 @@ assert what the launcher sent, in what order, and what it left out.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from collections.abc import Sequence
@@ -49,6 +50,7 @@ class Response:
     headers: dict[str, str] = field(default_factory=dict)
     truncate_after: int | None = None
     declared_length: int | None = None
+    drop: bool = False  # close the connection without answering at all
 
     @staticmethod
     def json_body(status: int, payload) -> Response:
@@ -116,6 +118,10 @@ class StandinServer:
                 self._send(response, head_only=self.command == "HEAD")
 
             def _send(self, response: Response, head_only: bool) -> None:
+                if response.drop:
+                    self.close_connection = True
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    return
                 declared = (
                     response.declared_length
                     if response.declared_length is not None

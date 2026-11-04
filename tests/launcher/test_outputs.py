@@ -58,7 +58,8 @@ def test_a_symlink_in_work_is_removed_and_recorded(either_rig):
         'mkdir -p "$NEMAR_OUT/sub"\n'
         'ln -s ../real.txt "$NEMAR_OUT/sub/up-link"\n'
         'ln -s /etc/hostname "$NEMAR_OUT/../loose-link"\n'
-        'ln -s /etc/hostname "$NEMAR_OUT/../tmp/tmp-link"\n'
+        'mkdir "$NEMAR_OUT/../other"\n'
+        'ln -s /etc/hostname "$NEMAR_OUT/../other/other-link"\n'
     )
     launch = either_rig.launch(either_rig.script_spec(script))
     assert launch.exit == 0, launch.log
@@ -68,7 +69,7 @@ def test_a_symlink_in_work_is_removed_and_recorded(either_rig):
         "outputs/root-link",
         "outputs/sub/up-link",
         "loose-link",
-        "tmp/tmp-link",
+        "other/other-link",
     ):
         assert not os.path.lexists(work / gone), gone
     assert [f["path"] for f in launch.manifest["files"]] == ["real.txt"]
@@ -77,7 +78,7 @@ def test_a_symlink_in_work_is_removed_and_recorded(either_rig):
         "outputs/root-link",
         "outputs/sub/up-link",
         "loose-link",
-        "tmp/tmp-link",
+        "other/other-link",
     ):
         assert "removed symlink {}".format(gone) in launch.log
     assert sorted(k for k in either_rig.callbacks.objects if k.startswith("outputs/")) == [

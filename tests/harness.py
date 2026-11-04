@@ -213,6 +213,16 @@ class Rig:
             code = launcher.main(self.env(spec_bytes, **extra_env), sleep=sleep)
         return Launch(code, self.out, stderr.getvalue())
 
+    def preflight_calls(self) -> list:
+        path = Path(str(self.runtime_record) + ".preflight")
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def set_pid_namespace(self, mode: str) -> None:
+        """Make the stand-in runtime answer the PID namespace probe: isolated, shared or unknown."""
+        Path(str(self.runtime_record) + ".pidns").write_text(mode)
+
     def runtime_calls(self) -> list:
         if not self.runtime_record.exists():
             return []

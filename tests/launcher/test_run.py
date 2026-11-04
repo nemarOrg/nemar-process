@@ -77,17 +77,22 @@ def test_the_exec_arguments_and_the_bind_table_are_exactly_these(rig):
     assert str(rig.out) not in scratch_run  # never in the archived output directory
     assert data_src.startswith(str(rig.scratch))
     assert str(rig.out) not in data_src
+    tmp_src = next(b[: -len(":/tmp")] for b in argv if b.endswith(":/tmp"))
+    assert tmp_src.startswith(str(rig.scratch))
+    assert str(rig.out) not in tmp_src
     assert argv == [
         "exec",
         "--containall",
         "--cleanenv",
         "--no-home",
+        "--no-mount",
+        "bind-paths",
         "--pwd",
         "/work",
         "--bind",
         "{}:/work".format(rig.out / "work"),
         "--bind",
-        "{}:/tmp".format(rig.out / "work" / "tmp"),
+        "{}:/tmp".format(tmp_src),
         "--bind",
         scratch_run + ":/code:ro",
         "--bind",

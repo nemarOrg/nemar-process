@@ -24,6 +24,7 @@ of the meaningful steps, so a test can assert that ``complete`` came last.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote
 
@@ -60,6 +61,12 @@ class Callbacks:
         self.put_always: dict[str, int] = {}  # key prefix -> status, every time
         self.complete_status: int = 200
         self.complete_refusal_code: str | None = None
+        # answered in order before the normal answer: ("drop",) closes the connection after the
+        # request was recorded (an ambiguous outcome), (409, "results_incomplete") refuses
+        self.complete_queue: list[tuple] = []
+        self.put_delay = (
+            0.0  # seconds every PUT takes, so a test can signal the launcher mid-upload
+        )
         self.omit_from_plan: set[str] = set()
         self.expire_urls_once = False  # first PUT of the run answers 403
         # records -------------------------------------------------------------------------------
@@ -181,6 +188,8 @@ class Callbacks:
 
     def _put(self, request: Request) -> Response:
         key = unquote(request.path[len("/s3/jobs/{}/".format(self.job_id)) :])
+        if self.put_delay:
+            time.sleep(self.put_delay)
         declared = request.headers.get("content-length")
         if declared is None or int(declared) != len(request.body):
             return Response.json_body(400, {"error": "length mismatch"})
@@ -209,6 +218,12 @@ class Callbacks:
         if not self._token_ok(request):
             return self._refuse(404, "job_not_found")
         self._event("complete")
+        with self._lock:
+            queued = self.complete_queue.pop(0) if self.complete_queue else None
+        if queued is not None:
+            if queued[0] == "drop":
+                return Response(drop=True)
+            return self._refuse(*queued)
         if self.complete_status != 200:
             code = self.complete_refusal_code or "bad_state"
             return self._refuse(self.complete_status, code)

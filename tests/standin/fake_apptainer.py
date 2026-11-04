@@ -27,7 +27,8 @@ import os
 import sys
 
 VALUELESS = {"--containall", "--cleanenv", "--no-home", "--nv"}
-VALUED = {"--pwd", "--bind", "--env"}
+VALUED = {"--pwd", "--bind", "--env", "--no-mount"}
+PROBE_MARKER = "# nemar-pid-namespace-probe"
 
 
 def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
@@ -57,12 +58,28 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
     if i >= len(rest):
         print("fake apptainer: no image given", file=sys.stderr)
         return 2
+    for option, value in options:
+        if option == "--no-mount" and value != "bind-paths":
+            print("fake apptainer: only '--no-mount bind-paths' is expected", file=sys.stderr)
+            return 2
     image, command = rest[i], rest[i + 1 :]
-    with open(record_path, "a", encoding="utf-8") as handle:
+    probing = len(command) >= 3 and command[1] == "-c" and command[2].startswith(PROBE_MARKER)
+    # The launcher's preflight is recorded apart from the job's own calls. This stand-in cannot make
+    # a PID namespace, so it answers the probe from a mode file: absent or "isolated" is exit 0,
+    # "shared" is exit 3 (the container shares the launcher's namespace), "unknown" is exit 4.
+    target = record_path + ".preflight" if probing else record_path
+    with open(target, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": argv, "environ": dict(os.environ)}) + "\n")
     if not os.path.isfile(image):
         print("FATAL: image not found", file=sys.stderr)
         return 255
+    if probing:
+        mode_file = record_path + ".pidns"
+        mode = "isolated"
+        if os.path.exists(mode_file):
+            with open(mode_file, encoding="utf-8") as handle:
+                mode = handle.read().strip()
+        return {"isolated": 0, "shared": 3, "unknown": 4}[mode]
 
     binds: list[tuple[str, str]] = []
     pwd = "/"

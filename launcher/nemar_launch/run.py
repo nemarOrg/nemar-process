@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -50,6 +51,7 @@ from .codes import (
     ENV_OUT,
     ENV_SIF_ROOT,
     ENV_SLURM_END_TIME,
+    LOG_FILE,
     Env,
     Failure,
 )
@@ -58,6 +60,8 @@ from .stage import Staged
 
 # A SIGTERM within this many seconds of the job's end time is the time limit, not a cancellation.
 TIME_LIMIT_MARGIN = 120
+# How long the PID namespace preflight may take.
+PREFLIGHT_SECONDS = 120
 # What Python runs inside the image for `runtime: python`. The image provides it on its PATH.
 IMAGE_PYTHON = "python"
 # The host variables the container runtime process is given. Nothing else of the launcher's
@@ -165,21 +169,72 @@ def env_argument(name: str, value: str) -> str:
     return pair
 
 
+class Bind(NamedTuple):
+    """One bind mount: a host directory, where it appears inside, and whether it is read-only."""
+
+    source: str
+    dest: str
+    read_only: bool
+
+    def argument(self) -> str:
+        return "{}:{}{}".format(self.source, self.dest, ":ro" if self.read_only else "")
+
+
+def build_binds(
+    job: spec.Spec,
+    work: str,
+    tmp_dir: str,
+    code_dir: str | None,
+    staged: list[Staged],
+) -> list[Bind]:
+    """The whole bind table. ``work`` is the ONLY archived directory in it: ``/tmp`` is node-local
+    scratch (user temporary files must not count against the shared account's quota), code and
+    datasets are read-only, and nothing else of the host is mounted."""
+    binds = [Bind(work, CONTAINER_WORK, False), Bind(tmp_dir, "/tmp", False)]  # noqa: S108
+    if code_dir is not None:
+        binds.append(Bind(code_dir, CONTAINER_CODE, True))
+    for dataset, held in zip(job.datasets, staged):
+        binds.append(Bind(held.source, "{}/{}".format(CONTAINER_DATA, dataset["id"]), True))
+    return binds
+
+
+def check_bind_sources(binds: list[Bind]) -> None:
+    """Immediately before the container runs: every bind source is a real directory, not a link.
+
+    A path holding ``,`` or ``:`` is refused too: the runtime splits a bind argument on them.
+    Anything else is ``bind_source_unsafe``.
+    """
+    for bind in binds:
+        if "," in bind.source or ":" in bind.source:
+            raise Failure("runtime_error", "bind_source_unsafe", "a bind source name is ambiguous")
+        try:
+            info = os.lstat(bind.source)
+        except OSError:
+            raise Failure(
+                "runtime_error", "bind_source_unsafe", "a bind source is missing"
+            ) from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise Failure(
+                "runtime_error", "bind_source_unsafe", "a bind source is not a real directory"
+            )
+
+
+# The isolation flags, each repeated on purpose (a reviewer can see them and a test can mutate them):
+# `--containall` is contain, clean environment, private PID and IPC namespaces; `--no-mount
+# bind-paths` turns off the site's own `bind path` entries, which would otherwise mount host
+# directories into every container.
+ISOLATION_FLAGS = ("--containall", "--cleanenv", "--no-home", "--no-mount", "bind-paths")
+
+
 def build_argv(
     runtime: str,
     job: spec.Spec,
     sif: str,
-    work: str,
-    code_dir: str | None,
-    staged: list[Staged],
+    binds: list[Bind],
 ) -> list[str]:
-    argv = [runtime, "exec", "--containall", "--cleanenv", "--no-home", "--pwd", CONTAINER_WORK]
-    argv += ["--bind", "{}:{}".format(work, CONTAINER_WORK)]
-    argv += ["--bind", "{}:/tmp".format(os.path.join(work, "tmp"))]
-    if code_dir is not None:
-        argv += ["--bind", "{}:{}:ro".format(code_dir, CONTAINER_CODE)]
-    for dataset, held in zip(job.datasets, staged):
-        argv += ["--bind", "{}:{}/{}:ro".format(held.source, CONTAINER_DATA, dataset["id"])]
+    argv = [runtime, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
+    for bind in binds:
+        argv += ["--bind", bind.argument()]
     if job.gpus > 0:
         argv.append("--nv")
     for name, value in job.env.items():
@@ -188,6 +243,154 @@ def build_argv(
     argv.append(sif)
     argv += entry_argv(job)
     return argv
+
+
+# ---- the PID namespace -----------------------------------------------------------------------------
+
+# Run inside the container by the preflight: exit 0 when its PID namespace is not the launcher's.
+# The first line is a marker the test stand-in for the runtime recognises.
+PID_NAMESPACE_PROBE = (
+    "# nemar-pid-namespace-probe\n"
+    "import os, sys\n"
+    "try:\n"
+    "    inside = os.readlink('/proc/self/ns/pid')\n"
+    "except OSError:\n"
+    "    sys.exit(4)\n"
+    "sys.exit(3 if inside == sys.argv[1] else 0)\n"
+)
+_ALLOW_PID_NS = re.compile(r"^\s*allow\s+pid\s+ns\s*=\s*(\S+)", re.IGNORECASE)
+
+
+def runtime_config_paths(runtime_path: str) -> list[str]:
+    """Where the runtime's configuration may be: beside the install prefix, then the usual places."""
+    name = os.path.basename(runtime_path)
+    prefix = os.path.dirname(os.path.dirname(os.path.realpath(runtime_path)))
+    return [
+        os.path.join(prefix, "etc", name, name + ".conf"),
+        "/usr/local/etc/{0}/{0}.conf".format(name),
+        "/etc/{0}/{0}.conf".format(name),
+    ]
+
+
+def allow_pid_namespace(runtime_path: str) -> bool | None:
+    """``allow pid ns`` from the runtime's configuration: False for ``no``, True otherwise, None
+    when no configuration file could be read (the preflight then has to prove it)."""
+    for path in runtime_config_paths(runtime_path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        value = None
+        for line in lines:
+            found = _ALLOW_PID_NS.match(line)
+            if found:
+                value = found.group(1).lower()
+        return value != "no"
+    return None
+
+
+def own_pid_namespace() -> str | None:
+    """The identity of the launcher's PID namespace (``pid:[inode]``), None where /proc has none."""
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
+def require_pid_namespace(
+    runtime_path: str,
+    sif: str,
+    job: spec.Spec,
+    layout: Layout,
+    tmp_dir: str,
+    env: Env,
+    log: Log,
+) -> None:
+    """Before any user code runs: prove the container will not share the launcher's PID namespace.
+
+    A shared one would let user code read the launcher's environment (the job token) from
+    ``/proc``. Two checks. The runtime's configuration, when readable, must not say
+    ``allow pid ns = no``. For ``runtime: python`` (whose image has a Python) a preflight then
+    runs a probe in the job's own image with the same isolation flags, and the probe must report a
+    namespace other than the launcher's; it cannot be told apart otherwise, since a runtime that is
+    not allowed a PID namespace carries on without one. A user image (``runtime: image``) has no
+    Python we can count on, so only the configuration is checked. Failure:
+    ``pid_namespace_unavailable``; a runtime that cannot start at all: ``runtime_unusable``.
+    """
+    if allow_pid_namespace(runtime_path) is False:
+        raise Failure(
+            "runtime_error", "pid_namespace_unavailable", "the runtime's configuration forbids it"
+        )
+    ours = own_pid_namespace()
+    if job.runtime != "python" or ours is None:
+        log.info("pid namespace: configuration checked; no preflight for this job")
+        return
+    binds = [Bind(layout.work, CONTAINER_WORK, False), Bind(tmp_dir, "/tmp", False)]  # noqa: S108
+    check_bind_sources(binds)
+    argv = [runtime_path, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
+    for bind in binds:
+        argv += ["--bind", bind.argument()]
+    argv += ["--env", env_argument(ENV_OUT, CONTAINER_OUTPUTS), sif]
+    argv += [IMAGE_PYTHON, "-c", PID_NAMESPACE_PROBE, ours]
+    try:
+        done = subprocess.run(
+            argv,
+            env=runtime_environment(env),
+            cwd=layout.work,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=PREFLIGHT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Failure("runtime_error", "runtime_unusable", "the preflight could not run") from None
+    if done.returncode == 0:
+        log.info("pid namespace: the preflight saw a namespace of its own")
+        return
+    if done.returncode in (3, 4):
+        raise Failure(
+            "runtime_error", "pid_namespace_unavailable", "the container shares the PID namespace"
+        )
+    raise Failure("runtime_error", "runtime_unusable", "the preflight did not run")
+
+
+class Layout(NamedTuple):
+    """The output directory the launcher made: all three are created here, by the launcher."""
+
+    out_dir: str
+    work: str
+    outputs: str
+    launcher: str
+
+    @property
+    def log_path(self) -> str:
+        return os.path.join(self.launcher, LOG_FILE)
+
+
+def prepare_layout(out_dir: str) -> Layout:
+    """Create ``work``, ``work/outputs`` and ``launcher`` with ``os.mkdir``, or refuse.
+
+    If either of ``work`` and ``launcher`` already exists, whatever it is (a directory, a link),
+    the launcher does not start: something else has been at work in the archived directory, and
+    writing into it or mounting it could lead outside it. ``output_dir_not_empty``.
+    """
+    layout = Layout(
+        out_dir,
+        os.path.join(out_dir, "work"),
+        os.path.join(out_dir, "work", "outputs"),
+        os.path.join(out_dir, "launcher"),
+    )
+    try:
+        os.mkdir(layout.work, 0o700)
+        os.mkdir(layout.outputs, 0o700)
+        os.mkdir(layout.launcher, 0o700)
+    except OSError:
+        raise Failure(
+            "runtime_error", "output_dir_not_empty", "work or launcher already exists"
+        ) from None
+    return layout
 
 
 # ---- signals --------------------------------------------------------------------------------------
@@ -303,40 +506,99 @@ def run_container(
 # ---- what the container left ----------------------------------------------------------------------
 
 
-def _hash(path: str) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as handle:
-        while True:
-            chunk = handle.read(net.CHUNK)
-            if not chunk:
-                break
-            size += len(chunk)
-            digest.update(chunk)
-    return size, digest.hexdigest()
+class Finalized(NamedTuple):
+    """The result of reading ``work`` back: the manifest entries, and a failure that blocks the
+    output upload (the manifest is then empty and only the launcher files are sent)."""
+
+    files: list[dict[str, Any]]
+    failure: Failure | None
 
 
-def _representable(relative: str, path_schema: dict[str, Any]) -> bool:
+def output_path_ok(relative: str, job_id: str) -> bool:
+    """Whether the Worker will take this output name: THE predicate, used for the manifest and the
+    outputs request alike.
+
+    The schema's path pattern (no backslash, control character, empty, ``.`` or ``..`` segment, at
+    most 512 characters), and in addition at most 512 UTF-16 code units and a results key
+    ``jobs/<id>/outputs/<path>`` of at most 1024 UTF-8 bytes, which are the Worker's own limits.
+    """
     try:
-        relative.encode("utf-8")
+        key = "jobs/{}/outputs/{}".format(job_id, relative).encode("utf-8")
+        units = len(relative.encode("utf-16-le")) // 2
     except UnicodeEncodeError:
         return False
-    return not spec.validate(relative, path_schema)
+    if units > 512 or len(key) > 1024:
+        return False
+    return not spec.validate(relative, _output_path_schema())
 
 
-def finalize_outputs(work: str, log: Log) -> list[dict[str, Any]]:
-    """Remove symlinks and special files under ``work`` and hash ``work/outputs``.
+def _output_path_schema() -> dict[str, Any]:
+    return spec.schema_def("manifest")["properties"]["files"]["items"]["properties"]["path"]
 
-    The container is gone, so nothing races with this. A symlink anywhere under ``work`` (an
-    output, ``tmp``, ``work`` itself) is unlinked and recorded; a FIFO, socket or device is removed
-    too (a hash of a FIFO would never return). Only regular files under ``work/outputs`` enter the
-    manifest, sorted by path; a file whose name the documents cannot carry is left out and logged.
+
+def _hash_regular(name: str, expected_size: int) -> tuple[int, str]:
+    """SHA-256 of a regular file opened WITHOUT following a link, relative to the cwd.
+
+    ``fstat`` on the open descriptor must still say a regular file of ``expected_size`` and the
+    bytes read must add up to it, or ``net.OutputChanged``; ``PermissionError`` propagates.
     """
-    outputs = os.path.join(work, "outputs")
-    path_schema = spec.schema_def("manifest")["properties"]["files"]["items"]["properties"]["path"]
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(name, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != expected_size:
+            raise net.OutputChanged
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(fd, net.CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        if total != expected_size:
+            raise net.OutputChanged
+        return total, digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def finalize_outputs(
+    work: str,
+    log: Log,
+    *,
+    job_id: str,
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+) -> Finalized:
+    """Make ``work`` safe to archive and hash ``work/outputs`` into the manifest.
+
+    The container is gone, so nothing races with this. The walk is iterative (an explicit stack, so
+    a 1,000-level tree cannot raise ``RecursionError``) and works by changing directory into each
+    directory in turn, so a path longer than the system's limit is no obstacle. Every directory is
+    first made owner-readable, writable and searchable (``u+rwx``) so that what a read-only or
+    mode-000 directory holds can be listed and removed.
+
+    * A symlink anywhere under ``work`` is unlinked and recorded; so is a FIFO, socket or device
+      (a hash of a FIFO would never return). One that cannot be unlinked is recorded and skipped:
+      it never reaches the manifest or the upload.
+    * Only regular files under ``work/outputs`` enter the manifest, sorted by path, hashed through a
+      descriptor opened without following a link. A name the Worker would refuse
+      (``output_path_ok``) is left out and recorded.
+    * Limits are enforced BEFORE hashing a file: more than ``max_files`` outputs is
+      ``too_many_outputs``; a file over ``max_file_bytes``, or a running total over
+      ``max_total_bytes``, is ``results_too_large``. These end as ``result_upload_failed`` with that
+      word as the detail (the submitter's, not the platform's).
+    * An output that cannot be read (a mode-000 file, a directory that cannot be listed even after
+      the ``chmod``) is NOT skipped: the job ends ``runtime_error``, detail ``outputs_unreadable``.
+    * In either failure the manifest is empty and no output is uploaded.
+    """
     removed = 0
     skipped = 0
+    failure: Failure | None = None
     files: list[dict[str, Any]] = []
+    total = 0
 
     def note(kind: str, relative: str) -> None:
         nonlocal removed
@@ -344,52 +606,123 @@ def finalize_outputs(work: str, log: Log) -> list[dict[str, Any]]:
         if removed <= _LOG_LIMIT:
             log.warning("removed {} {}".format(kind, relative))
 
-    def walk_error(error: OSError) -> None:
-        log.warning("could not read a directory under work ({})".format(error.__class__.__name__))
+    def block(candidate: Failure) -> None:
+        nonlocal failure
+        if failure is None:
+            failure = candidate
+            log.error("outputs blocked: {}".format(candidate.detail))
 
-    for directory, dirnames, filenames in os.walk(
-        work, topdown=True, followlinks=False, onerror=walk_error
-    ):
-        for name in list(dirnames):
-            full = os.path.join(directory, name)
-            if os.path.islink(full):
-                os.unlink(full)
-                dirnames.remove(name)
-                note("symlink", os.path.relpath(full, work))
-        for name in sorted(filenames):
-            full = os.path.join(directory, name)
-            relative_to_work = os.path.relpath(full, work)
+    home = os.open(".", os.O_RDONLY)
+    try:
+        os.chdir(work)
+        parts: list[str] = []
+        stack: list[Any] = []
+
+        def enter() -> Any:
+            """Open the current directory for walking; None when it cannot be listed."""
             try:
-                info = os.lstat(full)
+                info = os.stat(".")
+                os.chmod(".", stat.S_IMODE(info.st_mode) | 0o700)
+                return iter(sorted(os.listdir(".")))
             except OSError:
+                where = "/".join(parts) or "."
+                log.warning("could not list {}".format(where))
+                if parts[:1] == ["outputs"]:
+                    block(
+                        Failure(
+                            "runtime_error", "outputs_unreadable", "a directory cannot be listed"
+                        )
+                    )
+                return None
+
+        first = enter()
+        if first is not None:
+            stack.append(first)
+        while stack:
+            try:
+                name = next(stack[-1])
+            except StopIteration:
+                stack.pop()
+                if stack:
+                    os.chdir("..")
+                    parts.pop()
                 continue
-            if stat.S_ISLNK(info.st_mode):
-                os.unlink(full)
-                note("symlink", relative_to_work)
-            elif not stat.S_ISREG(info.st_mode):
-                os.unlink(full)
-                note("special file", relative_to_work)
-            elif full.startswith(outputs + os.sep):
-                relative = os.path.relpath(full, outputs).replace(os.sep, "/")
-                if not _representable(relative, path_schema):
-                    skipped += 1
-                    if skipped <= _LOG_LIMIT:
-                        log.warning(
-                            "skipped {}: its name cannot be carried in the documents".format(
-                                "outputs/" + relative
+            in_outputs = parts[:1] == ["outputs"]
+            shown = "/".join([*parts, name])
+            try:
+                info = os.lstat(name)
+            except OSError:
+                if in_outputs:
+                    block(Failure("runtime_error", "outputs_unreadable", "an output vanished"))
+                continue
+            mode = info.st_mode
+            if stat.S_ISDIR(mode):
+                try:
+                    os.chmod(name, stat.S_IMODE(mode) | 0o700)
+                    os.chdir(name)
+                except OSError:
+                    log.warning("could not enter {}".format(shown))
+                    if in_outputs or shown == "outputs":
+                        block(
+                            Failure(
+                                "runtime_error",
+                                "outputs_unreadable",
+                                "a directory cannot be entered",
                             )
                         )
                     continue
+                parts.append(name)
+                listing = enter()
+                if listing is None:
+                    os.chdir("..")
+                    parts.pop()
+                else:
+                    stack.append(listing)
+                continue
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                kind = "symlink" if stat.S_ISLNK(mode) else "special file"
                 try:
-                    size, sha256 = _hash(full)
+                    os.unlink(name)
+                    note(kind, shown)
                 except OSError:
-                    log.warning("skipped outputs/{}: unreadable".format(relative))
-                    continue
-                files.append({"path": relative, "size": size, "sha256": sha256})
+                    log.warning("could not remove {} {}; it is left out".format(kind, shown))
+                continue
+            if not in_outputs or failure is not None:
+                continue
+            relative = "/".join([*parts[1:], name])
+            if not output_path_ok(relative, job_id):
+                skipped += 1
+                if skipped <= _LOG_LIMIT:
+                    log.warning(
+                        "skipped outputs/{}: its name cannot be carried in the documents".format(
+                            relative
+                        )
+                    )
+                continue
+            if len(files) >= max_files:
+                block(Failure("result_upload_failed", "too_many_outputs", "too many outputs"))
+                continue
+            if info.st_size > max_file_bytes or total + info.st_size > max_total_bytes:
+                block(Failure("result_upload_failed", "results_too_large", "outputs too large"))
+                continue
+            try:
+                size, sha256 = _hash_regular(name, info.st_size)
+            except (OSError, net.OutputChanged):
+                log.warning("outputs/{} could not be read".format(relative))
+                block(Failure("runtime_error", "outputs_unreadable", "an output cannot be read"))
+                continue
+            total += size
+            files.append({"path": relative, "size": size, "sha256": sha256})
+    finally:
+        os.fchdir(home)
+        os.close(home)
     if removed > _LOG_LIMIT:
         log.warning("... and {} more removed".format(removed - _LOG_LIMIT))
+    if failure is not None:
+        log.info("outputs: none uploaded ({} removed, {} skipped)".format(removed, skipped))
+        return Finalized([], failure)
     files.sort(key=lambda item: item["path"])
     log.info(
         "outputs: {} files hashed, {} removed, {} skipped".format(len(files), removed, skipped)
     )
-    return files
+    return Finalized(files, None)
