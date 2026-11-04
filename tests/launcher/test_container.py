@@ -33,6 +33,15 @@ facts["home"] = os.path.expanduser("~")
 facts["cwd"] = os.getcwd()
 facts["argv"] = os.sys.argv[1:3]
 facts["host_home_marker_visible"] = os.path.exists(os.sys.argv[3])
+# /dev/shm inside must be the container's own: write a file the host test looks for afterwards.
+try:
+    with open(os.sys.argv[4], "w") as shm:
+        shm.write("from inside the container")
+    facts["shm_written"] = True
+except OSError:
+    facts["shm_written"] = False
+facts["oom_score_adj"] = open("/proc/self/oom_score_adj").read().strip()
+facts["pid_namespace"] = os.readlink("/proc/self/ns/pid")
 
 
 def can_write(directory):
@@ -73,11 +82,12 @@ def probed(tmp_path_factory, test_sif):
     )
     with open(marker, "w") as handle:
         handle.write("host home")
+    shm_marker = "/dev/shm/nemar-test-shm-" + uuid.uuid4().hex
     spec = rig.spec(
         runtime="python",
         entry="probe.py",
         bundle=bundle,
-        args=["a b", 'caf\u00e9 "q"', marker],
+        args=["a b", 'caf\u00e9 "q"', marker, shm_marker],
         datasets=[
             {
                 "id": DATASET_ID,
@@ -99,6 +109,7 @@ def probed(tmp_path_factory, test_sif):
     facts = json.loads((launch.out / "work" / "outputs" / "facts.json").read_text())
     yield rig, launch, facts
     os.unlink(marker)
+    assert not os.path.exists(shm_marker)  # the container's /dev/shm is not the host's
     rig.close()
 
 
@@ -187,3 +198,23 @@ def test_what_the_container_wrote_is_where_the_launcher_hashes_it(probed):
     _rig, launch, _facts = probed
     assert [f["path"] for f in launch.manifest["files"]] == ["facts.json"]
     assert os.path.isfile(launch.out / "launcher" / "provenance.json")
+
+
+def test_dev_shm_inside_is_private_to_the_container(probed):
+    _rig, _launch, facts = probed
+    assert facts["shm_written"] is True  # the container has a /dev/shm of its own to write to
+    # (the host side of this check, that no file appeared in the host's /dev/shm, runs when the
+    # module's fixture is torn down)
+
+
+def test_the_container_was_started_with_a_raised_oom_score(probed):
+    _rig, _launch, facts = probed
+    assert facts["oom_score_adj"] == "1000"
+
+
+def test_the_container_has_a_pid_namespace_of_its_own(probed):
+    from nemar_launch import run
+
+    _rig, _launch, facts = probed
+    assert facts["pid_namespace"].startswith("pid:[")
+    assert facts["pid_namespace"] != run.own_pid_namespace()

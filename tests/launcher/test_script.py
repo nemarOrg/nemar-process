@@ -122,51 +122,51 @@ def finish(proc):
     return output
 
 
-def test_sigterm_near_the_end_time_is_time_limit(rig):
+def test_sigterm_near_the_end_time_is_time_limit(either_rig):
     end = str(int(time.time()) + 60)
-    proc = start_long_job(rig, rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
+    proc = start_long_job(either_rig, either_rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
     proc.send_signal(signal.SIGTERM)
     finish(proc)
     assert proc.returncode == 15
-    assert (rig.out / "tapisjob.exitcode").read_text() == "15\n"
-    result = (rig.out / "launcher" / "result.json").read_text()
+    assert (either_rig.out / "tapisjob.exitcode").read_text() == "15\n"
+    result = (either_rig.out / "launcher" / "result.json").read_text()
     assert '"time_limit"' in result
-    assert b'"time_limit"' in rig.callbacks.objects["launcher/result.json"]
+    assert b'"time_limit"' in either_rig.callbacks.objects["launcher/result.json"]
     # Once the stop event is set no output upload starts and `complete` is not called: the four
     # launcher files go alone, result.json last.
-    assert rig.callbacks.events[-1] == "put:launcher/result.json"
-    assert "complete" not in rig.callbacks.events
+    assert either_rig.callbacks.events[-1] == "put:launcher/result.json"
+    assert "complete" not in either_rig.callbacks.events
 
 
-def test_sigterm_at_exactly_120_seconds_before_the_end_is_time_limit(rig):
+def test_sigterm_at_exactly_120_seconds_before_the_end_is_time_limit(either_rig):
     end = str(int(time.time()) + 120)
-    proc = start_long_job(rig, rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
+    proc = start_long_job(either_rig, either_rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
     proc.send_signal(signal.SIGTERM)
     finish(proc)
     assert proc.returncode == 15
 
 
-def test_sigterm_with_plenty_of_time_left_is_a_runtime_error_terminated(rig):
+def test_sigterm_with_plenty_of_time_left_is_a_runtime_error_terminated(either_rig):
     end = str(int(time.time()) + 3600)
-    proc = start_long_job(rig, rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
+    proc = start_long_job(either_rig, either_rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
     proc.send_signal(signal.SIGTERM)
     finish(proc)
     assert proc.returncode == 13
-    result = (rig.out / "launcher" / "result.json").read_text()
+    result = (either_rig.out / "launcher" / "result.json").read_text()
     assert '"runtime_error"' in result
     assert '"terminated"' in result
 
 
-def test_sigterm_without_an_end_time_is_a_runtime_error_terminated(rig):
-    proc = start_long_job(rig, rig.script_spec(LONG))
+def test_sigterm_without_an_end_time_is_a_runtime_error_terminated(either_rig):
+    proc = start_long_job(either_rig, either_rig.script_spec(LONG))
     proc.send_signal(signal.SIGTERM)
     finish(proc)
     assert proc.returncode == 13
-    assert '"terminated"' in (rig.out / "launcher" / "result.json").read_text()
+    assert '"terminated"' in (either_rig.out / "launcher" / "result.json").read_text()
 
 
-def test_the_entry_really_stopped_when_the_launcher_was_terminated(rig):
-    proc = start_long_job(rig, rig.script_spec(LONG))
+def test_the_entry_really_stopped_when_the_launcher_was_terminated(either_rig):
+    proc = start_long_job(either_rig, either_rig.script_spec(LONG))
     started = time.monotonic()
     proc.send_signal(signal.SIGTERM)
     finish(proc)
@@ -337,13 +337,13 @@ def test_a_late_sigterm_near_the_end_time_is_time_limit(rig):
     assert b'"time_limit"' in rig.callbacks.objects["launcher/result.json"]
 
 
-def test_sigterm_with_300_seconds_left_is_terminated_not_time_limit(rig):
+def test_sigterm_with_300_seconds_left_is_terminated_not_time_limit(either_rig):
     end = str(int(time.time()) + 300)
-    proc = start_long_job(rig, rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
+    proc = start_long_job(either_rig, either_rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
     proc.send_signal(signal.SIGTERM)
     finish(proc)
     assert proc.returncode == 13
-    result = (rig.out / "launcher" / "result.json").read_text()
+    result = (either_rig.out / "launcher" / "result.json").read_text()
     assert '"terminated"' in result
 
 

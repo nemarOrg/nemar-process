@@ -44,17 +44,19 @@ def test_a_child_killed_by_sigkill_is_out_of_memory(either_rig):
     assert launch.result["entry_exit_code"] == 137
 
 
-def test_the_entry_itself_killed_by_sigkill_is_out_of_memory(rig):
-    # With the stand-in the entry is the process the launcher waits for, so it dies by signal 9
-    # (a negative return code). The real runtime reports 128 + 9, which the test above covers.
-    launch = run(rig, "kill -9 $$\n")
-    assert launch.exit == 14
+def test_the_entry_itself_killed_by_sigkill_is_out_of_memory(either_rig):
+    # The entry is not an entry that exits 137 itself: it is killed by signal 9, as the kernel's
+    # out-of-memory killer would. Under the stand-in the launcher waits for that very process and
+    # sees a negative return code; under the real runtime the status is whatever the runtime makes
+    # of it. Either way it is `out_of_memory`, with 128 + 9 recorded as the entry's exit code.
+    launch = run(either_rig, "kill -9 $$\n")
+    assert launch.exit == 14, launch.log
     assert launch.result["failure_code"] == "out_of_memory"
     assert launch.result["entry_exit_code"] == 137
 
 
-def test_any_other_signal_is_a_runtime_error_with_128_plus_the_signal(rig):
-    launch = run(rig, "kill -11 $$\n")
+def test_any_other_signal_is_a_runtime_error_with_128_plus_the_signal(either_rig):
+    launch = run(either_rig, "kill -11 $$\n")
     assert launch.exit == 13
     assert launch.result["failure_code"] == "runtime_error"
     assert launch.result["entry_exit_code"] == 139
