@@ -39,9 +39,9 @@ When upstream publishes a release with the schema packaged, drop the vendored co
 
 ## eegprep
 
-This phase files no eegprep issue.
 The recipes phases pin each eegprep function they use and file an upstream issue for every gap they find; their links belong here.
 
-One thing seen while building the smoke fixture, not filed: `clean_flatlines` of eegprep 0.5.0 raises `AttributeError: 'numpy.ndarray' object has no attribute 'get'` as soon as it removes a channel from a set that `pop_loadset` returned with an empty `etc`, because `update_clean_channel_mask` calls `.get` on `EEG["etc"]`.
+**[sccn/eegprep#533](https://github.com/sccn/eegprep/issues/533)**, "clean_flatlines fails with AttributeError on a dataset loaded with an empty etc" (filed 2026-11-04, found while building the smoke fixture).
+`clean_flatlines` of eegprep 0.5.0 raises `AttributeError: 'numpy.ndarray' object has no attribute 'get'` as soon as it removes a channel from a set that `pop_loadset` returned with an empty `etc`, because `update_clean_channel_mask` calls `.get` on `EEG["etc"]`.
 `pop_saveset` writes an empty `etc` as an empty matrix and `pop_loadset` reads it back as an array, so the failure follows a plain save and load; setting `EEG["etc"] = {}` after loading avoids it.
-The fixture generator therefore gives `etc` a key, and a recipe that loads sets it did not write should expect the same.
+The workaround stays until that is fixed upstream: `scripts/make_smoke_fixture.py` gives the fixture's `etc` a key, with a comment pointing here, and a recipe that loads sets it did not write should expect the same.

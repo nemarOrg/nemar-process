@@ -26,8 +26,16 @@ There is no MATLAB, no Octave and no `eeglab` extra of eegprep in the image or t
 One root `uv.lock` serves the image, the recipes and the tests.
 The environment in the image is exactly `uv sync --frozen --no-dev --group runtime --extra cpu`, into `/opt/venv`.
 
+Two locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only) and the signalJourney validator (a Git source).
+Their build requirements are not in `uv.lock`, so uv resolves them afresh at build time; `build-constraint-dependencies` in `pyproject.toml` pins the build backend (`setuptools`) to the version the lock holds, and `uv.lock` records the constraint.
+`tests/images/test_dependencies.py` reads the lock for every package built from source and fails until each is listed, with its backend, in `[tool.nemar-process.build-backends]` and the backend is pinned.
+The residual: a pin names a version, not a hash, so the build backend is still fetched from PyPI by name and version, and a changed file under the same version would not be noticed.
+
+The image holds software under its own licences: this repository's code is MIT, MNE-Python is BSD 3-Clause, and eegprep, pamica, torch and the rest carry theirs.
+The image therefore has no licence label, because one value would be wrong for most of what is inside.
+
 The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED=0`, runs as a non-root user, and carries labels for the source commit (`org.opencontainers.image.revision`) and the lock's SHA-256 (`io.nemar.lock-sha256`).
-Its bases are digests: `python:3.12-slim` and the `uv` image, each named with its version in the Dockerfile's comments.
+Its bases are digests: `python:3.12-slim` (used by two stages, with the same digest) and the `uv` image, each named with its version in the Dockerfile's comments.
 The recipes package arrives in a later phase; this one installs the placeholder `nemar_process` (the signalJourney validator pointed at the vendored schema).
 
 ## How a consumer refers to it
@@ -50,14 +58,31 @@ The tag `<version>-cpu` exists so that people can find an image; it is never a r
 
 ### Installing the SIF
 
-The workflow publishes the SIF as an OCI artifact tagged with the image digest, in a repository of its own:
+Start from the image digest, because it is what a signature names and what the launch specification carries.
+The digest file is not signed: it is a release asset that anyone with write access to the repository can replace, so nothing in it is a reason to trust a file.
 
-```bash
-apptainer pull "$NEMAR_SIF_ROOT/<hex>.sif" oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>
-```
+1. Verify the image digest `sha256:<hex>` (next section).
+2. Resolve the SIF artifact the workflow pushed for it. Its tag is the image digest, and `oras manifest fetch --descriptor` prints the artifact digest the tag points at:
 
-The artifact's own digest (not the image's) is what is signed, and it is in the digest file as `sif.oras_digest`.
-A SIF build is not reproducible, so the same image digest can have several SIF files with different hashes; the one the release recorded is `sif.file_sha256`.
+   ```bash
+   oras manifest fetch --descriptor ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>
+   ```
+
+   The workflow refuses to move that tag, but only a digest is signed, so use the digest from here on. It should equal `sif.oras_digest` in the digest file.
+3. Verify the artifact digest (next section), then pull it by that digest, not by the tag:
+
+   ```bash
+   oras pull ghcr.io/nemarorg/nemar-python-sif@sha256:<sif artifact digest> --output <directory>
+   mv <directory>/<the pulled file> "$NEMAR_SIF_ROOT/<hex>.sif"
+   ```
+
+Whether `apptainer pull ... oras://ghcr.io/nemarorg/nemar-python-sif@sha256:<digest>` accepts a digest is unverified, and so is the name of the file `oras pull` writes (the title the artifact carries); the file is renamed to `<hex>.sif` either way.
+
+What this does not give you: nothing in the signature itself ties the SIF artifact to the image digest.
+The tie is the workflow's naming (the tag `sha256-<hex>`, which it refuses to move, and the file name) and your reading of the steps above.
+A signed annotation naming the image digest would close that, and has not been tried with cosign 3.
+The launcher does not hash the file either, and `sif.file_sha256` in the digest file comes from the unsigned asset, so compare it only as a check against a corrupted copy.
+A SIF build is not reproducible: the same image digest can have several SIF files with different hashes.
 
 ## Verifying a signature
 
@@ -71,12 +96,18 @@ cosign verify ghcr.io/nemarorg/nemar-python@sha256:<hex> \
   --certificate-identity-regexp "$IDENTITY" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-cosign verify ghcr.io/nemarorg/nemar-python-sif@sha256:<sif.oras_digest> \
+cosign verify ghcr.io/nemarorg/nemar-python-sif@sha256:<sif artifact digest> \
   --certificate-identity-regexp "$IDENTITY" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-A signature from any other workflow, repository or branch fails this check.
+**What a passing check proves:** this repository's workflow file, run for a version tag or for `main`, signed that digest.
+In the image's case it signed only after the pushed digest passed its smoke test, and, if the file at that commit still holds the guard, only for a commit reachable from `main`.
+A signature from any other workflow, repository or ref fails the check.
+
+**What it does not prove:** that anyone reviewed the commit.
+Today `main` has no branch protection and no ruleset restricts who can push a tag, and the guard is a step in the same file the tagged commit supplies, so a person who can push a tag and edit the file in one commit is not stopped by it.
+The controls that would stop that are the owner's and are not yet in place (see below).
 
 ## What the workflow does
 
@@ -85,16 +116,18 @@ A signature from any other workflow, repository or branch fails this check.
 | Job | Runs on | Does |
 |---|---|---|
 | `test` | pull request, tag, dispatch | builds the image without pushing; runs `smoke.py` inside it; builds a SIF from the local image; runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths` |
-| `publish` | tag, dispatch from `main` | pushes `ghcr.io/nemarorg/nemar-python:<version>-cpu` and captures the digest |
-| `sign` | after `publish` | signs the image digest and verifies it; smoke-tests the pushed digest; builds the SIF from that digest; smoke-tests it; pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`; signs and verifies the artifact; writes the digest file |
-| `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` to the release of the tag |
+| `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails if `<version>-cpu` already exists; pushes `ghcr.io/nemarorg/nemar-python:<version>-cpu` and captures the digest |
+| `sign` | after `publish` | smoke-tests the pushed digest, and only then signs it and verifies the signature; builds the SIF from that digest; smoke-tests it; refuses an existing SIF tag; pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`; signs and verifies the artifact; writes the digest file |
+| `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` to the release of the tag; an existing asset of that name is an error, never overwritten |
 
 A pull request runs `test` only: nothing on a pull request pushes, signs or releases.
 Only `sign` has `id-token: write`; only `publish` and `sign` have `packages: write`; only `release` has `contents: write`.
 The image is pushed without provenance or SBOM (software bill of materials) attestations, so that the digest every consumer pins is the image's own and not an index's.
 
-A tag `image-nemar-python-vMAJOR.MINOR.PATCH` runs the whole chain, using the workflow file at the tagged commit.
+A tag `image-nemar-python-vMAJOR.MINOR.PATCH` runs the whole chain, using the workflow file at the tagged commit, but only for a commit that is reachable from `main`: the first step of `publish` fails otherwise.
+The first publication therefore happens from `main`, after the epic branch has merged: a dispatch from `main`, or a tag on a commit of `main`.
 A manual dispatch runs it from `main` only, with the version as an input; it attaches the digest file to the workflow run, not to a release.
+A version is published once: a second run for the same version stops at the existing `<version>-cpu` tag.
 The version is never read from a file: it is the tag or the input.
 
 The digest file, `nemar-python-<version>-cpu-digests.json`, holds the image digest and reference, the SIF's artifact digest, reference, file name and file hash, the SHA-256 of `uv.lock`, the Python, eegprep, pamica and torch versions, the source commit, the run's address, and `launch_image`, the `image` object of a launch specification for this release.
@@ -109,7 +142,7 @@ The fixture is synthetic and a smoke input only (see its README); the scientific
 ## Published images
 
 None yet.
-The first image is published by a version tag or a manual dispatch from `main`, which the maintainers decide; its digests are recorded here when it exists.
+The first image is published from `main` (a manual dispatch, or a version tag on a commit of `main`) once the epic branch has merged, which the maintainers decide; its digests are recorded here when it exists.
 
 | Version | Image digest | SIF artifact digest | Run |
 |---|---|---|---|
@@ -119,9 +152,24 @@ The first image is published by a version tag or a manual dispatch from `main`, 
 
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
-- **Whether GHCR publishing is enabled for the repository, and that the packages are public,** is the owner's to confirm. A new GHCR package starts private; a consumer without credentials needs both packages (`nemar-python` and `nemar-python-sif`) set to public once.
-- **Image environment under `--cleanenv`.** The smoke check in CI asserts that the Dockerfile's environment (`PATH`, the thread counts, `PYTHONHASHSEED`) survives `apptainer exec --containall --cleanenv`; no run has confirmed it yet.
-- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked.
+- **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.
+- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-cpu` tag and the SIF tag read the registry's "not found" reply, whose exact wording for a package that does not exist yet is unconfirmed; a reply they cannot read stops the run, it never publishes.
+- **`apptainer push` and the SIF package.** The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure.
+
+### The owner's controls (not in place)
+
+The publish guard in the workflow is a step in a file the tagged commit supplies; it stops a mistaken tag, not a determined one.
+These are the repository owner's to set, and none exists today (no ruleset, no branch protection on `main`, no environment):
+
+- a tag ruleset on `image-nemar-python-v*` that limits who can create such a tag, and
+- branch protection or a ruleset on `main` that requires review, and
+- optionally an environment with required reviewers (and a deployment rule limited to `main` and those tags) on the `publish` and `sign` jobs; the workflow names no environment today, so using one needs a one-line change to each job.
+
+Also the owner's, before the first release:
+
+- confirm that GHCR publishing is enabled for the repository;
+- set the packages `nemar-python` and `nemar-python-sif` public (a new GHCR package starts private) so a node can pull without credentials;
+- link `nemar-python-sif` to this repository and give the workflow write access to it (see above).
 
 ## Changing it
 
@@ -134,6 +182,8 @@ uv run pytest tests/images --cov        # syncs the lock's runtime environment i
 ```
 
 To move a base image, look up the new digest from the registry (for example `docker buildx imagetools inspect python:3.12-slim`, or the registry's manifest endpoint), hash the manifest bytes to confirm it, and change the digest and the tag named in the Dockerfile's comment together.
+The `python:3.12-slim` digest is written twice, in the builder and in the final stage; change both (a test requires them equal).
+When the lock gains a package that is built from source, or `setuptools` moves in the lock, `tests/images/test_dependencies.py` says what to update.
 To move `uv`, change the version in `images/nemar-python/Dockerfile`, `.github/workflows/ci.yml` and `.github/workflows/image-nemar-python.yml` together; a test compares the three.
 To move the signalJourney commit, see [upstream.md](upstream.md).
 The version of the image is never edited: it is the tag.
