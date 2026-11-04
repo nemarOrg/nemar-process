@@ -20,8 +20,9 @@ the same one, found left to right, and ``bad_include`` is that set.
 
 Matching never backtracks. A pattern is compiled to a nondeterministic automaton whose states are
 the bits of one integer; each character of the path advances all states at once, so a match costs
-the path's length times a few big-integer operations (the integer has one bit per pattern token),
-whatever the pattern. A regular expression, or a glob matcher that backs up to an earlier ``*``,
+the path's length times at most the pattern's length in big-integer operations (the integer has
+one bit per pattern token, and a chain of zero-width steps such as ``**/**/**/x`` is followed to
+its end), whatever the pattern. A regular expression, or a glob matcher that backs up to an earlier ``*``,
 can take exponential or cubic time on a hostile pattern.
 """
 
@@ -119,22 +120,17 @@ def include_pattern_problem(pattern: str) -> str | None:
 class Pattern:
     """One ``include`` pattern, compiled once. ``BadInclude`` if the dialect refuses it."""
 
-    __slots__ = ("_body", "_count", "_head", "_masks", "_rounds", "_skip", "_tokens")
+    __slots__ = ("_body", "_count", "_head", "_masks", "_skip", "_tokens")
 
     def __init__(self, pattern: str) -> None:
         tokens = _tokenize(pattern)
         self._tokens = tokens
         self._count = len(tokens)
         skip = head = body = 0
-        run = longest = 0
         for index, (kind, _payload) in enumerate(tokens):
             bit = 1 << index
             if kind in (_SEG, _ANY, _HEAD):
                 skip |= bit  # may match nothing: the next token's state is reached at once
-                run += 1
-                longest = max(longest, run)
-            else:
-                run = 0
             if kind == _HEAD:
                 head |= bit  # and, with the body skipped, the token after the body too
             elif kind == _BODY:
@@ -142,14 +138,17 @@ class Pattern:
         self._skip = skip
         self._head = head
         self._body = body
-        self._rounds = longest + 1
         self._masks: dict[str, tuple[int, int]] = {}
 
     def _close(self, states: int) -> int:
-        """Add every state reachable without reading a character."""
-        for _ in range(self._rounds):
-            states |= ((states & self._skip) << 1) | ((states & self._head) << 2)
-        return states
+        """Add every state reachable without reading a character: repeat until nothing is new, so
+        a chain of zero-width steps (``**/**/**/x``) is followed to its end however long it is.
+        Each round reaches a token further on, so there are at most as many rounds as tokens."""
+        while True:
+            more = states | ((states & self._skip) << 1) | ((states & self._head) << 2)
+            if more == states:
+                return states
+            states = more
 
     def _for_char(self, char: str) -> tuple[int, int]:
         """(states that read ``char`` and move on, states that read it and stay)."""

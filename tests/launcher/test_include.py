@@ -20,6 +20,8 @@ The old matcher translated a pattern to a regular expression, which backtracks w
 
 from __future__ import annotations
 
+import random
+import re
 import time
 
 import pytest
@@ -149,6 +151,78 @@ def test_double_star_slash_matches_zero_or_more_directories():
     assert selected(["**/**/x"], paths) == ["x", "a/x", "a/b/x"]
     assert selected(["a/**/**/x"], ["a/x", "a/b/x"]) == ["a/x", "a/b/x"]
     assert selected(["**/"], ["a/", "x"]) == ["a/"]  # the slash itself is still needed
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("**/**/**/x", "x", True),
+        ("**/**/**/x", "a/b/c/x", True),
+        ("**/**/**/x", "ax", False),
+        ("**/**/*x", "x", True),
+        ("**/**/*x", "a/bx", True),
+        ("**/**/*x", "a/b/", False),
+        ("a/**/**/**/b", "a/b", True),
+        ("a/**/**/**/b", "a/x/y/b", True),
+        ("a/**/**/**/b", "ab", False),
+        ("**/**/**/**/**/**/**/**/x", "x", True),
+        ("**/**/**/**/**/**/**/**/x", "a/x", True),
+        ("**/*/**/x", "a/x", True),
+        ("**/*/**/x", "x", False),  # the `*` still needs one path segment
+        ("**/**/", "", True),
+        ("a/**/**/", "a/", True),
+    ],
+)
+def test_chained_double_star_slash_steps_all_match_zero_directories(pattern, path, expected):
+    assert include.Pattern(pattern).match(path) is expected
+    assert selected([pattern], [path]) == ([path] if expected else [])
+
+
+def reference_regex(pattern):
+    """The dialect as a regular expression, built from the pattern text and nothing of ours: the
+    oracle for the differential test. Its tokens are the dialect's own words."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            j = i
+            while j < len(pattern) and pattern[j] == "*":
+                j += 1
+            stars = j - i
+            starts_segment = i == 0 or pattern[i - 1] == "/"
+            if stars == 1:
+                out.append("[^/]*")
+                i = j
+            elif stars == 2 and starts_segment and pattern[j : j + 1] == "/":
+                out.append("(?:.*/)?")
+                i = j + 1
+            else:
+                out.append(".*")
+                i = j
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("".join(out), re.DOTALL)
+
+
+def test_a_randomised_differential_against_a_regular_expression_reference():
+    rng = random.Random(20261104)
+    pieces = ["a", "b", "/", "*", "**", "**/", "?", "x", "/**/", "**/**/"]
+    alphabet = ["a", "b", "/", "x", "ab", "b/"]
+    checked = 0
+    for _ in range(4000):
+        pattern = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 7)))
+        reference = reference_regex(pattern)
+        compiled = include.Pattern(pattern)
+        for _ in range(8):
+            path = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 7)))
+            assert compiled.match(path) == (reference.fullmatch(path) is not None), (pattern, path)
+            checked += 1
+    assert checked == 32000
 
 
 def test_double_star_elsewhere_matches_any_run_including_the_slash():
@@ -361,6 +435,16 @@ def test_a_256_character_pattern_against_a_1024_character_path_is_fast():
     result, elapsed = timed("**/" + "*a" * 120 + "*b", "/".join(["a" * 60] * 17))
     assert result == []
     assert elapsed < BOUND
+
+
+def test_a_long_chain_of_double_star_slash_steps_is_fast_and_still_right():
+    pattern = "**/" * 85 + "x"  # 256 characters, a chain of 85 zero-width steps
+    assert len(pattern) == 256
+    started = time.perf_counter()
+    assert include.Pattern(pattern).match("x")
+    assert include.Pattern(pattern).match("/".join(["d" * 60] * 8 + ["x"]))
+    assert not include.Pattern(pattern).match("d" * 500)
+    assert time.perf_counter() - started < BOUND
 
 
 def test_sixty_four_pathological_patterns_against_thousands_of_paths_finish():
