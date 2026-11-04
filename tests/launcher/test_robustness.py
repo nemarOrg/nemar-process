@@ -15,8 +15,13 @@ Replacing `except Exception` with `except ZeroDivisionError` in either handler t
 
 from __future__ import annotations
 
+import json
+
+import nemar_launch.__main__ as launcher_main
 import pytest
-from nemar_launch import net
+from nemar_launch import net, run
+from nemar_launch.codes import Env
+from nemar_launch.provenance import Documents, Log
 
 LONG_LABEL_HOST = "https://" + "a" * 64 + ".example"
 
@@ -64,6 +69,24 @@ def test_an_unexpected_error_in_the_work_still_leaves_three_files_and_the_upload
     assert len(uploaded) == 4
     assert b'"internal_error"' in rig.callbacks.objects["launcher/result.json"]
     assert rig.callbacks.events[-1] == "complete"  # a failed job still commits what it made
+
+
+# ---- the documents handler -------------------------------------------------------------------------
+
+
+def test_a_document_that_cannot_be_built_still_leaves_result_json(tmp_path):
+    # `json` cannot encode the bytes a faulty output name would be: a real TypeError, raised while the
+    # manifest is built, which nothing handles on purpose.
+    log = Log(None)
+    state = launcher_main.Run(str(tmp_path), None, log, Documents(str(tmp_path), log))
+    state.files = [{"path": b"bytes", "size": 1, "sha256": "a" * 64}]
+    launcher_main._finish(
+        state, None, Env({b"PATH": b"/"}), run.Terminator(), lambda _seconds: None
+    )
+    assert (state.failure.code, state.failure.detail) == ("runtime_error", "internal_error")
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert (result["failure_code"], result["detail"]) == ("runtime_error", "internal_error")
+    assert "TypeError" in log.snapshot(log.size()).decode()
 
 
 # ---- the upload-phase handler ------------------------------------------------------------------------
