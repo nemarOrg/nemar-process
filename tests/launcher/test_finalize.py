@@ -273,6 +273,14 @@ def test_output_path_ok_is_the_one_predicate():
     assert not run.output_path_ok("lone\udc80surrogate", JOB_ID)
 
 
+def test_the_utf_16_limit_is_its_own_rule_not_the_byte_limit():
+    astral = chr(0x1F600)  # 2 UTF-16 units, 4 bytes
+    # 520 units, 720 bytes: the results key (about 770 bytes) is within 1,024, only the units are over.
+    assert not run.output_path_ok("a" * 320 + astral * 100, JOB_ID)
+    assert run.output_path_ok("a" * 312 + astral * 100, JOB_ID)  # exactly 512 units
+    assert not run.output_path_ok("a" * 313 + astral * 100, JOB_ID)  # 513
+
+
 # ---- the outputs request is checked before it is sent ---------------------------------------------
 
 
@@ -308,6 +316,17 @@ def test_a_request_within_the_cap_is_accepted(rig):
     assert uploader._body["outputs"][0]["path"] == "a"
 
 
+def test_the_run_may_ask_for_new_addresses_fifty_times_and_no_more(rig):
+    uploader = make_uploader(rig)
+    uploader._set_body([])
+    uploader._urls = uploader._request_plan()
+    for _ in range(50):
+        assert uploader._refresh(uploader._version)
+    assert not uploader._refresh(uploader._version)
+    posts = [r for r in rig.server.requests if r.path.endswith("/outputs")]
+    assert len(posts) == 51  # the plan, and fifty re-requests; the fifty-first asked for none
+
+
 def test_an_output_that_changed_after_hashing_is_not_uploaded(rig, tmp_path):
     uploader = make_uploader(rig)
     out = tmp_path / "outputs"
@@ -321,6 +340,53 @@ def test_an_output_that_changed_after_hashing_is_not_uploaded(rig, tmp_path):
     (out / "link").symlink_to(out / "f")
     with pytest.raises(net.OutputChanged):
         net.put_file("http://127.0.0.1:1/x", str(out / "link"), 5)  # never through a link
+
+
+# ---- finalize_outputs itself ---------------------------------------------------------------------------
+
+
+def finalize(work, **limits):
+    arguments = {"max_files": 100, "max_file_bytes": 10**9, "max_total_bytes": 10**9}
+    arguments.update(limits)
+    return run.finalize_outputs(str(work), Log(None), job_id=JOB_ID, **arguments)
+
+
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o300, 0o500])
+def test_the_work_directory_itself_made_unreadable_is_still_read(tmp_path, mode):
+    # The entry can `chmod /work` (it is a bind of this directory): the walk must still read it back.
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    (work / "outputs" / "f").write_bytes(b"x")
+    work.chmod(mode)
+    try:
+        done = finalize(work)
+    finally:
+        work.chmod(0o700)
+    assert done.failure is None
+    assert [f["path"] for f in done.files] == ["f"]
+
+
+def test_an_output_over_the_per_file_limit_is_refused_before_it_is_read(tmp_path):
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    big = work / "outputs" / "big"
+    big.write_bytes(b"x" * 11)
+    big.chmod(0o000)  # reading it would be outputs_unreadable: the limit must come first
+    try:
+        done = finalize(work, max_file_bytes=10)
+    finally:
+        big.chmod(0o600)
+    assert done.files == []
+    assert (done.failure.code, done.failure.detail) == ("result_upload_failed", "results_too_large")
+
+
+def test_an_output_exactly_at_the_per_file_limit_is_taken(tmp_path):
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    (work / "outputs" / "f").write_bytes(b"x" * 10)
+    done = finalize(work, max_file_bytes=10)
+    assert done.failure is None
+    assert [f["size"] for f in done.files] == [10]
 
 
 # ---- hashing opens without following a link ----------------------------------------------------------
@@ -344,3 +410,18 @@ def test_an_output_is_hashed_without_following_a_link_and_only_if_it_is_what_was
     (tmp_path / "dir").mkdir()
     with pytest.raises(net.OutputChanged):  # not a regular file
         run._hash_regular("dir", 0)
+    os.mkfifo(
+        str(tmp_path / "fifo")
+    )  # a FIFO has size 0: only the type tells it from an empty file
+    with pytest.raises(net.OutputChanged):
+        run._hash_regular("fifo", 0)
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/status"), reason="no /proc on this system")
+def test_a_file_that_is_longer_than_it_said_it_was_is_not_hashed():
+    # `/proc/self/status` says it is empty (size 0) and then reads out text: the bytes read must add
+    # up to the size that was measured.
+    from nemar_launch import net
+
+    with pytest.raises(net.OutputChanged):
+        run._hash_regular("/proc/self/status", 0)

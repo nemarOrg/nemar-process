@@ -676,6 +676,10 @@ def finalize_outputs(
 
     home = os.open(".", os.O_RDONLY)
     try:
+        # `work` is the directory the entry sees as /work: it can have changed its mode, so it is
+        # widened first like every directory below it (a chmod that is refused is left to chdir).
+        with contextlib.suppress(OSError):
+            os.chmod(work, stat.S_IMODE(os.stat(work).st_mode) | 0o700)
         os.chdir(work)
         parts: list[str] = []
         stack: list[Any] = []
@@ -683,8 +687,6 @@ def finalize_outputs(
         def enter() -> Any:
             """Open the current directory for walking; None when it cannot be listed."""
             try:
-                info = os.stat(".")
-                os.chmod(".", stat.S_IMODE(info.st_mode) | 0o700)
                 return iter(sorted(os.listdir(".")))
             except OSError:
                 where = "/".join(parts) or "."
