@@ -172,7 +172,9 @@ class Rig:
         return self.spec(command=["sh", "/code/run.sh"], bundle=bundle, **overrides)
 
     def env(self, spec_bytes: bytes | None, **extra: str) -> dict:
-        path = os.pathsep.join([str(self.bin_dir), "/usr/bin", "/bin", os.environ.get("PATH", "")])
+        # The stand-in rig finds ONLY the stand-in runtime, so a real Apptainer on the machine is
+        # never picked up by accident; the real rig uses the machine's own PATH.
+        path = str(self.bin_dir) if self.container == "standin" else os.environ.get("PATH", "")
         env: dict = {
             b"PATH": path.encode(),
             b"HOME": str(self.tmp).encode(),

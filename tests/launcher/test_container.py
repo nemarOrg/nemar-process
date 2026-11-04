@@ -121,7 +121,10 @@ def test_no_host_environment_variable_reaches_the_entry(probed):
         "SMUGGLED2",
     ):
         assert name not in env, name
-    joined = json.dumps(env)
+    # The runtime's own markers (APPTAINER_CONTAINER and friends) name the image file; they are not
+    # the launcher's environment, so they are left out of the search for host paths.
+    own = {k: v for k, v in env.items() if not k.startswith(("APPTAINER", "SINGULARITY"))}
+    joined = json.dumps(own)
     assert CANARY not in joined
     assert TOKEN not in joined
     assert str(rig.out) not in joined
