@@ -5,10 +5,14 @@ seeded generator plus a slow integer sawtooth, and the last channel flat from th
 (so ``clean_flatlines`` has one channel to remove). It stands for no recording and is never a
 scientific input; the scientific fixtures belong to the recipes (phase 4).
 
-The bytes are the same on every machine. Everything is integer arithmetic until one division by a
-constant, so no platform's maths library is involved, and the one clock time in a MAT-file (its
-header text) is replaced by a fixed line. The file is written with eegprep's own ``pop_saveset``, so
-it is a set file eegprep reads; run this script in the runtime environment (``--group runtime``).
+The bytes are the same on every machine for the locked NumPy and eegprep. Everything is integer
+arithmetic until one division by a constant, so no platform's maths library is involved, and the
+one clock time in a MAT-file (its header text) is replaced by a fixed line. NumPy does not promise
+that ``Generator.integers`` gives the same numbers in every release, so a NumPy bump may change the
+bytes: ``--check`` and ``tests/images/test_fixture.py`` fail when it does, and the fix is to
+regenerate the file and copy its new digest into the README. The file is written with eegprep's own
+``pop_saveset``, so it is a set file eegprep reads; run this script in the runtime environment
+(``--group runtime``).
 
     python scripts/make_smoke_fixture.py            # write tests/fixtures/smoke/smoke.set
     python scripts/make_smoke_fixture.py --check    # fail if the committed file differs
@@ -63,6 +67,8 @@ def build_eeg() -> dict:
             "chanlocs": [{"labels": "Ch{}".format(i + 1)} for i in range(CHANNELS)],
             "setname": "nemar smoke fixture (synthetic)",
             "comments": "Synthetic smoke input only; see tests/fixtures/smoke/README.md.",
+            # A key, not an empty dict: an empty `etc` is read back as an array and clean_flatlines then
+            # fails (docs/upstream.md, sccn/eegprep#533). Keep the key until that is fixed upstream.
             "etc": {"nemar_smoke_fixture": "synthetic; smoke input only"},
         }
     )

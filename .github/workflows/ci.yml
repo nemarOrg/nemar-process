@@ -158,7 +158,7 @@ jobs:
         run: |
           uv sync --frozen
           uv lock --check
-          uv run pytest tests/images --cov
+          uv run pytest tests/images --cov=recipes --cov=scripts
 
   nemar-cli-latest:
     # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.
