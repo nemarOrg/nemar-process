@@ -68,3 +68,17 @@ None of this has been observed on the node's runtime, which may be a commercial 
 - No image is built or pushed (the runtime image is phase 3); the container tests use a small public image.
 - No Tapis application or system definition is written, validated or registered, and no observer exists (phase 6).
 - A symlink or special file that cannot be unlinked even after the directory's permissions are widened, a directory that cannot be listed even after the same, and an entry that vanishes between the directory listing and its `lstat`, have no test: an unprivileged test cannot make any of them on demand (the walk records each as `outputs_unreadable` or skips it, and the code paths are read, not run).
+
+## The runtime image (nemar-python)
+
+[images.md](images.md) says what the image is and how a consumer refers to it.
+CI builds the image, builds a SIF from it and smoke-tests both, with the community Apptainer 1.5.5.
+These are the facts that nothing has confirmed yet.
+
+- **The push, sign and release path has not run.** Pushing to GHCR, `cosign sign`, `cosign verify`, the SIF built from a digest, its push as an OCI artifact and the release asset all run only on a version tag or a dispatch from `main`.
+- **SIF compatibility with the cluster's Apptainer variant is unverified.** The cluster may run a commercial Singularity; a SIF from this image has not been run there. It is the operator's test, with `--containall --cleanenv --no-home --no-mount bind-paths` and the smoke test.
+- **GHCR.** Whether publishing is enabled for the repository, and that `nemar-python` and `nemar-python-sif` are set public so a node can pull without credentials, is the owner's to confirm.
+- **The image's environment under `--cleanenv`.** The Dockerfile sets `PATH` (the virtual environment first), the thread counts and `PYTHONHASHSEED`; the launcher runs the entry with `python` from the image's `PATH`, so the launcher depends on them surviving `apptainer exec --containall --cleanenv`. The CI check asserts it; no run has yet.
+- **A SIF's content hash is not verified by the launcher** (see above); the release's digest file records the file's SHA-256 for whoever installs it.
+- **Signature verification** needs cosign 3 or newer; older versions may not read signatures made by cosign 3.
+- **Thread counts.** The image pins one thread per math library; a recipe that wants more must set them, and what is right on a node is unmeasured.
