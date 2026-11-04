@@ -116,8 +116,8 @@ The controls that would stop that are the owner's and are not yet in place (see 
 | Job | Runs on | Does |
 |---|---|---|
 | `test` | pull request, tag, dispatch | builds the image without pushing; runs `smoke.py` inside it; builds a SIF from the local image; runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths` |
-| `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails if `<version>-cpu` already exists; pushes `ghcr.io/nemarorg/nemar-python:<version>-cpu` and captures the digest |
-| `sign` | after `publish` | smoke-tests the pushed digest, and only then signs it and verifies the signature; builds the SIF from that digest; smoke-tests it; refuses an existing SIF tag; pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`; signs and verifies the artifact; writes the digest file |
+| `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails unless the registry says `<version>-cpu` is absent (`scripts/check_tag_absent.py`, below); pushes `ghcr.io/nemarorg/nemar-python:<version>-cpu` and captures the digest |
+| `sign` | after `publish` | smoke-tests the pushed digest, and only then signs it and verifies the signature; builds the SIF from that digest; smoke-tests it; fails unless the registry says the SIF tag is absent (the same script); pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`; signs and verifies the artifact; writes the digest file |
 | `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` to the release of the tag; an existing asset of that name is an error, never overwritten |
 
 A pull request runs `test` only: nothing on a pull request pushes, signs or releases.
@@ -129,6 +129,24 @@ The first publication therefore happens from `main`, after the epic branch has m
 A manual dispatch runs it from `main` only, with the version as an input; it attaches the digest file to the workflow run, not to a release.
 A version is published once: a second run for the same version stops at the existing `<version>-cpu` tag.
 The version is never read from a file: it is the tag or the input.
+
+**The existence checks.** `scripts/check_tag_absent.py` asks the registry for the HTTP status of a manifest `HEAD` and reads nothing else.
+Exactly 404 means the tag is absent and the run goes on; 200 means it exists and the run stops.
+Every other answer also stops the run before anything is pushed: another 2xx, a redirect (never followed), 401, 403, 429, a 5xx, a token exchange that fails, a TLS or network error, an empty reply, a missing credential.
+No text in a reply is searched, so an error that merely contains "404", "unknown" or "not found" is not taken for an absence.
+`tests/images/test_publish_guards.py` runs the steps' shell against a stand-in registry for each of these, and the "not on `main`" guard in a throwaway git repository.
+
+### When a run fails after the image was pushed
+
+`publish` pushes `<version>-cpu` before anything is signed, so a failure in `sign` or `release` leaves that tag published and unsigned.
+The likely one is the SIF package, described below.
+Never use an unsigned tag: take only a digest that `cosign verify` accepted.
+
+- Do not run the whole workflow again for the same version: it stops at `publish`, at the refusal to overwrite the existing `<version>-cpu` tag.
+- Use "Re-run failed jobs" on the run. It re-runs `sign` alone, with the digest that `publish` recorded.
+- `sign` alone can be re-run until the SIF tag `sha256-<hex>` exists, because it refuses to move an existing SIF tag. If the failure came after the SIF was pushed (for example while signing it), a re-run stops there, and the way on is to publish a new version: a new tag and a new image.
+- If the pushed digest failed its smoke test, the image is bad, and the way on is also a new version.
+- If only `release` failed, re-run it; it fails rather than replace an existing asset.
 
 The digest file, `nemar-python-<version>-cpu-digests.json`, holds the image digest and reference, the SIF's artifact digest, reference, file name and file hash, the SHA-256 of `uv.lock`, the Python, eegprep, pamica and torch versions, the source commit, the run's address, and `launch_image`, the `image` object of a launch specification for this release.
 
@@ -153,8 +171,8 @@ The first image is published from `main` (a manual dispatch, or a version tag on
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
 - **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.
-- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-cpu` tag and the SIF tag read the registry's "not found" reply, whose exact wording for a package that does not exist yet is unconfirmed; a reply they cannot read stops the run, it never publishes.
-- **`apptainer push` and the SIF package.** The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure.
+- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-cpu` tag and the SIF tag rely on two things that nothing has confirmed: that GHCR answers a manifest `HEAD` for an absent tag, including one in a package that does not exist yet, with exactly 404, and that its token endpoint accepts the actor and the workflow's token as basic authentication for the `pull` scope. Any other answer stops the run before anything is pushed, so the failure mode is a first release that stops at the check, not one that overwrites; if that happens the check needs a change, and it is not to be bypassed.
+- **`apptainer push` and the SIF package.** The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure; "When a run fails after the image was pushed" says what to do then.
 
 ### The owner's controls (not in place)
 
@@ -178,7 +196,7 @@ The tests that guard the declaration are in `tests/images/`:
 
 ```bash
 uv lock --check && uv run ruff check . && uv run ruff format --check . && uv run ty check
-uv run pytest tests/images --cov        # syncs the lock's runtime environment into .cache/runtime-venv
+uv run pytest tests/images --cov=recipes --cov=scripts   # syncs the lock's runtime environment into .cache/runtime-venv
 ```
 
 To move a base image, look up the new digest from the registry (for example `docker buildx imagetools inspect python:3.12-slim`, or the registry's manifest endpoint), hash the manifest bytes to confirm it, and change the digest and the tag named in the Dockerfile's comment together.
