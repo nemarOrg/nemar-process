@@ -65,6 +65,29 @@ None of this has been observed on the node's runtime, which may be a commercial 
 
 ## Not done in this phase
 
-- No image is built or pushed (the runtime image is phase 3); the container tests use a small public image.
+- No image is published by the launcher's phase; the container tests use a small public image. The runtime image, its build and its smoke tests are in [images.md](images.md).
 - No Tapis application or system definition is written, validated or registered, and no observer exists (phase 6).
 - A symlink or special file that cannot be unlinked even after the directory's permissions are widened, a directory that cannot be listed even after the same, and an entry that vanishes between the directory listing and its `lstat`, have no test: an unprivileged test cannot make any of them on demand (the walk records each as `outputs_unreadable` or skips it, and the code paths are read, not run).
+
+## The runtime image (nemar-python)
+
+[images.md](images.md) says what the image is and how a consumer refers to it.
+CI builds the image, builds a SIF from it and smoke-tests both, with the community Apptainer 1.5.5.
+These are the facts that nothing has confirmed yet.
+
+- **The push, sign and release path has not run.** Pushing to GHCR, `cosign sign`, `cosign verify`, the SIF built from a digest, its push as an OCI artifact and the release asset all run only on a version tag or a dispatch from `main`, and only for a commit reachable from `main`.
+- **SIF compatibility with the cluster's Apptainer variant is unverified.** The cluster may run a commercial Singularity; a SIF from this image has not been run there. It is the operator's test, with `--containall --cleanenv --no-home --no-mount bind-paths` and the smoke test.
+- **The image's environment under `--cleanenv`: observed once, with a limited scope.** The Dockerfile sets `PATH` (the virtual environment first), the thread counts and `PYTHONHASHSEED`; the launcher runs the entry with `python` from the image's `PATH`, so the launcher depends on them surviving `apptainer exec --containall --cleanenv`. The `test` job of run 41909394410 (pull request 8) passed that check: the community Apptainer 1.5.5 on a hosted runner, with a SIF built from a local image archive, not from the pushed digest, and not the cluster's variant.
+- **A SIF's content hash is not verified by the launcher** (see above); the release's digest file records the file's SHA-256, but it is an unsigned release asset, so it guards only against a corrupted copy.
+- **The existence checks rely on GHCR answering with exactly 404.** `scripts/check_tag_absent.py` lets a publication go on only when a manifest `HEAD` for the tag answers 404, and stops on every other answer. Unconfirmed: that GHCR answers 404 for an absent tag, including in a package that does not exist yet, and that its token endpoint accepts the actor and the workflow's token as basic authentication. If the first release stops at this check, the check needs a change; it is not bypassed.
+- **Signature verification** needs cosign 3 or newer; older versions may not read signatures made by cosign 3. What a passing check proves, and what it does not, is in [images.md](images.md).
+- **Build requirements are pinned by version, not by hash.** `docopt` and the signalJourney validator are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
+- **Thread counts.** The image pins one thread per math library; a recipe that wants more must set them, and what is right on a node is unmeasured.
+
+### Owner items for the image
+
+None of these is in place; each needs a repository setting, not a code change.
+
+- **Protect publication.** The workflow refuses a commit that is not reachable from `main`, but that check lives in a file the tagged commit supplies. A tag ruleset on `image-nemar-python-v*`, branch protection or a ruleset on `main`, or an environment with required reviewers on the `publish` and `sign` jobs (which the workflow does not name today) would stop a person with write access who edits the file and pushes a tag. Until one exists, a signature that passes the documented check does not mean the commit was reviewed.
+- **GHCR.** Confirm that publishing is enabled for the repository and set `nemar-python` and `nemar-python-sif` public so a node can pull without credentials.
+- **The SIF package.** `apptainer push` creates `nemar-python-sif`, and it cannot set `org.opencontainers.image.source`, so GHCR does not link the package to this repository by itself. The first release creates it with the workflow's token; link the package to the repository and give the workflow write access before the first release. The second release is the likely point of failure; [images.md](images.md) says what to do when a run fails after the image was pushed (re-run only the failed jobs, never use an unsigned tag, publish a new version if the SIF tag already exists).

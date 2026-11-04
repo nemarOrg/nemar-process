@@ -12,3 +12,4 @@ dist/
 .nemar-cli/
 .nemar-cli-dev/
 .cache/
+.signaljourney/

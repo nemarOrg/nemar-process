@@ -58,9 +58,10 @@ Worker secrets, Tapis registrations and cloud buckets are the owner's.
 uv sync --frozen
 uv run pre-commit install        # once per clone: ruff on the staged files, with --fix --unsafe-fixes
 uv run ruff check . && uv run ruff format --check . && uv run ty check
-uv run pytest --cov=launcher --cov-fail-under=85
+uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images   # the launcher gate; tests/images syncs a ~1 GB runtime environment
 uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher   # the launcher on its floor
 uv run python scripts/build_launcher_zip.py --check
+uv lock --check && uv run pytest tests/images --cov=recipes --cov=scripts   # the runtime image's declaration, lock, fixture, Dockerfile, workflows
 ```
 
 ## Workflow
@@ -76,7 +77,10 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 | Path | What |
 |---|---|
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
-| `scripts/` | `build_launcher_zip.py` (deterministic zip, `--check`) |
-| `tests/` | `launcher/` tests, `standin/` HTTP stand-ins, `fixtures/` dataset, `contract/` pins |
-| `docs/` | `launcher.md` (spec, layout, codes, environment), `contracts.md`, `unverified.md` |
-| `images/`, `recipes/`, `deploy/tapis/`, `observer/` | later phases |
+| `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
+| `recipes/nemar_process/` | the recipes package; for now the placeholder `sj.py` and the vendored signalJourney schema in `_vendor/` |
+| `scripts/` | `build_launcher_zip.py` (deterministic zip, `--check`), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
+| `tests/` | `launcher/` tests, `images/` tests, `standin/` HTTP stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `contract/` pins |
+| `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `upstream.md`, `contracts.md`, `unverified.md` |
+| `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
+| `deploy/tapis/`, `observer/` | later phases |

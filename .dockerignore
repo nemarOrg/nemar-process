@@ -1,0 +1,10 @@
+# Deny by default: the build context is the repository root, and the image takes only what is listed.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!recipes/nemar_process
+!images/nemar-python/smoke.py
+!tests/fixtures/smoke
+**/__pycache__
+**/*.pyc
