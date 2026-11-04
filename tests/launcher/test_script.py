@@ -380,6 +380,7 @@ def test_a_sigterm_before_the_run_is_recorded_and_the_entry_never_runs(rig):
         "terminated",
     )
     assert rig.runtime_calls() == []
+    assert "starting the container" not in launch.log  # not even started, then stopped at once
 
 
 def test_a_sigterm_before_staging_fetches_no_file_and_claims_none_staged(rig):
