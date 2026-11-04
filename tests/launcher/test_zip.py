@@ -140,7 +140,7 @@ def test_only_the_lib_directory_is_on_the_import_path_and_site_is_not_imported(r
     assert proc.returncode == 0, proc.stderr
 
 
-def test_the_wrapper_starts_the_launcher_with_dash_I_dash_S_and_probes_with_dash_I(rig, tmp_path):
+def test_the_wrapper_starts_the_launcher_and_probes_with_dash_I_dash_S(rig, tmp_path):
     log = tmp_path / "calls.log"
     stub = tmp_path / "python-stub"
     stub.write_text(
@@ -158,7 +158,7 @@ def test_the_wrapper_starts_the_launcher_with_dash_I_dash_S_and_probes_with_dash
     assert proc.returncode == 0, proc.stderr
     calls = [line.split() for line in log.read_text().splitlines() if line.strip()]
     probe, start = calls[0], calls[1]
-    assert probe[0] == "-I"  # the probe is isolated too
+    assert probe[:3] == ["-I", "-S", "-c"]  # the probe is isolated, and has no site, too
     assert start[:3] == ["-I", "-S", "-c"]
 
 
