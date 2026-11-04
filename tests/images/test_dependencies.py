@@ -11,11 +11,13 @@ from __future__ import annotations
 import re
 import subprocess
 import tomllib
+from urllib.parse import unquote
 
 from check_smoke_pins import NO_MATLAB, forbidden_names
 from image_support import clean_env, uv_binary
 from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
+from packaging.tags import compatible_tags, cpython_tags, mac_platforms
+from packaging.utils import canonicalize_name, parse_wheel_filename
 from repo_paths import LOCK, PYPROJECT, ROOT, VENDORED
 
 EXACT_PINS = {"eegprep": "0.5.0", "mne": "1.13.2", "pamica": "0.4.0"}
@@ -141,3 +143,109 @@ def test_the_vendored_commit_is_the_locked_commit():
     assert commit
     locked = next(p for p in load_lock()["package"] if p["name"] == "signaljourney-validator")
     assert locked["source"]["git"].endswith("#" + commit.group(1))
+
+
+# ---- build requirements ----------------------------------------------------------------------
+# A package the lock cannot install from a wheel is built on the machine, in an isolated environment
+# whose build requirements (setuptools and the like) uv resolves afresh: uv.lock does not record
+# them. `build-constraint-dependencies` pins them, and each source-built package must be named,
+# with its build backend, in `[tool.nemar-process.build-backends]` so a new one is a reviewed change.
+
+
+def target_tags() -> set:
+    """Wheel tags of the targets this repository installs on: the image (Linux x86-64) and macOS."""
+    glibc = ["manylinux_2_{}_x86_64".format(minor) for minor in range(41, 16, -1)]
+    linux = [
+        *glibc,
+        "manylinux2014_x86_64",
+        "manylinux2010_x86_64",
+        "manylinux1_x86_64",
+        "linux_x86_64",
+    ]
+    tags = set()
+    for platforms in (linux, list(mac_platforms((14, 0), "arm64"))):
+        tags |= set(cpython_tags((3, 12), ["cp312"], platforms))
+        tags |= set(compatible_tags((3, 12), "cp312", platforms))
+    return tags
+
+
+def built_from_source(lock: dict) -> set[str]:
+    """Names of the locked packages that are installed by building them: a git, url or directory
+    source, or an sdist with no wheel for a target (the repository's own virtual root is not one)."""
+    tags = target_tags()
+    found = set()
+    for package in lock["package"]:
+        source = package["source"]
+        if "virtual" in source or "editable" in source:
+            continue
+        if any(key in source for key in ("git", "url", "path", "directory")):
+            found.add(package["name"])
+            continue
+        installable = False
+        for wheel in package.get("wheels", []):
+            filename = unquote(wheel["url"].rsplit("/", 1)[-1])
+            if parse_wheel_filename(filename)[3] & tags:
+                installable = True
+        if not installable:
+            found.add(package["name"])  # no wheel for a target: uv builds the sdist
+    return found
+
+
+def build_constraints() -> dict[str, str]:
+    raw = load_pyproject()["tool"]["uv"].get("build-constraint-dependencies", [])
+    pins = {}
+    for text in raw:
+        requirement = Requirement(text)
+        specifiers = list(requirement.specifier)
+        assert [s.operator for s in specifiers] == ["=="], (
+            "a build constraint must be an exact pin: " + text
+        )
+        pins[str(canonicalize_name(requirement.name))] = specifiers[0].version
+    return pins
+
+
+def test_the_lock_builds_exactly_the_packages_the_repository_has_reviewed():
+    built = built_from_source(load_lock())
+    assert built, (
+        "the lock has no source-built package: this test, and the constraint, are not needed"
+    )
+    reviewed = load_pyproject()["tool"]["nemar-process"]["build-backends"]
+    assert set(reviewed) >= built, (
+        "a package is now built from source and has no reviewed backend: {}".format(
+            sorted(built - set(reviewed))
+        )
+    )
+    locked = {p["name"] for p in load_lock()["package"]}
+    assert set(reviewed) <= locked, "a reviewed package is not in the lock: {}".format(
+        sorted(set(reviewed) - locked)
+    )
+
+
+def test_every_source_built_package_has_its_build_backend_pinned():
+    constraints = build_constraints()
+    reviewed = load_pyproject()["tool"]["nemar-process"]["build-backends"]
+    locked_versions = {p["name"]: p["version"] for p in load_lock()["package"]}
+    for package in built_from_source(load_lock()):
+        backend = str(canonicalize_name(reviewed[package]))
+        assert backend in constraints, "{} is built with {} and nothing pins it".format(
+            package, backend
+        )
+        # the pin is the version the lock already resolved, so there is one answer
+        assert constraints[backend] == locked_versions[backend], (backend, constraints[backend])
+
+
+def test_the_lock_records_the_same_build_constraints_as_the_declaration():
+    manifest = load_lock().get("manifest", {})
+    recorded = {
+        str(canonicalize_name(c["name"])): c["specifier"]
+        for c in manifest.get("build-constraints", [])
+    }
+    assert recorded == {name: "==" + version for name, version in build_constraints().items()}
+
+
+def test_the_source_built_rule_finds_the_known_cases():
+    names = built_from_source(load_lock())
+    assert "signaljourney-validator" in names  # a git source
+    assert "docopt" in names  # an sdist with no wheel
+    assert "numpy" not in names  # wheels for every target
+    assert "nemar-process" not in names  # the repository itself

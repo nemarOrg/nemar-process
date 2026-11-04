@@ -56,6 +56,13 @@ runtime = [
 [tool.uv]
 package = false
 
+# A package with no wheel for a target is built on the machine, in an isolated environment whose
+# build requirements uv resolves afresh (uv.lock does not record them), so a new release of the
+# build backend would change what is installed while `uv lock --check` stays green. These pins are
+# the versions the lock already holds for the backend. They give a version, not a hash: the build
+# requirements are still fetched from PyPI by name and version (docs/images.md).
+build-constraint-dependencies = ["setuptools==84.2.1"]
+
 # torch comes from the CPU index only, never from PyPI (whose Linux wheels carry the CUDA runtime).
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", extra = "cpu" }]
@@ -104,3 +111,11 @@ include = ["images/nemar-python/smoke.py", "scripts/make_smoke_fixture.py"]
 
 [tool.ty.overrides.rules]
 import-not-found = "ignore"
+
+# The packages the lock builds from source today (a git source, or an sdist with no wheel) and the
+# build backend each declares. tests/images/test_dependencies.py reads the lock for the packages that
+# need building and fails until each is listed here with its backend pinned in
+# `build-constraint-dependencies` above.
+[tool.nemar-process.build-backends]
+docopt = "setuptools"
+signaljourney-validator = "setuptools"
