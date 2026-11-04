@@ -59,7 +59,7 @@ None of this has been observed on the node's runtime, which may be a commercial 
   The error body is read for a `code` word only, and only the three results refusals (`results_too_large`, `results_quota_exceeded`, `too_many_outputs`) are recorded as they are; any other refusal is `outputs_refused` or `complete_refused`.
   The launcher posts `{}` as the body of the bundle and complete routes, retries `complete` on a 409 `results_incomplete`, and so may call it more than once: it must be idempotent.
 - **Who pays for a detail.** `codes.PLATFORM_LAUNCHER_DETAILS` says which declared details are the platform's (refunded) and which the submitter's (charged); a transport fault is `fetch_failed`, the platform's.
-  An entry that itself exits 255 is counted as the runtime's failure (`runtime_unusable`, refunded) because the two cannot be told apart.
+  A status of 255 after user code started is `entry_failed` and charged, because the runtime's own fatal exit cannot be told from an entry's: a platform fault that surfaces as 255 mid-run is therefore charged to the submitter (a known limitation, and a question for the Epic A refund path).
 
 ## Not done in this phase
 

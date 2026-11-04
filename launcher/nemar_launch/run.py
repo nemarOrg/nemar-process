@@ -502,9 +502,11 @@ def run_container(
     not stopped ``TERM_GRACE_SECONDS`` later (a process that is PID 1 of its namespace ignores a
     SIGTERM it has no handler for), the whole group is killed. ``entry_exit_code`` is the entry's
     own status, with a signal death as 128 + the signal, as a shell reports it. 137 (SIGKILL, what
-    the kernel's out-of-memory killer sends) is ``out_of_memory``; 255 is the runtime's own failure
-    (``runtime_unusable``; an entry that itself exits 255 is indistinguishable and is counted the
-    same). A SIGTERM received while it ran is ``time_limit`` or ``runtime_error`` (detail
+    the kernel's out-of-memory killer sends) is ``out_of_memory``. Every other non-zero status,
+    255 included, is ``entry_failed`` and charged: the runtime's own fatal exit (255) and an entry
+    that exits 255 or ``-1`` cannot be told apart once user code could have run, and refunding
+    255 would let any entry end itself that way. ``runtime_unusable`` is only for a runtime that
+    cannot be started at all or whose preflight failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or ``runtime_error`` (detail
     ``terminated``).
     """
     log.info("run: starting the container with {}".format(os.path.basename(argv[0])))
@@ -556,10 +558,6 @@ def run_container(
         return Outcome(code, None)
     if code == 137:
         return Outcome(code, Failure("out_of_memory", None, "the entry was killed (exit 137)"))
-    if code == 255:
-        return Outcome(
-            code, Failure("runtime_error", "runtime_unusable", "the runtime itself failed (255)")
-        )
     return Outcome(
         code, Failure("runtime_error", "entry_failed", "the entry exited with {}".format(code))
     )

@@ -132,7 +132,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
 - `/code` and `/data/<id>` are read-only.
 - The container is started in a session of its own, with `oom_score_adj` raised to 1000, so the kernel's OOM killer ends the entry rather than the launcher that has to record it.
   After a SIGTERM the container gets 10 seconds to stop, and the whole process group is then killed (a process that is PID 1 of its namespace ignores a SIGTERM it has no handler for); whatever the entry left running in the group is killed when the container exits.
-- Exit status 255 is the runtime's own failure (`runtime_unusable`); an entry that itself exits 255 cannot be told apart and is counted the same.
+- Exit status 255 is `entry_failed` like any other non-zero status, and is charged: the runtime's own fatal exit and an entry that exits 255 (or `-1`) cannot be told apart once user code could have run, and refunding it would let any entry refund itself. `runtime_unusable` is only for a runtime binary that cannot be started and for a preflight that failed, both before any user code.
 
 The entry's standard output and error go to Tapis's `tapisjob.out`; the launcher's own log goes to `launcher/launcher.log` and to standard error.
 `tapisjob.out` is user output: NEMAR must never parse it.

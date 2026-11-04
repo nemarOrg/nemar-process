@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from harness import make_bundle
 
 
 def run(rig, script):
@@ -62,16 +63,43 @@ def test_any_other_signal_is_a_runtime_error_with_128_plus_the_signal(either_rig
     assert launch.result["entry_exit_code"] == 139
 
 
-def test_the_runtime_itself_failing_is_a_runtime_error(either_rig):
-    launch = either_rig.launch(
-        either_rig.spec(command=["no-such-program-anywhere"]),
-    )
+def test_a_program_the_runtime_could_not_execute_is_the_entrys_failure(either_rig):
+    # 127 or 255, as the runtime says: either way the entry's, which is charged. Nothing tells the
+    # runtime's own fatal exit from the entry's once user code could have run.
+    launch = either_rig.launch(either_rig.spec(command=["no-such-program-anywhere"]))
     assert launch.exit == 13
     assert launch.result["failure_code"] == "runtime_error"
-    # 255 is the runtime's own failure (a program it could not execute); anything else is the entry's.
-    code = launch.result["entry_exit_code"]
-    assert code in (127, 255)
-    assert launch.result["detail"] == ("runtime_unusable" if code == 255 else "entry_failed")
+    assert launch.result["entry_exit_code"] in (127, 255)
+    assert launch.result["detail"] == "entry_failed"
+
+
+def test_an_entry_that_exits_255_is_entry_failed_and_charged(either_rig):
+    launch = run(either_rig, "exit 255\n")
+    assert launch.exit == 13
+    assert launch.result["failure_code"] == "runtime_error"
+    assert launch.result["detail"] == "entry_failed"
+    assert launch.result["entry_exit_code"] == 255
+
+
+def test_an_entry_that_exits_minus_one_is_entry_failed_and_charged(either_rig):
+    bundle = either_rig.set_bundle(make_bundle({"run.py": "import sys\nsys.exit(-1)\n"}))
+    launch = either_rig.launch(either_rig.spec(runtime="python", entry="run.py", bundle=bundle))
+    assert launch.exit == 13
+    assert launch.result["detail"] == "entry_failed"
+    assert launch.result["entry_exit_code"] == 255
+
+
+def test_a_runtime_binary_that_cannot_be_executed_stays_runtime_unusable(rig):
+    # Nothing ran, so nothing of the user's is in question: the runtime is the platform's. The binary
+    # is executable but names an interpreter that does not exist, so starting it raises OSError.
+    runtime = rig.bin_dir / "apptainer"
+    runtime.write_text("#!/nonexistent/interpreter\n")
+    runtime.chmod(0o755)
+    launch = rig.launch(rig.spec(command=["true"]))
+    assert launch.exit == 13
+    assert launch.result["failure_code"] == "runtime_error"
+    assert launch.result["detail"] == "runtime_unusable"
+    assert launch.result["entry_exit_code"] is None
 
 
 @pytest.mark.parametrize("code", [0, 3, 137])
