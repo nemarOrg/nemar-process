@@ -6,12 +6,13 @@ the launcher gave it. What the real runtime then does with them is `test_contain
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 
 import fake_apptainer
 import pytest
-from harness import DATASET_ID, DATASET_VERSION, IMAGE_DIGEST, IMAGE_URI, make_bundle
+from harness import DATASET_ID, DATASET_VERSION, IMAGE_DIGEST, IMAGE_URI, SIF_NAME, make_bundle
 
 DATASET = [{"id": DATASET_ID, "version": DATASET_VERSION, "include": ["README"]}]
 
@@ -97,7 +98,7 @@ def test_the_exec_arguments_and_the_bind_table_are_exactly_these(rig):
         "PYTHONHASHSEED=0",
         "--env",
         "NEMAR_OUT=/work/outputs",
-        str(rig.sif_root / "runtime.sif"),
+        str(rig.sif_root / SIF_NAME),
         "python",
         "/code/run.py",
         "a",
@@ -190,27 +191,61 @@ def test_no_container_runtime_is_a_runtime_error(rig):
 
 
 def test_a_missing_image_file_is_a_runtime_error_before_the_container_starts(rig):
-    os.unlink(rig.sif_root / "runtime.sif")
+    os.unlink(rig.sif_root / SIF_NAME)
     launch = rig.launch(entry_spec(rig))
     assert launch.exit == 13
     assert launch.result["detail"] == "image_missing"
     assert rig.runtime_calls() == []
 
 
-def test_the_image_file_is_resolved_under_the_sif_root_and_defaults_to_the_working_directory(
+def test_an_unset_or_empty_sif_root_has_no_fallback_and_is_image_missing(
     rig, tmp_path, monkeypatch
 ):
+    # A SIF in the working directory must never be found: the root is named or there is no image.
     elsewhere = tmp_path / "cwd"
     elsewhere.mkdir()
-    shutil.copy(rig.sif_root / "runtime.sif", elsewhere / "runtime.sif")
+    shutil.copy(rig.sif_root / SIF_NAME, elsewhere / SIF_NAME)
     monkeypatch.chdir(elsewhere)
-    env_without_root = dict(rig.env(None))
-    del env_without_root[b"NEMAR_SIF_ROOT"]
+    import harness
     import nemar_launch.__main__ as launcher
 
-    env_without_root[b"NEMAR_LAUNCH_SPEC"] = __import__("harness").encode_spec(entry_spec(rig))
-    assert launcher.main(env_without_root, sleep=lambda s: None) == 0
-    assert rig.runtime_calls()[0]["argv"][-3] == str(elsewhere / "runtime.sif")
+    unset = dict(rig.env(None))
+    del unset[b"NEMAR_SIF_ROOT"]
+    unset[b"NEMAR_LAUNCH_SPEC"] = harness.encode_spec(entry_spec(rig))
+    assert launcher.main(unset, sleep=lambda s: None) == 13
+    assert rig.runtime_calls() == []
+    rig.reset_out()
+    empty = dict(unset)
+    empty[b"NEMAR_SIF_ROOT"] = b""
+    assert launcher.main(empty, sleep=lambda s: None) == 13
+    assert rig.runtime_calls() == []
+    result = json.loads((rig.out / "launcher" / "result.json").read_text())
+    assert result["detail"] == "image_missing"
+
+
+def test_a_sif_that_is_a_symlink_out_of_the_root_is_image_missing(rig, tmp_path):
+    outside = tmp_path / "outside.sif"
+    outside.write_bytes(b"an image elsewhere")
+    (rig.sif_root / SIF_NAME).unlink()
+    (rig.sif_root / SIF_NAME).symlink_to(outside)
+    launch = rig.launch(entry_spec(rig))
+    assert launch.exit == 13
+    assert launch.result["detail"] == "image_missing"
+    assert rig.runtime_calls() == []
+
+
+def test_a_sif_that_is_a_symlink_inside_the_root_is_allowed(rig):
+    real = rig.sif_root / "real-image"
+    (rig.sif_root / SIF_NAME).rename(real)
+    (rig.sif_root / SIF_NAME).symlink_to(real)
+    launch = rig.launch(entry_spec(rig))
+    assert launch.exit == 0, launch.log
+
+
+def test_the_image_file_is_named_under_the_sif_root(rig):
+    launch = rig.launch(entry_spec(rig))
+    assert launch.exit == 0, launch.log
+    assert rig.runtime_calls()[0]["argv"][-3] == str(rig.sif_root / SIF_NAME)
 
 
 def test_provenance_records_what_ran_and_how(rig):
@@ -249,7 +284,7 @@ def test_scratch_is_cleaned_up_and_is_never_the_output_directory(rig):
     launch = rig.launch(entry_spec(rig))
     assert launch.exit == 0
     assert list(rig.scratch.iterdir()) == []
-    assert not list((rig.out).glob("**/runtime.sif"))
+    assert not list((rig.out).glob("**/*.sif"))
 
 
 def test_scratch_falls_back_from_slurm_tmpdir_to_tmpdir(rig):
