@@ -78,7 +78,7 @@ def test_the_shell_wrapper_output_and_the_launcher_files_are_clean(rig):
     rig.callbacks.outputs_refusal = (413, "results_too_large")
     env = rig.process_env(rig.script_spec(WRITE))
     proc = subprocess.run(
-        ["sh", str(LAUNCH_SCRIPT)],
+        ["/bin/sh", str(LAUNCH_SCRIPT)],
         env=env,
         capture_output=True,
         text=True,

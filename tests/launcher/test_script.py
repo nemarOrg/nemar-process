@@ -26,7 +26,7 @@ def child_env(rig, spec: dict, **extra: str) -> dict:
 
 def run_script(rig, spec, **extra):
     proc = subprocess.run(
-        ["sh", str(SCRIPT)],
+        ["/bin/sh", str(SCRIPT)],
         env=child_env(rig, spec, **extra),
         capture_output=True,
         text=True,
@@ -101,7 +101,7 @@ def test_the_exit_code_file_and_the_exit_status_hold_the_mapped_number(rig, name
 def start_long_job(rig, spec, **extra):
     env = child_env(rig, spec, **extra)
     proc = subprocess.Popen(
-        ["sh", str(SCRIPT)],
+        ["/bin/sh", str(SCRIPT)],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -282,6 +282,8 @@ def test_the_launcher_runs_isolated_so_the_environment_cannot_redirect_it(rig, t
 def test_the_output_directory_is_required(rig):
     env = child_env(rig, rig.script_spec("true\n"))
     del env["_tapisExecSystemOutputDir"]
-    proc = subprocess.run(["sh", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+    proc = subprocess.run(
+        ["/bin/sh", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60
+    )
     assert proc.returncode == 13
     assert "_tapisExecSystemOutputDir" in proc.stderr
