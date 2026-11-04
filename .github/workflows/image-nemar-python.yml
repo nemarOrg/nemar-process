@@ -2,14 +2,21 @@ name: image-nemar-python
 
 # The nemar-python runtime image, CPU flavor: built from the root lock, smoke-tested as a container
 # image and as a Singularity Image Format (SIF) file under Apptainer, and, on a version tag or a
-# manual dispatch from main, pushed to GHCR, signed with cosign (keyless), turned into a SIF from its
-# digest, pushed again as an OCI artifact, signed again and recorded in a release asset.
+# manual dispatch from main, pushed to GHCR, smoke-tested again by digest, signed with cosign
+# (keyless), turned into a SIF from its digest, pushed again as an OCI artifact, signed again and
+# recorded in a release asset.
 #
 #   pull request              the `test` job only: build without pushing, smoke test in both forms.
 #                             No job that pushes, signs or releases runs on a pull request.
-#   tag image-nemar-python-v* the whole chain. (A tag runs the workflow file at the tagged commit, so
-#                             the first image can be published before this file is on main.)
+#   tag image-nemar-python-v* the whole chain, but only for a commit that is reachable from main:
+#                             the first step of `publish` fails otherwise. The first publication
+#                             therefore happens from main, after this file has been merged.
 #   workflow_dispatch         the same chain, from main only, with the version as an input.
+#
+# What the guard is: a check in this file, at the tagged commit. It stops a mistaken tag. It does
+# not stop someone who can push a tag and edit this file in the same commit; that is what a tag
+# ruleset on `image-nemar-python-v*`, branch protection on main, or an environment with required
+# reviewers can do, and they are the repository owner's (docs/images.md, "What is not verified").
 #
 # docs/images.md says how a consumer references and verifies what this publishes.
 
@@ -131,6 +138,18 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the whole history, so that main is there to compare with
+
+      # A tag can be pushed on any commit by anyone who can write to the repository, and the signature
+      # a tag run gets names only this workflow and the tag. Only a commit of main is published.
+      - name: Refuse a commit that is not on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not reachable from main: only a commit of main is published"
+            exit 1
+          fi
 
       - name: Read the version from the tag or the dispatch input
         id: version
@@ -162,6 +181,22 @@ jobs:
       - name: Hash the lock
         id: lock
         run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # A version is published once: the tag <version>-cpu is never moved to a new image.
+      - name: Refuse to overwrite an existing version tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/nemarorg/nemar-python:${VERSION}-cpu"
+          if output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+            echo "::error::${ref} already exists: a version is never overwritten, publish a new version"
+            exit 1
+          fi
+          if ! grep -qiE 'not found|unknown|404' <<< "$output"; then
+            echo "::error::could not tell whether ${ref} exists, so nothing is pushed: ${output}"
+            exit 1
+          fi
 
       # No provenance or SBOM attestation: either would make the pushed manifest an index, and the
       # digest every consumer pins is then the index's, not the image's.
@@ -212,6 +247,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The pushed digest passes its smoke test BEFORE it is signed: a signature means this workflow
+      # built the image and the image passed, not only that this workflow built it.
+      - name: Smoke test the pushed image by digest (container form)
+        run: |
+          set -euo pipefail
+          docker run --rm "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" python /opt/smoke.py > smoke-container.json
+          python3 scripts/check_smoke_pins.py --image smoke-container.json
+
       - name: Sign the image digest and verify the signature
         run: |
           set -euo pipefail
@@ -219,12 +262,6 @@ jobs:
           cosign verify "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" \
             --certificate-identity-regexp "$SIGNING_IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
-
-      - name: Smoke test the pushed image by digest (container form)
-        run: |
-          set -euo pipefail
-          docker run --rm "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" python /opt/smoke.py > smoke-container.json
-          python3 scripts/check_smoke_pins.py --image smoke-container.json
 
       - name: Install Apptainer
         run: |
@@ -249,6 +286,19 @@ jobs:
           set -euo pipefail
           apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
           python3 scripts/check_smoke_pins.py --image smoke-sif.json
+
+      - name: Refuse to overwrite an existing SIF tag
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/nemarorg/nemar-python-sif:sha256-${IMAGE_DIGEST#sha256:}"
+          if output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+            echo "::error::${ref} already exists: a SIF tag is never overwritten"
+            exit 1
+          fi
+          if ! grep -qiE 'not found|unknown|404' <<< "$output"; then
+            echo "::error::could not tell whether ${ref} exists, so nothing is pushed: ${output}"
+            exit 1
+          fi
 
       # The artifact is tagged with the image digest, because the SIF file is named by it: the launcher
       # looks for <64 hex digits of the image digest>.sif under NEMAR_SIF_ROOT.
@@ -326,4 +376,5 @@ jobs:
             digest="$(jq -r .image.digest "$file")"
             gh release create "$TAG" --title "nemar-python ${VERSION} (cpu)" --notes "Runtime image ghcr.io/nemarorg/nemar-python@${digest}. See docs/images.md for how to verify it."
           fi
-          gh release upload "$TAG" "$file" --clobber
+          # no overwrite flag: the digest file is the record of a release, and a second upload must fail
+          gh release upload "$TAG" "$file"

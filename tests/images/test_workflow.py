@@ -48,10 +48,16 @@ def test_actionlint_passes_on_both_workflows():
     assert done.returncode == 0, done.stdout + done.stderr
 
 
-def test_every_action_is_pinned_to_a_commit_with_a_version_comment():
-    for line in IMAGE_WORKFLOW.read_text(encoding="utf-8").splitlines():
-        if re.match(r"^\s*(?:-\s+)?uses:", line):
-            assert SHA_PIN.match(line), "not pinned to a commit: " + line.strip()
+@pytest.mark.parametrize("path", [IMAGE_WORKFLOW, CI_WORKFLOW], ids=lambda p: p.name)
+def test_every_action_is_pinned_to_a_commit_with_a_version_comment(path):
+    uses = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if re.match(r"^\s*(?:-\s+)?uses:", line)
+    ]
+    assert uses
+    for line in uses:
+        assert SHA_PIN.match(line), "not pinned to a commit: " + line.strip()
 
 
 def test_the_triggers_are_a_pull_request_a_version_tag_and_a_manual_dispatch():
@@ -86,18 +92,34 @@ def test_only_the_publish_job_writes_packages_and_only_the_release_job_writes_co
             assert name == "release", name
 
 
+def reaches(jobs: dict, start: str, target: str) -> bool:
+    """Whether `target` is among the jobs `start` needs, directly or through other jobs."""
+    seen: set[str] = set()
+    pending = [start]
+    while pending:
+        needs = jobs[pending.pop()].get("needs", [])
+        for name in [needs] if isinstance(needs, str) else needs:
+            if name == target:
+                return True
+            if name not in seen:
+                seen.add(name)
+                pending.append(name)
+    return False
+
+
 def test_a_pull_request_neither_pushes_nor_signs_nor_releases():
     jobs = workflow()["jobs"]
-    for name in PUBLISHING_JOBS:
-        condition = (
-            jobs[name].get("if", "") + " " + " ".join(str(n) for n in jobs[name].get("needs", []))
-        )
-        # the job is conditioned on the event, or needs a job that is
-        if name == "publish":
-            assert "github.event_name != 'pull_request'" in jobs[name]["if"]
-        else:
-            assert jobs[name]["needs"], name
-        assert condition
+    assert "github.event_name != 'pull_request'" in jobs["publish"]["if"]
+    # sign and release run only if publish ran: their chains of `needs` reach it
+    assert reaches(jobs, "sign", "publish")
+    assert reaches(jobs, "release", "publish")
+    assert reaches(jobs, "release", "sign")
+    assert not reaches(jobs, "test", "publish")
+    # an `if` of always() or !cancelled() would run a job although a job it needs was skipped
+    for name, job in jobs.items():
+        condition = str(job.get("if", ""))
+        assert "always()" not in condition, name
+        assert "!cancelled()" not in condition, name
     test_job = jobs["test"]
     assert "docker/login-action" not in str(test_job)
     pushes = [s for s in test_job["steps"] if "docker/build-push-action" in s.get("uses", "")]
@@ -130,9 +152,11 @@ def test_the_image_is_pushed_without_attestation_manifests_so_its_digest_is_the_
 def test_signing_follows_the_issues_order_and_verifies_in_the_same_run():
     commands = step_commands(workflow()["jobs"]["sign"])
     order = [
+        "docker run",  # the pushed digest passes its smoke test BEFORE anything is signed
         "cosign sign",  # the image digest
         "cosign verify",
         "apptainer build",  # the SIF from that digest
+        "apptainer exec",  # and passes its smoke test before it is pushed
         "apptainer push",
         "cosign sign",  # the SIF artifact digest
         "cosign verify",
@@ -163,10 +187,11 @@ def test_the_sif_is_pushed_under_the_image_digest_and_smoke_tested_in_both_forms
     assert "apptainer exec" in commands
 
 
-def test_the_sif_runs_under_the_launchers_isolation_flags_in_the_pull_request_job():
-    commands = step_commands(workflow()["jobs"]["test"])
+@pytest.mark.parametrize("job", ["test", "sign"])
+def test_every_sif_run_uses_the_launchers_isolation_flags(job):
+    commands = step_commands(workflow()["jobs"][job])
     runs = [line for line in commands.splitlines() if "apptainer exec" in line]
-    assert runs
+    assert runs, job
     for line in runs:
         for flag in ("--containall", "--cleanenv", "--no-home"):
             assert flag in line, line
@@ -188,6 +213,11 @@ def test_the_release_job_attaches_the_digest_file_to_the_release_of_a_tag():
     assert "-digests.json" in commands
 
 
+def test_a_release_asset_is_never_overwritten():
+    # the digest file is the record of a release: a second upload must fail, not replace it
+    assert "--clobber" not in IMAGE_WORKFLOW.read_text(encoding="utf-8")
+
+
 def test_ghcr_names_are_lowercase():
     for ref in re.findall(r"ghcr\.io/[^\s'\"]+", IMAGE_WORKFLOW.read_text(encoding="utf-8")):
         if "${" not in ref:  # an expression or a shell variable is not a name
@@ -205,3 +235,83 @@ def test_the_digest_file_is_built_by_the_script_and_named_by_version_and_flavor(
     commands = step_commands(workflow()["jobs"]["sign"])
     assert "scripts/make_image_digests.py" in commands
     assert "nemar-python-${VERSION}-cpu-digests.json" in commands
+
+
+def publish_steps() -> list[dict]:
+    return workflow()["jobs"]["publish"]["steps"]
+
+
+def step_index(steps: list[dict], needle: str) -> int:
+    """The index of the first step whose `run`, `uses` or name contains `needle`."""
+    for index, step in enumerate(steps):
+        if needle in step.get("run", "") or needle in step.get("uses", ""):
+            return index
+    raise AssertionError("no step contains " + needle)
+
+
+def test_publish_refuses_a_commit_that_is_not_on_main_before_it_logs_in_or_pushes():
+    steps = publish_steps()
+    checkout = next(s for s in steps if "actions/checkout" in s.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == 0  # the whole history, so main is there to compare
+    guard = step_index(steps, 'merge-base --is-ancestor "$GITHUB_SHA" origin/main')
+    assert steps.index(checkout) < guard
+    assert guard < step_index(steps, "docker/login-action")
+    assert guard < step_index(steps, "docker/build-push-action")
+    assert "exit 1" in steps[guard]["run"]
+
+
+def test_publish_never_overwrites_an_existing_version_tag():
+    steps = publish_steps()
+    check = step_index(steps, "imagetools inspect")
+    assert (
+        step_index(steps, "docker/login-action")
+        < check
+        < step_index(steps, "docker/build-push-action")
+    )
+    assert "already exists" in steps[check]["run"]
+    assert "nemar-python:${VERSION}-cpu" in steps[check]["run"]
+
+
+def test_the_sif_tag_is_never_overwritten_either():
+    sign = workflow()["jobs"]["sign"]["steps"]
+    check = step_index(sign, "imagetools inspect")
+    assert check < step_index(sign, "apptainer push")
+    assert "already exists" in sign[check]["run"]
+
+
+def signing_identity() -> str:
+    return workflow()["env"]["SIGNING_IDENTITY"]
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/tags/image-nemar-python-v1.2.3",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/main",
+    ],
+)
+def test_the_signing_identity_accepts_this_workflow_at_a_version_tag_and_at_main(subject):
+    assert re.fullmatch(signing_identity(), subject)
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/feature/x",
+        "https://github.com/nemarOrg/nemar-process-evil/.github/workflows/image-nemar-python.yml@refs/heads/main",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/other.yml@refs/heads/main",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/tags/image-nemar-python-v1.2",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/tags/image-nemar-python-v1.2.3-rc1",
+        "xhttps://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/main",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/main/extra",
+    ],
+)
+def test_the_signing_identity_refuses_everything_else(subject):
+    # `cosign verify --certificate-identity-regexp` matches anywhere unless the pattern is anchored,
+    # so these are matched with `search`, as cosign does
+    assert re.search(signing_identity(), subject) is None
+
+
+def test_the_documented_signing_identity_is_the_workflows():
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert "IDENTITY='" + signing_identity() + "'" in docs
