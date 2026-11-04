@@ -694,7 +694,6 @@ def finalize_outputs(
     job_id: str,
     max_files: int,
     max_file_bytes: int,
-    max_total_bytes: int,
 ) -> Finalized:
     """Make ``work`` safe to archive and hash ``work/outputs`` into the manifest.
 
@@ -711,9 +710,10 @@ def finalize_outputs(
       descriptor opened without following a link. A name the Worker would refuse
       (``output_path_ok``) is left out and recorded.
     * Limits are enforced BEFORE hashing a file: more than ``max_files`` outputs is
-      ``too_many_outputs``; a file over ``max_file_bytes``, or a running total over
-      ``max_total_bytes``, is ``results_too_large``. These end as ``result_upload_failed`` with that
-      word as the detail (the submitter's, not the platform's).
+      ``too_many_outputs`` and a file over ``max_file_bytes`` is ``results_too_large``. These end as
+      ``result_upload_failed`` with that word as the detail (the submitter's, not the platform's).
+      There is no limit on the total: the job's ``limits`` bound the dataset selection only, and the
+      Worker's own route refuses a total over the results limit (charged as the same word).
     * An output that cannot be read (a mode-000 file, a directory that cannot be listed even after
       the ``chmod``) is NOT skipped: the job ends ``runtime_error``, detail ``outputs_unreadable``.
     * In either failure the manifest is empty and no output is uploaded.
@@ -722,7 +722,6 @@ def finalize_outputs(
     skipped = 0
     failure: Failure | None = None
     files: list[dict[str, Any]] = []
-    total = 0
 
     def note(kind: str, relative: str) -> None:
         nonlocal removed
@@ -828,7 +827,7 @@ def finalize_outputs(
             if len(files) >= max_files:
                 block(Failure("result_upload_failed", "too_many_outputs", "too many outputs"))
                 continue
-            if info.st_size > max_file_bytes or total + info.st_size > max_total_bytes:
+            if info.st_size > max_file_bytes:
                 block(Failure("result_upload_failed", "results_too_large", "outputs too large"))
                 continue
             try:
@@ -837,7 +836,6 @@ def finalize_outputs(
                 log.warning("outputs/{} could not be read".format(relative))
                 block(Failure("runtime_error", "outputs_unreadable", "an output cannot be read"))
                 continue
-            total += size
             files.append({"path": relative, "size": size, "sha256": sha256})
     finally:
         os.fchdir(home)

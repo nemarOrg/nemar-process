@@ -225,12 +225,15 @@ def test_a_file_over_five_billion_bytes_is_results_too_large_without_being_read(
     assert launch.manifest["files"] == []
 
 
-def test_the_total_of_the_outputs_is_capped_by_the_jobs_max_total_bytes(rig):
+def test_the_jobs_max_total_bytes_bounds_the_dataset_selection_and_not_the_outputs(rig):
+    # `limits` are for staging: a Worker that sets max_total_bytes below the results limit must not
+    # have valid outputs dropped and the job charged `results_too_large` for them.
     script = 'printf "0123456789" > "$NEMAR_OUT/a"\nprintf "0123456789" > "$NEMAR_OUT/b"\n'
     launch = rig.launch(rig.script_spec(script, limits={"max_files": 100, "max_total_bytes": 15}))
-    assert launch.exit == 16
-    assert launch.result["detail"] == "results_too_large"
-    assert outputs_uploaded(rig) == []
+    assert launch.exit == 0, launch.log
+    assert sorted(f["path"] for f in launch.manifest["files"]) == ["a", "b"]
+    assert outputs_uploaded(rig) == ["outputs/a", "outputs/b"]
+    assert rig.callbacks.events[-1] == "complete"
 
 
 def test_names_the_worker_would_refuse_are_left_out_and_recorded_not_failed(rig):
@@ -346,7 +349,7 @@ def test_an_output_that_changed_after_hashing_is_not_uploaded(rig, tmp_path):
 
 
 def finalize(work, **limits):
-    arguments = {"max_files": 100, "max_file_bytes": 10**9, "max_total_bytes": 10**9}
+    arguments = {"max_files": 100, "max_file_bytes": 10**9}
     arguments.update(limits)
     return run.finalize_outputs(str(work), Log(None), job_id=JOB_ID, **arguments)
 

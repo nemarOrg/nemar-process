@@ -59,7 +59,7 @@ The launcher validates against it with a small validator of its own, because it 
 | `image` | `{uri, digest, sif}`; `sif` is `<64 hex digits of the digest>.sif`, relative to `NEMAR_SIF_ROOT` |
 | `env` | the allowlisted environment for the container |
 | `resources` | `{gpus}`; `--nv` only when above zero |
-| `limits` | `{max_files, max_total_bytes}` for staged datasets, and the cap on the total of the outputs |
+| `limits` | `{max_files, max_total_bytes}` bound the dataset selection only (checked before any file is fetched); they do not bound the outputs |
 | `job_token` | the per-job token, sent in the `X-Compute-Job-Token` header, never in a URL |
 
 There are no unknown keys, at any level.
@@ -189,7 +189,7 @@ Every directory is first made owner-readable, writable and searchable (`u+rwx`),
 - A symlink anywhere under `work` is unlinked and recorded in the log; so is a FIFO, socket or device (a hash of a FIFO would never return). One that cannot be unlinked is recorded and left out: it never reaches the manifest or the upload.
 - Only regular files under `work/outputs` enter the manifest, sorted by path, hashed through a descriptor opened without following a link whose size must still match.
 - A name the Worker would refuse is left out and recorded: a backslash or control character, an empty, `.` or `..` segment, more than 512 UTF-16 code units, or a results key `jobs/<id>/outputs/<path>` of more than 1,024 UTF-8 bytes.
-- **Limits are enforced before any file is hashed.** More than 100,000 outputs is `too_many_outputs`; a file over 5,000,000,000 bytes, or a running total over `limits.max_total_bytes`, is `results_too_large`. Each ends as `result_upload_failed` with that word as the detail (the submitter's, not the platform's), the manifest is empty and no output is uploaded.
+- **Limits are enforced before any file is hashed.** More than 100,000 outputs is `too_many_outputs`; a file over 5,000,000,000 bytes is `results_too_large`; there is no limit on the total, because `limits` bound the dataset selection only and the Worker's route refuses an excess (charged as the same word). Each ends as `result_upload_failed` with that word as the detail (the submitter's, not the platform's), the manifest is empty and no output is uploaded.
 - **An output that cannot be read** (a mode-000 file, or a directory that cannot be listed even after the `chmod`) is never skipped silently: the job ends `runtime_error` with detail `outputs_unreadable`, the manifest is empty and no output is uploaded. A mode-000 directory is made searchable and read normally.
 
 `provenance.json` holds the launch specification digest, the bundle digest, the image URI and digest, a free-text runtime version (the container runtime's own version line and the host Python), the staging records (`id`, `version`, `mode`, `files`, `bytes`), phase timings (`code_fetch`, `staging`, `run`, `finalize`), the Slurm job id and the entry's exit code.

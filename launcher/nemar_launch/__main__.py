@@ -325,7 +325,6 @@ def _finish(
                 job_id=state.job_id,
                 max_files=MAX_OUTPUT_FILES,
                 max_file_bytes=MAX_OUTPUT_FILE_BYTES,
-                max_total_bytes=job.max_total_bytes if job is not None else MAX_OUTPUT_FILE_BYTES,
             )
             state.files = finalized.files
             if finalized.failure is not None:
