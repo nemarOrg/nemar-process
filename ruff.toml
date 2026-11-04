@@ -1,0 +1,31 @@
+target-version = "py312"
+line-length = 100
+extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev"]
+
+# The launcher and the observer run on a compute node under whatever Python the host has; the
+# floor is 3.9. The launcher tests run on 3.9 too, so they keep to the same syntax.
+[per-file-target-version]
+"launcher/**" = "py39"
+"observer/**" = "py39"
+"tests/launcher/**" = "py39"
+"tests/standin/**" = "py39"
+
+[lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "PT", "RUF", "S", "T20", "BLE", "PIE", "RET"]
+ignore = [
+    "E501",    # the formatter wraps code; long prose lines in docstrings and strings are fine
+    "UP032",   # str.format is used throughout; both forms are valid on 3.9
+    "S101",    # asserts are the point of tests
+    "S603",    # subprocess without shell is how the launcher runs the container
+    "S607",    # the container runtime is found on PATH by design
+    "S310",    # urllib is opened only on https/http URLs the specification and manifests name
+]
+
+[lint.per-file-ignores]
+"tests/**" = ["S", "ARG", "PT011", "T201"]
+"scripts/**" = ["T201"]
+# The launcher prints its own diagnostics to stderr on purpose.
+"launcher/**" = ["T201"]
+
+[format]
+quote-style = "double"

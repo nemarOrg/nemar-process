@@ -1,0 +1,136 @@
+name: ci
+
+on:
+  push:
+    branches: ["main", "feature/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned by version and by the sha256 of the .deb; bump both together (docs/contracts.md).
+  APPTAINER_VERSION: "1.5.5"
+  APPTAINER_DEB_SHA256: "25095d3711504b3e8657dbb2e172ef8db9db43c4503d940c9c36b105db8dce77"
+  # The small public image the container tests run, pinned by digest (an OCI index).
+  TEST_IMAGE: "docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
+  TEST_IMAGE_KEY: "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
+  UV_VERSION: "0.13.4"
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check
+      # The launcher and the observer must stay on the Python 3.9 floor.
+      - run: uv run ty check --python-version 3.9 launcher observer
+
+  launcher:
+    name: launcher (python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    env:
+      # In CI neither the container tests nor the drift comparison may be skipped unnoticed.
+      NEMAR_REQUIRE_APPTAINER: "1"
+      NEMAR_REQUIRE_DRIFT: "1"
+      NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
+      NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the nemar-cli pin
+        id: pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at the pinned commit (the drift test compares against it)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli
+          sparse-checkout: |
+            /shared/
+            /test/compute-contract.unit.test.ts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Install Apptainer
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
+          echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y ./apptainer.deb
+          apptainer --version
+
+      - name: Cache the test image
+        id: sif-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/runtime.sif
+          key: sif-${{ env.TEST_IMAGE_KEY }}-apptainer-${{ env.APPTAINER_VERSION }}
+
+      - name: Build the test image
+        if: steps.sif-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache
+          for attempt in 1 2 3; do
+            apptainer build --force .cache/runtime.sif "$TEST_IMAGE" && exit 0
+            echo "build attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # The launcher on its floor: Python 3.9, nothing installed but pytest and the test oracle.
+      - name: Launcher tests on 3.9
+        if: matrix.python == '3.9'
+        run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
+
+      # The gates of the phase, in order, on 3.12.
+      - name: Gates
+        if: matrix.python == '3.12'
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run ty check
+          uv run pytest --cov=launcher --cov-fail-under=85
+          uv run python scripts/build_launcher_zip.py --check
+
+  nemar-cli-latest:
+    # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: dev
+          path: .nemar-cli-dev
+          sparse-checkout: shared/contract
+          fetch-depth: 1
+      - run: |
+          theirs=.nemar-cli-dev/shared/contract/compute-launch.schema.json
+          if [ ! -f "$theirs" ]; then
+            echo "::warning title=nemar-cli dev has no launch schema yet::The pin in tests/contract/nemar-cli-pin.json still points at a commit of the epic branch."
+          elif cmp -s "$theirs" launcher/schema/launch-spec.v1.json; then
+            echo "launcher/schema/launch-spec.v1.json equals nemar-cli dev"
+          else
+            echo "::warning title=launch schema differs from nemar-cli dev::Bump the pin (docs/contracts.md) once the change is reviewed."
+          fi

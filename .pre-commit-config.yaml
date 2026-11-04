@@ -1,0 +1,9 @@
+# Install once per clone: `uv run pre-commit install`.
+# pre-commit passes only the staged files, so the hook checks what is about to be committed.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-check
+        args: [--fix, --unsafe-fixes]
+      - id: ruff-format
