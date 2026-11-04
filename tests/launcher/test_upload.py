@@ -93,15 +93,43 @@ def test_an_expired_address_is_requested_once_more_and_then_works(rig):
     assert rig.callbacks.events[-1] == "complete"
 
 
-def test_a_403_that_persists_is_requested_once_more_only_then_fails(rig):
-    rig.callbacks.put_always["outputs/d.txt"] = 403
+def test_an_object_whose_address_expires_twice_is_requested_again_twice_and_succeeds(rig):
+    rig.callbacks.put_statuses["outputs/d.txt"] = [403, 403]
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 0, launch.log
+    assert rig.callbacks.objects["outputs/d.txt"] == b"world"
+    assert len(requests_to(rig, "/outputs")) == 3  # the plan, and two re-requests
+    assert rig.callbacks.events[-1] == "complete"
+
+
+def test_the_third_expiry_of_one_object_fails_it(rig):
+    # An address lives an hour and a large upload can outlive it, so a re-request is allowed per
+    # object (twice), not once per run; a third expiry of the same object is the end of it.
+    rig.callbacks.put_statuses["outputs/d.txt"] = [403, 403, 403]
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 16
     assert launch.result["failure_code"] == "result_upload_failed"
-    # The full request, one re-request after the first 403, and the launcher-only request after.
+    assert launch.result["detail"] == "http_403"
+    assert rig.callbacks.events.count("put-403:outputs/d.txt") == 3
     full = [b for b in rig.callbacks.outputs_requests if b["outputs"]]
-    assert len(full) == 2
+    assert len(full) == 3  # the plan and two re-requests, never a third
     assert "complete" not in rig.callbacks.events
+    assert sorted(k for k in rig.callbacks.objects if k.startswith("launcher/")) == LAUNCHER_KEYS
+
+
+def test_when_every_put_answers_403_the_run_is_bounded(rig):
+    rig.callbacks.put_always[""] = 403  # every key, outputs and launcher files alike
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 16
+    assert launch.result["detail"] == "http_403"
+    posts = len(requests_to(rig, "/outputs"))
+    # The full upload: the plan plus at most 2 re-requests for the object that fails first; then the
+    # launcher-only upload: its own plan plus at most 2. Nothing is uploaded, nothing completes.
+    assert posts <= 1 + 2 + 1 + 2
+    assert rig.callbacks.objects == {}
+    assert "complete" not in rig.callbacks.events
+    for key in ("outputs/a/b/c.txt", "outputs/d.txt", "outputs/empty"):
+        assert rig.callbacks.events.count("put-403:" + key) <= 3
 
 
 def test_a_cap_refusal_still_uploads_the_launcher_files_then_fails(rig):
@@ -217,3 +245,50 @@ def test_the_token_header_is_the_job_token_and_the_path_has_the_job_id(rig):
     assert launch.exit == 0
     assert all(JOB_ID in r.path for r in rig.server.requests if r.path.startswith("/compute/"))
     assert PRESIGN_SIGNATURE not in launch.launcher_text()
+
+
+# ---- complete may be seen twice -------------------------------------------------------------------
+
+
+def test_complete_is_retried_on_a_409_results_incomplete(rig):
+    rig.callbacks.complete_queue = [(409, "results_incomplete"), (409, "results_incomplete")]
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 0, launch.log
+    assert rig.callbacks.events.count("complete") == 3
+    assert rig.callbacks.events[-1] == "complete"
+
+
+def test_complete_gives_up_after_three_results_incomplete_answers(rig):
+    rig.callbacks.complete_queue = [(409, "results_incomplete")] * 3
+    delays = []
+    launch = rig.launch(rig.script_spec(WRITE), sleep=delays.append)
+    assert launch.exit == 16
+    assert launch.result["detail"] == "results_incomplete"
+    assert rig.callbacks.events.count("complete") == 3
+    assert len(delays) == 2  # backoff between the three attempts
+    assert all(0 <= d <= 30 for d in delays)
+
+
+def test_an_ambiguous_complete_is_retried_so_nemar_may_see_it_twice(rig):
+    # The Worker records the call, and the answer never arrives: the launcher cannot know whether
+    # `complete` took effect, so it asks again. `complete` is idempotent on NEMAR's side.
+    rig.callbacks.complete_queue = [("drop",)]
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 0, launch.log
+    assert rig.callbacks.events.count("complete") == 2
+
+
+def test_a_503_from_complete_is_retried(rig):
+    rig.callbacks.complete_queue = [(503, "bad_state")]
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 0, launch.log
+    assert rig.callbacks.events.count("complete") == 2
+
+
+def test_other_refusals_of_complete_are_not_retried(rig):
+    rig.callbacks.complete_status = 409
+    rig.callbacks.complete_refusal_code = "bad_state"
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 16
+    assert launch.result["detail"] == "bad_state"
+    assert rig.callbacks.events.count("complete") == 1

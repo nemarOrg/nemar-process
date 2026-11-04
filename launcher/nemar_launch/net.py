@@ -22,6 +22,7 @@ import os
 import random
 import socket
 import ssl
+import stat
 import threading
 import urllib.error
 import urllib.request
@@ -48,12 +49,39 @@ Sleep = Callable[[float], None]
 
 
 def redact(url: str) -> str:
-    """A URL as host and path only: no scheme, no userinfo, no query, no fragment."""
-    parts = urlsplit(url)
-    host = parts.hostname or "?"
-    if parts.port:
-        host = "{}:{}".format(host, parts.port)
-    return host + (parts.path or "/")
+    """A URL as host and path only: no scheme, no userinfo, no query, no fragment.
+
+    Never raises: a URL that cannot be read (a bad port, a broken host) is shown as ``?``.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or "?"
+        if parts.port:
+            host = "{}:{}".format(host, parts.port)
+        return host + (parts.path or "/")
+    except ValueError:
+        return "?"
+
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def url_allowed(url: str) -> bool:
+    """A usable address: ``https``, or ``http`` on loopback only (the tests' stand-ins).
+
+    False for anything ``urlsplit`` cannot read, such as a port outside 1 to 65535.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        parts.port  # noqa: B018 - raises ValueError for a bad port
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and host in _LOOPBACK_HOSTS
 
 
 def backoff_delay(attempt: int) -> float:
@@ -158,12 +186,17 @@ def retrying(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def encode_json(body: dict[str, Any]) -> bytes:
+    """The bytes of a request body: compact JSON. Its length is what the Worker's cap measures."""
+    return json.dumps(body, separators=(",", ":")).encode("utf-8")
+
+
 def post_json(url: str, body: dict[str, Any], token: str) -> tuple[int, dict[str, Any]]:
     """POST ``body`` as JSON with the job token header; return (status, JSON object).
 
     Never follows a redirect. A refusal is an ``HttpFailure`` with the response's ``code`` word.
     """
-    data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    data = encode_json(body)
     request = urllib.request.Request(
         url,
         data=data,
@@ -401,34 +434,51 @@ def _discard(path: str) -> None:
 # ---- PUT ----------------------------------------------------------------------------------------
 
 
-class LimitedReader:
-    """A file read from the start for exactly ``limit`` bytes (``urllib`` reads it as the PUT body)."""
+class OutputChanged(Exception):
+    """An output is not the regular file of the size that was hashed (it was replaced or resized)."""
 
-    def __init__(self, path: str, limit: int) -> None:
-        self._handle = open(path, "rb")  # noqa: SIM115 - closed by close()
-        self._left = limit
+
+class FileBody:
+    """The body of a PUT: a regular file opened without following a link, exactly ``size`` bytes.
+
+    ``urllib`` reads it with ``read``. ``fstat`` on the open descriptor must say a regular file of
+    the size the manifest recorded, or ``OutputChanged``: what is sent is what was hashed.
+    """
+
+    def __init__(self, path: str, size: int) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            raise OutputChanged from None
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            raise OutputChanged from None
+        if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+            os.close(fd)
+            raise OutputChanged
+        self._fd = fd
+        self._left = size
 
     def read(self, amount: int = -1) -> bytes:
         if self._left <= 0:
             return b""
         want = self._left if amount is None or amount < 0 else min(amount, self._left)
-        data = self._handle.read(want)
+        data = os.read(self._fd, want)
         self._left -= len(data)
         return data
 
     def close(self) -> None:
-        self._handle.close()
+        with contextlib.suppress(OSError):
+            os.close(self._fd)
 
 
-def put_file(url: str, path: str, size: int) -> None:
-    """PUT the first ``size`` bytes of ``path`` to a presigned ``url``, following no redirect.
-
-    The token is not sent: the address itself is the authority. Raises ``HttpFailure``.
-    """
-    reader = LimitedReader(path, size)
+def _put(url: str, body: Any, size: int) -> None:
     request = urllib.request.Request(
         url,
-        data=reader,  # type: ignore[arg-type] - a file-like body, with an explicit length
+        data=body,
         method="PUT",
         headers={
             "Content-Length": str(size),
@@ -441,5 +491,21 @@ def put_file(url: str, path: str, size: int) -> None:
             response.read(MAX_ERROR_BODY)
     except BaseException as exc:  # noqa: BLE001
         raise classify(exc) from None
+
+
+def put_bytes(url: str, data: bytes) -> None:
+    """PUT ``data`` (a launcher document or the log, from memory) to a presigned ``url``."""
+    _put(url, data, len(data))
+
+
+def put_file(url: str, path: str, size: int) -> None:
+    """PUT the output ``path`` (exactly ``size`` bytes, as hashed) to a presigned ``url``.
+
+    No redirect is followed and the token is not sent: the address itself is the authority.
+    Raises ``HttpFailure``, or ``OutputChanged`` when the file is no longer what was hashed.
+    """
+    body = FileBody(path, size)
+    try:
+        _put(url, body, size)
     finally:
-        reader.close()
+        body.close()

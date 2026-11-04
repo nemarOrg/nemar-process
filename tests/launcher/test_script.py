@@ -134,7 +134,10 @@ def test_sigterm_near_the_end_time_is_time_limit(rig):
     result = (rig.out / "launcher" / "result.json").read_text()
     assert '"time_limit"' in result
     assert b'"time_limit"' in rig.callbacks.objects["launcher/result.json"]
-    assert rig.callbacks.events[-1] == "complete"
+    # Once the stop event is set no output upload starts and `complete` is not called: the four
+    # launcher files go alone, result.json last.
+    assert rig.callbacks.events[-1] == "put:launcher/result.json"
+    assert "complete" not in rig.callbacks.events
 
 
 def test_sigterm_at_exactly_120_seconds_before_the_end_is_time_limit(rig):
@@ -287,3 +290,92 @@ def test_the_output_directory_is_required(rig):
     )
     assert proc.returncode == 13
     assert "_tapisExecSystemOutputDir" in proc.stderr
+
+
+# ---- a SIGTERM that arrives late, or early ----------------------------------------------------------
+
+LATE_TERM = (
+    "L=$PPID\n"
+    'for n in 1 2 3 4 5 6; do printf "$n" > "$NEMAR_OUT/f$n"; done\n'
+    "( sleep 0.3; kill -TERM $L ) &\n"
+)
+
+
+def outputs_uploaded(rig):
+    return sorted(k for k in rig.callbacks.objects if k.startswith("outputs/"))
+
+
+def test_a_sigterm_during_the_upload_is_recorded_and_no_further_output_starts(rig):
+    # The entry exits at once, so the container is long gone when the signal arrives; the result
+    # must still not say success for a job that was terminated. Each PUT takes 0.4 s, four run at a
+    # time, so the signal lands while the first four are in flight and the last two never start.
+    rig.callbacks.put_delay = 0.4
+    spec = rig.script_spec(LATE_TERM)
+    proc, written = run_script(rig, spec)
+    assert proc.returncode == 13, proc.stderr
+    assert written == "13\n"
+    assert b'"terminated"' in rig.callbacks.objects["launcher/result.json"]
+    assert len(outputs_uploaded(rig)) < 6
+    assert "complete" not in rig.callbacks.events
+    assert rig.callbacks.events[-1] == "put:launcher/result.json"
+
+
+def test_a_late_sigterm_near_the_end_time_is_time_limit(rig):
+    rig.callbacks.put_delay = 0.4
+    end = str(int(time.time()) + 60)
+    proc, _written = run_script(rig, rig.script_spec(LATE_TERM), SLURM_JOB_END_TIME=end)
+    assert proc.returncode == 15, proc.stderr
+    assert b'"time_limit"' in rig.callbacks.objects["launcher/result.json"]
+
+
+def test_sigterm_with_300_seconds_left_is_terminated_not_time_limit(rig):
+    end = str(int(time.time()) + 300)
+    proc = start_long_job(rig, rig.script_spec(LONG), SLURM_JOB_END_TIME=end)
+    proc.send_signal(signal.SIGTERM)
+    finish(proc)
+    assert proc.returncode == 13
+    result = (rig.out / "launcher" / "result.json").read_text()
+    assert '"terminated"' in result
+
+
+def test_a_sigterm_while_datasets_stage_runs_nothing_and_claims_nothing(rig):
+    rig.plane.delay = 0.4  # nine files, four at a time: about a second of staging
+    dataset = [{"id": "nm000104", "version": "v1.0.2"}]
+    env = child_env(rig, rig.script_spec(LONG, datasets=dataset))
+    proc = subprocess.Popen(
+        ["/bin/sh", str(SCRIPT)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=str(rig.tmp),
+    )
+    assert wait_for(lambda: rig.plane.in_flight > 0), "staging never started"
+    proc.send_signal(signal.SIGTERM)
+    finish(proc)
+    assert proc.returncode == 13
+    assert rig.runtime_calls() == []  # a cancel must not run the entry
+    assert not (rig.out / "work" / "started").exists()
+    provenance_text = (rig.out / "launcher" / "provenance.json").read_text()
+    assert '"staging":[]' in provenance_text  # the record does not claim files were staged
+    assert '"terminated"' in (rig.out / "launcher" / "result.json").read_text()
+
+
+def test_terminated_failure_by_the_end_time_with_an_injected_timestamp():
+    from nemar_launch import run
+    from nemar_launch.codes import Env
+
+    def failure(received, end):
+        terminator = run.Terminator()
+        terminator.received = received
+        env = Env({} if end is None else {b"SLURM_JOB_END_TIME": str(end).encode()})
+        return run.terminated_failure(terminator, env)
+
+    end = 1_000_000
+    assert failure(end - 120, end).code == "time_limit"  # exactly 120 s before: the time limit
+    assert failure(end - 121, end).detail == "terminated"
+    assert failure(end + 5, end).code == "time_limit"
+    assert failure(end - 300, end).detail == "terminated"
+    assert failure(end - 10, None).detail == "terminated"  # no end time: a cancellation
+    assert failure(end - 10, "not a number").detail == "terminated"
+    assert failure(None, end).detail == "terminated"

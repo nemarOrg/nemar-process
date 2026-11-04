@@ -1,22 +1,29 @@
 """Uploading the outputs and the launcher's files through NEMAR's outputs routes.
 
-The node holds no storage credential. After the manifest is written the launcher:
+The node holds no storage credential. After the documents are written the launcher:
 
-1. ``POST <api_base>/compute/jobs/<job_id>/outputs`` with the job token: every output's
-   ``path``, ``size`` and ``sha256`` and the sizes of the four launcher files. NEMAR answers with
-   one presigned PUT address per file (or refuses: a size cap or a quota);
+1. ``POST <api_base>/compute/jobs/<job_id>/outputs`` with the job token: every output's ``path``,
+   ``size`` and ``sha256`` and the sizes of the four launcher files. The request is validated
+   against the schema's ``outputs_request`` and capped at 1 MiB (the Worker's cap) BEFORE it is
+   sent. NEMAR answers with one presigned PUT address per file, or refuses (a size cap, a quota);
 2. PUTs each file to its address (outputs four at a time, three attempts each with backoff, no
-   redirect followed, the token NOT sent), the outputs first, then ``manifest.json``,
-   ``provenance.json``, ``launcher.log`` and last ``result.json``;
-3. ``POST .../outputs/complete`` once, after every PUT succeeded. ``complete`` is the commit: files
-   without it are not a result.
+   redirect followed, the token NOT sent): the outputs first, then the launcher files with
+   ``result.json`` LAST. The launcher files are sent from MEMORY (the documents and a snapshot of
+   the log), never re-read from disk; an output is opened without following a link and must still
+   be the regular file of the size that was hashed;
+3. ``POST .../outputs/complete`` after every PUT succeeded. ``complete`` is the commit: files
+   without it are not a result. It is retried on a transport failure and (three times) on a 409
+   ``results_incomplete``, so NEMAR may see it more than once and must treat it as idempotent.
 
-An expired address (403) is re-requested ONCE for the whole run. ``launcher.log`` is uploaded as it
-was when its size was declared, even though the launcher keeps logging. When the full upload fails
-for any reason (a refusal, a PUT that fails past its retries, a refused ``complete``), the launcher
-makes one more request that names no outputs and uploads only the four launcher files, so NEMAR can
-read why; ``complete`` is not called then. The failure is ``result_upload_failed``, which never
-replaces an earlier failure code.
+An upload address lives about an hour and a large upload can outlive it, so an expired address
+(403) is re-requested: up to 2 times for each file and at most 50 times for the whole run, then the
+file fails. ``launcher.log`` is sent as it was when its size was declared. Once the stop event is
+set (a SIGTERM) no further output is started.
+
+When the full upload fails for any reason, the launcher makes one more request that names no
+outputs and sends only the four launcher files (with a fresh re-request budget of its own), so
+NEMAR can read why; ``complete`` is not called then. The failure is ``result_upload_failed``, which
+never replaces an earlier failure code.
 
 Nothing secret is logged: addresses are shown as host and path.
 """
@@ -29,12 +36,21 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import net, spec
-from .codes import LAUNCHER_FILES, is_word
-from .provenance import Log
+from .codes import (
+    KNOWN_REFUSAL_WORDS,
+    LAUNCHER_FILES,
+    LOG_FILE,
+    OUTPUTS_REQUEST_MAX_BYTES,
+    UPLOAD_ORDER,
+    Stopped,
+    is_word,
+)
+from .provenance import Documents, Log
 
 CONCURRENCY = 4
-# The launcher files are uploaded in this order, result.json last.
-LAUNCHER_UPLOAD_ORDER = ("manifest.json", "provenance.json", "launcher.log", "result.json")
+PER_OBJECT_REREQUESTS = 2
+RUN_REREQUESTS = 50
+COMPLETE_INCOMPLETE_ATTEMPTS = 3
 _LOG_LIMIT = 100
 
 
@@ -47,37 +63,69 @@ class UploadFailed(Exception):
 
 
 def _detail(failure: net.HttpFailure, fallback: str) -> str:
-    if is_word(failure.code):
+    """A refusal's own word when it is one NEMAR declares, else the transport word (``http_503``)."""
+    if failure.code in KNOWN_REFUSAL_WORDS:
         return str(failure.code)
     return failure.word if is_word(failure.word) else fallback
 
 
 class Uploader:
-    def __init__(self, job: spec.Spec, out_dir: str, log: Log, sleep: net.Sleep) -> None:
+    def __init__(
+        self,
+        job: spec.Spec,
+        docs: Documents,
+        log: Log,
+        sleep: net.Sleep,
+        stop: threading.Event,
+        outputs_dir: str | None,
+    ) -> None:
         self.job = job
-        self.out_dir = out_dir
+        self.docs = docs
         self.log = log
         self.sleep = sleep
+        self.stop = stop
+        self.outputs_dir = outputs_dir
         self._base = "{}/compute/jobs/{}".format(job.api_base.rstrip("/"), job.job_id)
         self._lock = threading.Lock()
         self._urls: dict[str, str] = {}
         self._version = 0
-        self._rerequests_left = 1
+        self._rerequests = 0
         self._body: dict[str, Any] = {}
+        self._log_size = 0
         self._puts_logged = 0
 
-    # ---- the plan ----------------------------------------------------------------------------------
+    # ---- the request and the plan ------------------------------------------------------------------
 
-    def _launcher_sizes(self, log_size: int) -> list[dict[str, Any]]:
-        sizes = []
-        for name in LAUNCHER_FILES:
-            size = (
-                log_size
-                if name == "launcher.log"
-                else os.path.getsize(os.path.join(self.out_dir, "launcher", name))
-            )
-            sizes.append({"name": name, "size": size})
-        return sizes
+    def _launcher_sizes(self) -> list[dict[str, Any]]:
+        self._log_size = self.log.size()
+        return [
+            {
+                "name": name,
+                "size": self._log_size if name == LOG_FILE else len(self.docs.data[name]),
+            }
+            for name in LAUNCHER_FILES
+        ]
+
+    def _launcher_bytes(self, name: str) -> bytes:
+        if name == LOG_FILE:
+            return self.log.snapshot(self._log_size)
+        return self.docs.data[name]
+
+    def _set_body(self, files: list[dict[str, Any]]) -> None:
+        """Build the outputs request and check it the way the Worker will, before sending it."""
+        body = {
+            "outputs": [
+                {"path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files
+            ],
+            "launcher": self._launcher_sizes(),
+        }
+        if spec.validate(body, spec.schema_def("outputs_request")):
+            self.log.error("the outputs request is not what the schema says")
+            raise UploadFailed("internal_error")
+        if len(net.encode_json(body)) > OUTPUTS_REQUEST_MAX_BYTES:
+            self.log.error("the outputs request is over the 1 MiB cap")
+            raise UploadFailed("too_many_outputs")
+        self._body = body
 
     def _request_plan(self) -> dict[str, str]:
         url = self._base + "/outputs"
@@ -110,6 +158,9 @@ class Uploader:
         if any(key not in urls for key in wanted):
             self.log.error("outputs route left some files without an address")
             raise UploadFailed("incomplete_plan")
+        if not all(net.url_allowed(urls[key]) for key in wanted):
+            self.log.error("outputs route gave an address that is not https")
+            raise UploadFailed("bad_response")
         return urls
 
     def _address(self, key: str) -> tuple[int, str]:
@@ -117,14 +168,15 @@ class Uploader:
             return self._version, self._urls[key]
 
     def _refresh(self, seen: int) -> bool:
-        """After a 403: get new addresses, once for the whole run. True if there are newer ones."""
+        """After a 403: new addresses. True if there are newer ones than ``seen``; False when the
+        run's re-request budget is spent or the new request failed."""
         with self._lock:
             if self._version != seen:
                 return True
-            if self._rerequests_left <= 0:
+            if self._rerequests >= RUN_REREQUESTS:
                 return False
-            self._rerequests_left -= 1
-            self.log.warning("an upload address was refused (403); requesting new addresses once")
+            self._rerequests += 1
+            self.log.warning("an upload address was refused (403); requesting new addresses")
             try:
                 self._urls = self._request_plan()
             except UploadFailed:
@@ -132,24 +184,32 @@ class Uploader:
             self._version += 1
             return True
 
-    # ---- the puts ----------------------------------------------------------------------------------
+    # ---- the puts -------------------------------------------------------------------------------
 
-    def _put(self, key: str, path: str, size: int) -> None:
+    def _put(self, key: str, send: Any, *, stoppable: bool) -> None:
         attempt = 0
+        expired = 0
         while True:
+            if stoppable and self.stop.is_set():
+                raise Stopped
             version, url = self._address(key)
             with self._lock:
                 self._puts_logged += 1
                 if self._puts_logged <= _LOG_LIMIT:
                     self.log.info("put {}".format(net.redact(url)))
             try:
-                net.put_file(url, path, size)
+                send(url)
                 return
+            except net.OutputChanged:
+                self.log.error("{} is no longer the file that was hashed".format(key))
+                raise UploadFailed("output_changed") from None
             except net.HttpFailure as failure:
                 if failure.status == 403:
-                    if self._refresh(version):
-                        continue
-                    raise UploadFailed(failure.word) from None
+                    expired += 1
+                    if expired > PER_OBJECT_REREQUESTS or not self._refresh(version):
+                        self.log.error("put of {} refused: its address kept expiring".format(key))
+                        raise UploadFailed(failure.word) from None
+                    continue
                 attempt += 1
                 if not failure.retryable or attempt >= net.PUT_ATTEMPTS:
                     self.log.error("put of {} failed ({})".format(key, failure.word))
@@ -163,24 +223,30 @@ class Uploader:
                 self.sleep(delay)
 
     def _put_launcher_files(self) -> None:
-        sizes = {f["name"]: f["size"] for f in self._body["launcher"]}
-        for name in LAUNCHER_UPLOAD_ORDER:
-            self._put("launcher/" + name, os.path.join(self.out_dir, "launcher", name), sizes[name])
+        for name in UPLOAD_ORDER:
+            data = self._launcher_bytes(name)
+            self._put(
+                "launcher/" + name, lambda url, d=data: net.put_bytes(url, d), stoppable=False
+            )
 
     def _put_outputs(self, files: list[dict[str, Any]]) -> None:
-        root = os.path.join(self.out_dir, "work", "outputs")
         failed: list[UploadFailed] = []
+        stopped: list[bool] = []
         cancel = threading.Event()
 
         def one(item: dict[str, Any]) -> None:
             if cancel.is_set():
                 return
+            path = os.path.join(self.outputs_dir or "", *item["path"].split("/"))
             try:
                 self._put(
                     "outputs/" + item["path"],
-                    os.path.join(root, *item["path"].split("/")),
-                    item["size"],
+                    lambda url: net.put_file(url, path, item["size"]),
+                    stoppable=True,
                 )
+            except Stopped:
+                stopped.append(True)
+                cancel.set()
             except UploadFailed as problem:
                 with self._lock:
                     failed.append(problem)
@@ -190,42 +256,68 @@ class Uploader:
             list(pool.map(one, files))
         if failed:
             raise failed[0]
+        if stopped:
+            raise Stopped
 
-    # ---- the whole upload ---------------------------------------------------------------------------
+    # ---- complete ---------------------------------------------------------------------------------
 
-    def upload_all(self, files: list[dict[str, Any]], log_size: int) -> None:
-        """Plan, put the outputs, put the launcher files (result last), then call ``complete`` once."""
-        self._body = {
-            "outputs": [
-                {"path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files
-            ],
-            "launcher": self._launcher_sizes(log_size),
-        }
+    def _complete(self) -> None:
+        url = self._base + "/outputs/complete"
+        attempts = 0
+        incomplete = 0
+        while True:
+            try:
+                net.post_json(url, {}, self.job.job_token)
+                return
+            except net.HttpFailure as failure:
+                attempts += 1
+                if failure.status == 409 and failure.code == "results_incomplete":
+                    incomplete += 1
+                    giving_up = incomplete >= COMPLETE_INCOMPLETE_ATTEMPTS
+                else:
+                    giving_up = not failure.retryable or attempts >= net.ATTEMPTS
+                if giving_up:
+                    detail = _detail(failure, "complete_refused")
+                    self.log.error("complete was refused ({})".format(detail))
+                    raise UploadFailed(detail) from None
+                delay = net.backoff_delay(attempts)
+                self.log.warning(
+                    "complete attempt {} failed ({}); retrying in {:.1f}s".format(
+                        attempts, failure.word, delay
+                    )
+                )
+                self.sleep(delay)
+
+    # ---- the whole upload -------------------------------------------------------------------------
+
+    def upload_all(self, files: list[dict[str, Any]]) -> None:
+        """Plan, put the outputs, put the launcher files (result last), then call ``complete``.
+
+        Raises ``UploadFailed``, or ``Stopped`` when the stop event ended it.
+        """
+        self._set_body(files)
         self.log.info(
             "upload: {} outputs and {} launcher files".format(len(files), len(LAUNCHER_FILES))
         )
         self._urls = self._request_plan()
         self._put_outputs(files)
+        if self.stop.is_set():
+            raise Stopped
         self._put_launcher_files()
-        try:
-            net.retrying(
-                lambda _n: net.post_json(self._base + "/outputs/complete", {}, self.job.job_token),
-                attempts=net.ATTEMPTS,
-                sleep=self.sleep,
-            )
-        except net.HttpFailure as failure:
-            detail = _detail(failure, "complete_refused")
-            self.log.error("complete was refused ({})".format(detail))
-            raise UploadFailed(detail) from None
+        self._complete()
         self.log.info("upload: complete")
 
-    def upload_launcher_only(self, log_size: int) -> bool:
-        """After a failed upload: one more attempt that names no outputs. Best effort; ``complete`` is not called."""
-        self._body = {"outputs": [], "launcher": self._launcher_sizes(log_size)}
+    def upload_launcher_only(self) -> bool:
+        """After a failed upload: one more attempt that names no outputs. Best effort.
+
+        Own re-request budget; ``complete`` is not called. The four files are sent even when the
+        stop event is set: this is how NEMAR learns what happened.
+        """
         with self._lock:
-            self._rerequests_left = 1
+            self._rerequests = 0
         self.log.info("upload: sending only the launcher files")
         try:
+            self._set_body([])
             self._urls = self._request_plan()
             self._put_launcher_files()
         except UploadFailed as problem:
