@@ -239,6 +239,37 @@ def test_the_image_file_must_be_named_by_the_digest(sif):
     refused(document)
 
 
+@pytest.mark.parametrize(
+    "api_base",
+    ["http://api.example.test", "http://10.0.0.1/", "http://127.0.0.1.evil.test", "http://[::2]/"],
+)
+def test_a_plain_http_api_base_off_loopback_is_refused(api_base):
+    document = base()
+    document["api_base"] = api_base
+    refused(document)
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://api.example.test",
+        "http://127.0.0.1:8787",
+        "http://localhost",
+        "http://[::1]:8787/x",
+    ],
+)
+def test_https_and_loopback_http_api_bases_are_accepted(api_base):
+    document = base()
+    document["api_base"] = api_base
+    assert spec_mod.parse(encode_spec(document)).api_base == api_base
+
+
+def test_a_port_out_of_range_in_the_api_base_is_refused():
+    document = base()
+    document["api_base"] = "https://api.example.test:99999"
+    refused(document)
+
+
 def test_the_image_file_named_by_the_digest_is_accepted():
     assert spec_mod.parse(encode_spec(base())).image["sif"] == "b" * 64 + ".sif"
 

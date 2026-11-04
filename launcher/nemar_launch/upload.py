@@ -37,10 +37,10 @@ from typing import Any
 
 from . import net, spec
 from .codes import (
-    KNOWN_REFUSAL_WORDS,
     LAUNCHER_FILES,
     LOG_FILE,
     OUTPUTS_REQUEST_MAX_BYTES,
+    RESULT_REFUSAL_DETAILS,
     UPLOAD_ORDER,
     Stopped,
     is_word,
@@ -62,11 +62,16 @@ class UploadFailed(Exception):
         self.detail = detail if is_word(detail) else "upload_failed"
 
 
-def _detail(failure: net.HttpFailure, fallback: str) -> str:
-    """A refusal's own word when it is one NEMAR declares, else the transport word (``http_503``)."""
-    if failure.code in KNOWN_REFUSAL_WORDS:
+def _detail(failure: net.HttpFailure, refused: str) -> str:
+    """The declared detail for a failed call to a route. One of the three results refusals (the
+    submitter's) when the response names it; ``refused`` (``outputs_refused`` or
+    ``complete_refused``) for any other answer of the route's own, a 4xx; ``fetch_failed`` for a
+    transport fault or a 5xx. The exact word is for the log line only."""
+    if failure.code in RESULT_REFUSAL_DETAILS:
         return str(failure.code)
-    return failure.word if is_word(failure.word) else fallback
+    if failure.status is not None and 400 <= failure.status < 500 and not failure.retryable:
+        return refused
+    return net.transport_detail(failure)
 
 
 class Uploader:
@@ -146,7 +151,7 @@ class Uploader:
             )
         except net.HttpFailure as failure:
             detail = _detail(failure, "outputs_refused")
-            self.log.error("outputs route refused the request ({})".format(detail))
+            self.log.error("outputs route failed ({}) -> {}".format(net.describe(failure), detail))
             raise UploadFailed(detail) from None
         if spec.validate(answer, spec.schema_def("outputs_response")):
             self.log.error("outputs route answered with the wrong shape")
@@ -202,18 +207,18 @@ class Uploader:
                 return
             except net.OutputChanged:
                 self.log.error("{} is no longer the file that was hashed".format(key))
-                raise UploadFailed("output_changed") from None
+                raise UploadFailed("upload_failed") from None
             except net.HttpFailure as failure:
                 if failure.status == 403:
                     expired += 1
                     if expired > PER_OBJECT_REREQUESTS or not self._refresh(version):
                         self.log.error("put of {} refused: its address kept expiring".format(key))
-                        raise UploadFailed(failure.word) from None
+                        raise UploadFailed("upload_failed") from None
                     continue
                 attempt += 1
                 if not failure.retryable or attempt >= net.PUT_ATTEMPTS:
                     self.log.error("put of {} failed ({})".format(key, failure.word))
-                    raise UploadFailed(failure.word) from None
+                    raise UploadFailed("upload_failed") from None
                 delay = net.backoff_delay(attempt)
                 self.log.warning(
                     "put of {} attempt {} failed ({}); retrying in {:.1f}s".format(
@@ -278,7 +283,9 @@ class Uploader:
                     giving_up = not failure.retryable or attempts >= net.ATTEMPTS
                 if giving_up:
                     detail = _detail(failure, "complete_refused")
-                    self.log.error("complete was refused ({})".format(detail))
+                    self.log.error(
+                        "complete failed ({}) -> {}".format(net.describe(failure), detail)
+                    )
                     raise UploadFailed(detail) from None
                 delay = net.backoff_delay(attempts)
                 self.log.warning(

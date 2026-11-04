@@ -26,6 +26,8 @@ import os
 import re
 from typing import Any
 
+from .net import url_allowed
+
 MAX_SPEC_BYTES = 64 * 1024
 SCHEMA_FILE = "launch-spec.v1.json"
 PLACEHOLDER_JOB_ID = "job_" + "0" * 24
@@ -347,8 +349,9 @@ def parse(raw: bytes) -> Spec:
 
     Order of refusal: ``decode``, an unsupported runtime, the schema, then the rules the schema
     does not state: a dataset id once; each dataset version is the data-plane tag, used verbatim
-    (``latest`` or ``vN.N.N``, the Worker resolves the user's spelling); the image file is named by
-    the image digest (``<64 hex>.sif``, relative to ``NEMAR_SIF_ROOT``).
+    (``latest`` or ``vN.N.N``, the Worker resolves the user's spelling); ``api_base`` is https
+    (plain http only on loopback, for the tests' stand-ins); the image file is named by the image
+    digest (``<64 hex>.sif``, relative to ``NEMAR_SIF_ROOT``).
     """
     document = decode(raw)
     schema = load_schema()
@@ -361,6 +364,8 @@ def parse(raw: bytes) -> Spec:
     if len(ids) != len(set(ids)):
         raise SpecError("invalid_spec")
     if not all(_DATASET_TAG.fullmatch(d["version"]) for d in document["datasets"]):
+        raise SpecError("invalid_spec")
+    if not url_allowed(document["api_base"]):
         raise SpecError("invalid_spec")
     image = document["image"]
     if image["sif"] != image["digest"].split(":", 1)[1] + ".sif":

@@ -27,7 +27,7 @@ import threading
 import urllib.error
 import urllib.request
 from typing import Any, Callable, ClassVar
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from . import __version__
 from .codes import Stopped, is_word
@@ -119,6 +119,19 @@ def _read_error_json(error: urllib.error.HTTPError) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def describe(failure: HttpFailure) -> str:
+    """The exact word of a failure (and the response's own ``code`` word, if it named one), for a
+    log line: the declared detail hides it, the log keeps it."""
+    code = failure.code
+    return failure.word + (" " + code if code is not None and is_word(code) else "")
+
+
+def transport_detail(failure: HttpFailure) -> str:
+    """The declared detail for a failed exchange: ``bad_response`` when the answer was not the
+    shape, else ``fetch_failed``. The exact word (``http_503``, ``timeout``) is for the log."""
+    return "bad_response" if failure.word == "bad_response" else "fetch_failed"
+
+
 def classify(exc: BaseException) -> HttpFailure:
     """Turn what urllib raised into an ``HttpFailure``."""
     if isinstance(exc, HttpFailure):
@@ -151,13 +164,24 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _FollowSafely(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect (the data plane sends the bytes to storage) but only to an allowed
+    address: never from https down to plain http, and never to something that is not a URL."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        if not url_allowed(urljoin(req.full_url, newurl)):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 _OPENERS: dict[bool, Any] = {}
 
 
 def _opener(follow: bool) -> Any:
     if follow not in _OPENERS:
-        handlers = [] if follow else [_NoRedirect()]
-        _OPENERS[follow] = urllib.request.build_opener(*handlers)
+        _OPENERS[follow] = urllib.request.build_opener(_FollowSafely() if follow else _NoRedirect())
     return _OPENERS[follow]
 
 
@@ -216,7 +240,7 @@ def post_json(url: str, body: dict[str, Any], token: str) -> tuple[int, dict[str
         raise classify(exc) from None
     try:
         parsed = json.loads(raw.decode("utf-8")) if raw.strip() else {}
-    except ValueError:
+    except (ValueError, RecursionError):  # not JSON, or nested too deep to read
         raise HttpFailure("bad_response", status=status) from None
     if not isinstance(parsed, dict):
         raise HttpFailure("bad_response", status=status)
@@ -237,7 +261,7 @@ def get_json(url: str, *, limit: int) -> Any:
         raise HttpFailure("too_large")
     try:
         return json.loads(raw.decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):  # not JSON, or nested too deep to read
         raise HttpFailure("bad_response") from None
 
 
@@ -292,12 +316,15 @@ class AnyStop:
 
 
 class Download(Exception):
-    """A download that cannot succeed. ``word`` is a fixed word; ``lost`` marks lost content."""
+    """A download that cannot succeed. ``word`` is a declared detail (``fetch_failed`` for a
+    transport fault); ``original`` is the exact word (``http_503``), for the log only; ``lost``
+    marks lost content."""
 
-    def __init__(self, word: str, lost: bool = False) -> None:
+    def __init__(self, word: str, lost: bool = False, original: str | None = None) -> None:
         super().__init__(word)
         self.word = word
         self.lost = lost
+        self.original = original or word
 
 
 class _Progress:
@@ -418,8 +445,13 @@ def download(
             raise Download("checksum_mismatch")
     except HttpFailure as failure:
         _discard(dest)
-        word = "file_not_found" if failure.status == 404 else failure.word
-        raise Download(word, lost=failure.lost) from None
+        if failure.status == 404:
+            word = "file_not_found"
+        elif failure.lost:
+            word = "content_missing"
+        else:
+            word = transport_detail(failure)
+        raise Download(word, lost=failure.lost, original=failure.word) from None
     except BaseException:
         _discard(dest)
         raise

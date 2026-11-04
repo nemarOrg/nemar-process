@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -69,6 +70,17 @@ def make_tar(members: list) -> bytes:
         for info, data in members:
             tar.addfile(info, io.BytesIO(data) if data is not None else None)
     return buffer.getvalue()
+
+
+def declared_check(result: dict | None) -> None:
+    """Every detail the launcher records is one the shared contract declares for that code."""
+    from nemar_launch.codes import LAUNCHER_DETAILS
+
+    if result is None or result["detail"] is None:
+        return
+    assert result["failure_code"] is not None
+    assert result["detail"] in LAUNCHER_DETAILS[result["failure_code"]], result
+    assert re.fullmatch(r"[a-z0-9_]{1,64}", result["detail"])
 
 
 @dataclass
@@ -172,6 +184,15 @@ class Rig:
         overrides.setdefault("args", ["/data/" + d["id"] for d in datasets])
         return self.spec(command=["sh", "/code/run.sh"], bundle=bundle, **overrides)
 
+    def script_spec_python(self, script: str, **overrides) -> dict:
+        """Like ``script_spec`` but a ``runtime: python`` job, so the PID namespace preflight runs.
+        The entry is ``run.py``, which runs the shell ``script`` through ``sh``."""
+        code = "import os, subprocess, sys\nsys.exit(subprocess.call(['sh', '-c', {!r}]))\n".format(
+            script
+        )
+        bundle = self.set_bundle(make_bundle({"run.py": code}))
+        return self.spec(runtime="python", entry="run.py", bundle=bundle, **overrides)
+
     def env(self, spec_bytes: bytes | None, **extra: str) -> dict:
         # The stand-in rig finds ONLY the stand-in runtime, so a real Apptainer on the machine is
         # never picked up by accident; the real rig uses the machine's own PATH.
@@ -211,7 +232,9 @@ class Rig:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             code = launcher.main(self.env(spec_bytes, **extra_env), sleep=sleep)
-        return Launch(code, self.out, stderr.getvalue())
+        launch = Launch(code, self.out, stderr.getvalue())
+        declared_check(launch.result)
+        return launch
 
     def preflight_calls(self) -> list:
         path = Path(str(self.runtime_record) + ".preflight")

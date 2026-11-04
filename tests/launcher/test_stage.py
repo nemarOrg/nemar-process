@@ -158,7 +158,8 @@ def test_five_attempts_per_file_then_a_dataset_fetch_failure(rig):
     rig.plane.fault(EDF1, Fault.status_code(503, times=5))
     launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET), sleep=delays.append)
     assert launch.exit == 11
-    assert launch.result["detail"] == "http_503"
+    assert launch.result["detail"] == "fetch_failed"
+    assert "http_503" in launch.log
     assert len([r for r in file_requests(rig) if r.path.endswith("sub-01_task-rest_eeg.edf")]) == 5
     assert len(delays) >= 4
     assert all(0 <= d <= 30 for d in delays)
@@ -244,6 +245,17 @@ def test_a_duplicate_manifest_path_and_a_file_under_a_file_are_refused(rig):
     assert (
         rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET)).result["detail"] == "unsafe_path"
     )
+
+
+@pytest.mark.parametrize(
+    "url", ["http://203.0.113.5/x", "http://127.0.0.1:99999/x", "ftp://x/y", "https:///nohost"]
+)
+def test_a_manifest_address_that_is_not_https_or_not_an_address_is_refused(rig, url):
+    rig.plane.manifest_transform = lambda entries: [dict(entries[0], bytes_url=url), *entries[1:]]
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["detail"] == "bad_manifest"
+    assert file_requests(rig) == []
 
 
 def test_a_manifest_that_is_not_the_shape_is_refused(rig):

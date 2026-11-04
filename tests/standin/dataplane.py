@@ -89,6 +89,7 @@ class DataPlane:
         self.manifest_status: list[int] = []
         self.manifest_transform: Callable[[list], list] | None = None
         self.omit_checksum: set[str] = set()
+        self.manifest_raw: bytes | None = None  # answer the manifest route with exactly these bytes
         self.delay = 0.0  # seconds each file response waits, so concurrent requests overlap
         self.in_flight = 0
         self.max_in_flight = 0
@@ -156,6 +157,10 @@ class DataPlane:
             with self._lock:
                 if self.manifest_status:
                     return Response.json_body(self.manifest_status.pop(0), {"error": "unavailable"})
+            if self.manifest_raw is not None:
+                return Response(
+                    status=200, body=self.manifest_raw, headers={"Content-Type": "application/json"}
+                )
             return Response.json_body(200, self.manifest())
         for version in (self.version, "latest"):
             prefix = "/files/{}/{}/".format(self.dataset_id, version)

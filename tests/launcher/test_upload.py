@@ -109,7 +109,7 @@ def test_the_third_expiry_of_one_object_fails_it(rig):
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 16
     assert launch.result["failure_code"] == "result_upload_failed"
-    assert launch.result["detail"] == "http_403"
+    assert launch.result["detail"] == "upload_failed"
     assert rig.callbacks.events.count("put-403:outputs/d.txt") == 3
     full = [b for b in rig.callbacks.outputs_requests if b["outputs"]]
     assert len(full) == 3  # the plan and two re-requests, never a third
@@ -121,7 +121,7 @@ def test_when_every_put_answers_403_the_run_is_bounded(rig):
     rig.callbacks.put_always[""] = 403  # every key, outputs and launcher files alike
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 16
-    assert launch.result["detail"] == "http_403"
+    assert launch.result["detail"] == "upload_failed"
     posts = len(requests_to(rig, "/outputs"))
     # The full upload: the plan plus at most 2 re-requests for the object that fails first; then the
     # launcher-only upload: its own plan plus at most 2. Nothing is uploaded, nothing completes.
@@ -223,7 +223,7 @@ def test_a_refused_complete_is_an_upload_failure_with_the_refusals_word(rig):
     rig.callbacks.complete_refusal_code = "bad_state"
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 16
-    assert launch.result["detail"] == "bad_state"
+    assert launch.result["detail"] == "complete_refused"
 
 
 def test_the_outputs_route_retries_a_503(rig):
@@ -263,7 +263,8 @@ def test_complete_gives_up_after_three_results_incomplete_answers(rig):
     delays = []
     launch = rig.launch(rig.script_spec(WRITE), sleep=delays.append)
     assert launch.exit == 16
-    assert launch.result["detail"] == "results_incomplete"
+    assert launch.result["detail"] == "complete_refused"
+    assert "results_incomplete" in launch.log
     assert rig.callbacks.events.count("complete") == 3
     assert len(delays) == 2  # backoff between the three attempts
     assert all(0 <= d <= 30 for d in delays)
@@ -290,5 +291,5 @@ def test_other_refusals_of_complete_are_not_retried(rig):
     rig.callbacks.complete_refusal_code = "bad_state"
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 16
-    assert launch.result["detail"] == "bad_state"
+    assert launch.result["detail"] == "complete_refused"
     assert rig.callbacks.events.count("complete") == 1

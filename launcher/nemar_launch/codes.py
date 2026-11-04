@@ -54,39 +54,111 @@ MAX_OUTPUT_FILES = 100_000
 MAX_OUTPUT_FILE_BYTES = 5_000_000_000
 OUTPUTS_REQUEST_MAX_BYTES = 1024 * 1024
 
-# The refusal words NEMAR's routes answer with in a body's `code` (nemar-cli: COMPUTE_REFUSAL_CODES in
-# shared/compute-state.ts, compared by tests/launcher/test_drift.py). The launcher records one of
-# these as a detail only when the response names it; any other word becomes `http_<status>`.
-COMPUTE_REFUSAL_WORDS = (
-    "no_compute_access",
-    "suspended",
-    "insufficient_balance",
-    "over_job_limit",
-    "over_concurrency",
-    "platform_budget_exhausted",
-    "client_cap_reached",
+# The three refusal words the outputs route answers with that are the SUBMITTER's (nemar-cli:
+# RESULT_REFUSAL_DETAILS). A route's body names a `code`; the launcher records it as a detail only
+# when it is one of these. Any other refusal becomes `outputs_refused` or `complete_refused`.
+RESULT_REFUSAL_DETAILS = ("results_too_large", "results_quota_exceeded", "too_many_outputs")
+
+# EVERY detail the launcher can emit, per failure code, and nothing else: a detail is a fixed word
+# and part of the shared contract (nemar-cli: LAUNCHER_DETAILS in shared/compute-state.ts, compared
+# by tests/launcher/test_drift.py), so NEMAR decides who pays from a table and not from a guess.
+# A transport fault (a status, a timeout, a dropped connection) is `fetch_failed`, with the exact
+# word in the log line only; a route's own refusal is `outputs_refused` or `complete_refused`.
+LAUNCHER_DETAILS: dict[str, tuple[str, ...]] = {
+    "code_fetch_failed": (
+        "unsafe_archive",
+        "archive_too_large",
+        "bad_response",
+        "fetch_failed",
+        "checksum_mismatch",
+        "digest_mismatch",
+        "size_mismatch",
+        "content_missing",
+        "disk_error",
+    ),
+    "dataset_fetch_failed": (
+        "bad_include",
+        "too_many_files",
+        "too_many_bytes",
+        "dataset_not_found",
+        "bad_manifest",
+        "manifest_too_large",
+        "unsafe_path",
+        "bad_response",
+        "fetch_failed",
+        "checksum_mismatch",
+        "size_mismatch",
+        "content_missing",
+        "file_not_found",
+        "disk_error",
+    ),
+    "entry_not_found": (),
+    "runtime_error": (
+        "entry_failed",
+        "terminated",
+        "outputs_unreadable",
+        "invalid_spec",
+        "unsupported_runtime",
+        "scratch_in_output",
+        "scratch_unavailable",
+        "no_container_runtime",
+        "image_missing",
+        "runtime_unusable",
+        "internal_error",
+        "output_dir_not_empty",
+        "bind_source_unsafe",
+        "pid_namespace_unavailable",
+    ),
+    "out_of_memory": (),
+    "time_limit": (),
+    "result_upload_failed": (
+        *RESULT_REFUSAL_DETAILS,
+        "outputs_unreadable",
+        "bad_response",
+        "fetch_failed",
+        "incomplete_plan",
+        "upload_failed",
+        "outputs_refused",
+        "complete_refused",
+        "internal_error",
+    ),
+}
+
+# The details that are a NEMAR, node, runtime or contract fault, so the job is refunded even under
+# `runtime_error`: the rule is that a submitter cannot cause one with a valid specification and
+# bundle. Every other declared detail is the submitter's and is charged: an archive that is unsafe
+# or too large, a selection over the job's own limits, an include that is not a glob, an entry that
+# failed or was terminated, outputs that cannot be read, and the results NEMAR refused for their
+# size or count.
+PLATFORM_LAUNCHER_DETAILS = (
     "invalid_spec",
-    "partition_not_offered",
-    "runtime_unavailable",
-    "registry_not_allowed",
-    "compute_disabled",
-    "dataset_not_eligible",
-    "recipe_unknown",
-    "pipelines_account_missing",
-    "live_attempt_exists",
-    "bundle_too_large",
-    "bundle_too_many_files",
-    "results_too_large",
-    "results_quota_exceeded",
-    "too_many_outputs",
-    "results_expired",
-    "job_not_found",
-    "bad_state",
+    "unsupported_runtime",
+    "scratch_in_output",
+    "scratch_unavailable",
+    "no_container_runtime",
+    "image_missing",
+    "runtime_unusable",
+    "internal_error",
+    "output_dir_not_empty",
+    "bind_source_unsafe",
+    "pid_namespace_unavailable",
+    "content_missing",
+    "dataset_not_found",
+    "bad_response",
+    "checksum_mismatch",
+    "digest_mismatch",
+    "size_mismatch",
+    "disk_error",
+    "fetch_failed",
+    "bad_manifest",
+    "manifest_too_large",
+    "unsafe_path",
+    "file_not_found",
+    "incomplete_plan",
+    "upload_failed",
+    "outputs_refused",
+    "complete_refused",
 )
-# Words the `complete` route adds beyond that list (it answers 409 `results_incomplete` while NEMAR
-# cannot yet see every object, and the launcher retries it).
-EXTRA_REFUSAL_WORDS = ("results_incomplete",)
-KNOWN_REFUSAL_WORDS = COMPUTE_REFUSAL_WORDS + EXTRA_REFUSAL_WORDS
 
 # Where a job's code and outputs live inside the container.
 CONTAINER_WORK = "/work"

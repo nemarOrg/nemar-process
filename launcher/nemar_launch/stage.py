@@ -88,7 +88,7 @@ def parse_manifest(document: Any) -> list[Entry]:
             and not isinstance(size, bool)
             and size >= 0
             and isinstance(url, str)
-            and url.startswith(("http://", "https://"))
+            and net.url_allowed(url)
         )
         if not valid:
             raise _fail("bad_manifest", "a manifest entry lacks a path, a size or a bytes_url")
@@ -145,7 +145,8 @@ def fetch_manifest(
             raise _fail(
                 "manifest_too_large", "the manifest is larger than the data plane serves"
             ) from None
-        raise _fail(failure.word, "manifest request failed ({})".format(failure.word)) from None
+        log.error("manifest request failed ({})".format(failure.word))
+        raise _fail(net.transport_detail(failure), "manifest request failed") from None
     return parse_manifest(document)
 
 
@@ -295,7 +296,7 @@ def download_dataset(
             if problem.lost:
                 log.error("lost content: {} is listed but missing from storage".format(entry.path))
             else:
-                log.error("download failed: {} ({})".format(entry.path, problem.word))
+                log.error("download failed: {} ({})".format(entry.path, problem.original))
             with lock:
                 if not failure:
                     failure.append(_fail(problem.word, "{} could not be staged".format(entry.path)))
