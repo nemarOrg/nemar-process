@@ -76,3 +76,20 @@ def either_rig(request, tmp_path):
         shutil.copy(sif, made.sif_root / SIF_NAME)
     yield made
     made.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _unpacked_launcher(tmp_path_factory):
+    """Build the launcher zip and unpack it the way Tapis does; the wrapper tests run that copy."""
+    import build_launcher_zip
+    import harness
+
+    root = Path(__file__).resolve().parent.parent
+    base = tmp_path_factory.mktemp("exec")
+    archive = base / "nemar-launch.zip"
+    archive.write_bytes(build_launcher_zip.build(root))
+    target = base / "exec"
+    target.mkdir()
+    harness.unzip(archive, target)
+    harness.set_launch_script(target / "tapisjob_app.sh")
+    return target

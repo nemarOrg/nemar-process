@@ -15,9 +15,7 @@ import time
 from pathlib import Path
 
 import pytest
-from harness import LAUNCH_SCRIPT, wait_for
-
-SCRIPT = LAUNCH_SCRIPT
+from harness import launch_script, wait_for
 
 
 def child_env(rig, spec: dict, **extra: str) -> dict:
@@ -26,7 +24,7 @@ def child_env(rig, spec: dict, **extra: str) -> dict:
 
 def run_script(rig, spec, **extra):
     proc = subprocess.run(
-        ["/bin/sh", str(SCRIPT)],
+        ["/bin/sh", str(launch_script())],
         env=child_env(rig, spec, **extra),
         capture_output=True,
         text=True,
@@ -101,7 +99,7 @@ def test_the_exit_code_file_and_the_exit_status_hold_the_mapped_number(rig, name
 def start_long_job(rig, spec, **extra):
     env = child_env(rig, spec, **extra)
     proc = subprocess.Popen(
-        ["/bin/sh", str(SCRIPT)],
+        ["/bin/sh", str(launch_script())],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -196,7 +194,7 @@ def run_with_path(rig, path_dirs, spec=None, **extra):
     env.pop("NEMAR_HOST_PYTHON", None)
     env["PATH"] = os.pathsep.join([str(rig.bin_dir)] + [str(d) for d in path_dirs])
     return subprocess.run(
-        ["/bin/sh", str(SCRIPT)],
+        ["/bin/sh", str(launch_script())],
         env=env,
         capture_output=True,
         text=True,
@@ -286,7 +284,7 @@ def test_the_output_directory_is_required(rig):
     env = child_env(rig, rig.script_spec("true\n"))
     del env["_tapisExecSystemOutputDir"]
     proc = subprocess.run(
-        ["/bin/sh", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60
+        ["/bin/sh", str(launch_script())], env=env, capture_output=True, text=True, timeout=60
     )
     assert proc.returncode == 13
     assert "_tapisExecSystemOutputDir" in proc.stderr
@@ -306,7 +304,7 @@ def terminate_during_the_upload(rig, **extra):
     are in flight: the container is long gone, only the upload is under way."""
     rig.callbacks.put_delay = 0.4
     proc = subprocess.Popen(
-        ["/bin/sh", str(SCRIPT)],
+        ["/bin/sh", str(launch_script())],
         env=child_env(rig, rig.script_spec(SIX_OUTPUTS), **extra),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -354,7 +352,7 @@ def test_a_sigterm_while_datasets_stage_runs_nothing_and_claims_nothing(rig):
     dataset = [{"id": "nm000104", "version": "v1.0.2"}]
     env = child_env(rig, rig.script_spec(LONG, datasets=dataset))
     proc = subprocess.Popen(
-        ["/bin/sh", str(SCRIPT)],
+        ["/bin/sh", str(launch_script())],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

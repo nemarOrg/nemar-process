@@ -3,8 +3,11 @@
 Layout (``tapisjob_app.sh`` at the root, as Tapis expects)::
 
     tapisjob_app.sh
-    nemar_launch/*.py
-    schema/launch-spec.v1.json
+    lib/nemar_launch/*.py
+    lib/schema/launch-spec.v1.json
+
+Only ``lib/`` goes on the launcher's import path (``tapisjob_app.sh`` runs it with ``python -I -S``),
+so nothing else Tapis puts beside the script, or the job leaves there, can shadow a module.
 
 Two builds of the same tree are byte-identical: members are sorted, every timestamp is
 1980-01-01, modes are fixed (0755 for the script, 0644 for the rest), the archive is stored
@@ -48,9 +51,9 @@ def members(root: Path) -> list[tuple[str, Path, int]]:
     for path in sorted((launcher / "nemar_launch").rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
-        found.append((path.relative_to(launcher).as_posix(), path, 0o644))
+        found.append(("lib/" + path.relative_to(launcher).as_posix(), path, 0o644))
     for path in sorted((launcher / "schema").glob("*.json")):
-        found.append((path.relative_to(launcher).as_posix(), path, 0o644))
+        found.append(("lib/" + path.relative_to(launcher).as_posix(), path, 0o644))
     return sorted(found, key=lambda member: member[0])
 
 
@@ -78,12 +81,14 @@ def check_layout(data: bytes, root: Path) -> list[str]:
             problems.append("members are not sorted")
         if any("__pycache__" in n or n.endswith(".pyc") for n in names):
             problems.append("the zip holds bytecode")
-        if not any(n.startswith("nemar_launch/") for n in names):
-            problems.append("the nemar_launch package is missing")
+        if not any(n.startswith("lib/nemar_launch/") for n in names):
+            problems.append("the nemar_launch package is missing from lib/")
+        if any(n != SCRIPT and not n.startswith("lib/") for n in names):
+            problems.append("something other than lib/ and the script is at the root")
         schema = root / "launcher" / "schema" / "launch-spec.v1.json"
         if (
-            "schema/launch-spec.v1.json" not in names
-            or archive.read("schema/launch-spec.v1.json") != schema.read_bytes()
+            "lib/schema/launch-spec.v1.json" not in names
+            or archive.read("lib/schema/launch-spec.v1.json") != schema.read_bytes()
         ):
             problems.append("the schema in the zip is not the repository's copy")
     return problems

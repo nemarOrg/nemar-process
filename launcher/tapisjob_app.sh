@@ -9,6 +9,12 @@
 # It never echoes the environment: NEMAR_LAUNCH_SPEC holds the job token.
 #
 # NEMAR_HOST_PYTHON overrides the interpreter (it must itself be 3.9 or newer).
+#
+# Layout (scripts/build_launcher_zip.py): this script at the root, the package in lib/. Python
+# runs with -I (no PYTHON* variables, no working directory or script directory on the path, no
+# user site) and -S (no site: no .pth files, no sitecustomize), and ONLY lib/ is put on the path,
+# so nothing beside this script can shadow a module. Files are made owner-only (umask 077).
+umask 077
 
 here=${0%/*}
 [ "$here" = "$0" ] && here=.
@@ -27,7 +33,7 @@ finish() {
 }
 
 usable() {
-  "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+  "$1" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
 }
 
 py=
@@ -50,9 +56,9 @@ if [ -z "$py" ]; then
   finish 13
 fi
 
-# `python -I -m nemar_launch`, with the package directory named explicitly: in isolated mode (-I)
-# Python ignores PYTHONPATH and the working directory, so `-m` alone cannot find a package that is
-# only next to this script. runpy.run_module is what `-m` runs.
+# `python -I -S -m nemar_launch`, with the package directory named explicitly: in isolated mode
+# (-I) Python ignores PYTHONPATH and the working directory, so `-m` alone cannot find a package
+# that is only next to this script. runpy.run_module is what `-m` runs.
 boot='import runpy, sys; sys.path.insert(0, sys.argv[1]); runpy.run_module("nemar_launch", run_name="__main__", alter_sys=True)'
 
 # A SIGTERM to this script (Slurm's, at the time limit or on cancel) goes on to the launcher, which
@@ -65,7 +71,7 @@ on_term() {
 }
 trap on_term TERM
 
-"$py" -I -c "$boot" "$here" &
+"$py" -I -S -c "$boot" "$here/lib" &
 child=$!
 wait "$child"
 rc=$?

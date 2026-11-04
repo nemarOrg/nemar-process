@@ -14,7 +14,7 @@ import sys
 
 import pytest
 from callbacks import PRESIGN_SIGNATURE
-from harness import JOB_ID, LAUNCH_SCRIPT, TOKEN, encode_spec
+from harness import JOB_ID, TOKEN, encode_spec, launch_script
 
 FORBIDDEN = [
     TOKEN,
@@ -78,7 +78,7 @@ def test_the_shell_wrapper_output_and_the_launcher_files_are_clean(rig):
     rig.callbacks.outputs_refusal = (413, "results_too_large")
     env = rig.process_env(rig.script_spec(WRITE))
     proc = subprocess.run(
-        ["/bin/sh", str(LAUNCH_SCRIPT)],
+        ["/bin/sh", str(launch_script())],
         env=env,
         capture_output=True,
         text=True,

@@ -15,9 +15,11 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import time
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +30,32 @@ from dataplane import DataPlane
 from server import StandinServer
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCH_SCRIPT = ROOT / "launcher" / "tapisjob_app.sh"
+_LAUNCH_SCRIPT: list[Path] = []
+
+
+def set_launch_script(path: Path) -> None:
+    """The conftest builds the zip once per session and unpacks it, as Tapis does: the wrapper is
+    only meaningful next to the `lib/` directory the zip builder gives it."""
+    _LAUNCH_SCRIPT[:] = [path]
+
+
+def launch_script() -> Path:
+    return _LAUNCH_SCRIPT[0]
+
+
+def unzip(archive: Path, target: Path) -> None:
+    """Unpack the way Tapis does, keeping the mode bits (info-zip `unzip`, else the same by hand)."""
+    if shutil.which("unzip"):
+        subprocess.run(["unzip", "-q", str(archive), "-d", str(target)], check=True)
+        return
+    with zipfile.ZipFile(archive) as handle:  # pragma: no cover - unzip is on every CI image
+        for info in handle.infolist():
+            path = target / info.filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(handle.read(info))
+            path.chmod(info.external_attr >> 16)
+
+
 JOB_ID = "job_0123456789abcdef01234567"
 TOKEN = "tok_" + "a1b2c3d4e5f6" * 4
 DATASET_ID = "nm000104"
@@ -229,9 +256,12 @@ class Rig:
 
         if spec_bytes is None and spec is not None:
             spec_bytes = encode_spec(spec)
+        saved_umask = os.umask(0)
+        os.umask(saved_umask)
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             code = launcher.main(self.env(spec_bytes, **extra_env), sleep=sleep)
+        os.umask(saved_umask)  # main() sets 077; keep it out of the other tests of this process
         launch = Launch(code, self.out, stderr.getvalue())
         declared_check(launch.result)
         return launch
