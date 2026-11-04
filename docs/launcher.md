@@ -170,9 +170,11 @@ The first failure wins.
 | 16 | `result_upload_failed` | the upload failed and nothing failed earlier |
 
 The detail is a fixed word, never text from a response or the container.
-Some details are `unsupported_runtime`, `invalid_spec`, `entry_failed`, `terminated`, `no_container_runtime`, `image_missing`, `scratch_in_output`, `digest_mismatch`, `size_mismatch`, `checksum_mismatch`, `content_missing`, `file_not_found`, `unsafe_archive`, `unsafe_path`, `too_many_files`, `too_many_bytes`, `bad_manifest`, `manifest_too_large`, `dataset_not_found` and `incomplete_plan`; an HTTP failure is `http_<status>`, `timeout` or `network_error`, or the response's own `code` word when it has one.
+Some details are `unsupported_runtime`, `invalid_spec`, `entry_failed`, `terminated`, `no_container_runtime`, `image_missing`, `scratch_in_output`, `scratch_unavailable`, `internal_error`, `digest_mismatch`, `size_mismatch`, `checksum_mismatch`, `content_missing`, `file_not_found`, `unsafe_archive`, `unsafe_path`, `too_many_files`, `too_many_bytes`, `bad_manifest`, `manifest_too_large`, `dataset_not_found` and `incomplete_plan`; an HTTP failure is `http_<status>`, `timeout` or `network_error`, or the response's own `code` word when it has one.
 
 A signal death of the entry is reported as 128 plus the signal, as a shell does, in `entry_exit_code`.
+
+An error the launcher did not expect (a bug) is also recorded, as `runtime_error` with detail `internal_error` (or `result_upload_failed` with the same detail during the upload), with only the exception's class name in the log, and the run still leaves its three files.
 
 ## Environment
 

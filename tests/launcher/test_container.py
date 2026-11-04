@@ -57,6 +57,8 @@ with open(os.path.join(os.environ["NEMAR_OUT"], "facts.json"), "w") as handle:
 """
 
 CANARY = "host-only-secret-canary"
+# A value with a comma, a quote, an equals sign and spaces, to prove `--env` passes it as it is.
+TRICKY_VALUE = 'a,b "c" d=e  f'
 
 
 @pytest.fixture(scope="module")
@@ -83,7 +85,7 @@ def probed(tmp_path_factory, test_sif):
                 "include": ["README", "participants.tsv"],
             }
         ],
-        env={"OMP_NUM_THREADS": "3"},
+        env={"OMP_NUM_THREADS": "3", "MPLBACKEND": TRICKY_VALUE},
     )
     launch = rig.launch(
         spec,
@@ -134,6 +136,7 @@ def test_no_host_environment_variable_reaches_the_entry(probed):
 def test_only_the_allowlist_and_the_output_path_were_set(probed):
     _rig, _launch, facts = probed
     assert facts["env"]["OMP_NUM_THREADS"] == "3"
+    assert facts["env"]["MPLBACKEND"] == TRICKY_VALUE
     assert facts["env"]["NEMAR_OUT"] == "/work/outputs"
 
 

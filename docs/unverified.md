@@ -31,7 +31,7 @@ These are the facts it depends on that nobody has confirmed on the node or again
   It sends a `nemar-launch/<version>` `User-Agent` on every request, in case a content delivery network rejects the default.
 - **The Worker's responses.** The outputs and bundle routes do not exist yet; the stand-ins follow the schema's `$defs`.
   The error body is read for a `code` word only (`results_too_large`, `results_quota_exceeded`, `too_many_outputs`, `bad_state`, ...), and the launcher posts `{}` as the body of the bundle and complete routes.
-- **Details that are NEMAR-caused but exit 13.** `invalid_spec`, `scratch_in_output`, `no_container_runtime`, `image_missing` and `runtime_unusable` are `runtime_error` because the launcher has only seven codes.
+- **Details that are NEMAR-caused but exit 13.** `invalid_spec`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `runtime_unusable` and `internal_error` are `runtime_error` because the launcher has only seven codes.
   NEMAR's side decides whether a job failing with one of those details is refunded.
 
 ## Not done in this phase

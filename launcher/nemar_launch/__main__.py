@@ -71,8 +71,6 @@ class Run:
         self.timings[name] = time.monotonic() - started
 
     def write_documents(self) -> None:
-        code = self.failure.code if self.failure else None
-        detail = self.failure.detail if self.failure else None
         provenance.write_document(
             self.launcher_dir,
             "provenance.json",
@@ -91,9 +89,11 @@ class Run:
         provenance.write_document(
             self.launcher_dir, "manifest.json", provenance.build_manifest(self.job_id, self.files)
         )
-        self.write_result(code, detail)
+        self.write_result()
 
-    def write_result(self, code: str | None, detail: str | None) -> None:
+    def write_result(self) -> None:
+        code = self.failure.code if self.failure else None
+        detail = self.failure.detail if self.failure else None
         provenance.write_document(
             self.launcher_dir,
             "result.json",
@@ -122,8 +122,13 @@ def _do_work(
         raise Failure(
             "runtime_error", "scratch_in_output", "scratch is inside the archived directory"
         )
-    os.makedirs(base, exist_ok=True)
-    scratch = tempfile.mkdtemp(prefix="nemar-launch-", dir=base)
+    try:
+        os.makedirs(base, exist_ok=True)
+        scratch = tempfile.mkdtemp(prefix="nemar-launch-", dir=base)
+    except OSError:
+        raise Failure(
+            "runtime_error", "scratch_unavailable", "scratch could not be created"
+        ) from None
     try:
         code_dir: str | None = None
         started = time.monotonic()
@@ -178,10 +183,7 @@ def _upload(state: Run, job: spec.Spec, sleep: net.Sleep) -> None:
                 "the upload failed ({})".format(problem.detail),
             )
         )
-        state.write_result(
-            state.failure.code if state.failure else None,
-            state.failure.detail if state.failure else None,
-        )
+        state.write_result()
         uploader.upload_launcher_only(log.size())
     log.info("upload took {:.1f}s".format(time.monotonic() - started))
 
@@ -207,6 +209,7 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         state.slurm_job_id = slurm_id if slurm_id and _SLURM_ID.match(slurm_id) else None
         raw = env.raw(ENV_SPEC)
         if raw is None:
+            state.digest = hashlib.sha256(b"").hexdigest()  # the digest of no bytes
             state.fail(
                 Failure("runtime_error", "invalid_spec", "the launch specification is not set")
             )
@@ -229,12 +232,30 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
                 state.fail(failure)
             except Stopped:
                 state.fail(run.terminated_failure(terminator, env))
+            except Exception as unexpected:  # noqa: BLE001 - a launcher bug must still leave a record
+                state.fail(
+                    Failure(
+                        "runtime_error",
+                        "internal_error",
+                        "unexpected {}".format(unexpected.__class__.__name__),
+                    )
+                )
         started = time.monotonic()
         state.files = run.finalize_outputs(state.work, log)
         state.phase("finalize", started)
         state.write_documents()
         if job is not None:
-            _upload(state, job, sleep)
+            try:
+                _upload(state, job, sleep)
+            except Exception as unexpected:  # noqa: BLE001
+                state.fail(
+                    Failure(
+                        "result_upload_failed",
+                        "internal_error",
+                        "unexpected {}".format(unexpected.__class__.__name__),
+                    )
+                )
+                state.write_result()
     finally:
         terminator.restore()
         log.close()

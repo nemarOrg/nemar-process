@@ -280,3 +280,18 @@ def test_the_output_directory_is_required(rig, missing):
     env = rig.env(harness.encode_spec(entry_spec(rig)))
     del env[missing.encode()]
     assert launcher.main(env, sleep=lambda s: None) == 13
+
+
+def test_a_scratch_directory_that_cannot_be_made_is_a_runtime_error_with_its_own_detail(rig):
+    launch = rig.launch(entry_spec(rig), SLURM_TMPDIR="/dev/null/scratch")
+    assert launch.exit == 13
+    assert launch.result["detail"] == "scratch_unavailable"
+    assert launch.provenance["job_id"] == launch.result["job_id"]
+
+
+def test_a_missing_specification_still_leaves_valid_launcher_files(rig):
+    launch = rig.launch(spec_bytes=None)
+    assert launch.exit == 13
+    assert launch.result["detail"] == "invalid_spec"
+    assert len(launch.provenance["launch_spec_digest"]) == 64
+    assert rig.server.requests == []
