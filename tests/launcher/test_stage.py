@@ -81,6 +81,30 @@ def test_include_globs_select_only_the_matching_files(rig):
     assert not [r for r in file_requests(rig) if "sub-02" in r.path]
 
 
+def test_the_dialect_selects_through_the_whole_launcher_including_double_star_slash(rig):
+    spec = rig.script_spec(
+        LIST_DATA, datasets=[dict(DATASET[0], include=["**/*_channels.tsv", "participants.tsv"])]
+    )
+    launch = rig.launch(spec)
+    assert launch.exit == 0, launch.log
+    listing = (launch.out / "work" / "outputs" / "listing.txt").read_text().split()
+    assert listing == [
+        "./participants.tsv",
+        "./sub-01/eeg/sub-01_task-rest_channels.tsv",
+        "./sub-02/eeg/sub-02_task-rest_channels.tsv",
+    ]
+
+
+@pytest.mark.parametrize("pattern", ["[]", "[!]", "sub-0[z-a]/**"])
+def test_a_pattern_the_dialect_refuses_is_bad_include_and_nothing_is_fetched(rig, pattern):
+    spec = rig.script_spec(LIST_DATA, datasets=[dict(DATASET[0], include=["README", pattern])])
+    launch = rig.launch(spec)
+    assert launch.exit == 11
+    assert launch.result["failure_code"] == "dataset_fetch_failed"
+    assert launch.result["detail"] == "bad_include"
+    assert file_requests(rig) == []
+
+
 def test_a_truncated_body_is_resumed_with_a_range_request(rig):
     rig.plane.fault(EDF1, Fault.truncate())
     launch = rig.launch(rig.script_spec(COPY_DATA, datasets=DATASET))

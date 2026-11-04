@@ -1,19 +1,21 @@
 """The `include` glob dialect, and that matching it can never blow up.
 
-The dialect (docs/launcher.md), matched against manifest paths relative to the dataset root:
+The dialect is the shared contract's (the `include` description in the launch-specification schema),
+matched against manifest paths relative to the dataset root:
 
-* a path segment that is exactly ``**`` matches any number of whole segments, none included;
-  ``**`` inside a longer segment is the same as ``*``;
-* ``*`` matches any run of characters within one segment, ``?`` exactly one character within one
-  segment; neither ever matches ``/``;
-* ``[abc]``, ``[a-c]`` and ``[!abc]`` are classes within one segment; a caret is an ordinary
-  character everywhere (``[^a]`` holds a caret and an ``a``); a ``[`` that is never closed is
-  ordinary too;
-* matching is case-sensitive and a leading dot is not special.
+* ``**/`` at the start of a path segment matches zero or more directories (``a/**/b`` matches
+  ``a/b``);
+* ``**`` anywhere else matches any run of characters, ``/`` included (``a**b`` matches ``a/x/b``);
+* ``*`` matches any run of characters and ``?`` exactly one, neither ever ``/``;
+* ``[abc]``, ``[a-c]`` and ``[!abc]`` are classes; a class NEVER matches ``/`` (``[!a]`` is any one
+  character except ``a`` and ``/``); a caret is an ordinary character everywhere;
+* a ``[`` that is never closed is a literal ``[``; an empty class ``[]`` and an inverted range such
+  as ``[z-a]`` are refused (``bad_include``), and that is exactly the set of patterns refused;
+* matching is case-sensitive, a leading dot is not special, and there are no escapes;
+* matching takes time linear in the pattern's length times the path's length: no backtracking.
 
 The old matcher translated a pattern to a regular expression, which backtracks without bound on
-``**a**a**a**a**a**a**a**a**b`` and ``*a*a*a*a*a*a*a*b``. This one walks segments with explicit
-pointers and is polynomial by construction.
+``**a**a**a**a**a**a**a**a**b`` and ``*a*a*a*a*a*a*a*b``; this one is a bit-parallel automaton.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import time
 
 import pytest
 from dataplane import FIXTURE_ROOT
-from nemar_launch import stage
+from nemar_launch import include, stage
 from nemar_launch.codes import Failure
 
 URL = "https://data.example.test/x"
@@ -127,24 +129,194 @@ def test_an_unclosed_bracket_is_an_ordinary_character_and_a_dot_is_not_special()
     assert selected(["?.b"], paths) == ["a.b"]
 
 
-def test_a_class_may_hold_a_closing_bracket_first_and_dashes_at_the_ends():
+def test_a_hyphen_at_either_end_of_a_class_is_a_literal():
     paths = ["]", "a", "-", "b"]
-    assert selected(["[]a]"], paths) == ["]", "a"]
     assert selected(["[a-]"], paths) == ["a", "-"]
     assert selected(["[-a]"], paths) == ["a", "-"]
     assert selected(["[!a-]"], paths) == ["]", "b"]
+    assert selected(["[a-c-e]"], ["a", "-", "e", "d"]) == ["a", "-", "e"]  # a-c, then - and e
+    assert selected(["[a-a]"], paths) == ["a"]
 
 
-def test_a_double_star_inside_a_longer_segment_is_a_single_star():
-    paths = ["ab", "a/b", "a1b", "a/x/b"]
-    assert selected(["a**b"], paths) == ["ab", "a1b"]
-    assert selected(["a/**/b"], paths) == ["a/b", "a/x/b"]
+def test_double_star_slash_matches_zero_or_more_directories():
+    paths = ["x", "a/x", "a/b/x", "ax", "a/bx", "x/y"]
+    assert selected(["**/x"], paths) == ["x", "a/x", "a/b/x"]
+    assert selected(["a/**/x"], ["a/x", "a/b/x", "a/b/c/x", "ax", "b/x"]) == [
+        "a/x",
+        "a/b/x",
+        "a/b/c/x",
+    ]
+    assert selected(["**/**/x"], paths) == ["x", "a/x", "a/b/x"]
+    assert selected(["a/**/**/x"], ["a/x", "a/b/x"]) == ["a/x", "a/b/x"]
+    assert selected(["**/"], ["a/", "x"]) == ["a/"]  # the slash itself is still needed
 
 
-def test_a_reversed_range_is_a_bad_include():
+def test_double_star_elsewhere_matches_any_run_including_the_slash():
+    paths = ["ab", "a/b", "axb", "a/x/b", "b", "a/x/c"]
+    assert selected(["a**b"], paths) == ["ab", "a/b", "axb", "a/x/b"]
+    assert selected(["a/**"], ["a/", "a/b", "a/b/c", "a", "ab/c"]) == ["a/", "a/b", "a/b/c"]
+    assert selected(["**"], ["a", "a/b", "a/b/c"]) == ["a", "a/b", "a/b/c"]
+    assert selected(["**b"], ["b", "a/b", "ab", "a/c"]) == ["b", "a/b", "ab"]
+    assert selected(["x**/y"], ["x/y", "xa/b/y", "y", "a/x/y"]) == ["x/y", "xa/b/y"]  # not `**/`
+    assert selected(["***/x"], ["x", "a/x", "a/b/x"]) == ["a/x", "a/b/x"]  # three stars: any run
+
+
+def test_star_and_question_mark_never_match_a_slash():
+    paths = ["ab", "a/b", "a/b/c"]
+    assert selected(["a*b"], paths) == ["ab"]
+    assert selected(["a?b"], ["a/b", "axb"]) == ["axb"]
+    assert selected(["*"], paths) == ["ab"]
+    assert selected(["*/*"], paths) == ["a/b"]
+
+
+def test_a_class_never_matches_a_slash_negated_or_not():
+    paths = ["a/c", "abc", "axc", "a-c"]
+    assert selected(["a[!b]c"], paths) == ["axc", "a-c"]  # any character except b and /
+    assert selected(["a[!x]c"], paths) == ["abc", "a-c"]  # still not the slash
+    assert selected(["a[/]c"], paths) == []  # a class holding the slash matches nothing there
+    assert selected(["a[b/]c"], paths) == ["abc"]
+    assert selected(["a[--/]c"], paths) == ["a-c"]  # the range - to / holds `-`, `.` and `/`
+    assert selected(["a[!--/]c"], paths) == ["abc", "axc"]
+    assert selected(["sub-01[!a]eeg/*.edf"], FIXTURE) == []
+
+
+def test_a_bracket_without_a_closing_one_is_a_literal():
+    paths = ["[x", "[", "a[", "[!", "[!abc", "x"]
+    assert selected(["[x"], paths) == ["[x"]
+    assert selected(["["], paths) == ["["]
+    assert selected(["a["], paths) == ["a["]
+    assert selected(["[!"], paths) == ["[!"]
+    assert selected(["[!abc"], paths) == ["[!abc"]
+    assert selected(["[a-c][z-a"], ["b[z-a", "b"]) == ["b[z-a"]  # the second [ is unterminated
+
+
+def test_a_class_ends_at_the_first_closing_bracket():
+    assert selected(["[ab]]"], ["a]", "b]", "a", "]"]) == ["a]", "b]"]
+    assert selected(["[a]z-a]"], ["az-a]", "a"]) == ["az-a]"]
+    assert selected(["[[]"], ["[", "a"]) == ["["]
+    assert selected(["[a[b]"], ["a", "[", "b", "]"]) == ["a", "[", "b"]
+
+
+def test_a_range_is_by_code_point():
+    astral = [chr(0x1F600 + n) for n in range(6)]
+    assert selected(["[{}-{}]".format(chr(0x1F600), chr(0x1F603))], astral) == astral[:4]
+    latin = [chr(0xE8), chr(0xE9), chr(0xFF), chr(0x100)]
+    assert selected(["[{}-{}]".format(chr(0xE9), chr(0xFF))], latin) == latin[1:3]
+
+
+def test_matching_is_case_sensitive_and_a_leading_dot_is_not_special():
+    assert selected(["readme"], ["README", "readme"]) == ["readme"]
+    assert selected(["[a-z]*"], ["abc", "ABC"]) == ["abc"]
+    assert selected(["*"], [".hidden", "a/.b"]) == [".hidden"]
+    assert selected(["**/.b"], ["a/.b", ".b"]) == ["a/.b", ".b"]
+
+
+def test_a_pattern_has_no_escapes():
+    assert selected(["a?b"], ["a?b", "axb"]) == ["a?b", "axb"]  # `?` is the wildcard, not escaped
+    assert selected(["a[?]b"], ["a?b", "axb"]) == ["a?b"]  # inside a class it is a literal
+    assert selected(["a[*]b"], ["a*b", "axb"]) == ["a*b"]
+
+
+# ---- what the dialect refuses: exactly includePatternProblem ---------------------------------------
+
+ACCEPTED = [
+    "",
+    "*",
+    "**",
+    "?",
+    "**/x",
+    "a/**/b",
+    "**/*.set",
+    "sub-*/eeg/*.set",
+    "*.set",
+    "[",
+    "a[",
+    "[abc",
+    "[!",
+    "[!abc",
+    "x[y",
+    "a/[b",
+    "[abc]",
+    "[a-c]",
+    "[!abc]",
+    "[!a-c]",
+    "[0-9a-f]x",
+    "[a-]",
+    "[-a]",
+    "[a-a]",
+    "[--/]",
+    "[a-c-e]",
+    "[a-c-a]",
+    "[cba]",
+    "[zyx]",
+    "[[]",
+    "[a[b]",
+    "[ab]]",
+    "[{}-{}]".format(chr(0x1F600), chr(0x1F603)),
+    "[{}-{}]".format(chr(0x1F600), chr(0x1F600)),
+    "[" + chr(0xE9) + "-" + chr(0xFF) + "]",
+]
+EMPTY_CLASS = ["[]", "[!]", "a[]b", "x/[]/y", "[]]", "[]a]", "[!]a]", "*[]", "[a][]"]
+INVERTED_RANGE = [
+    "[z-a]",
+    "[b-a]",
+    "[9-0]",
+    "[!z-a]",
+    "x[a-c][z-a]",
+    "[a-cz-a]",
+    "[xb-a]",
+    "[a-!]",
+    "[{}-{}]".format(chr(0x1F603), chr(0x1F600)),
+    "[" + chr(0xFF) + "-" + chr(0xE9) + "]",
+    "[~- ]",
+]
+
+
+@pytest.mark.parametrize("pattern", ACCEPTED)
+def test_the_dialect_accepts(pattern):
+    assert include.include_pattern_problem(pattern) is None
+    include.Pattern(pattern)  # compiles
+
+
+@pytest.mark.parametrize("pattern", EMPTY_CLASS)
+def test_an_empty_class_is_refused(pattern):
+    assert include.include_pattern_problem(pattern) == "empty_class"
+    with pytest.raises(include.BadInclude):
+        include.Pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", INVERTED_RANGE)
+def test_an_inverted_range_is_refused(pattern):
+    assert include.include_pattern_problem(pattern) == "inverted_range"
+    with pytest.raises(include.BadInclude):
+        include.Pattern(pattern)
+
+
+def test_the_first_problem_from_the_left_is_the_one_named():
+    assert include.include_pattern_problem("[][z-a]") == "empty_class"
+    assert include.include_pattern_problem("[z-a][]") == "inverted_range"
+    assert include.include_pattern_problem("[a-c][b-a]") == "inverted_range"
+    assert include.include_pattern_problem("[a-c][z-a") is None  # the second [ is unterminated
+    assert include.include_pattern_problem("[a]z-a]") is None  # z-a] is outside any class
+    assert include.include_pattern_problem("[a-c]]") is None
+
+
+@pytest.mark.parametrize("pattern", ["[]", "[z-a]", "ok/[]x", "[!]"])
+def test_select_refuses_a_bad_pattern_as_bad_include(pattern):
     with pytest.raises(Failure) as info:
-        stage.select(entries(["a"]), ["[z-a]"])
+        stage.select(entries(["a"]), ["README", pattern])
     assert (info.value.code, info.value.detail) == ("dataset_fetch_failed", "bad_include")
+
+
+def test_every_pattern_is_checked_even_when_an_earlier_one_matches_everything():
+    with pytest.raises(Failure) as info:
+        stage.select(entries(["a"]), ["**", "[z-a]"])
+    assert info.value.detail == "bad_include"
+
+
+def test_a_bad_pattern_is_refused_whatever_the_manifest_holds():
+    with pytest.raises(Failure):
+        stage.select([], ["[]"])
 
 
 # ---- bounded time ----------------------------------------------------------------------------------

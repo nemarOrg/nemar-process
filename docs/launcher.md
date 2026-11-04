@@ -71,7 +71,7 @@ The Worker resolves whatever spelling the user typed into one of those two befor
 The local copy and the data plane's routes use the same string.
 
 **The image file is named by the image digest.**
-`image.sif` must equal the 64 hexadecimal digits of `image.digest`, then `.sif`; any other value is `invalid_spec`.
+`image.sif` must equal the 64 hexadecimal digits of `image.digest`, then `.sif`, and `image.uri` must end with `image.digest`; any other value is `invalid_spec` (NEMAR's encoder never writes one).
 The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it).
 The launcher does not hash the image: only its name ties it to the digest.
 
@@ -155,14 +155,20 @@ For each dataset the launcher reads `GET <api_base>/data/<id>/<version>/manifest
 Each `bytes_url` must be HTTPS (HTTP only on loopback).
 It selects the files the `include` globs name (all when there are none), and checks the selection against `limits` before fetching any byte.
 
-**The `include` dialect**, matched against manifest paths relative to the dataset root, case-sensitive:
+**The `include` dialect** is the shared contract's (the `include` description in the schema), matched against manifest paths relative to the dataset root, case-sensitive, with no escapes:
 
-- a path segment that is exactly `**` matches any number of whole segments, none included (`**/README` matches a top-level `README`); a trailing `**` after a directory (`sub-01/**`) means everything inside it, at least one segment, and a bare `**` is everything; `**` inside a longer segment is the same as `*`;
-- `*` matches any run of characters within one segment and `?` exactly one; neither matches `/`;
-- `[abc]`, `[a-c]` and `[!abc]` are classes within one segment (a `]` first in a class is a literal; a reversed range is `bad_include`);
-- a caret is an ordinary character everywhere (`[^a]` holds a caret and an `a`); a `[` that is never closed is ordinary too; a leading dot is not special.
+- `**/` at the start of a path segment matches zero or more directories (`a/**/b` matches `a/b`, `**/README` a top-level `README`);
+- `**` anywhere else matches any run of characters including `/` (`a**b` matches `a/x/b`, and `sub-01/**` everything inside `sub-01`); three or more stars in a row are this too, never `**/`;
+- `*` matches any run of characters and `?` exactly one, and neither ever matches `/`;
+- `[abc]`, `[a-c]` and `[!abc]` are classes, by code point; a class never matches `/`, so `[!a]` is any one character except `a` and `/`;
+- a class ends at the first `]` after its start, so `[]` and `[!]` are empty classes; a range that ends before it starts (`[z-a]`) is refused too; a `[` with no `]` after it is a literal `[`;
+- a caret is an ordinary character everywhere (`[^a]` holds a caret and an `a`), and a leading dot is not special.
 
-The matcher walks segments with explicit pointers; its worst case is polynomial, never a regular expression's exponential backtracking.
+An empty class and an inverted range are `bad_include`, and that is the whole of what is refused (`include_pattern_problem`, checked against nemar-cli's own lists by the drift tests).
+Every pattern is compiled before any file is selected, so a refused pattern is `bad_include` whatever else the job names.
+
+Matching never backtracks: a pattern is compiled to an automaton whose states are the bits of one integer, and a path costs its length times a few integer operations (`launcher/nemar_launch/include.py`).
+A regular expression, or a glob that backs up to an earlier `*`, can take exponential or cubic time on a hostile pattern, and a job's author writes the pattern.
 
 - **bind**: when `NEMAR_LOCAL_DATASETS_ROOT` holds `<id>/<version>/` (a real directory, not a symlink) and every selected file there matches the manifest by size and checksum (`SHA256E` sha256, or the git blob SHA-1 for `git`), that directory is mounted read-only; no file is requested.
   A symlink, a missing file, a different byte or an entry without a checksum falls back to download.

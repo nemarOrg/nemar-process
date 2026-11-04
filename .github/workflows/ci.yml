@@ -58,7 +58,10 @@ jobs:
           repository: nemarOrg/nemar-cli
           ref: ${{ steps.pin.outputs.ref }}
           path: .nemar-cli
-          sparse-checkout: shared
+          sparse-checkout: |
+            /shared/
+            /test/compute-contract.unit.test.ts
+          sparse-checkout-cone-mode: false
           fetch-depth: 1
 
       - name: Install Apptainer

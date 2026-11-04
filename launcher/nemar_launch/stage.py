@@ -26,7 +26,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
-from . import net, spec
+from . import include, net, spec
 from .codes import ENV_LOCAL_DATASETS_ROOT, Env, Failure, Stopped
 from .provenance import Log
 
@@ -152,164 +152,19 @@ def fetch_manifest(
 # ---- selection ----------------------------------------------------------------------------------
 
 
-class _Class:
-    """A bracket class within one path segment: ``[abc]``, ``[a-c]``, ``[!abc]``."""
+def select(entries: list[Entry], patterns: list[str] | None) -> list[Entry]:
+    """The entries an ``include`` list picks: any pattern matches (none means all).
 
-    __slots__ = ("negate", "ranges")
-
-    def __init__(self, negate: bool, ranges: list[tuple[str, str]]) -> None:
-        self.negate = negate
-        self.ranges = ranges
-
-    def has(self, char: str) -> bool:
-        found = any(low <= char <= high for low, high in self.ranges)
-        return found != self.negate
-
-
-_ANY = "?"  # tokens are single characters (a literal), _ANY, _STAR or a _Class
-_STAR = "*"
-
-
-def _tokens(segment: str) -> list[object]:
-    """One path segment of a pattern as tokens. A literal is a one-character string, ``?`` and
-    ``*`` are the two wildcards (a literal ``?`` or ``*`` cannot be asked for: there is no escape,
-    the schema forbids the backslash), a class is ``_Class``. ``**`` inside a segment is ``*``."""
-    out: list[object] = []
-    i = 0
-    while i < len(segment):
-        c = segment[i]
-        if c == "*":
-            if not out or out[-1] != _STAR:
-                out.append(_STAR)
-            i += 1
-        elif c == "?":
-            out.append(_ANY)
-            i += 1
-        elif c == "[":
-            j = i + 1
-            negate = j < len(segment) and segment[j] == "!"
-            if negate:
-                j += 1
-            start = j
-            end = segment.find("]", start + 1)  # a `]` first in the class is a literal
-            if end == -1:
-                out.append("[")  # never closed: an ordinary character
-                i += 1
-                continue
-            body = segment[start:end]
-            ranges: list[tuple[str, str]] = []
-            k = 0
-            while k < len(body):
-                if k + 2 < len(body) and body[k + 1] == "-":
-                    if body[k] > body[k + 2]:
-                        raise ValueError("a reversed range")
-                    ranges.append((body[k], body[k + 2]))
-                    k += 3
-                else:
-                    ranges.append((body[k], body[k]))
-                    k += 1
-            out.append(_Class(negate, ranges))
-            i = end + 1
-        else:
-            out.append(c)
-            i += 1
-    return out
-
-
-def _segment_matches(tokens: list[object], text: str) -> bool:
-    """Wildcard matching of one segment by the two-pointer method: on a mismatch go back to the
-    last ``*`` and let it take one more character. Never worse than len(tokens) x len(text)."""
-    t = s = 0
-    star_t = -1
-    star_s = 0
-    n, m = len(tokens), len(text)
-    while s < m:
-        if t < n and tokens[t] == _STAR:
-            star_t, star_s = t, s
-            t += 1
-            continue
-        if t < n:
-            token = tokens[t]
-            if token == _ANY or (
-                token.has(text[s]) if isinstance(token, _Class) else token == text[s]
-            ):
-                t += 1
-                s += 1
-                continue
-        if star_t >= 0:
-            star_s += 1
-            s = star_s
-            t = star_t + 1
-            continue
-        return False
-    while t < n and tokens[t] == _STAR:
-        t += 1
-    return t == n
-
-
-_GLOBSTAR = object()
-
-
-class Glob:
-    """One ``include`` pattern, compiled once. ``match`` takes a manifest path split on ``/``."""
-
-    def __init__(self, pattern: str) -> None:
-        self.pieces: list[object] = []
-        for segment in pattern.split("/"):
-            if segment == "**":
-                if not self.pieces or self.pieces[-1] is not _GLOBSTAR:
-                    self.pieces.append(_GLOBSTAR)
-            elif not any(c in segment for c in "*?["):
-                self.pieces.append(segment)  # a plain segment: compared as text
-            else:
-                self.pieces.append(_tokens(segment))
-        if len(self.pieces) > 1 and self.pieces[-1] is _GLOBSTAR:
-            # `dir/**` means everything INSIDE dir: at least one more segment (a file named `dir`
-            # is not inside itself). A bare `**` is everything.
-            self.pieces.append([_STAR])
-
-    def match(self, segments: list[str]) -> bool:
-        pieces = self.pieces
-        p = s = 0
-        star_p = -1
-        star_s = 0
-        n, m = len(pieces), len(segments)
-        while s < m:
-            if p < n and pieces[p] is _GLOBSTAR:
-                star_p, star_s = p, s
-                p += 1  # try it with no segment first
-                continue
-            if p < n:
-                piece = pieces[p]
-                if isinstance(piece, str):
-                    hit = segments[s] == piece
-                else:
-                    assert isinstance(piece, list)
-                    hit = _segment_matches(piece, segments[s])
-                if hit:
-                    p += 1
-                    s += 1
-                    continue
-            if star_p >= 0:
-                star_s += 1  # let the ``**`` take one more segment
-                s = star_s
-                p = star_p + 1
-                continue
-            return False
-        while p < n and pieces[p] is _GLOBSTAR:
-            p += 1
-        return p == n
-
-
-def select(entries: list[Entry], include: list[str] | None) -> list[Entry]:
-    """The entries an ``include`` list picks: any pattern matches (none means all)."""
-    if not include:
+    Every pattern is compiled first, so one the dialect refuses is ``bad_include`` whatever the
+    others or the manifest hold (the dialect is in ``include.py``).
+    """
+    if not patterns:
         return list(entries)
     try:
-        patterns = [Glob(p) for p in include]
-    except ValueError:
-        raise _fail("bad_include", "an include pattern is not a usable glob") from None
-    return [e for e in entries if any(p.match(e.path.split("/")) for p in patterns)]
+        compiled = [include.Pattern(text) for text in patterns]
+    except include.BadInclude:
+        raise _fail("bad_include", "an include pattern is one the dialect refuses") from None
+    return [e for e in entries if any(p.match(e.path) for p in compiled)]
 
 
 # ---- binding NEMAR's own copy ---------------------------------------------------------------------

@@ -26,11 +26,10 @@ The launcher's validator treats the schema this way because the schema says so; 
 `tests/contract/nemar-cli-pin.json` records, in one place, the nemar-cli commit this repository copies from, and the schema's size and SHA-256 at that commit.
 
 - `test_the_schema_copy_is_the_pinned_bytes` needs no checkout and always runs: the copy must hash to the pinned digest, so it cannot be edited without bumping the pin.
-- `test_the_copies_match_nemar_cli_at_the_pinned_ref`, and the tests of the failure codes, file names, environment names, output limits and results refusals, compare against nemar-cli's own files at the pinned commit.
-  The tests of the declared details (`LAUNCHER_DETAILS`, `PLATFORM_LAUNCHER_DETAILS`) and of `NEMAR_SIF_ROOT` compare as soon as the pinned commit declares them, and skip with a loud message until then; the re-pin to the commit that does makes them a hard comparison.
+- `test_the_copies_match_nemar_cli_at_the_pinned_ref`, and the tests of the failure codes, file names, environment names (`NEMAR_SIF_ROOT` among them), output limits, results refusals, declared details (`LAUNCHER_DETAILS`, `PLATFORM_LAUNCHER_DETAILS`) and the `include` patterns the dialect refuses, compare against nemar-cli's own files at the pinned commit.
   They use a nemar-cli checkout named by `NEMAR_CLI_DIR`, or a `nemar-cli` directory beside this checkout (or beside its worktree directory), through `git show <ref>:<path>`.
   Locally, with no checkout, they skip with a message that says the check did not run.
-  In CI the workflow checks out exactly the pinned commit (sparse, `shared/` only) and sets `NEMAR_REQUIRE_DRIFT=1`, which turns that skip into a failure.
+  In CI the workflow checks out exactly the pinned commit (sparse, `shared/` and `test/`) and sets `NEMAR_REQUIRE_DRIFT=1`, which turns that skip into a failure.
 
 Because the comparison is against a commit and not against a moving branch, CI is never red because nemar-cli moved, and it never skips unnoticed.
 A separate advisory CI job, `nemar-cli-latest`, checks out nemar-cli's `dev` and says in an annotation, without failing, when its schema differs from the copy here, or when `dev` does not have the file yet.
@@ -56,7 +55,7 @@ If a failure code, a launcher file name, an environment name, a declared detail 
 The bump checklist, in full:
 
 1. copy the schema byte for byte and update `tests/contract/nemar-cli-pin.json` (the commands above);
-2. replace the golden vector literals in `tests/launcher/test_golden.py` from nemar-cli's `test/compute-contract.unit.test.ts` (never edit one by hand), and switch the test back to `spec.parse` once the vector is valid under the launcher's own rules;
+2. replace the golden vector literals in `tests/launcher/test_golden.py` from nemar-cli's `test/compute-contract.unit.test.ts` (never edit one by hand), and keep the test on `spec.parse`: the vector must be valid under the launcher's own rules;
 3. update `codes.py` (failure codes, details, platform details, refusal words, limits, environment names);
 4. update the header comment of `launcher/tapisjob_app.sh`, which lists the exit numbers and codes;
 5. update `docs/launcher.md` (the codes and details tables) and `docs/unverified.md`;

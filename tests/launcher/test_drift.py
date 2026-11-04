@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import pytest
-from nemar_launch import codes
+from nemar_launch import codes, include
 from nemar_launch import spec as spec_mod
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,27 +159,48 @@ def ts_details(source: str) -> dict:
 
 def test_the_declared_details_and_who_pays_are_nemar_clis():
     state = at_ref(PIN["words"]["failure_codes"]).decode("utf-8")
-    if "export const LAUNCHER_DETAILS" not in state:
-        # The pinned commit predates the contract follow-up that declares the details. The pin is
-        # held there on purpose until that follow-up is merged; the re-pin turns this into a hard
-        # comparison (and this skip into an error). Say so loudly rather than pass silently.
-        # A skip even in CI (the checkout is there; the pinned commit just predates the contract),
-        # so CI is not red because of a deliberate hold of the pin.
-        pytest.skip(
-            "DETAILS NOT COMPARED: the pinned nemar-cli commit {} does not declare "
-            "LAUNCHER_DETAILS yet; bump the pin to the commit that does".format(PIN["ref"][:12])
-        )
     declared = ts_details(state)
     assert {k: list(v) for k, v in codes.LAUNCHER_DETAILS.items()} == declared
     assert list(codes.PLATFORM_LAUNCHER_DETAILS) == words(state, "PLATFORM_LAUNCHER_DETAILS")
 
 
-def test_nemar_sif_root_is_nemar_clis_once_the_pin_names_it():
+def test_nemar_sif_root_is_nemar_clis():
     source = at_ref(PIN["words"]["launcher_files_and_env"]).decode("utf-8")
-    if not re.search(r"\bSIF_ROOT: ", source):
-        pytest.skip(
-            "SIF_ROOT NOT COMPARED: the pinned nemar-cli commit {} does not name it yet".format(
-                PIN["ref"][:12]
-            )
-        )
     assert env_name(source, "SIF_ROOT") == codes.ENV_SIF_ROOT
+
+
+CONTRACT_TEST = "test/compute-contract.unit.test.ts"
+
+
+def ts_strings(array_source: str) -> list:
+    """The double-quoted string literals of a TypeScript array, with the `\\u{...}` escape read."""
+    found = re.findall(r'"((?:[^"\\]|\\.)*)"', array_source)
+    return [re.sub(r"\\u\{([0-9A-Fa-f]+)\}", lambda m: chr(int(m.group(1), 16)), s) for s in found]
+
+
+def include_cases(source: str, title: str, name: str) -> list:
+    """The patterns of `for (const <name> of [...]) {` that follows the test titled `title`."""
+    after = source[source.index(title) :]
+    block = re.search(r"for \(const " + name + r" of \[(.*?)\]\) \{", after, re.DOTALL)
+    assert block, title
+    return ts_strings(block.group(1))
+
+
+def test_the_patterns_the_dialect_refuses_are_exactly_nemar_clis_lists():
+    source = at_ref(CONTRACT_TEST).decode("utf-8")
+    accepted = include_cases(source, "includePatternProblem accepts every pattern", "ok")
+    empty = include_cases(source, "an empty class is refused as empty_class", "bad")
+    inverted = include_cases(source, "an inverted range is refused as inverted_range", "bad")
+    assert len(accepted) > 25
+    assert len(empty) >= 9
+    assert len(inverted) >= 11
+    for pattern in accepted:
+        assert include.include_pattern_problem(pattern) is None, pattern
+        include.Pattern(pattern)
+    for pattern in empty:
+        assert include.include_pattern_problem(pattern) == "empty_class", pattern
+    for pattern in inverted:
+        assert include.include_pattern_problem(pattern) == "inverted_range", pattern
+    # The two that settle which problem is named first, and where a class ends.
+    assert include.include_pattern_problem("[][z-a]") == "empty_class"
+    assert include.include_pattern_problem("[z-a][]") == "inverted_range"
