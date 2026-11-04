@@ -400,6 +400,42 @@ def test_an_output_exactly_at_the_per_file_limit_is_taken(tmp_path):
     assert [f["size"] for f in done.files] == [10]
 
 
+# ---- the request cannot fit: refused before the files are hashed --------------------------------------
+
+
+def long_named_tree(work, count, unreadable=0):
+    directory = work / "outputs" / ("d" * 200)
+    directory.mkdir(parents=True)
+    for n in range(count):
+        (directory / ("f{:05d}".format(n) + "x" * 190)).write_bytes(b"")
+    for n in range(unreadable):  # sort last; reading one is outputs_unreadable
+        victim = directory / ("zz{:03d}".format(n) + "x" * 190)
+        victim.write_bytes(b"x")
+        victim.chmod(0o000)
+
+
+def test_outputs_that_cannot_fit_the_request_are_refused_before_any_is_hashed(tmp_path):
+    work = tmp_path / "work"
+    long_named_tree(work, 2300, unreadable=2)
+    try:
+        done = finalize(work, max_files=100_000)
+    finally:
+        for victim in (work / "outputs" / ("d" * 200)).glob("zz*"):
+            victim.chmod(0o600)
+    # The unreadable files sort last: had the walk hashed its way to them the failure would be
+    # outputs_unreadable. The request alone (2,300 entries of about 500 bytes) is over 1 MiB.
+    assert done.files == []
+    assert (done.failure.code, done.failure.detail) == ("result_upload_failed", "too_many_outputs")
+
+
+def test_a_request_that_fits_is_not_refused_early(tmp_path):
+    work = tmp_path / "work"
+    long_named_tree(work, 1500)  # about 750 KB of request
+    done = finalize(work, max_files=100_000)
+    assert done.failure is None
+    assert len(done.files) == 1500
+
+
 # ---- a SIGTERM during finalization --------------------------------------------------------------------
 
 GIB = 1 << 30

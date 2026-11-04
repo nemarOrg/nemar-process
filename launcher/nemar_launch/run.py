@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import signal
@@ -52,6 +53,7 @@ from .codes import (
     ENV_SIF_ROOT,
     ENV_SLURM_END_TIME,
     LOG_FILE,
+    OUTPUTS_REQUEST_MAX_BYTES,
     Env,
     Failure,
     Stopped,
@@ -658,6 +660,12 @@ def output_path_ok(relative: str, job_id: str) -> bool:
     return not spec.validate(relative, _output_path_schema())
 
 
+def _request_entry_bytes(relative: str, size: int) -> int:
+    """The bytes one output takes in the outputs request: its compact JSON entry and a comma."""
+    entry = {"path": relative, "size": size, "sha256": "0" * 64}
+    return len(json.dumps(entry, separators=(",", ":"))) + 1
+
+
 def _output_path_schema() -> dict[str, Any]:
     return spec.schema_def("manifest")["properties"]["files"]["items"]["properties"]["path"]
 
@@ -734,6 +742,7 @@ def finalize_outputs(
     skipped = 0
     failure: Failure | None = None
     stopped = False
+    request_bytes = 0
     files: list[dict[str, Any]] = []
 
     def note(kind: str, relative: str) -> None:
@@ -842,6 +851,15 @@ def finalize_outputs(
                 continue
             if info.st_size > max_file_bytes:
                 block(Failure("result_upload_failed", "results_too_large", "outputs too large"))
+                continue
+            # The outputs request lists every file, and the Worker refuses one over 1 MiB: count the
+            # entries as they come (the size and hash have fixed widths, so an estimate is exact
+            # enough) and refuse the moment they cannot fit, before hashing up to 100,000 files only
+            # for the upload to refuse them. The launcher's own files are not counted here, so this
+            # only ever refuses what could not be sent anyway; `Uploader` checks the whole body.
+            request_bytes += _request_entry_bytes(relative, info.st_size)
+            if request_bytes > OUTPUTS_REQUEST_MAX_BYTES:
+                block(Failure("result_upload_failed", "too_many_outputs", "the request is too big"))
                 continue
             try:
                 size, sha256 = _hash_regular(name, info.st_size, stop)
