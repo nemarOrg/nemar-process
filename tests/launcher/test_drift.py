@@ -126,3 +126,58 @@ def test_the_launcher_file_names_and_the_env_allowlist_are_nemar_clis():
     assert env_name(source, "LOCAL_DATASETS_ROOT") == codes.ENV_LOCAL_DATASETS_ROOT
     assert env_name(source, "HOST_PYTHON") == codes.ENV_HOST_PYTHON
     assert env_name(source, "OUT") == codes.ENV_OUT
+
+
+def number(source: str, name: str) -> int:
+    found = re.search(r"export const {} = ([0-9_]+);".format(re.escape(name)), source)
+    assert found, name
+    return int(found.group(1).replace("_", ""))
+
+
+def test_the_output_limits_and_the_results_refusals_are_nemar_clis():
+    contract = at_ref(PIN["words"]["launcher_files_and_env"]).decode("utf-8")
+    assert number(contract, "COMPUTE_MAX_OUTPUT_FILES") == codes.MAX_OUTPUT_FILES
+    assert number(contract, "RESULT_MAX_FILE_BYTES") == codes.MAX_OUTPUT_FILE_BYTES
+    state = at_ref(PIN["words"]["failure_codes"]).decode("utf-8")
+    assert list(codes.RESULT_REFUSAL_DETAILS) == words(state, "RESULT_REFUSAL_DETAILS")
+
+
+def ts_details(source: str) -> dict:
+    """nemar-cli's `LAUNCHER_DETAILS` object as a dict of lists (its one spread, of
+    RESULT_REFUSAL_DETAILS, expanded)."""
+    block = re.search(
+        r"export const LAUNCHER_DETAILS = \{(.*?)\n\} as const satisfies", source, re.DOTALL
+    )
+    assert block, "LAUNCHER_DETAILS"
+    spread = words(source, "RESULT_REFUSAL_DETAILS")
+    table = {}
+    for name, body in re.findall(r"\n  (\w+): \[(.*?)\],", block.group(0) + "\n", re.DOTALL):
+        listed = re.findall(r'"([^"]+)"', body)
+        table[name] = spread + listed if "...RESULT_REFUSAL_DETAILS" in body else listed
+    return table
+
+
+def test_the_declared_details_and_who_pays_are_nemar_clis():
+    state = at_ref(PIN["words"]["failure_codes"]).decode("utf-8")
+    if "export const LAUNCHER_DETAILS" not in state:
+        # The pinned commit predates the contract follow-up that declares the details. The pin is
+        # held there on purpose until that follow-up is merged; the re-pin turns this into a hard
+        # comparison (and this skip into an error). Say so loudly rather than pass silently.
+        not_run(
+            "DETAILS NOT COMPARED: the pinned nemar-cli commit {} does not declare "
+            "LAUNCHER_DETAILS yet; bump the pin to the commit that does".format(PIN["ref"][:12])
+        )
+    declared = ts_details(state)
+    assert {k: list(v) for k, v in codes.LAUNCHER_DETAILS.items()} == declared
+    assert list(codes.PLATFORM_LAUNCHER_DETAILS) == words(state, "PLATFORM_LAUNCHER_DETAILS")
+
+
+def test_nemar_sif_root_is_nemar_clis_once_the_pin_names_it():
+    source = at_ref(PIN["words"]["launcher_files_and_env"]).decode("utf-8")
+    if not re.search(r"\bSIF_ROOT: ", source):
+        not_run(
+            "SIF_ROOT NOT COMPARED: the pinned nemar-cli commit {} does not name it yet".format(
+                PIN["ref"][:12]
+            )
+        )
+    assert env_name(source, "SIF_ROOT") == codes.ENV_SIF_ROOT

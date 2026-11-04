@@ -132,3 +132,15 @@ def test_the_wording_in_the_source_has_no_transport_word_as_a_detail():
     for _code, detail, where in raised_details():
         assert not detail.startswith("http_"), (detail, where)
         assert detail not in {"timeout", "network_error", "redirect_refused", "truncated"}, where
+
+
+def test_the_upload_order_is_a_permutation_of_the_launcher_files_with_result_last():
+    assert sorted(codes.UPLOAD_ORDER) == sorted(codes.LAUNCHER_FILES)
+    assert len(codes.UPLOAD_ORDER) == 4
+    assert codes.UPLOAD_ORDER[-1] == codes.RESULT_FILE
+    assert codes.LAUNCHER_FILES == (
+        codes.RESULT_FILE,
+        codes.PROVENANCE_FILE,
+        codes.MANIFEST_FILE,
+        codes.LOG_FILE,
+    )
