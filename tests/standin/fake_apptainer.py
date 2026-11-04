@@ -42,8 +42,24 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
             os.kill(os.getppid(), signal.SIGTERM)
             time.sleep(0.2)
         return 0
+    if argv[:1] == ["buildcfg"]:
+        # The real runtime prints its compile-time settings, SYSCONFDIR among them, one KEY=value a
+        # line. This one answers only when a test names the directory.
+        named = record_path + ".sysconfdir"
+        if not os.path.exists(named):
+            print("fake apptainer: no buildcfg here", file=sys.stderr)
+            return 2
+        with open(named, encoding="utf-8") as handle:
+            print(
+                "PACKAGE_NAME={}\nSYSCONFDIR={}\nLOCALSTATEDIR=/var".format(
+                    name, handle.read().strip()
+                )
+            )
+        return 0
     if argv[:1] != ["exec"]:
-        print("fake apptainer: only 'exec' and '--version' are supported", file=sys.stderr)
+        print(
+            "fake apptainer: only 'exec', 'buildcfg' and '--version' are supported", file=sys.stderr
+        )
         return 2
     rest = argv[1:]
     options: list[tuple[str, str]] = []
@@ -141,6 +157,10 @@ def install(bin_dir: str, record_path: str, name: str = "apptainer") -> str:
             )
         )
     os.chmod(path, 0o755)
+    conf_dir = os.path.join(os.path.dirname(os.path.abspath(bin_dir)), "etc", name)
+    os.makedirs(conf_dir, exist_ok=True)
+    with open(os.path.join(conf_dir, name + ".conf"), "w", encoding="utf-8") as handle:
+        handle.write("# the stand-in's configuration\nallow pid ns = yes\n")
     return path
 
 

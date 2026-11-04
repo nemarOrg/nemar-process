@@ -29,6 +29,7 @@ import pytest
 from conftest import BINARY, REQUIRE
 from harness import SIF_NAME, Rig, make_bundle
 from nemar_launch import run
+from nemar_launch.codes import Env
 
 pytestmark = pytest.mark.apptainer
 
@@ -191,4 +192,11 @@ def test_the_preflight_probe_reports_a_shared_namespace_when_containall_is_left_
 def test_the_runtimes_own_configuration_is_readable_by_the_launcher(runtime_config):
     path = shutil.which(binary())
     assert path is not None
-    assert run.allow_pid_namespace(path) in (True, False)
+    setting = run.pid_namespace_setting(path, Env())
+    assert setting.allowed is True, setting.source  # a fresh install allows it
+    assert os.path.isfile(setting.source)
+    # `buildcfg` is how the runtime names its own configuration directory; if it says, that is a
+    # real directory (where it does not say, the usual places are still tried).
+    named = run.buildcfg_sysconfdir(path, Env())
+    assert named is None or os.path.isdir(named)
+    assert run.runtime_config_paths(path, Env())

@@ -281,6 +281,14 @@ class Rig:
         launcher does after choosing the runtime and the image and before it fetches anything."""
         Path(str(self.runtime_record) + ".term-parent").write_text("1")
 
+    def conf_path(self) -> Path:
+        """The stand-in runtime's configuration file, beside its install prefix."""
+        return self.tmp / "etc" / "apptainer" / "apptainer.conf"
+
+    def point_buildcfg_at(self, directory: Path) -> None:
+        """Make `apptainer buildcfg` name this SYSCONFDIR."""
+        Path(str(self.runtime_record) + ".sysconfdir").write_text(str(directory))
+
     def runtime_calls(self) -> list:
         if not self.runtime_record.exists():
             return []

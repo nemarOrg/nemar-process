@@ -265,36 +265,83 @@ PID_NAMESPACE_PROBE = (
     "    sys.exit(4)\n"
     "sys.exit(3 if inside == sys.argv[1] else 0)\n"
 )
-_ALLOW_PID_NS = re.compile(r"^\s*allow\s+pid\s+ns\s*=\s*(\S+)", re.IGNORECASE)
+_ALLOW_PID_NS = re.compile(r"^\s*allow\s+pid\s+ns\s*=\s*(\S*)", re.IGNORECASE)
+_SYSCONFDIR = re.compile(r"^SYSCONFDIR=(\S.*)$", re.MULTILINE)
+BUILDCFG_SECONDS = 10
 
 
-def runtime_config_paths(runtime_path: str) -> list[str]:
-    """Where the runtime's configuration may be: beside the install prefix, then the usual places."""
+class PidNamespaceSetting(NamedTuple):
+    """What the runtime's configuration says: ``allowed`` is False when it forbids a PID namespace,
+    True when it allows one, None when that cannot be told; ``source`` says which file or why not
+    (it goes in the log, so the record is honest about which check ran)."""
+
+    allowed: bool | None
+    source: str
+
+
+def buildcfg_sysconfdir(runtime_path: str, env: Env) -> str | None:
+    """The runtime's own ``SYSCONFDIR``, from ``<runtime> buildcfg`` (None if it will not say)."""
+    try:
+        done = subprocess.run(
+            [runtime_path, "buildcfg"],
+            env=runtime_environment(env),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=BUILDCFG_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    found = _SYSCONFDIR.search(done.stdout.decode("utf-8", "replace"))
+    return found.group(1).strip() if found else None
+
+
+def runtime_config_paths(runtime_path: str, env: Env) -> list[str]:
+    """Where the runtime's configuration may be: where the runtime itself says (``buildcfg``), then
+    beside the install prefix and the usual places."""
     name = os.path.basename(runtime_path)
     prefix = os.path.dirname(os.path.dirname(os.path.realpath(runtime_path)))
-    return [
+    paths = []
+    sysconfdir = buildcfg_sysconfdir(runtime_path, env)
+    if sysconfdir:
+        paths.append(os.path.join(sysconfdir, name, name + ".conf"))
+    paths += [
         os.path.join(prefix, "etc", name, name + ".conf"),
         "/usr/local/etc/{0}/{0}.conf".format(name),
         "/etc/{0}/{0}.conf".format(name),
     ]
+    return paths
 
 
-def allow_pid_namespace(runtime_path: str) -> bool | None:
-    """``allow pid ns`` from the runtime's configuration: False for ``no``, True otherwise, None
-    when no configuration file could be read (the preflight then has to prove it)."""
-    for path in runtime_config_paths(runtime_path):
+def pid_namespace_setting(runtime_path: str, env: Env) -> PidNamespaceSetting:
+    """``allow pid ns`` from the first runtime configuration that exists.
+
+    ``no`` is False and ``yes`` is True; a configuration that does not mention it is the runtime's
+    default, which is ``yes``. None, with the reason, when nothing can be relied on: no file found,
+    the file exists but cannot be read, or the setting is neither ``yes`` nor ``no`` (a later line
+    wins, as the runtime reads it).
+    """
+    for path in runtime_config_paths(runtime_path, env):
+        if not os.path.exists(path):
+            continue
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
                 lines = handle.read().splitlines()
         except OSError:
-            continue
+            return PidNamespaceSetting(None, "{} exists but cannot be read".format(path))
         value = None
         for line in lines:
             found = _ALLOW_PID_NS.match(line)
             if found:
                 value = found.group(1).lower()
-        return value != "no"
-    return None
+        if value in (None, "yes"):
+            return PidNamespaceSetting(True, path)
+        if value == "no":
+            return PidNamespaceSetting(False, path)
+        return PidNamespaceSetting(None, "{} has an ambiguous allow pid ns setting".format(path))
+    return PidNamespaceSetting(None, "configuration not found")
 
 
 def own_pid_namespace() -> str | None:
@@ -317,22 +364,36 @@ def require_pid_namespace(
     """Before any user code runs: prove the container will not share the launcher's PID namespace.
 
     A shared one would let user code read the launcher's environment (the job token) from
-    ``/proc``. Two checks. The runtime's configuration, when readable, must not say
-    ``allow pid ns = no``. For ``runtime: python`` (whose image has a Python) a preflight then
-    runs a probe in the job's own image with the same isolation flags, and the probe must report a
-    namespace other than the launcher's; it cannot be told apart otherwise, since a runtime that is
-    not allowed a PID namespace carries on without one. A user image (``runtime: image``) has no
-    Python we can count on, so only the configuration is checked. Failure:
-    ``pid_namespace_unavailable``; a runtime that cannot start at all: ``runtime_unusable``.
+    ``/proc``. This fails CLOSED: if the namespace cannot be verified, the job is refused with
+    ``pid_namespace_unavailable``. Two checks, and the log says which one ran. The runtime's
+    configuration, when it can be read, must not say ``allow pid ns = no``. For ``runtime: python``
+    (whose image has a Python) a preflight then runs a probe in the job's own image with the same
+    isolation flags, and the probe must report a namespace other than the launcher's (it cannot
+    be told apart otherwise, since a runtime that is not allowed a PID namespace carries on
+    without one); that proof stands even where the configuration cannot be found. A user image
+    (``runtime: image``) has no Python we can count on, and where the launcher has no ``/proc`` to
+    compare, so only the configuration can verify it: found, readable and saying ``yes``. A runtime
+    that cannot start at all: ``runtime_unusable``.
     """
-    if allow_pid_namespace(runtime_path) is False:
+    setting = pid_namespace_setting(runtime_path, env)
+    if setting.allowed is False:
         raise Failure(
             "runtime_error", "pid_namespace_unavailable", "the runtime's configuration forbids it"
         )
     ours = own_pid_namespace()
     if job.runtime != "python" or ours is None:
-        log.info("pid namespace: configuration checked; no preflight for this job")
-        return
+        if setting.allowed is True:
+            log.info(
+                "pid namespace: allowed by the runtime configuration {}; no preflight "
+                "(a user image has no Python to count on, or this host has no /proc)".format(
+                    setting.source
+                )
+            )
+            return
+        log.error("pid namespace cannot be verified: {}".format(setting.source))
+        raise Failure(
+            "runtime_error", "pid_namespace_unavailable", "it cannot be verified: no configuration"
+        )
     binds = [Bind(layout.work, CONTAINER_WORK, False), Bind(tmp_dir, "/tmp", False)]  # noqa: S108
     check_bind_sources(binds)
     argv = [runtime_path, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
@@ -354,7 +415,10 @@ def require_pid_namespace(
     except (OSError, subprocess.SubprocessError):
         raise Failure("runtime_error", "runtime_unusable", "the preflight could not run") from None
     if done.returncode == 0:
-        log.info("pid namespace: the preflight saw a namespace of its own")
+        log.info(
+            "pid namespace: proven by a preflight probe in the job's image "
+            "(configuration: {})".format(setting.source)
+        )
         return
     if done.returncode in (3, 4):
         raise Failure(

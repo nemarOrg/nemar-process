@@ -508,12 +508,87 @@ def test_an_image_job_is_checked_by_the_configuration_only(rig):
     launch = rig.launch(rig.script_spec("true\n"))
     assert launch.exit == 0
     assert rig.preflight_calls() == []
+    # Say honestly which check ran: the file, not "checked".
+    assert "allowed by the runtime configuration" in launch.log
+    assert str(rig.conf_path()) in launch.log
+    assert "no preflight" in launch.log
 
 
-def conf_for(rig, text):
-    directory = rig.tmp / "etc" / "apptainer"
-    directory.mkdir(parents=True)
-    (directory / "apptainer.conf").write_text(text)
+def refused_before_user_code(rig, launch):
+    assert launch.exit == 13
+    assert launch.result["failure_code"] == "runtime_error"
+    assert launch.result["detail"] == "pid_namespace_unavailable"
+    assert rig.runtime_calls() == []
+    assert rig.preflight_calls() == []
+
+
+def test_an_image_job_whose_configuration_is_not_found_is_refused_not_run_unchecked(rig):
+    rig.conf_path().unlink()
+    launch = rig.launch(rig.script_spec("true\n"))
+    refused_before_user_code(rig, launch)
+    assert "cannot be verified" in launch.log
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
+def test_an_image_job_whose_configuration_cannot_be_read_is_refused(rig):
+    rig.conf_path().chmod(0o000)
+    try:
+        launch = rig.launch(rig.script_spec("true\n"))
+    finally:
+        rig.conf_path().chmod(0o600)
+    refused_before_user_code(rig, launch)
+    assert "cannot be read" in launch.log
+
+
+@pytest.mark.parametrize(
+    "text", ["allow pid ns = maybe\n", "allow pid ns =\n", "allow pid ns = 1\n"]
+)
+def test_an_image_job_whose_configuration_is_ambiguous_is_refused(rig, text):
+    rig.conf_path().write_text(text)
+    launch = rig.launch(rig.script_spec("true\n"))
+    refused_before_user_code(rig, launch)
+    assert "ambiguous" in launch.log
+
+
+def test_a_configuration_that_forbids_it_is_refused_before_anything(rig):
+    rig.conf_path().write_text("allow pid ns = no\n")
+    refused_before_user_code(rig, rig.launch(rig.script_spec("true\n")))
+
+
+def test_the_configuration_is_found_through_buildcfg_when_the_usual_places_have_none(rig):
+    elsewhere = rig.tmp / "elsewhere"
+    (elsewhere / "apptainer").mkdir(parents=True)
+    (elsewhere / "apptainer" / "apptainer.conf").write_text("allow pid ns = yes\n")
+    rig.conf_path().unlink()
+    rig.point_buildcfg_at(elsewhere)
+    launch = rig.launch(rig.script_spec("true\n"))
+    assert launch.exit == 0, launch.log
+    assert str(elsewhere / "apptainer" / "apptainer.conf") in launch.log
+
+
+def test_the_configuration_buildcfg_names_wins_over_a_guess_beside_the_prefix(rig):
+    elsewhere = rig.tmp / "elsewhere"
+    (elsewhere / "apptainer").mkdir(parents=True)
+    (elsewhere / "apptainer" / "apptainer.conf").write_text("allow pid ns = no\n")
+    rig.point_buildcfg_at(elsewhere)  # the prefix guess says yes; the runtime's own place says no
+    refused_before_user_code(rig, rig.launch(rig.script_spec("true\n")))
+
+
+@pytest.mark.skipif(HAS_PID_NS, reason="the probe can prove it here")
+def test_a_python_job_with_no_probe_and_no_configuration_is_refused(rig):
+    rig.conf_path().unlink()
+    refused_before_user_code(rig, rig.launch(entry_spec(rig)))
+
+
+@pytest.mark.skipif(
+    not HAS_PID_NS, reason="no PID namespace file here (the preflight runs on Linux)"
+)
+def test_a_python_job_is_proven_by_the_probe_even_without_a_configuration(rig):
+    rig.conf_path().unlink()
+    launch = rig.launch(entry_spec(rig))
+    assert launch.exit == 0, launch.log
+    assert "proven by a preflight probe" in launch.log
+    assert "configuration not found" in launch.log
 
 
 @pytest.mark.parametrize(
@@ -524,26 +599,27 @@ def conf_for(rig, text):
         ("# allow pid ns = no\nallow pid ns = yes\n", True),
         ("allow pid ns = yes\nallow pid ns = no\n", False),
         ("  Allow  PID  NS  =  No  \n", False),
-        ("unrelated = no\n", True),
+        ("unrelated = no\n", True),  # the line is absent: the runtime's default, which is yes
+        ("allow pid ns = maybe\n", None),
+        ("allow pid ns = yes\nallow pid ns = perhaps\n", None),
     ],
 )
 def test_the_configuration_says_whether_a_pid_namespace_is_allowed(rig, text, expected):
     from nemar_launch import run as run_module
+    from nemar_launch.codes import Env
 
-    conf_for(rig, text)
-    assert run_module.allow_pid_namespace(str(rig.bin_dir / "apptainer")) is expected
+    rig.conf_path().write_text(text)
+    setting = run_module.pid_namespace_setting(str(rig.bin_dir / "apptainer"), Env({}))
+    assert setting.allowed is expected
+    assert str(rig.conf_path()) in setting.source
 
 
-def test_without_a_readable_configuration_it_is_unknown(rig):
+def test_without_any_configuration_the_setting_is_unknown_and_says_why(rig):
     from nemar_launch import run as run_module
+    from nemar_launch.codes import Env
 
-    assert run_module.allow_pid_namespace(str(rig.bin_dir / "apptainer")) in (None, True, False)
-
-
-def test_a_configuration_that_forbids_a_pid_namespace_stops_the_job_before_anything(rig):
-    conf_for(rig, "allow pid ns = no\n")
-    launch = rig.launch(entry_spec(rig))
-    assert launch.exit == 13
-    assert launch.result["detail"] == "pid_namespace_unavailable"
-    assert rig.runtime_calls() == []
-    assert rig.preflight_calls() == []
+    rig.conf_path().unlink()
+    setting = run_module.pid_namespace_setting(str(rig.bin_dir / "apptainer"), Env({}))
+    if setting.allowed is not None:  # a host that has a system-wide configuration of its own
+        pytest.skip("this host has a runtime configuration in a usual place")
+    assert "not found" in setting.source
