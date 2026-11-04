@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
+import io
+import shutil
+import subprocess
 import tarfile
 
 import pytest
@@ -59,7 +63,10 @@ def test_a_route_refusal_is_code_fetch_failed_and_is_not_retried(rig):
     launch = rig.launch(rig.script_spec(HELLO))
     assert launch.exit == 10
     assert launch.result["failure_code"] == "code_fetch_failed"
-    assert launch.result["detail"] == "bad_state"
+    # A route's own refusal is `fetch_failed` like any other failure of the exchange; the exact
+    # word is in the log line only.
+    assert launch.result["detail"] == "fetch_failed"
+    assert "bad_state" in launch.log
     assert rig.server.count("POST", "/compute/jobs/{}/bundle".format(JOB_ID)) == 1
     assert rig.server.count("GET", "/s3/") == 0
 
@@ -83,7 +90,8 @@ def test_five_attempts_then_give_up_with_backoff_between_them(rig):
     rig.callbacks.bundle_route_statuses = [503] * 5
     launch = rig.launch(rig.script_spec(HELLO), sleep=delays.append)
     assert launch.exit == 10
-    assert launch.result["detail"] == "http_503"
+    assert launch.result["detail"] == "fetch_failed"
+    assert "http_503" in launch.log
     assert rig.server.count("POST", "/compute/jobs/{}/bundle".format(JOB_ID)) == 5
     assert len(delays) == 4
     assert all(0 <= d <= 30 for d in delays)
@@ -139,6 +147,11 @@ def regular(name: str, data: bytes = b"x") -> tuple:
 HOSTILE = {
     "dotdot": [regular("../x")],
     "nested dotdot": [regular("a/../../x")],
+    "dotdot in the middle": [regular("a/../x")],
+    "dot segment in the middle": [regular("a/./x")],
+    "empty segment": [regular("a//x")],
+    "dotdot after a dot": [regular("./../x")],
+    "the root as a file": [regular(".")],
     "absolute": [regular("/tmp/nemar-absolute")],
     "symlink": [(tarinfo("link", tarfile.SYMTYPE, linkname="/etc/passwd"), None)],
     "symlink to dotdot": [(tarinfo("link", tarfile.SYMTYPE, linkname="../x"), None)],
@@ -147,6 +160,14 @@ HOSTILE = {
     "block device": [(tarinfo("blk", tarfile.BLKTYPE, devmajor=7, devminor=0), None)],
     "fifo": [(tarinfo("pipe", tarfile.FIFOTYPE), None)],
     "duplicate": [regular("dup", b"1"), regular("dup", b"2")],
+    "duplicate directory": [
+        (tarinfo("sub", tarfile.DIRTYPE, mode=0o755), None),
+        (tarinfo("sub", tarfile.DIRTYPE, mode=0o755), None),
+    ],
+    "directory then file of the same name": [
+        (tarinfo("clash", tarfile.DIRTYPE, mode=0o755), None),
+        regular("clash", b"1"),
+    ],
     "file under a file": [regular("f", b"1"), regular("f/g", b"2")],
 }
 
@@ -162,9 +183,168 @@ def test_a_hostile_archive_is_refused_before_anything_is_extracted(rig, name):
     assert launch.result["failure_code"] == "code_fetch_failed"
     assert launch.result["detail"] == "unsafe_archive"
     assert rig.runtime_calls() == []
-    assert not (rig.scratch / "x").exists()
-    assert not list(rig.scratch.glob("*/good.txt"))
     assert not list(rig.tmp.glob("**/nemar-absolute"))
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE))
+def test_a_hostile_archive_leaves_the_destination_untouched(tmp_path, name):
+    # Through the extractor itself, into a destination of our own: refused means NOTHING exists
+    # afterwards, not the destination and not the good member that came first.
+    archive = tmp_path / "bundle.tar.gz"
+    archive.write_bytes(make_tar([regular("good.txt", b"fine"), *HOSTILE[name]]))
+    dest = tmp_path / "code"
+    with pytest.raises(codes.Failure) as info:
+        bundle_mod.extract_archive(str(archive), str(dest))
+    assert (info.value.code, info.value.detail) == ("code_fetch_failed", "unsafe_archive")
+    assert not dest.exists()
+    assert not (tmp_path / "x").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bundle.tar.gz"]
+
+
+def test_member_path_refuses_an_absolute_name():
+    for name in ("/abs", "/", "", "a\0b"):
+        with pytest.raises(codes.Failure):
+            bundle_mod._member_path(name)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("a/b", "a/b"),
+        ("./a/b", "a/b"),
+        ("././a", "a"),
+        ("a/", "a"),
+        ("./a/", "a"),
+        (".", None),
+        ("./", None),
+        ("././", None),
+    ],
+)
+def test_member_path_strips_a_leading_dot_slash_and_knows_the_root(name, expected):
+    assert bundle_mod._member_path(name) == expected
+
+
+@pytest.mark.parametrize("name", ["..", "./..", "a/..", "a/../b", "a//b", "a/./b", "./a//b", "//a"])
+def test_member_path_still_refuses_dot_dot_empty_segments_and_slashes(name):
+    with pytest.raises(codes.Failure):
+        bundle_mod._member_path(name)
+
+
+def dot_archive(tmp_path, files):
+    """What ``tar -czf bundle.tar.gz -C dir .`` writes: ``.``, then ``./name`` for everything."""
+    source = tmp_path / "dir"
+    for name, content in files.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        path.chmod(0o755 if name.endswith(".sh") else 0o644)
+    archive = tmp_path / "dot.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(source, arcname=".")
+    return archive
+
+
+def test_an_archive_made_with_tar_dash_C_dir_dot_extracts(tmp_path):
+    archive = dot_archive(tmp_path, {"run.sh": "echo hi\n", "data/in.txt": "x"})
+    with tarfile.open(archive) as tar:
+        assert tar.getnames()[0] == "."  # the shape this is about
+        assert all(n == "." or n.startswith("./") for n in tar.getnames())
+    dest = tmp_path / "code"
+    bundle_mod.extract_archive(str(archive), str(dest))
+    assert (dest / "run.sh").read_text() == "echo hi\n"
+    assert (dest / "data" / "in.txt").read_text() == "x"
+    assert not (dest / ".").is_symlink()
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="no tar binary")
+def test_an_archive_made_by_the_tar_command_extracts_and_runs(rig, tmp_path):
+    source = tmp_path / "dir"
+    source.mkdir()
+    (source / "run.sh").write_text('#!/bin/sh\nprintf made-by-tar > "$NEMAR_OUT/t"\n')
+    (source / "run.sh").chmod(0o755)
+    archive = tmp_path / "bundle.tar.gz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "."], check=True)
+    spec = rig.spec(command=["/code/run.sh"], bundle=rig.set_bundle(archive.read_bytes()))
+    launch = rig.launch(spec)
+    assert launch.exit == 0, launch.log
+    assert (launch.out / "work" / "outputs" / "t").read_text() == "made-by-tar"
+
+
+# ---- limits on what an archive may make us read -------------------------------------------------
+
+
+def test_a_gnu_long_name_over_the_header_cap_is_refused(tmp_path):
+    archive = tmp_path / "a.tar.gz"
+    info = tarinfo("x" * 2_000_000)
+    info.size = 1
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
+        tar.addfile(info, io.BytesIO(b"x"))
+    archive.write_bytes(buffer.getvalue())
+    with pytest.raises(codes.Failure) as failure:
+        bundle_mod.extract_archive(str(archive), str(tmp_path / "code"))
+    assert (failure.value.code, failure.value.detail) == ("code_fetch_failed", "archive_too_large")
+    assert not (tmp_path / "code").exists()
+
+
+def test_a_pax_header_over_the_cap_is_refused(tmp_path):
+    archive = tmp_path / "a.tar.gz"
+    info = tarinfo("ok")
+    info.size = 1
+    info.pax_headers = {"comment": "c" * 2_000_000}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        tar.addfile(info, io.BytesIO(b"x"))
+    archive.write_bytes(buffer.getvalue())
+    with pytest.raises(codes.Failure) as failure:
+        bundle_mod.extract_archive(str(archive), str(tmp_path / "code"))
+    assert failure.value.detail == "archive_too_large"
+    assert not (tmp_path / "code").exists()
+
+
+def test_an_ordinary_long_name_still_extracts(tmp_path):
+    archive = tmp_path / "a.tar.gz"
+    name = "d/" + "n" * 150 + ".txt"
+    archive.write_bytes(make_tar([regular(name, b"ok")]))
+    bundle_mod.extract_archive(str(archive), str(tmp_path / "code"))
+    assert (tmp_path / "code" / name).read_bytes() == b"ok"
+
+
+def test_the_decompressed_stream_is_bounded(tmp_path):
+    path = tmp_path / "zeros.gz"
+    with gzip.open(path, "wb") as handle:
+        handle.write(b"\0" * 100_000)
+    stream = bundle_mod._BoundedGzip(str(path), 10_000)
+    with pytest.raises(bundle_mod._StreamTooLarge):
+        stream.read(50_000)
+    stream.close()
+    within = bundle_mod._BoundedGzip(str(path), 200_000)
+    assert len(within.read(50_000)) == 50_000
+    within.close()
+
+
+def test_a_redirect_from_the_presigned_address_to_storage_is_followed(rig):
+    rig.callbacks.bundle_get_redirect = "/s3/stored/{}.tar.gz".format(JOB_ID)
+    launch = rig.launch(rig.script_spec(HELLO))
+    assert launch.exit == 0, launch.log
+    assert rig.server.count("GET", "/s3/stored/") == 1
+
+
+def test_a_redirect_down_to_plain_http_off_loopback_is_refused(rig):
+    rig.callbacks.bundle_get_redirect = "http://203.0.113.9/stored.tar.gz"
+    launch = rig.launch(rig.script_spec(HELLO))
+    assert launch.exit == 10
+    assert launch.result["detail"] == "fetch_failed"
+    assert "redirect_refused" in launch.log
+
+
+def test_a_bundle_address_that_is_not_https_or_not_an_address_is_bad_response(rig):
+    for url in ("http://203.0.113.9/b", "http://127.0.0.1:99999/b", "ftp://x/b"):
+        rig.reset_out()
+        rig.callbacks.bundle_response_override = {"url": url, "expires_at": "2026-11-04T12:00:00Z"}
+        launch = rig.launch(rig.script_spec(HELLO))
+        assert launch.exit == 10, url
+        assert launch.result["detail"] == "bad_response", url
 
 
 def test_a_clean_archive_extracts_with_modes_kept_and_runs(rig):

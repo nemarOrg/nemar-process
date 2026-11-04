@@ -13,17 +13,22 @@ setgid, sticky and group/world-write bits removed.
 
 from __future__ import annotations
 
+import gzip
 import os
 import posixpath
 import tarfile
 import threading
 
 from . import net, spec
-from .codes import Failure, is_word
+from .codes import Failure
 from .provenance import Log
 
 MAX_EXTRACT_BYTES = 4 * 1024**3
 MAX_MEMBERS = 100_000
+# A GNU long name or a pax header is read into memory whole; no honest one is this large.
+MAX_HEADER_BYTES = 1024 * 1024
+# What the decompressed stream may hold beyond the file data it declares: tar headers and padding.
+STREAM_SLACK_BYTES = 128 * 1024 * 1024
 ARCHIVE_NAME = "bundle.tar.gz"
 
 
@@ -35,10 +40,56 @@ def _unsafe(message: str) -> Failure:
     return Failure("code_fetch_failed", "unsafe_archive", message)
 
 
-def _member_path(name: str) -> str:
-    """The normalised relative path of a member, or raise: absolute, dot-dot and empty are refused."""
+def _too_large(message: str) -> Failure:
+    return Failure("code_fetch_failed", "archive_too_large", message)
+
+
+class _StreamTooLarge(Exception):
+    """The decompressed stream is longer than any honest archive of this size."""
+
+
+class _BoundedGzip(gzip.GzipFile):
+    """A gzip file that refuses to decompress past ``limit`` bytes (a decompression bomb)."""
+
+    def __init__(self, filename: str, limit: int) -> None:
+        super().__init__(filename, "rb")
+        self._limit = limit
+
+    def read(self, size: int | None = -1) -> bytes:
+        data = super().read(size)
+        if self.tell() > self._limit:
+            raise _StreamTooLarge
+        return data
+
+
+class _LimitedTarInfo(tarfile.TarInfo):
+    """A member header that refuses a GNU long name or a pax block over ``MAX_HEADER_BYTES``
+    before it is read into memory."""
+
+    def _proc_gnulong(self, tarfile):  # type: ignore[no-untyped-def]
+        if self.size > MAX_HEADER_BYTES:
+            raise _StreamTooLarge
+        return getattr(super(), "_proc_gnulong")(tarfile)  # noqa: B009 - a private method
+
+    def _proc_pax(self, tarfile):  # type: ignore[no-untyped-def]
+        if self.size > MAX_HEADER_BYTES:
+            raise _StreamTooLarge
+        return getattr(super(), "_proc_pax")(tarfile)  # noqa: B009 - a private method
+
+
+def _member_path(name: str) -> str | None:
+    """The normalised relative path of a member; None for the archive root itself.
+
+    ``tar -czf bundle.tar.gz -C dir .`` writes ``.``, ``./`` and ``./name``: a leading ``./`` is
+    stripped and the root entry is allowed. Refused: an absolute or empty name, ``..``, an empty
+    segment (``a//b``), a ``.`` anywhere but the start.
+    """
     if not name or "\0" in name or name.startswith("/"):
         raise _unsafe("a member has an absolute or empty name")
+    while name.startswith("./"):
+        name = name[2:]
+    if name in ("", "."):
+        return None
     parts = name.split("/")
     # A trailing slash on a directory name is ordinary; an empty or dot segment elsewhere is not.
     if parts[-1] == "":
@@ -54,35 +105,50 @@ def extract_archive(archive: str, dest: str) -> int:
     Refused, each as ``code_fetch_failed`` with detail ``unsafe_archive``: an absolute name or one
     containing ``..``, a link of any kind, a device, a FIFO or any other member that is neither a
     regular file nor a directory, a duplicate name, a file below a file, or a file that is not
-    readable as a gzip tar at all. ``archive_too_large`` for more than ``MAX_MEMBERS`` members or
-    ``MAX_EXTRACT_BYTES`` bytes. Returns the number of bytes extracted.
+    readable as a gzip tar at all. ``archive_too_large`` for more than ``MAX_MEMBERS`` members
+    (counted while reading the headers, not after), more than ``MAX_EXTRACT_BYTES`` of file data, a
+    decompressed stream beyond that plus ``STREAM_SLACK_BYTES``, or a long-name or pax header over
+    ``MAX_HEADER_BYTES``. Returns the number of bytes extracted. Nothing is created until every
+    member has been judged.
     """
     try:
-        tar = tarfile.open(archive, mode="r:gz")  # noqa: SIM115 - entered by the with below
+        stream = _BoundedGzip(archive, MAX_EXTRACT_BYTES + STREAM_SLACK_BYTES)
+        tar = tarfile.open(  # noqa: SIM115 - entered by the with below
+            fileobj=stream, mode="r:", tarinfo=_LimitedTarInfo
+        )
+    except _StreamTooLarge:
+        raise _too_large("a header is too large") from None
     except (tarfile.TarError, OSError, EOFError):
         raise _unsafe("not a readable gzip tar archive") from None
-    with tar:
-        try:
-            members = tar.getmembers()
-        except (tarfile.TarError, OSError, EOFError):
-            raise _unsafe("not a readable gzip tar archive") from None
-        if len(members) > MAX_MEMBERS:
-            raise Failure("code_fetch_failed", "archive_too_large", "too many members")
+    with tar, stream:
         planned: list[tuple[tarfile.TarInfo, str]] = []
         seen: dict[str, bool] = {}  # path -> is a directory
         declared = 0
-        for member in members:
-            if not (member.isreg() or member.isdir()):
-                raise _unsafe("a member is a link, a device or another special file")
-            path = _member_path(member.name)
-            if path in seen:
-                raise _unsafe("a member name appears twice")
-            seen[path] = member.isdir()
-            if member.isreg():
-                declared += member.size
-                if declared > MAX_EXTRACT_BYTES:
-                    raise Failure("code_fetch_failed", "archive_too_large", "archive too large")
-            planned.append((member, path))
+        count = 0
+        try:
+            for member in tar:
+                count += 1
+                if count > MAX_MEMBERS:
+                    raise _too_large("too many members")
+                if not (member.isreg() or member.isdir()):
+                    raise _unsafe("a member is a link, a device or another special file")
+                path = _member_path(member.name)
+                if path is None:
+                    if not member.isdir():
+                        raise _unsafe("the archive root is not a directory")
+                    continue
+                if path in seen:
+                    raise _unsafe("a member name appears twice")
+                seen[path] = member.isdir()
+                if member.isreg():
+                    declared += member.size
+                    if declared > MAX_EXTRACT_BYTES:
+                        raise _too_large("archive too large")
+                planned.append((member, path))
+        except _StreamTooLarge:
+            raise _too_large("the archive expands past its limit") from None
+        except (tarfile.TarError, OSError, EOFError):
+            raise _unsafe("not a readable gzip tar archive") from None
         for _member, path in planned:
             parent = posixpath.dirname(path)
             while parent:
@@ -112,15 +178,18 @@ def extract_archive(archive: str, dest: str) -> int:
                 fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
             except OSError:
                 raise _unsafe("a member could not be created") from None
-            with os.fdopen(fd, "wb") as out:
-                while True:
-                    chunk = source.read(net.CHUNK)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if written > MAX_EXTRACT_BYTES:
-                        raise Failure("code_fetch_failed", "archive_too_large", "archive too large")
-                    out.write(chunk)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    while True:
+                        chunk = source.read(net.CHUNK)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > MAX_EXTRACT_BYTES:
+                            raise _too_large("archive too large")
+                        out.write(chunk)
+            except _StreamTooLarge:
+                raise _too_large("the archive expands past its limit") from None
             os.chmod(target, mode)
         return written
 
@@ -155,15 +224,19 @@ def fetch(
             on_retry=retry_note,
         )
     except net.HttpFailure as failure:
-        detail = failure.code if is_word(failure.code) else failure.word
+        # A refusal (job_not_found, bad_state, ...) and a transport fault alike are `fetch_failed`;
+        # the exact word is for this line only.
+        log.error("bundle route failed ({})".format(net.describe(failure)))
         raise Failure(
-            "code_fetch_failed", detail, "bundle route refused ({})".format(failure.word)
+            "code_fetch_failed", net.transport_detail(failure), "bundle route failed"
         ) from None
     if spec.validate(answer, spec.schema_def("bundle_response")):
         raise Failure(
             "code_fetch_failed", "bad_response", "bundle route answered with the wrong shape"
         )
     download_url = answer["url"]
+    if not net.url_allowed(download_url):
+        raise Failure("code_fetch_failed", "bad_response", "the bundle address is not https")
     log.info("bundle: downloading {}".format(net.redact(download_url)))
     checker = net.Checker(job.bundle["size"], "SHA256", job.bundle["sha256"])
 
@@ -177,10 +250,14 @@ def fetch(
     try:
         net.download(download_url, archive, checker, sleep=sleep, stop=stop, on_retry=download_note)
     except net.Download as failure:
-        detail = "digest_mismatch" if failure.word == "checksum_mismatch" else failure.word
-        raise Failure(
-            "code_fetch_failed", detail, "bundle download failed ({})".format(failure.word)
-        ) from None
+        log.error("bundle download failed ({})".format(failure.original))
+        if failure.word == "checksum_mismatch":
+            detail = "digest_mismatch"
+        elif failure.word == "file_not_found":
+            detail = "fetch_failed"  # a presigned address that is gone is a fault of the exchange
+        else:
+            detail = failure.word
+        raise Failure("code_fetch_failed", detail, "bundle download failed") from None
     log.info("bundle: {} bytes, sha256 verified".format(job.bundle["size"]))
     extracted = extract_archive(archive, code_dir)
     log.info("bundle: extracted {} bytes".format(extracted))
