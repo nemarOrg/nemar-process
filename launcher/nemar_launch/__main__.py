@@ -333,8 +333,8 @@ def _finish(
                 state.outputs_blocked = True
             if finalized.stopped:
                 # A SIGTERM during finalization: nothing was hashed and no output goes, so the
-                # record can be written and uploaded inside the scheduler's grace period.
-                state.fail(run.terminated_failure(terminator, env))
+                # record can be written and uploaded inside the scheduler's grace period. The
+                # termination itself is recorded just below, from the signal.
                 state.outputs_blocked = True
         except Exception as error:  # noqa: BLE001
             state.fail(_unexpected("runtime_error", error, log))

@@ -421,7 +421,8 @@ def stop_after(seconds):
 def test_the_stop_event_ends_the_hashing_of_a_large_output_at_once(tmp_path):
     work = tmp_path / "work"
     (work / "outputs").mkdir(parents=True)
-    sparse(work / "outputs" / "big", GIB)
+    (work / "outputs" / "a").write_bytes(b"hashed before the stop")  # sorts first, so it is hashed
+    sparse(work / "outputs" / "z-big", GIB)
     stop, timer = stop_after(0.2)
     started = time.monotonic()
     try:
@@ -430,7 +431,7 @@ def test_the_stop_event_ends_the_hashing_of_a_large_output_at_once(tmp_path):
         timer.cancel()
     assert time.monotonic() - started < STOP_BOUND
     assert done.stopped is True
-    assert done.files == []
+    assert done.files == []  # not even the one that was hashed: nothing is uploaded after a stop
     assert done.failure is None  # the termination is recorded by the caller, which knows which kind
 
 

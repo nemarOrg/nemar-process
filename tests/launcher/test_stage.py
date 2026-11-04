@@ -436,6 +436,22 @@ def test_a_stop_event_already_set_verifies_nothing(tmp_path):
         stage.verify_local(str(tmp_path), [entry], Log(None), stop)
 
 
+def test_a_stop_event_already_set_ends_verification_even_for_an_entry_that_cannot_be_verified(
+    tmp_path,
+):
+    import threading
+
+    from nemar_launch import stage
+    from nemar_launch.codes import Stopped
+    from nemar_launch.provenance import Log
+
+    entry = stage.Entry("f", 1, None, None, "https://data.example.test/f")  # no checksum
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(Stopped):
+        stage.verify_local(str(tmp_path), [entry], Log(None), stop)
+
+
 def test_without_a_stop_event_verification_is_as_before(tmp_path):
     import hashlib
     import threading

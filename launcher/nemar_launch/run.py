@@ -843,9 +843,6 @@ def finalize_outputs(
             if info.st_size > max_file_bytes:
                 block(Failure("result_upload_failed", "results_too_large", "outputs too large"))
                 continue
-            if stop is not None and stop.is_set():
-                stopped = True
-                continue
             try:
                 size, sha256 = _hash_regular(name, info.st_size, stop)
             except Stopped:
@@ -863,7 +860,7 @@ def finalize_outputs(
         log.warning("... and {} more removed".format(removed - _LOG_LIMIT))
     if stopped:
         log.warning("outputs: not hashed, the job was terminated ({} removed)".format(removed))
-        return Finalized([], failure, True)
+        return Finalized([], None, True)  # hashing stopped first, so no failure was found
     if failure is not None:
         log.info("outputs: none uploaded ({} removed, {} skipped)".format(removed, skipped))
         return Finalized([], failure)
