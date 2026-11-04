@@ -370,6 +370,36 @@ def test_a_sigterm_while_datasets_stage_runs_nothing_and_claims_nothing(rig):
     assert '"terminated"' in (rig.out / "launcher" / "result.json").read_text()
 
 
+def test_a_sigterm_before_the_run_is_recorded_and_the_entry_never_runs(rig):
+    # Nothing is staged and the stop is set when the container would start: it must not start.
+    rig.terminate_the_launcher_during_the_version_call()
+    launch = rig.launch(rig.spec(command=["true"]))
+    assert launch.exit == 13
+    assert (launch.result["failure_code"], launch.result["detail"]) == (
+        "runtime_error",
+        "terminated",
+    )
+    assert rig.runtime_calls() == []
+
+
+def test_a_sigterm_before_staging_fetches_no_file_and_claims_none_staged(rig):
+    rig.terminate_the_launcher_during_the_version_call()
+    dataset = [{"id": "nm000104", "version": "v1.0.2"}]
+    launch = rig.launch(rig.spec(command=["true"], datasets=dataset))
+    assert launch.exit == 13
+    assert launch.result["detail"] == "terminated"
+    assert launch.provenance["staging"] == []
+    fetched = [r for r in rig.server.requests if r.path.startswith("/data/")]
+    assert [r.path for r in fetched if not r.path.endswith("manifest.json")] == []
+    assert rig.runtime_calls() == []
+
+
+def test_the_exit_code_file_is_owner_only(rig):
+    proc, written = run_script(rig, rig.script_spec("true\n"))
+    assert written == "0\n", proc.stderr
+    assert stat.S_IMODE(os.stat(rig.out / "tapisjob.exitcode").st_mode) == 0o600
+
+
 def test_terminated_failure_by_the_end_time_with_an_injected_timestamp():
     from nemar_launch import run
     from nemar_launch.codes import Env

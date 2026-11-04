@@ -69,6 +69,7 @@ class Callbacks:
         self.put_delay = 0.0
         self.puts_in_flight = 0
         self.omit_from_plan: set[str] = set()
+        self.upload_url_base: str | None = None  # give every upload address this base instead
         self.outputs_raw: bytes | None = None  # answer the outputs route with exactly these bytes
         self.expire_urls_once = False  # first PUT of the run answers 403
         # records -------------------------------------------------------------------------------
@@ -188,7 +189,10 @@ class Callbacks:
                 {
                     "path": key,
                     "url": "{}/s3/jobs/{}/{}?{}".format(
-                        self.server.base_url, self.job_id, quote(key), PRESIGN_QUERY
+                        self.upload_url_base or self.server.base_url,
+                        self.job_id,
+                        quote(key),
+                        PRESIGN_QUERY,
                     ),
                     "an_upload_key_added_later": True,
                 }

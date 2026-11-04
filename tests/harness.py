@@ -276,6 +276,11 @@ class Rig:
         """Make the stand-in runtime answer the PID namespace probe: isolated, shared or unknown."""
         Path(str(self.runtime_record) + ".pidns").write_text(mode)
 
+    def terminate_the_launcher_during_the_version_call(self) -> None:
+        """The stand-in runtime sends the launcher a SIGTERM when asked for its version, which the
+        launcher does after choosing the runtime and the image and before it fetches anything."""
+        Path(str(self.runtime_record) + ".term-parent").write_text("1")
+
     def runtime_calls(self) -> list:
         if not self.runtime_record.exists():
             return []

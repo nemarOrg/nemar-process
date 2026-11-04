@@ -24,7 +24,9 @@ from __future__ import annotations
 import csv
 import json
 import os
+import signal
 import sys
+import time
 
 VALUELESS = {"--containall", "--cleanenv", "--no-home", "--nv"}
 VALUED = {"--pwd", "--bind", "--env", "--no-mount"}
@@ -34,6 +36,11 @@ PROBE_MARKER = "# nemar-pid-namespace-probe"
 def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
     if argv[:1] == ["--version"]:
         print("{} version 0.0.0-standin".format(name))
+        if os.path.exists(record_path + ".term-parent"):
+            # The launcher asks for the version after it has chosen the runtime and the image and
+            # before it fetches or stages anything: a deterministic moment for a cancel.
+            os.kill(os.getppid(), signal.SIGTERM)
+            time.sleep(0.2)
         return 0
     if argv[:1] != ["exec"]:
         print("fake apptainer: only 'exec' and '--version' are supported", file=sys.stderr)

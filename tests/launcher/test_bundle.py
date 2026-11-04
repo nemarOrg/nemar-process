@@ -331,7 +331,9 @@ def test_a_redirect_from_the_presigned_address_to_storage_is_followed(rig):
 
 
 def test_a_redirect_down_to_plain_http_off_loopback_is_refused(rig):
-    rig.callbacks.bundle_get_redirect = "http://203.0.113.9/stored.tar.gz"
+    rig.callbacks.bundle_get_redirect = (
+        "http://0.0.0.0:1/stored.tar.gz"  # a missing check cannot hang
+    )
     launch = rig.launch(rig.script_spec(HELLO))
     assert launch.exit == 10
     assert launch.result["detail"] == "fetch_failed"
@@ -339,7 +341,7 @@ def test_a_redirect_down_to_plain_http_off_loopback_is_refused(rig):
 
 
 def test_a_bundle_address_that_is_not_https_or_not_an_address_is_bad_response(rig):
-    for url in ("http://203.0.113.9/b", "http://127.0.0.1:99999/b", "ftp://x/b"):
+    for url in ("http://0.0.0.0:1/b", "http://127.0.0.1:99999/b", "ftp://x/b"):
         rig.reset_out()
         rig.callbacks.bundle_response_override = {"url": url, "expires_at": "2026-11-04T12:00:00Z"}
         launch = rig.launch(rig.script_spec(HELLO))
@@ -378,6 +380,21 @@ def test_an_archive_that_expands_past_the_cap_is_refused(tmp_path, monkeypatch):
     with pytest.raises(codes.Failure) as info:
         bundle_mod.extract_archive(str(archive), str(tmp_path / "code"))
     assert (info.value.code, info.value.detail) == ("code_fetch_failed", "archive_too_large")
+    assert not (
+        tmp_path / "code"
+    ).exists()  # refused on the declared sizes, before anything is made
+
+
+def test_the_declared_sizes_are_added_up_across_members(tmp_path, monkeypatch):
+    archive = tmp_path / "a.tar.gz"
+    archive.write_bytes(make_bundle({"a": b"0" * 600, "b": b"0" * 600}))
+    monkeypatch.setattr(bundle_mod, "MAX_EXTRACT_BYTES", 1000)
+    with pytest.raises(codes.Failure) as info:
+        bundle_mod.extract_archive(str(archive), str(tmp_path / "code"))
+    assert info.value.detail == "archive_too_large"
+    assert not (tmp_path / "code").exists()
+    archive.write_bytes(make_bundle({"a": b"0" * 500, "b": b"0" * 500}))  # exactly the cap
+    assert bundle_mod.extract_archive(str(archive), str(tmp_path / "code")) == 1000
 
 
 def test_an_archive_with_too_many_members_is_refused(tmp_path, monkeypatch):

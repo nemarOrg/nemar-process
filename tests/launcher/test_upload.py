@@ -132,6 +132,17 @@ def test_when_every_put_answers_403_the_run_is_bounded(rig):
         assert rig.callbacks.events.count("put-403:" + key) <= 3
 
 
+def test_an_upload_address_that_is_not_https_is_refused_before_any_put(rig):
+    # 0.0.0.0 is refused at once by a connecting client too, so a missing check cannot hang here.
+    rig.callbacks.upload_url_base = "http://0.0.0.0:1"
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 16
+    assert launch.result["failure_code"] == "result_upload_failed"
+    assert launch.result["detail"] == "bad_response"
+    assert rig.callbacks.objects == {}
+    assert "not https" in launch.log
+
+
 def test_a_cap_refusal_still_uploads_the_launcher_files_then_fails(rig):
     rig.callbacks.outputs_refusal = (413, "results_too_large")
     launch = rig.launch(rig.script_spec(WRITE))

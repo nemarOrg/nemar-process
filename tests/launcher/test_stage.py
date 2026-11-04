@@ -272,7 +272,7 @@ def test_a_duplicate_manifest_path_and_a_file_under_a_file_are_refused(rig):
 
 
 @pytest.mark.parametrize(
-    "url", ["http://203.0.113.5/x", "http://127.0.0.1:99999/x", "ftp://x/y", "https:///nohost"]
+    "url", ["http://0.0.0.0:1/x", "http://127.0.0.1:99999/x", "ftp://x/y", "https:///nohost"]
 )
 def test_a_manifest_address_that_is_not_https_or_not_an_address_is_refused(rig, url):
     rig.plane.manifest_transform = lambda entries: [dict(entries[0], bytes_url=url), *entries[1:]]

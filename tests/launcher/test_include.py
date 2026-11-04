@@ -157,7 +157,10 @@ def test_double_star_elsewhere_matches_any_run_including_the_slash():
     assert selected(["a/**"], ["a/", "a/b", "a/b/c", "a", "ab/c"]) == ["a/", "a/b", "a/b/c"]
     assert selected(["**"], ["a", "a/b", "a/b/c"]) == ["a", "a/b", "a/b/c"]
     assert selected(["**b"], ["b", "a/b", "ab", "a/c"]) == ["b", "a/b", "ab"]
-    assert selected(["x**/y"], ["x/y", "xa/b/y", "y", "a/x/y"]) == ["x/y", "xa/b/y"]  # not `**/`
+    assert selected(["x**/y"], ["x/y", "xa/b/y", "y", "xy", "a/x/y"]) == [
+        "x/y",
+        "xa/b/y",
+    ]  # not `**/`
     assert selected(["***/x"], ["x", "a/x", "a/b/x"]) == ["a/x", "a/b/x"]  # three stars: any run
 
 
