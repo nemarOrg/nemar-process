@@ -294,26 +294,38 @@ def test_the_output_directory_is_required(rig):
 
 # ---- a SIGTERM that arrives late, or early ----------------------------------------------------------
 
-LATE_TERM = (
-    "L=$PPID\n"
-    'for n in 1 2 3 4 5 6; do printf "$n" > "$NEMAR_OUT/f$n"; done\n'
-    "( sleep 0.3; kill -TERM $L ) &\n"
-)
+SIX_OUTPUTS = 'for n in 1 2 3 4 5 6; do printf "$n" > "$NEMAR_OUT/f$n"; done\n'
 
 
 def outputs_uploaded(rig):
     return sorted(k for k in rig.callbacks.objects if k.startswith("outputs/"))
 
 
-def test_a_sigterm_during_the_upload_is_recorded_and_no_further_output_starts(rig):
-    # The entry exits at once, so the container is long gone when the signal arrives; the result
-    # must still not say success for a job that was terminated. Each PUT takes 0.4 s, four run at a
-    # time, so the signal lands while the first four are in flight and the last two never start.
+def terminate_during_the_upload(rig, **extra):
+    """Run the wrapper on an entry that exits at once, and send it a SIGTERM while the first PUTs
+    are in flight: the container is long gone, only the upload is under way."""
     rig.callbacks.put_delay = 0.4
-    spec = rig.script_spec(LATE_TERM)
-    proc, written = run_script(rig, spec)
-    assert proc.returncode == 13, proc.stderr
-    assert written == "13\n"
+    proc = subprocess.Popen(
+        ["/bin/sh", str(SCRIPT)],
+        env=child_env(rig, rig.script_spec(SIX_OUTPUTS), **extra),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=str(rig.tmp),
+    )
+    assert wait_for(lambda: rig.callbacks.puts_in_flight > 0), "the upload never started"
+    proc.send_signal(signal.SIGTERM)
+    finish(proc)
+    return proc
+
+
+def test_a_sigterm_during_the_upload_is_recorded_and_no_further_output_starts(rig):
+    # The result must not say success for a job that was terminated, even though the container had
+    # exited before the signal came. Each PUT takes 0.4 s and four run at a time, so the last two
+    # outputs have not started when the signal lands, and must never start.
+    proc = terminate_during_the_upload(rig)
+    assert proc.returncode == 13
+    assert (rig.out / "tapisjob.exitcode").read_text() == "13\n"
     assert b'"terminated"' in rig.callbacks.objects["launcher/result.json"]
     assert len(outputs_uploaded(rig)) < 6
     assert "complete" not in rig.callbacks.events
@@ -321,10 +333,9 @@ def test_a_sigterm_during_the_upload_is_recorded_and_no_further_output_starts(ri
 
 
 def test_a_late_sigterm_near_the_end_time_is_time_limit(rig):
-    rig.callbacks.put_delay = 0.4
     end = str(int(time.time()) + 60)
-    proc, _written = run_script(rig, rig.script_spec(LATE_TERM), SLURM_JOB_END_TIME=end)
-    assert proc.returncode == 15, proc.stderr
+    proc = terminate_during_the_upload(rig, SLURM_JOB_END_TIME=end)
+    assert proc.returncode == 15
     assert b'"time_limit"' in rig.callbacks.objects["launcher/result.json"]
 
 

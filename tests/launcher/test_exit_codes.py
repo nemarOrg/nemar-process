@@ -66,7 +66,10 @@ def test_the_runtime_itself_failing_is_a_runtime_error(either_rig):
     )
     assert launch.exit == 13
     assert launch.result["failure_code"] == "runtime_error"
-    assert launch.result["entry_exit_code"] in (127, 255)
+    # 255 is the runtime's own failure (a program it could not execute); anything else is the entry's.
+    code = launch.result["entry_exit_code"]
+    assert code in (127, 255)
+    assert launch.result["detail"] == ("runtime_unusable" if code == 255 else "entry_failed")
 
 
 @pytest.mark.parametrize("code", [0, 3, 137])

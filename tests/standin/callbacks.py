@@ -55,6 +55,7 @@ class Callbacks:
         self.put_redirect_to: str | None = None  # answer every PUT with a 307 to this path
         self.bundle_get_statuses: list[int] = []
         self.bundle_get_truncate_once = False
+        self.bundle_get_redirect: str | None = None  # 302 the presigned GET here (storage)
         self.outputs_refusal: tuple[int, str] | None = None  # refuses a non-empty outputs list
         self.outputs_route_statuses: list[int] = []
         self.put_statuses: dict[str, list[int]] = {}  # key -> statuses answered in order
@@ -64,10 +65,11 @@ class Callbacks:
         # answered in order before the normal answer: ("drop",) closes the connection after the
         # request was recorded (an ambiguous outcome), (409, "results_incomplete") refuses
         self.complete_queue: list[tuple] = []
-        self.put_delay = (
-            0.0  # seconds every PUT takes, so a test can signal the launcher mid-upload
-        )
+        # seconds every PUT takes, so a test can signal the launcher mid-upload
+        self.put_delay = 0.0
+        self.puts_in_flight = 0
         self.omit_from_plan: set[str] = set()
+        self.outputs_raw: bytes | None = None  # answer the outputs route with exactly these bytes
         self.expire_urls_once = False  # first PUT of the run answers 403
         # records -------------------------------------------------------------------------------
         self.objects: dict[str, bytes] = {}
@@ -96,6 +98,10 @@ class Callbacks:
         if request.method == "POST" and request.path == base + "outputs/complete":
             return self._complete(request)
         if request.method == "GET" and request.path == "/s3/bundle/{}.tar.gz".format(self.job_id):
+            if self.bundle_get_redirect is not None:
+                return Response(status=302, headers={"Location": self.bundle_get_redirect})
+            return self._bundle_get(request)
+        if request.method == "GET" and request.path == "/s3/stored/{}.tar.gz".format(self.job_id):
             return self._bundle_get(request)
         if request.method == "PUT" and request.path.startswith("/s3/jobs/{}/".format(self.job_id)):
             return self._put(request)
@@ -138,6 +144,7 @@ class Callbacks:
                 return Response.json_body(self.bundle_get_statuses.pop(0), {"error": "injected"})
             truncate = self.bundle_get_truncate_once
             self.bundle_get_truncate_once = False
+        self.bundle_get_redirect: str | None = None  # 302 the presigned GET here (storage)
         data = self.bundle_bytes
         if truncate:
             return Response(status=200, body=data, truncate_after=len(data) // 2)
@@ -163,6 +170,10 @@ class Callbacks:
                 self.events.append("outputs")
                 return Response.json_body(statuses.pop(0), {"error": "try again later"})
         self._event("outputs")
+        if self.outputs_raw is not None:
+            return Response(
+                status=200, body=self.outputs_raw, headers={"Content-Type": "application/json"}
+            )
         if self.outputs_refusal is not None and body.get("outputs"):
             return self._refuse(*self.outputs_refusal)
         assert self.server is not None
@@ -189,7 +200,11 @@ class Callbacks:
     def _put(self, request: Request) -> Response:
         key = unquote(request.path[len("/s3/jobs/{}/".format(self.job_id)) :])
         if self.put_delay:
+            with self._lock:
+                self.puts_in_flight += 1
             time.sleep(self.put_delay)
+            with self._lock:
+                self.puts_in_flight -= 1
         declared = request.headers.get("content-length")
         if declared is None or int(declared) != len(request.body):
             return Response.json_body(400, {"error": "length mismatch"})

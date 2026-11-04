@@ -12,9 +12,26 @@ import shutil
 
 import fake_apptainer
 import pytest
-from harness import DATASET_ID, DATASET_VERSION, IMAGE_DIGEST, IMAGE_URI, SIF_NAME, make_bundle
+from harness import (
+    DATASET_ID,
+    DATASET_VERSION,
+    IMAGE_DIGEST,
+    IMAGE_URI,
+    SIF_NAME,
+    encode_spec,
+    make_bundle,
+)
 
 DATASET = [{"id": DATASET_ID, "version": DATASET_VERSION, "include": ["README"]}]
+
+
+def fetched(rig):
+    """What was fetched for the job: the bundle and the datasets (not the launcher's own upload)."""
+    return [
+        r
+        for r in rig.server.requests
+        if r.path.endswith("/bundle") or r.path.startswith(("/data/", "/files/", "/s3/bundle"))
+    ]
 
 
 def entry_spec(rig, files=None, **overrides):
@@ -193,6 +210,7 @@ def test_no_container_runtime_is_a_runtime_error(rig):
     assert launch.exit == 13
     assert launch.result["failure_code"] == "runtime_error"
     assert launch.result["detail"] == "no_container_runtime"
+    assert not fetched(rig)  # nothing was fetched for a job that cannot run
 
 
 def test_a_missing_image_file_is_a_runtime_error_before_the_container_starts(rig):
@@ -201,6 +219,7 @@ def test_a_missing_image_file_is_a_runtime_error_before_the_container_starts(rig
     assert launch.exit == 13
     assert launch.result["detail"] == "image_missing"
     assert rig.runtime_calls() == []
+    assert not fetched(rig)  # the bundle was not downloaded for a missing image
 
 
 def test_an_unset_or_empty_sif_root_has_no_fallback_and_is_image_missing(
@@ -359,3 +378,172 @@ def test_env_arguments_are_quoted_only_when_they_must_be():
     assert env_argument("MPLBACKEND", "a b = c") == "MPLBACKEND=a b = c"
     assert env_argument("X", "1,2") == '"X=1,2"'
     assert env_argument("X", 'say "hi"') == '"X=say ""hi"""'
+
+
+# ---- fail fast, in this order: runtime and image, bundle and entry, PID namespace, datasets ----------
+
+
+def test_a_missing_entry_wastes_no_dataset_download(rig):
+    launch = rig.launch(entry_spec(rig, {"other.py": "x"}, datasets=DATASET))
+    assert launch.exit == 12
+    assert [r for r in rig.server.requests if r.path.startswith(("/data/", "/files/"))] == []
+    assert rig.preflight_calls() == []
+
+
+def test_a_staging_failure_does_not_mask_entry_not_found(rig):
+    from dataplane import Fault
+
+    rig.plane.fault("README", Fault.lost())
+    launch = rig.launch(entry_spec(rig, {"other.py": "x"}, datasets=DATASET))
+    assert launch.exit == 12
+    assert launch.result["failure_code"] == "entry_not_found"
+
+
+# ---- the container's process group, memory priority and GPUs --------------------------------------
+
+
+def test_what_the_entry_leaves_running_is_killed_with_the_container(rig):
+    script = '( sleep 30 ) &\necho $! > "$NEMAR_OUT/../child.pid"\n'
+    launch = rig.launch(rig.script_spec(script))
+    assert launch.exit == 0, launch.log
+    pid = int((rig.out / "work" / "child.pid").read_text())
+    import time
+
+    deadline = time.monotonic() + 5
+    gone = False
+    while time.monotonic() < deadline and not gone:
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            gone = True
+    assert gone, "a process of the entry outlived the run"
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/proc/self/oom_score_adj"), reason="no /proc on this system"
+)
+def test_the_container_is_the_first_choice_of_the_out_of_memory_killer(rig):
+    launch = rig.launch(rig.script_spec('cat /proc/self/oom_score_adj > "$NEMAR_OUT/oom"\n'))
+    assert launch.exit == 0, launch.log
+    assert (launch.out / "work" / "outputs" / "oom").read_text().strip() == "1000"
+
+
+def gpu_spec(rig, **overrides):
+    bundle = rig.set_bundle(make_bundle({"run.py": "pass\n"}))
+    return rig.spec(runtime="python", entry="run.py", bundle=bundle, **overrides)
+
+
+def test_cuda_visible_devices_is_passed_for_a_gpu_job_when_it_is_plain(rig):
+    launch = rig.launch(gpu_spec(rig, resources={"gpus": 2}), CUDA_VISIBLE_DEVICES="0,1")
+    assert launch.exit == 0, launch.log
+    argv = rig.runtime_calls()[0]["argv"]
+    assert "--nv" in argv
+    assert argv[argv.index('"CUDA_VISIBLE_DEVICES=0,1"') - 1] == "--env"
+    # after the job's own variables, before NEMAR_OUT
+    assert argv.index('"CUDA_VISIBLE_DEVICES=0,1"') < argv.index("NEMAR_OUT=/work/outputs")
+
+
+@pytest.mark.parametrize(
+    "value", ["GPU-1a2b3c4d-0000-1111-2222-333344445555", "MIG-GPU-1a2b/1/0", "0"]
+)
+def test_cuda_visible_devices_accepts_ids_and_uuids(rig, value):
+    from nemar_launch import run as run_module
+    from nemar_launch.codes import Env
+    from nemar_launch.spec import parse
+
+    job = parse(encode_spec(gpu_spec(rig, resources={"gpus": 1})))
+    got = run_module.cuda_visible_devices(job, Env({b"CUDA_VISIBLE_DEVICES": value.encode()}))
+    assert got == (value if "/" not in value else None)
+
+
+@pytest.mark.parametrize("value", ["0; rm -rf /", "$(id)", "", "a" * 200, "0 1", "`x`", "-1\n"])
+def test_a_cuda_visible_devices_that_is_not_plain_is_not_passed(rig, value):
+    launch = rig.launch(gpu_spec(rig, resources={"gpus": 1}), CUDA_VISIBLE_DEVICES=value)
+    assert launch.exit == 0, launch.log
+    assert not [a for a in rig.runtime_calls()[0]["argv"] if "CUDA_VISIBLE_DEVICES" in a]
+
+
+def test_cuda_visible_devices_is_not_passed_to_a_cpu_job(rig):
+    launch = rig.launch(entry_spec(rig), CUDA_VISIBLE_DEVICES="0")
+    assert launch.exit == 0
+    assert not [a for a in rig.runtime_calls()[0]["argv"] if "CUDA_VISIBLE_DEVICES" in a]
+
+
+# ---- the PID namespace preflight, against the stand-in runtime ------------------------------------
+
+
+HAS_PID_NS = os.path.exists("/proc/self/ns/pid")
+
+
+@pytest.mark.skipif(
+    not HAS_PID_NS, reason="no PID namespace file here (the preflight runs on Linux)"
+)
+def test_a_python_job_runs_the_preflight_with_the_same_isolation_flags(rig):
+    launch = rig.launch(entry_spec(rig))
+    assert launch.exit == 0, launch.log
+    (call,) = rig.preflight_calls()
+    argv = call["argv"]
+    for flag in ("--containall", "--cleanenv", "--no-home"):
+        assert flag in argv
+    assert argv[argv.index("--no-mount") + 1] == "bind-paths"
+    assert not [a for a in argv if a.endswith(":ro")]  # no user code or data in the probe
+    assert rig.runtime_calls()  # and the job itself ran after it
+
+
+@pytest.mark.skipif(
+    not HAS_PID_NS, reason="no PID namespace file here (the preflight runs on Linux)"
+)
+@pytest.mark.parametrize("mode", ["shared", "unknown"])
+def test_a_container_that_shares_the_pid_namespace_never_runs_user_code(rig, mode):
+    rig.set_pid_namespace(mode)
+    launch = rig.launch(rig.script_spec_python('printf ran > "$NEMAR_OUT/ran"\n'))
+    assert launch.exit == 13
+    assert launch.result["detail"] == "pid_namespace_unavailable"
+    assert rig.runtime_calls() == []
+    assert not (rig.out / "work" / "outputs" / "ran").exists()
+
+
+def test_an_image_job_is_checked_by_the_configuration_only(rig):
+    launch = rig.launch(rig.script_spec("true\n"))
+    assert launch.exit == 0
+    assert rig.preflight_calls() == []
+
+
+def conf_for(rig, text):
+    directory = rig.tmp / "etc" / "apptainer"
+    directory.mkdir(parents=True)
+    (directory / "apptainer.conf").write_text(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("allow pid ns = no\n", False),
+        ("allow pid ns = yes\n", True),
+        ("# allow pid ns = no\nallow pid ns = yes\n", True),
+        ("allow pid ns = yes\nallow pid ns = no\n", False),
+        ("  Allow  PID  NS  =  No  \n", False),
+        ("unrelated = no\n", True),
+    ],
+)
+def test_the_configuration_says_whether_a_pid_namespace_is_allowed(rig, text, expected):
+    from nemar_launch import run as run_module
+
+    conf_for(rig, text)
+    assert run_module.allow_pid_namespace(str(rig.bin_dir / "apptainer")) is expected
+
+
+def test_without_a_readable_configuration_it_is_unknown(rig):
+    from nemar_launch import run as run_module
+
+    assert run_module.allow_pid_namespace(str(rig.bin_dir / "apptainer")) in (None, True, False)
+
+
+def test_a_configuration_that_forbids_a_pid_namespace_stops_the_job_before_anything(rig):
+    conf_for(rig, "allow pid ns = no\n")
+    launch = rig.launch(entry_spec(rig))
+    assert launch.exit == 13
+    assert launch.result["detail"] == "pid_namespace_unavailable"
+    assert rig.runtime_calls() == []
+    assert rig.preflight_calls() == []

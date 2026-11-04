@@ -62,6 +62,10 @@ from .stage import Staged
 TIME_LIMIT_MARGIN = 120
 # How long the PID namespace preflight may take.
 PREFLIGHT_SECONDS = 120
+# After a SIGTERM the container gets this long to stop before the whole group is killed. Slurm
+# follows its SIGTERM with a SIGKILL after its own wait, and the record must be written before that.
+TERM_GRACE_SECONDS = 10
+_CUDA_VALUE = re.compile(r"[A-Za-z0-9,:_.-]{1,128}")
 # What Python runs inside the image for `runtime: python`. The image provides it on its PATH.
 IMAGE_PYTHON = "python"
 # The host variables the container runtime process is given. Nothing else of the launcher's
@@ -231,6 +235,7 @@ def build_argv(
     job: spec.Spec,
     sif: str,
     binds: list[Bind],
+    cuda: str | None = None,
 ) -> list[str]:
     argv = [runtime, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
     for bind in binds:
@@ -239,6 +244,8 @@ def build_argv(
         argv.append("--nv")
     for name, value in job.env.items():
         argv += ["--env", env_argument(name, value)]
+    if cuda is not None:
+        argv += ["--env", env_argument("CUDA_VISIBLE_DEVICES", cuda)]
     argv += ["--env", env_argument(ENV_OUT, CONTAINER_OUTPUTS)]
     argv.append(sif)
     argv += entry_argv(job)
@@ -412,10 +419,12 @@ class Terminator:
         self._forward()
 
     def _forward(self) -> None:
+        """Pass the SIGTERM to the container's whole process group (it was started in a session of
+        its own, so the group is the container and everything in it, and nothing of ours)."""
         child = self.child
         if child is not None and child.poll() is None:
             with contextlib.suppress(OSError, ProcessLookupError):
-                child.send_signal(signal.SIGTERM)
+                os.killpg(child.pid, signal.SIGTERM)
 
     def attach(self, child: subprocess.Popen[bytes]) -> None:
         self.child = child
@@ -464,14 +473,39 @@ class Outcome(NamedTuple):
     failure: Failure | None
 
 
+def _raise_oom_score() -> None:
+    """In the child, before the runtime starts: make the container the kernel's first choice when
+    memory runs out (raising ``oom_score_adj`` is allowed without privilege), so the OOM killer
+    ends the entry and not the launcher that has to record it."""
+    with contextlib.suppress(OSError), open("/proc/self/oom_score_adj", "w") as handle:
+        handle.write("1000")
+
+
+def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
+    """``CUDA_VISIBLE_DEVICES`` for the container: the scheduler's own value, only for a GPU job and
+    only when it is plain (digits, letters, comma, colon, dash, dot, underscore: ids, UUIDs,
+    MIG names); anything else is dropped rather than passed on."""
+    if job.gpus <= 0:
+        return None
+    value = env.get("CUDA_VISIBLE_DEVICES")
+    if value is not None and _CUDA_VALUE.fullmatch(value):
+        return value
+    return None
+
+
 def run_container(
     argv: list[str], env: Env, work: str, terminator: Terminator, log: Log
 ) -> Outcome:
     """Start the container, wait for it, and map how it ended (the first failure wins).
 
-    ``entry_exit_code`` is the entry's own status, with a signal death as 128 + the signal, as a
-    shell reports it. 137 (SIGKILL, what the kernel's out-of-memory killer sends) is ``out_of_memory``.
-    A SIGTERM received while it ran is ``time_limit`` or ``runtime_error`` (detail ``terminated``).
+    The container runs in a session of its own, so a SIGTERM reaches the whole of it and, if it has
+    not stopped ``TERM_GRACE_SECONDS`` later (a process that is PID 1 of its namespace ignores a
+    SIGTERM it has no handler for), the whole group is killed. ``entry_exit_code`` is the entry's
+    own status, with a signal death as 128 + the signal, as a shell reports it. 137 (SIGKILL, what
+    the kernel's out-of-memory killer sends) is ``out_of_memory``; 255 is the runtime's own failure
+    (``runtime_unusable``; an entry that itself exits 255 is indistinguishable and is counted the
+    same). A SIGTERM received while it ran is ``time_limit`` or ``runtime_error`` (detail
+    ``terminated``).
     """
     log.info("run: starting the container with {}".format(os.path.basename(argv[0])))
     try:
@@ -480,16 +514,40 @@ def run_container(
             env=runtime_environment(env),
             cwd=work,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            preexec_fn=_raise_oom_score,
         )
     except OSError:
         raise Failure(
             "runtime_error", "runtime_unusable", "the container runtime could not be started"
         ) from None
     terminator.attach(child)
+    killed = False
     try:
-        status = child.wait()
+        while True:
+            try:
+                status = child.wait(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                received = terminator.received
+                if (
+                    received is not None
+                    and not killed
+                    and time.time() - received >= TERM_GRACE_SECONDS
+                ):
+                    killed = True
+                    log.warning(
+                        "the container did not stop {} s after SIGTERM; killing it".format(
+                            TERM_GRACE_SECONDS
+                        )
+                    )
+                    with contextlib.suppress(OSError, ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGKILL)
     finally:
         terminator.detach()
+    # Whatever is left in the group (the entry's own children) goes with it.
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(child.pid, signal.SIGKILL)
     code = 128 - status if status < 0 else status
     log.info("run: the container exited with {}".format(code))
     if terminator.received is not None:
@@ -498,6 +556,10 @@ def run_container(
         return Outcome(code, None)
     if code == 137:
         return Outcome(code, Failure("out_of_memory", None, "the entry was killed (exit 137)"))
+    if code == 255:
+        return Outcome(
+            code, Failure("runtime_error", "runtime_unusable", "the runtime itself failed (255)")
+        )
     return Outcome(
         code, Failure("runtime_error", "entry_failed", "the entry exited with {}".format(code))
     )

@@ -187,7 +187,7 @@ def _do_work(
 
         binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
         run.check_bind_sources(binds)
-        argv = run.build_argv(runtime_path, job, sif, binds)
+        argv = run.build_argv(runtime_path, job, sif, binds, run.cuda_visible_devices(job, env))
         started = time.monotonic()
         try:
             outcome = run.run_container(argv, env, state.layout.work, terminator, log)
@@ -201,9 +201,10 @@ def _do_work(
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _unexpected(code: str, error: Exception) -> Failure:
-    """A launcher bug as a failure: a fixed detail and only the exception's class name, never its
-    message (which could hold a path or an address)."""
+def _unexpected(code: str, error: Exception, log: Log) -> Failure:
+    """A launcher bug as a failure: a fixed detail, and only the exception's class name in the log,
+    never its message (which could hold a path or an address)."""
+    log.error("unexpected {}".format(error.__class__.__name__))
     return Failure(code, "internal_error", "unexpected {}".format(error.__class__.__name__))
 
 
@@ -231,7 +232,7 @@ def _upload(
         state.fail(run.terminated_failure(terminator, env))
         only = True
     except Exception as error:  # noqa: BLE001 - the record must survive a launcher bug
-        state.fail(_unexpected("result_upload_failed", error))
+        state.fail(_unexpected("result_upload_failed", error, log))
         only = True
     if only:
         state.write_result()
@@ -301,7 +302,7 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
             except Stopped:
                 state.fail(run.terminated_failure(terminator, env))
             except Exception as error:  # noqa: BLE001 - a launcher bug must still leave a record
-                state.fail(_unexpected("runtime_error", error))
+                state.fail(_unexpected("runtime_error", error, log))
         _finish(state, job, env, terminator, sleep)
     finally:
         terminator.restore()
@@ -331,7 +332,7 @@ def _finish(
                 state.fail(finalized.failure)
                 state.outputs_blocked = True
         except Exception as error:  # noqa: BLE001
-            state.fail(_unexpected("runtime_error", error))
+            state.fail(_unexpected("runtime_error", error, log))
             state.files = []
             state.outputs_blocked = True
         state.phase("finalize", started)
@@ -342,7 +343,7 @@ def _finish(
     try:
         state.write_documents()
     except Exception as error:  # noqa: BLE001
-        state.fail(_unexpected("runtime_error", error))
+        state.fail(_unexpected("runtime_error", error, log))
         try:
             state.write_result()
         except Exception:  # noqa: BLE001
