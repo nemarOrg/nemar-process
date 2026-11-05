@@ -1,0 +1,62 @@
+[
+  {
+    "path": "CHANGES",
+    "size": 84,
+    "checksum": "940f71caa1fa9567efbd6a659a7bee6bca5da758",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "README.md",
+    "size": 489,
+    "checksum": "4ef314ec7862146992c738a236084875dea32c12",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "dataset_description.json",
+    "size": 2654,
+    "checksum": "51627401da50e6aea7485a8fcf801de794208305",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "sub-CUCOV076/eeg/sub-CUCOV076_coordsystem.json",
+    "size": 68,
+    "checksum": "b7ff1766a20dde5f00b2273b8e7dc34c5ad990dc",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "sub-CUCOV076/eeg/sub-CUCOV076_electrodes.tsv",
+    "size": 573,
+    "checksum": "18d23deb08649997e957e3ffe37385c2118ebd9b",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_channels.tsv",
+    "size": 968,
+    "checksum": "f4597c1045c8a39b0887dcb973fbb93e5987b138",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+    "size": 2487488,
+    "checksum": "b2029c3f30ee2d84839ee97be5abe39ee4b1960bcb6881ca2ac600ae7dc603d3",
+    "checksum_algorithm": "SHA256E"
+  },
+  {
+    "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.json",
+    "size": 443,
+    "checksum": "0eb74e789764c6b4abae2b12cdcede686c62a65a",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_events.tsv",
+    "size": 64,
+    "checksum": "abc2b634dbe1bb93242fe40715177cbf0b43e5a0",
+    "checksum_algorithm": "git"
+  },
+  {
+    "path": "sub-CUCOV076/sub-CUCOV076_scans.tsv",
+    "size": 64,
+    "checksum": "1c4a79e462337637320fa1c136465308d85b6aa3",
+    "checksum_algorithm": "git"
+  }
+]
