@@ -4,10 +4,10 @@ Nothing here changes a signal. Where eegprep has no public function for a number
 this module calls the one it has and does arithmetic on the answer, and says so beside the call
 with the upstream gap it stands for (docs/upstream.md):
 
-* the spectrum is eegprep's ``compute_spectra`` (gap G3: no public spectrum or line-noise helper);
+* the spectrum is eegprep's ``compute_spectra`` (sccn/eegprep#536: no public spectrum or line-noise helper);
   the line-noise excess and the median spectrum are arithmetic on its output;
-* the robust amplitude is a median absolute deviation, NumPy median arithmetic (gap G3);
-* the location guard is a rank test of the channel positions (gap G7: ``clean_channels`` accepts
+* the robust amplitude is a median absolute deviation, NumPy median arithmetic (sccn/eegprep#536);
+* the location guard is a rank test of the channel positions (sccn/eegprep#539: ``clean_channels`` accepts
   degenerate locations silently).
 
 The percentages are read from eegprep's own masks (``etc.clean_channel_mask`` for channels and the
@@ -22,13 +22,13 @@ from typing import Any
 
 import numpy as np
 
-# GAP G3 and R2 (docs/recipes.md): eegprep's spectrum estimator, in a module that is not documented
+# sccn/eegprep#536 and the risk of a private import (docs/recipes.md): eegprep's spectrum estimator, in a module that is not documented
 # API (it imports matplotlib, which ``nemar_process.common`` points at a non-interactive backend).
 # One test pins its answer; this is one of the two files that import such a module (the other is
 # ``plan.py``, which imports the filter design).
 from eegprep.functions.sigprocfunc.spectopo import compute_spectra
 
-# GAP G7 and R2: eegprep's own "has finite coordinates" test, also not documented API.
+# sccn/eegprep#539: eegprep's own "has finite coordinates" test, also not documented API.
 from eegprep.plugins.EEG_BIDS.coords import chanloc_has_coords
 
 from nemar_process.common.determinism import rounded
@@ -73,7 +73,7 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
     unit-length position vectors have numerical rank 3.
 
     ``clean_channels`` raises nothing for positions that are one point, a line or a plane through
-    the origin and silently removes a large part of the channels (GAP G7), so the rank is tested
+    the origin and silently removes a large part of the channels (sccn/eegprep#539), so the rank is tested
     here, before the call. It is a rank test, not a decomposition of the data.
     """
     n_signal = len(chanlocs)

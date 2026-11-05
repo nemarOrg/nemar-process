@@ -6,7 +6,7 @@ validates against the vendored schema; ``build_dataset_record`` does the same fo
 table. Both are recipe-agnostic: a recipe supplies its description, the steps of its dataset-level
 record and the distributions to summarize (``recipe.py``).
 
-What the schema cannot say goes in ``extensions.nemar`` (docs/upstream.md, gaps S1 to S3): the
+What the schema cannot say goes in ``extensions.nemar`` (docs/upstream.md; signalJourney/signalJourney#7 to #9): the
 checksum of every output file (``outputTargets`` has no checksum field), the identity of the run,
 the engine, the plan hash. The vendored validator checks neither timestamps nor non-finite numbers
 nor references, so ``check`` does (``TIMESTAMP``; the writer refuses NaN; ``references_problems``).
@@ -34,7 +34,7 @@ SJ_VERSION = "0.1.0"
 SCHEMA_VERSION = "0.1.0"
 IN_MEMORY_FORMAT = "EEGLAB EEG dict (float64)"
 
-# The date-time format the vendored validator does not check (gap S3).
+# The date-time format the vendored validator does not check (signalJourney/signalJourney#9).
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 # The dataset record is at most 256 KB; rows are added while it stays at or under the budget, and
@@ -227,7 +227,7 @@ def timestamp_problems(record: Mapping[str, Any]) -> list[str]:
 
 def references_problems(record: Mapping[str, Any]) -> list[str]:
     """Every ``dependsOn`` and ``previousStepOutput`` that does not name an earlier step and one of
-    its in-memory or file outputs (gap S3: the validator does not resolve references)."""
+    its in-memory or file outputs (signalJourney/signalJourney#9: the validator does not resolve references)."""
     outputs: dict[str, set[str]] = {}
     problems = []
     for step in record.get("processingSteps", []):

@@ -24,7 +24,7 @@ from threadpoolctl import threadpool_info, threadpool_limits
 
 from nemar_process.common import COMMON_VERSION
 
-# Seeds inside the engine that no argument reaches. Recorded in every record (extensions.nemar.seeds)
+# Seeds inside the engine that no argument reaches (sccn/eegprep#540 asks for a parameter). Recorded in every record (extensions.nemar.seeds)
 # and compared with eegprep's source by tests/recipes/test_determinism.py.
 SEEDS: dict[str, int] = {"clean_channels.ransac": 5489}
 

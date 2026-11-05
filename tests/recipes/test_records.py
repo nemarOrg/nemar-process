@@ -57,7 +57,9 @@ def test_the_validator_does_not_check_timestamps_so_the_recipe_does(record):
     broken = copy.deepcopy(record)
     broken["pipelineInfo"]["executionDate"] = "yesterday"
     broken["processingSteps"][1]["executionDateTime"] = "soon"
-    assert sj.validator().validate(broken, raise_exceptions=False) == []  # gap S3, upstream
+    assert (
+        sj.validator().validate(broken, raise_exceptions=False) == []
+    )  # signalJourney/signalJourney#9
     assert len(records.timestamp_problems(broken)) == 2
     assert len(records.check(broken, sj.validator())) >= 2
 

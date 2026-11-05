@@ -7,7 +7,8 @@ altered in outputs by construction.
 
 Steps 2 to 8 act on one working copy, which becomes the loaded dataset after the signal channels are
 selected (the raw copy is dropped at once: a long recording is gigabytes per float64 copy). Every
-step rebinds ``work = step(work, ...)`` and never relies on whether eegprep copied or mutated.
+step rebinds ``work = step(work, ...)`` and never relies on whether eegprep copied or mutated (the
+steps differ: sccn/eegprep#541).
 """
 
 from __future__ import annotations

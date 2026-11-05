@@ -63,6 +63,7 @@ FLATLINE_CALL: dict[str, Any] = {"max_flatline_duration": 5.0, "max_allowed_jitt
 DRIFT_FUNCTION = "eegprep.clean_drifts"
 DRIFT_CALL: dict[str, Any] = {"transition": (0.25, 0.75), "attenuation": 80.0, "method": "fft"}
 
+# A fixed band-stop: eegprep has no adaptive line-noise removal (sccn/eegprep#534 asks for ZapLine).
 BAND_STOP_FUNCTION = "eegprep.pop_eegfiltnew"
 # What pop_eegfiltnew applies when not asked (read from its source: it takes keyword options, so
 # there is no signature to read). tests/recipes/test_line_noise.py shows that passing these
@@ -76,6 +77,8 @@ BAND_STOP_APPLIED: dict[str, Any] = {
     "plotfreqz": False,
 }
 
+# What a criterion measured is not returned, only the mask (sccn/eegprep#535); the RANSAC seed is fixed
+# inside eegprep (sccn/eegprep#540).
 RANSAC_FUNCTION = "eegprep.clean_channels"
 RANSAC_CALL: dict[str, Any] = {
     "corr_threshold": 0.8,

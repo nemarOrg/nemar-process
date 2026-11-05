@@ -246,7 +246,12 @@ def signal_channel_indices(eeg: dict[str, Any]) -> list[int]:
 
 
 def normalize(eeg: dict[str, Any]) -> tuple[dict[str, Any], Notes]:
-    """Make a loaded dataset safe for eegprep's cleaning steps, and say what was changed."""
+    """Make a loaded dataset safe for eegprep's cleaning steps, and say what was changed.
+
+    An ``etc`` that is not a dict (eegprep reads an empty one back as an array) breaks every cleaning
+    step that writes its result into it: sccn/eegprep#533, which the recipe works around here and
+    which an upstream fix would make unnecessary.
+    """
     notes = Notes()
     data = np.asarray(eeg["data"], dtype=DTYPE)
     if data.ndim != 2 or int(eeg.get("trials") or 1) != 1:

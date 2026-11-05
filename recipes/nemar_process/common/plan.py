@@ -14,7 +14,8 @@ Parameters are typed in ``PARAMETER_TYPES``, one row per eegprep function: ``5.0
 different text, so every parameter is cast to its table type before it is hashed, and a parameter
 that is not in the table is refused, which keeps the table complete. Adding a step is adding a row.
 
-GAP G4 and R2 (docs/recipes.md): ``pop_eegfiltnew`` does not return the filter design it applied;
+Upstream gap, sccn/eegprep#537, and the risk of a private import (docs/recipes.md): ``pop_eegfiltnew``
+does not return the filter design it applied;
 ``recorded_band_stop`` reads it from eegprep's own design function, in a module that is not
 documented API, so that the record states the order, the transition width and the cutoffs that were
 used. This is one of the two files that import such a module (the other is ``qc.py``).
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any
 
-# GAP G4: the design function is reachable only through a private module of eegprep.
+# sccn/eegprep#537: the design function is reachable only through a private module of eegprep.
 from eegprep.plugins.firfilt._filtering import design_eegfiltnew
 
 from nemar_process.common import COMMON_VERSION
@@ -140,7 +141,7 @@ def recorded_band_stop(srate: float, frequency: int) -> dict[str, Any]:
 
     ``pop_eegfiltnew(locutoff=f-1, hicutoff=f+1, revfilt=True)`` designs a notch whose -6 dB
     cutoffs are at ``f-0.5`` and ``f+0.5``; the design function is called with the same arguments to
-    read the order, the transition width and the cutoffs (GAP G4).
+    read the order, the transition width and the cutoffs (sccn/eegprep#537).
     """
     _, meta = design_eegfiltnew(
         float(srate), locutoff=frequency - 1.0, hicutoff=frequency + 1.0, revfilt=True

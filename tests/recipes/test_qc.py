@@ -291,7 +291,7 @@ def test_the_import_eegprep_gives_for_the_located_test_has_the_answers_the_guard
 
 def test_the_filter_design_import_the_plan_relies_on_answers_as_pinned():
     # the second private import of the recipes (plan.py); pinned here with the other one so a new
-    # eegprep that moves or changes them fails by name (docs/upstream.md, gaps G3 and G4)
+    # eegprep that moves or changes them fails by name (sccn/eegprep#536 and #537)
     from eegprep.plugins.firfilt._filtering import design_eegfiltnew
 
     coefficients, meta = design_eegfiltnew(250.0, locutoff=49.0, hicutoff=51.0, revfilt=True)
