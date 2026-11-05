@@ -47,6 +47,10 @@ The Worker hands the launcher one document, in the environment variable `NEMAR_L
 `launcher/schema/launch-spec.v1.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
 The launcher validates against it with a small validator of its own, because it may use only the standard library; a schema keyword the validator does not implement is an error, never ignored.
 
+**Whether this encoding is safe through Tapis's launch files and the shell that reads them is NOT established, and is BLOCKED.**
+The schema's description says the bytes "survive Tapis, the shell and the locale"; treat that sentence as unverified and superseded by this one (the schema copy here is nemar-cli's, byte for byte, and is not edited here).
+Nothing is registered with a tenant, and no job with a real token is submitted, until a shell-inert encoding of the specification lands in the shared contract, the launcher and NEMAR's client together ([unverified.md](unverified.md)).
+
 | Key | Meaning |
 |---|---|
 | `job_id` | the NEMAR job id, `job_` and 24 hex digits |
