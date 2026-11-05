@@ -7,6 +7,8 @@ not. Only an exception's class name is ever kept, never its message, which can h
 
 from __future__ import annotations
 
+import contextlib
+
 LOAD_FAILED = "load_failed"
 NON_FINITE_SAMPLES = "non_finite_samples"
 STEP_FAILED = "step_failed"
@@ -43,3 +45,16 @@ class RecordingSkipped(RecordingError):
     """A recording the recipe does not process, with the word that says why."""
 
     status = "skipped"
+
+
+@contextlib.contextmanager
+def guarded(step_id: str):
+    """Turn what an eegprep call raises into ``step_failed`` for ``step_id``, keeping only the
+    exception's class name. A ``RecordingError`` passes as it is, and so does ``MemoryError``, which
+    the caller maps to ``out_of_memory``."""
+    try:
+        yield
+    except (RecordingError, MemoryError):
+        raise
+    except Exception as error:
+        raise RecordingError(STEP_FAILED, step_id, type(error).__name__) from error

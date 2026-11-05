@@ -107,3 +107,21 @@ def write_set(
     finally:
         logging.disable(logging.NOTSET)
     return path
+
+
+def loaded_fixture():
+    """The fixture recording, freshly loaded: a test may change it in memory before the floor."""
+    from nemar_process.common import io
+
+    (recording,) = io.discover(DATASET)
+    return io.load(recording)
+
+
+def copy_fixture(destination: Path, *, without: tuple[str, ...] = ()) -> Path:
+    """A writable copy of the fixture dataset, optionally without some of its sidecar files."""
+    import shutil
+
+    shutil.copytree(DATASET, destination)
+    for name in without:
+        (destination / "sub-CUCOV076" / "eeg" / name).unlink()
+    return destination

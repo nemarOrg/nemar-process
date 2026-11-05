@@ -32,7 +32,9 @@ from eegprep.functions.sigprocfunc.spectopo import compute_spectra
 from eegprep.plugins.EEG_BIDS.coords import chanloc_has_coords
 
 from nemar_process.common.determinism import rounded
+from nemar_process.common.params import signature_defaults
 
+SPECTRA_FUNCTION = "eegprep.functions.sigprocfunc.spectopo.compute_spectra"
 LINE_FREQUENCIES = (50, 60)
 LINE_THRESHOLD_DB = 10.0
 # The ten spectrum bins around a line frequency that are the baseline: the legacy `linenoise_magn`
@@ -98,6 +100,19 @@ def spectra_db(eeg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     """
     spectra, freqs, _ = compute_spectra(eeg["data"], int(eeg["pnts"]), float(eeg["srate"]))
     return np.asarray(spectra), np.asarray(freqs)
+
+
+def line_noise_parameters() -> dict[str, Any]:
+    """The plan parameters of the line-noise measurement: what eegprep's estimator applies by
+    default (read from its signature) and the choices of the measurement itself."""
+    return {
+        **signature_defaults(compute_spectra, ("percent", "winsize", "overlap", "nfft", "wintype")),
+        "frequencies_hz": list(LINE_FREQUENCIES),
+        "threshold_db": LINE_THRESHOLD_DB,
+        "peak": "nearest_bin",
+        "neighbor_bin_offsets": list(NEIGHBOR_BIN_OFFSETS),
+        "statistic": "mean_over_channels_of_db",
+    }
 
 
 def line_noise_excess(

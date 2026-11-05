@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from recipe_support import NO_RUNTIME_REASON, REQUIRE, RUNTIME
 
 # Modules that import nothing from the runtime environment run everywhere.
@@ -24,3 +25,12 @@ def pytest_report_header(config) -> str | None:
     if RUNTIME or REQUIRE:
         return None
     return "tests/recipes: modules that need the runtime are not collected. " + NO_RUNTIME_REASON
+
+
+@pytest.fixture(scope="session")
+def fixture_result():
+    """The floor on the fixture recording, run once; tests read it and never change it."""
+    from nemar_process.nemar_floor import process
+    from recipe_support import loaded_fixture
+
+    return process(loaded_fixture())
