@@ -175,6 +175,23 @@ jobs:
           uv lock --check
           uv run pytest tests/images --cov=recipes --cov=scripts
 
+  recipes:
+    # The recipes run in the runtime environment (eegprep, NumPy, SciPy, threadpoolctl), which the
+    # development environment does not have; the tests need all of it, so the job syncs the lock's
+    # `runtime` group. Linux is also where the thread-pool assertions can observe a pool at all.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # In CI the recipe tests may not be skipped or left uncollected for want of eegprep.
+      NEMAR_REQUIRE_RUNTIME: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Gates
+        run: uv run --frozen --group runtime --extra cpu pytest tests/recipes --cov=recipes --cov-fail-under=85
+
   deploy:
     # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
     # files, the registration script and the queue observer (docs/operator.md).
