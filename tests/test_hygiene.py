@@ -60,11 +60,17 @@ FORBIDDEN = {
 }
 
 
-# Files this test does not look in, for one label each. The Tapis project's own OpenAPI files are
-# vendored byte for byte (their sha256 is pinned in `deploy/tapis/openapi/SOURCE`), and their `servers`
-# list names the project's public development server, which is not a NEMAR tenant.
-# tests/deploy/test_tapis_hygiene.py checks that the only Tapis host in them is that one.
-EXEMPT = {"a Tapis tenant host": ("deploy/tapis/openapi/",)}
+# Files this test does not look in, for one label each: exactly the two vendored OpenAPI files, whose
+# sha256 is pinned in `deploy/tapis/openapi/SOURCE`. Their `servers` list names the Tapis project's
+# public development server, which is not a NEMAR tenant. Nothing else in that directory is exempt, and
+# tests/deploy/test_tapis_hygiene.py checks that these are the files SOURCE pins and bounds every host
+# the directory may name.
+EXEMPT = {
+    "a Tapis tenant host": (
+        "deploy/tapis/openapi/AppsAPI.yaml",
+        "deploy/tapis/openapi/SystemsAPI.yaml",
+    )
+}
 
 
 def tracked_text_files():

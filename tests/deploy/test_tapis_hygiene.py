@@ -24,6 +24,7 @@ and ``test_every_pattern_matches_its_sample`` proves each can fire.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -166,8 +167,36 @@ def test_a_placeholder_account_is_not_a_false_alarm():
         assert not ACCOUNT.search(text), text
 
 
-def test_the_only_tapis_host_in_the_vendored_files_is_the_projects_public_one():
-    hosts = set()
-    for path in ts.OPENAPI.glob("*.yaml"):
-        hosts |= set(re.findall(r"([A-Za-z0-9.-]+\." + "ta" + r"pis\." + "io)", read(path)))
-    assert hosts == {"dev.develop." + "ta" + "pis." + "io"}
+def vendored_files():
+    return sorted(p for p in ts.OPENAPI.rglob("*") if p.is_file())
+
+
+def test_the_global_exemption_is_exactly_the_two_files_source_pins():
+    sys.path.insert(0, str(ts.ROOT / "tests"))
+    try:
+        import test_hygiene
+    finally:
+        sys.path.pop(0)
+    exempt = test_hygiene.EXEMPT["a Tapis tenant host"]
+    pinned = []
+    for line in (ts.OPENAPI / "SOURCE").read_text(encoding="utf-8").splitlines():
+        if line.startswith("path: ") and line.endswith(".yaml"):
+            pinned.append("deploy/tapis/openapi/" + line[len("path: ") :])
+    assert sorted(exempt) == sorted(pinned)
+    assert len(exempt) == 2
+    for name in exempt:
+        assert (ts.ROOT / name).is_file()
+
+
+def test_the_only_tapis_host_in_any_vendored_file_is_the_projects_public_one():
+    pattern = re.compile(r"([A-Za-z0-9.-]+\." + "ta" + r"pis\." + "io)")
+    allowed = {"dev.develop." + "ta" + "pis." + "io"}
+    found = {}
+    for path in vendored_files():
+        hosts = set(pattern.findall(read(path)))
+        if hosts:
+            found[path.name] = hosts
+    assert found
+    assert set(found) <= {"AppsAPI.yaml", "SystemsAPI.yaml"}, "a host in a file that is not exempt"
+    for hosts in found.values():
+        assert hosts == allowed
