@@ -41,7 +41,7 @@ The files total 2,492,895 bytes, under the 5,000,000 the phase allows.
 
 All ten files were downloaded from NEMAR's public data plane (`on007823`, version `v1.0.0`) and each matched its manifest entry: the Secure Hash Algorithm 256 (SHA-256) for the recording and the git blob Secure Hash Algorithm 1 (SHA-1) for the text files.
 The recording's SHA-256 is `b2029c3f30ee2d84839ee97be5abe39ee4b1960bcb6881ca2ac600ae7dc603d3`, equal to the checksum the data plane publishes.
-`manifest.json` is computed from the committed bytes by `scripts/make_eeg_fixture_manifest.py` (`--check` fails when it differs), and `tests/recipes/test_fixture.py` compares it with the tree, with the published checksum and with the size limit.
+`manifest.json` is computed from the committed bytes by `scripts/make_eeg_fixture_manifest.py` (`--check` fails when it differs), and `tests/recipes/test_eeg_fixture.py` compares it with the tree, with the published checksum and with the size limit.
 The data-plane stand-in of the end-to-end test serves `dataset/` and builds its own manifest from the same bytes.
 
 To re-create the tree, fetch each path of `manifest.json` from `<data plane>/on007823/v1.0.0/<path>`, compare it with its entry, and run the script.

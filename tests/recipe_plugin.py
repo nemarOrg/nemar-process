@@ -25,7 +25,7 @@ from recipe_support import NO_RUNTIME_REASON, REQUIRE, ROOT, RUNTIME
 RECIPE_TESTS = ROOT / "tests" / "recipes"
 # Modules that import nothing from the runtime environment run everywhere.
 NEEDS_NO_RUNTIME = frozenset(
-    {"test_upstream_first.py", "test_fixture.py", "test_files.py", "test_naming.py"}
+    {"test_upstream_first.py", "test_eeg_fixture.py", "test_files.py", "test_naming.py"}
 )
 
 
