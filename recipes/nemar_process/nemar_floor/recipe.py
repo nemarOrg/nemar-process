@@ -28,7 +28,7 @@ COLUMNS = (
     Column("n_bad_channels", "int"),
     Column("n_bad_segments", "int"),
     Column("skipped_steps", "str"),
-    Column("record_sha256", "str"),
+    Column("record_content_sha256", "str"),
 )
 
 DISTRIBUTIONS = (

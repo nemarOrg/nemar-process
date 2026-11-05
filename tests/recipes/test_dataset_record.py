@@ -35,7 +35,7 @@ def succeeded(i, **changes):
         "n_bad_channels": 2,
         "n_bad_segments": 40,
         "skipped_steps": "line_noise_50:below_threshold,line_noise_60:below_threshold",
-        "record_sha256": "f" * 64,
+        "record_content_sha256": "f" * 64,
     }
     row.update(changes)
     return row

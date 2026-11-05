@@ -15,6 +15,8 @@ nor references, so ``check`` does (``TIMESTAMP``; the writer refuses NaN; ``refe
 from __future__ import annotations
 
 import bisect
+import copy
+import hashlib
 import re
 import statistics
 from collections.abc import Mapping, Sequence
@@ -24,7 +26,7 @@ from typing import Any
 
 from nemar_process.common import files, naming
 from nemar_process.common import plan as plans
-from nemar_process.common.determinism import rounded, utc_now
+from nemar_process.common.determinism import canonical_json, rounded, utc_now
 from nemar_process.common.io import Recording
 from nemar_process.common.recipe import Recipe, RecipeInfo, RunContext
 
@@ -180,6 +182,27 @@ def build_recording_record(
             }
         },
     }
+
+
+def content_sha256(record: Mapping[str, Any]) -> str:
+    """The SHA-256 of a record's content with the clock and the run id left out.
+
+    A record holds the time it was written and the id of the run (``executionDate``, every
+    ``executionDateTime``, ``extensions.nemar.run_id``, and the report's start and finish), which
+    are the only things that differ between two runs of the same recipe on the same data. Hashing
+    what is left gives a record an identity that two such runs share, so the recordings table, which
+    carries it, is byte-identical between them. It is not the hash of the file's bytes: the
+    launcher's manifest holds that.
+    """
+    stripped = copy.deepcopy(dict(record))
+    stripped.get("pipelineInfo", {}).pop("executionDate", None)
+    for step in stripped.get("processingSteps", []):
+        step.pop("executionDateTime", None)
+    nemar = stripped.get("extensions", {}).get("nemar", {})
+    nemar.pop("run_id", None)
+    for key in ("started_utc", "finished_utc"):
+        nemar.get("report", {}).pop(key, None)
+    return hashlib.sha256(canonical_json(stripped).encode("utf-8")).hexdigest()
 
 
 # ---- checks the vendored validator does not make ----------------------------------------------

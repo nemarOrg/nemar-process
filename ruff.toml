@@ -26,9 +26,12 @@ ignore = [
 [lint.per-file-ignores]
 "tests/**" = ["S", "ARG", "PT011", "T201"]
 "scripts/**" = ["T201"]
-# The launcher and the observer print their own diagnostics on purpose.
+# The launcher and the observer print their own diagnostics on purpose, and so does the recipe
+# command: one line per recording on standard error and one JSON line of counts on standard output.
+# (The pre-commit hook runs with --unsafe-fixes, which deletes a print the rule flags.)
 "launcher/**" = ["T201"]
 "observer/**" = ["T201"]
+"recipes/nemar_process/cli.py" = ["T201"]
 
 [format]
 quote-style = "double"

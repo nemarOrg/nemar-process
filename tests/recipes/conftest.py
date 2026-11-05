@@ -47,3 +47,24 @@ def floor_product(tmp_path_factory):
     (recording,) = io.discover(DATASET)
     product = RECIPE.run_recording(recording, make_context(), directory, loaded=loaded_fixture())
     return directory, product
+
+
+@pytest.fixture(scope="session")
+def multi(tmp_path_factory):
+    """A dataset of three recordings (the fixture and two short sets), never written to by tests."""
+    from recipe_support import multi_dataset
+
+    return multi_dataset(tmp_path_factory.mktemp("multi") / "on007823")
+
+
+@pytest.fixture
+def cli(capsys):
+    """Run the command in this process: (exit code, standard output, standard error)."""
+    from nemar_process import cli as command
+
+    def call(*argv):
+        code = command.main([str(a) for a in argv])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    return call

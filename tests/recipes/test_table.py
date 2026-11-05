@@ -27,7 +27,7 @@ SUCCEEDED = {
     "n_bad_channels": 2,
     "n_bad_segments": 40,
     "skipped_steps": "line_noise_50:below_threshold",
-    "record_sha256": "f" * 64,
+    "record_content_sha256": "f" * 64,
 }
 FAILED = {
     "path": "sub-02/eeg/sub-02_task-a_eeg.edf",

@@ -143,3 +143,38 @@ def make_context(**identity):
     with determinism.pinned_threads():
         engine = determinism.engine_info()
     return RunContext(DATASET, Identity(**values), engine, dict(determinism.SEEDS))
+
+
+def multi_dataset(destination: Path) -> Path:
+    """The fixture dataset plus two short synthetic recordings: three recordings, two plan variants."""
+    tree = copy_fixture(destination)
+    for subject in ("sub-02", "sub-03"):
+        target = tree / subject / "eeg" / "{}_task-smoke_eeg.set".format(subject)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(SMOKE_SET.read_bytes())
+    return tree
+
+
+def tree_digest(root: Path) -> dict[str, str]:
+    """The SHA-256 of every file under a tree, by relative path."""
+    import hashlib
+
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def write_fif(path: Path) -> Path:
+    """A small real FIF file written by MNE-Python: a format the recipes must skip, never convert."""
+    import mne
+    import numpy as np
+
+    info = mne.create_info(["Fz", "Cz", "Pz"], 250.0, "eeg", verbose=False)
+    raw = mne.io.RawArray(
+        np.random.default_rng(0).standard_normal((3, 500)) * 1e-5, info, verbose=False
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw.save(str(path), overwrite=True, verbose=False)
+    return path

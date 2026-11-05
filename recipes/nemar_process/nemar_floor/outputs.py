@@ -116,7 +116,7 @@ def summary_metrics(result: FloorResult) -> dict[str, Any]:
     }
 
 
-def table_row(recording: Recording, result: FloorResult, record_sha256: str) -> dict[str, Any]:
+def table_row(recording: Recording, result: FloorResult, content_sha256: str) -> dict[str, Any]:
     channels, samples = result.metrics["channels"], result.metrics["samples"]
     line_hz, before, after = _strongest_line(result)
     skipped = ",".join("{}:{}".format(s["step_id"], s["reason"]) for s in result.plan.skipped)
@@ -139,7 +139,7 @@ def table_row(recording: Recording, result: FloorResult, record_sha256: str) -> 
         "n_bad_channels": channels["nFlatline"] + channels["nBad"],
         "n_bad_segments": None if samples is None else samples["nBadSegments"],
         "skipped_steps": skipped or None,
-        "record_sha256": record_sha256,
+        "record_content_sha256": content_sha256,
     }
 
 
@@ -217,12 +217,11 @@ def write_product(
         raise RecordingError(INTERNAL_ERROR, "record", "invalid_record")
     record_path = place("signalJourney", "json")
     files.write_json(directory / record_path, record)
-    _, record_sha256 = files.size_and_sha256(directory / record_path)
     return RecordingProduct(
         files=[location for location, _, _ in written] + [record_path],
         record=record,
         record_path=record_path,
-        row=table_row(recording, result, record_sha256),
+        row=table_row(recording, result, records.content_sha256(record)),
     )
 
 
