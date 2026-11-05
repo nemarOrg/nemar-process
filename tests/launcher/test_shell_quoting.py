@@ -157,7 +157,7 @@ CASES = {
         document("*", "?", "[a-z]", "{a,b}", "~", "!!", "#x"),
         True,
     ),
-    "non-ASCII, as JSON escapes": (document("café", "\U0001f600"), True),
+    "non-ASCII, as JSON escapes": (document("caf\u00e9", "\U0001f600"), True),
     "everything at once": (
         document(
             "a b", INJECTION, BACKTICKS, '"', "'", "\\", ";", "&", "|", "<", ">", "\n", "$HOME", "*"
@@ -375,7 +375,7 @@ ADVERSARIAL_ARGS = [
     "~",
     "!!",
     "#x",
-    "café \U0001f600",
+    "caf\u00e9 \U0001f600",
     "%s %d",
     "--flag=$(touch marker)",
 ]

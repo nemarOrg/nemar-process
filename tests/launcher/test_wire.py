@@ -225,7 +225,7 @@ VALUE_REFUSALS = {
     "a backtick": (VALID[:40] + b"`" + VALID[41:], "not_base64url"),
     "a semicolon": (VALID[:40] + b";" + VALID[41:], "not_base64url"),
     "a byte above 0x7f": (VALID[:40] + b"\xe9" + VALID[41:], "not_base64url"),
-    "a utf-8 character": (VALID[:40] + "é".encode() + VALID[41:], "not_base64url"),
+    "a utf-8 character": (VALID[:40] + "\u00e9".encode() + VALID[41:], "not_base64url"),
     "a NUL byte": (VALID[:40] + b"\x00" + VALID[41:], "not_base64url"),
     "a raw JSON object, the old form": (spec_text(base()), "not_base64url"),
     "a raw JSON object, empty": (b"{}", "not_base64url"),
@@ -249,7 +249,7 @@ VALUE_REFUSALS = {
     # the rules in order: alphabet before length
     "the alphabet outranks the length rule": (b"AAA!A", "not_base64url"),
     # the decoded bytes
-    "non-ASCII after decoding, utf-8": (wire_encode('{"a":"é"}'.encode()), "not_ascii"),
+    "non-ASCII after decoding, utf-8": (wire_encode('{"a":"\u00e9"}'.encode()), "not_ascii"),
     "non-ASCII after decoding, latin-1": (wire_encode(b'{"a":"caf\xe9"}'), "not_ascii"),
     "non-ASCII after decoding, the first high byte": (wire_encode(b"\x80"), "not_ascii"),
     "non-ASCII after decoding, one byte": (wire_encode(b"\xff"), "not_ascii"),
