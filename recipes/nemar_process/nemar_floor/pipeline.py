@@ -33,6 +33,7 @@ from nemar_process.common import plan as plans
 from nemar_process.common.capture import logged_warnings
 from nemar_process.common.determinism import rounded
 from nemar_process.common.errors import (
+    ALL_CHANNELS_FLAGGED,
     ALL_CHANNELS_FLAT,
     INTERNAL_ERROR,
     NO_SIGNAL_CHANNELS,
@@ -246,7 +247,16 @@ def process(loaded: Loaded) -> FloorResult:
         elif srate > steps.MIN_NOLOCS_SRATE_HZ:
             branch = "nolocs"
             with guarded("bad_channels"):
-                work, _ = clean_channels_nolocs(work, **steps.NOLOCS_CALL)
+                work, flagged = clean_channels_nolocs(work, **steps.NOLOCS_CALL)
+            flagged = np.asarray(flagged, dtype=bool)
+            if flagged.shape != (entering,):
+                raise RecordingError(INTERNAL_ERROR, "bad_channels", "channel_mask_inconsistent")
+            if flagged.all():
+                # every channel is flagged: eegprep removes none and returns the recording unchanged,
+                # so there is nothing honest to annotate (the RANSAC branch raises past 75 percent)
+                raise RecordingError(ALL_CHANNELS_FLAGGED, "bad_channels")
+            if int((~flagged).sum()) != int(work["nbchan"]):
+                raise RecordingError(INTERNAL_ERROR, "bad_channels", "channel_mask_inconsistent")
             function, parameters = steps.NOLOCS_FUNCTION, steps.NOLOCS_CALL
         else:
             recipe.add_skip("bad_channels", steps.NOLOCS_FUNCTION, "sampling_rate_too_low")

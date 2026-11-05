@@ -74,6 +74,7 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or the data are epoched |
 | `failed` | `non_finite_samples` | the loaded data contain NaN or infinity |
 | `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
+| `failed` | `all_channels_flagged` | the no-locations criterion flags every channel, so eegprep removes none and the recording cannot be annotated honestly (step `bad_channels`); on the RANSAC branch eegprep itself raises when more than 75 percent are flagged, which is `step_failed` |
 | `failed` | `step_failed` | an eegprep step raised; the `step` column names it; only the exception's class name is kept |
 | `failed` | `out_of_memory` | `MemoryError` (a SIGKILL by the kernel ends the job and the launcher records it) |
 | `failed` | `disk_error` | writing or moving the recording's files failed |
@@ -231,6 +232,9 @@ The window step removes about half of the samples at eegprep's defaults on this 
   The floor listens to that warning for the length of the call (`common/capture.py`), because the command silences logging for the whole run.
   The condition is eegprep's (a flat portion of more than 5 s in every channel), not a constant recording, so a 10 s pause common to all channels is enough.
   The reproduction is a comment on sccn/eegprep#535.
+- A recording in which the no-locations criterion flags every channel also fails (`all_channels_flagged`, step `bad_channels`).
+  `clean_channels_nolocs` then removes nothing and returns its mask with every entry set, which the floor used to discard.
+  Channels that share nothing with each other, such as independent noise, are all flagged.
 
 ## Decisions the owner has not yet confirmed
 

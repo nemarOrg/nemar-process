@@ -203,8 +203,7 @@ def test_a_short_all_eeg_recording_skips_the_signal_channels_and_the_two_window_
 
 def test_a_set_saved_with_an_empty_etc_runs_the_whole_floor(tmp_path):
     """Without the loader's repair every cleaning step fails on such a set (sccn/eegprep#533)."""
-    rng = np.random.default_rng(3)
-    data = rng.standard_normal((8, 250 * 70)) * 10.0
+    data = correlated_channels(np.random.default_rng(3), 8, 250 * 70) * 10.0
     data[7, 10 * 250 : 20 * 250] = 0.0  # a flat stretch of 10 s
     write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
     (recording,) = io.discover(tmp_path)
@@ -264,6 +263,12 @@ def test_a_low_sampling_rate_without_locations_cannot_use_the_nolocs_criterion(t
     assert result.plan.has_step("bad_windows")
 
 
+def correlated_channels(rng, channels, samples):
+    """Channels that share one source and add their own noise: what real scalp channels look like to
+    a criterion that compares channels with each other. Independent noise would be all flagged."""
+    return rng.standard_normal((1, samples)) + 0.3 * rng.standard_normal((channels, samples))
+
+
 def flat_failure(tmp_path, data):
     """Run the floor on `data` (channels by samples, 250 Hz, no locations); return what it raised."""
     write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
@@ -314,6 +319,37 @@ def test_a_pause_in_some_channels_only_is_still_annotated_not_failed(tmp_path):
     (recording,) = io.discover(tmp_path)
     result = process(io.load(recording))
     assert result.plan.step("flatline").quality["removedChannels"] == ["Ch1", "Ch2", "Ch3"]
+
+
+def test_channels_that_share_nothing_are_all_flagged_and_the_recording_fails(tmp_path):
+    """Without locations the criterion compares channels with each other; independent noise is all
+    flagged, eegprep then removes nothing, and the floor used to call every channel good."""
+    write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set",
+        np.random.default_rng(13).standard_normal((8, 250 * 70)),
+    )
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingError) as caught:
+        process(io.load(recording))
+    error = caught.value
+    assert (error.status, error.code, error.step, error.detail) == (
+        "failed",
+        "all_channels_flagged",
+        "bad_channels",
+        None,
+    )
+
+
+def test_one_channel_that_shares_nothing_is_removed_and_the_others_are_kept(tmp_path):
+    data = correlated_channels(np.random.default_rng(14), 8, 250 * 70)
+    data[7] = np.random.default_rng(15).standard_normal(250 * 70)
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    quality = result.plan.step("bad_channels").quality
+    assert quality["branch"] == "nolocs"
+    assert quality["removedChannels"] == ["Ch8"]
+    assert result.kept_final.tolist() == [True] * 7 + [False]
 
 
 def test_a_recording_with_no_eeg_channel_is_skipped_not_failed(tmp_path):
