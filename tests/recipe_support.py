@@ -42,3 +42,68 @@ def require_runtime() -> None:
     if REQUIRE:
         pytest.fail("NEMAR_REQUIRE_RUNTIME=1 but " + NO_RUNTIME_REASON)
     pytest.skip(NO_RUNTIME_REASON)
+
+
+def touch_tree(root: Path, names: list[str]) -> Path:
+    """Empty files at these relative paths: enough for discovery, which reads names only."""
+    for name in names:
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"")
+    return root
+
+
+def write_set(
+    path: Path,
+    data,
+    *,
+    srate: float = 250.0,
+    labels: list[str] | None = None,
+    types: list[str] | None = None,
+    etc=None,
+    locations: dict[str, tuple[float, float, float]] | None = None,
+) -> Path:
+    """A real EEGLAB set file written by eegprep's own ``pop_saveset``, for the loader and floor.
+
+    ``etc=None`` leaves ``etc`` empty, which is the case that matters: eegprep reads an empty
+    ``etc`` back as an array (docs/upstream.md, sccn/eegprep#533).
+    """
+    import logging
+
+    import numpy as np
+    from eegprep import eeg_checkset, eeg_emptyset, pop_saveset
+
+    array = np.asarray(data, dtype=np.float32)
+    channels, points = array.shape
+    names = labels or ["Ch{}".format(i + 1) for i in range(channels)]
+    chanlocs = []
+    for i, name in enumerate(names):
+        entry: dict = {"labels": name}
+        if types is not None:
+            entry["type"] = types[i]
+        if locations is not None and name in locations:
+            entry["X"], entry["Y"], entry["Z"] = (float(v) for v in locations[name])
+        chanlocs.append(entry)
+    eeg = eeg_emptyset()
+    eeg.update(
+        {
+            "data": array,
+            "nbchan": channels,
+            "pnts": points,
+            "trials": 1,
+            "srate": float(srate),
+            "xmin": 0.0,
+            "xmax": (points - 1) / srate,
+            "chanlocs": chanlocs,
+        }
+    )
+    if etc is not None:
+        eeg["etc"] = etc
+    logging.disable(logging.WARNING)  # eeg_checkset notes fields of an empty set it does not need
+    try:
+        eeg = eeg_checkset(eeg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pop_saveset(eeg, str(path))
+    finally:
+        logging.disable(logging.NOTSET)
+    return path

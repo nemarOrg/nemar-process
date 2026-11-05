@@ -7,7 +7,9 @@ from pathlib import Path
 from recipe_support import NO_RUNTIME_REASON, REQUIRE, RUNTIME
 
 # Modules that import nothing from the runtime environment run everywhere.
-NEEDS_NO_RUNTIME = frozenset({"test_upstream_first.py", "test_fixture.py"})
+NEEDS_NO_RUNTIME = frozenset(
+    {"test_upstream_first.py", "test_fixture.py", "test_files.py", "test_naming.py"}
+)
 
 
 def pytest_ignore_collect(collection_path: Path, config) -> bool | None:
