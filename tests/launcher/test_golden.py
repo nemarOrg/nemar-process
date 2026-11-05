@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 
+import pytest
 from harness import encode_spec, sha256_hex, spec_text, wire_encode
 from nemar_launch import spec as spec_mod
 
@@ -43,6 +44,34 @@ GOLDEN_SHA256 = "88fcf9a4d6e63ae7bbedc9be536989fd7f2c263bb2b1c2fb6cfd706f49efe85
 GOLDEN_ENV = "eyJqb2JfaWQiOiJqb2JfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3IiwicnVudGltZSI6InB5dGhvbiIsImVudHJ5IjoicnVuLnB5IiwiYXJncyI6WyItLWxhYmVsIiwiY2FmXHUwMGU5IFwicVwiIFx1ZDgzZFx1ZGUwMCJdLCJidW5kbGUiOnsic2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInNpemUiOjEyMzR9LCJkYXRhc2V0cyI6W3siaWQiOiJubTAwMDEwNCIsInZlcnNpb24iOiJ2MS4wLjIifV0sImFwaV9iYXNlIjoiaHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0IiwiaW1hZ2UiOnsidXJpIjoiZG9ja2VyOi8vZ2hjci5pby9leGFtcGxlL3J1bnRpbWVAc2hhMjU2OmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJkaWdlc3QiOiJzaGEyNTY6YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInNpZiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIuc2lmIn0sImVudiI6eyJPTVBfTlVNX1RIUkVBRFMiOiI0In0sInJlc291cmNlcyI6eyJncHVzIjowfSwibGltaXRzIjp7Im1heF9maWxlcyI6MzgwMDAsIm1heF90b3RhbF9ieXRlcyI6MTA3Mzc0MTgyNH0sImpvYl90b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHQifQ"
 GOLDEN_ENV_LENGTH = 1022
 GOLDEN_ENV_SHA256 = "b20fae0dfbe428d0b8f37b52741abc52567b99674cd1b531ee53d9b6e8e36e26"
+
+
+# The second published vector: chosen so that its value holds BOTH url-safe characters (the two a
+# base64 encoder writes as '+' and '/'), and its arguments hold what a shell treats as special.
+# nemar-cli publishes the text as a TypeScript template; here it is the specification, and the text
+# is what `spec_text` writes for it (its digest is the published one).
+URLSAFE_SPEC = {
+    "job_id": "job_0123456789abcdef01234567",
+    "runtime": "python",
+    "command": ["python3", "-c"],
+    "args": ["print($(id))", "`x`;&|<>", "a\\b", "\n\t", ">>>???~~~"],
+    "datasets": [],
+    "api_base": "https://api.example.test",
+    "image": {
+        "uri": "docker://ghcr.io/example/runtime@sha256:" + "b" * 64,
+        "digest": "sha256:" + "b" * 64,
+        "sif": "b" * 64 + ".sif",
+    },
+    "env": {},
+    "resources": {"gpus": 0},
+    "limits": {"max_files": 38000, "max_total_bytes": 1073741824},
+    "job_token": "t" * 43,
+}
+URLSAFE_SHA256 = "501b92700038336d2579133ce14f3664bca06827f120be07d079ace09722f91e"
+URLSAFE_ENV = "eyJqb2JfaWQiOiJqb2JfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3IiwicnVudGltZSI6InB5dGhvbiIsImNvbW1hbmQiOlsicHl0aG9uMyIsIi1jIl0sImFyZ3MiOlsicHJpbnQoJChpZCkpIiwiYHhgOyZ8PD4iLCJhXFxiIiwiXG5cdCIsIj4-Pj8_P35-fiJdLCJkYXRhc2V0cyI6W10sImFwaV9iYXNlIjoiaHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0IiwiaW1hZ2UiOnsidXJpIjoiZG9ja2VyOi8vZ2hjci5pby9leGFtcGxlL3J1bnRpbWVAc2hhMjU2OmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJkaWdlc3QiOiJzaGEyNTY6YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInNpZiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIuc2lmIn0sImVudiI6e30sInJlc291cmNlcyI6eyJncHVzIjowfSwibGltaXRzIjp7Im1heF9maWxlcyI6MzgwMDAsIm1heF90b3RhbF9ieXRlcyI6MTA3Mzc0MTgyNH0sImpvYl90b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHQifQ"
+URLSAFE_ENV_LENGTH = 842
+URLSAFE_ENV_SHA256 = "073876511ad06a09f389b7207311fc906ca0c78e05397414bb2d32f31c85273e"
+URLSAFE_TEXT_LENGTH = 631
 
 
 def test_the_literals_are_the_published_ones():
@@ -129,3 +158,35 @@ def test_the_digest_in_provenance_is_of_the_decoded_text_through_the_entry_point
     outputs = launch.out / "work" / "outputs"
     assert (outputs / "arg1").read_text(encoding="utf-8") == 'caf\u00e9 "q" \U0001f600'
     assert (outputs / "arg2").read_text() == "two words"
+
+
+def test_the_url_safe_vector_is_the_published_one_to_the_byte():
+    text = spec_text(URLSAFE_SPEC)
+    assert len(text) == URLSAFE_TEXT_LENGTH
+    assert sha256_hex(text) == URLSAFE_SHA256
+    assert len(URLSAFE_ENV) == URLSAFE_ENV_LENGTH
+    assert sha256_hex(URLSAFE_ENV.encode("ascii")) == URLSAFE_ENV_SHA256
+    assert wire_encode(text).decode("ascii") == URLSAFE_ENV
+    assert URLSAFE_ENV_SHA256 != URLSAFE_SHA256
+    # Both url-safe characters appear, and the standard alphabet's three never do ...
+    assert "-" in URLSAFE_ENV
+    assert "_" in URLSAFE_ENV
+    assert not set(URLSAFE_ENV) & set("+/=")
+    # ... while the same bytes in the standard alphabet DO hold '+' and '/': the substitution is
+    # what is pinned, and the launcher refuses that form.
+    standard = base64.b64encode(text)
+    assert b"+" in standard
+    assert b"/" in standard
+    assert standard.replace(b"+", b"-").replace(b"/", b"_").rstrip(b"=").decode() == URLSAFE_ENV
+    with pytest.raises(spec_mod.SpecError) as info:
+        spec_mod.decode_wire(standard.rstrip(b"="))
+    assert info.value.reason == "not_base64url"
+
+
+def test_the_launcher_decodes_the_url_safe_vector_whole():
+    value = URLSAFE_ENV.encode("ascii")
+    assert spec_mod.decode_wire(value) == spec_text(URLSAFE_SPEC)
+    job = spec_mod.parse(value)
+    assert job.digest == URLSAFE_SHA256
+    assert job.args == URLSAFE_SPEC["args"]
+    assert job.command == ["python3", "-c"]

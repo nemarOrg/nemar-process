@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import pytest
+import test_golden as golden
 from nemar_launch import codes, include
 from nemar_launch import spec as spec_mod
 
@@ -170,6 +171,7 @@ def test_nemar_sif_root_is_nemar_clis():
 
 
 CONTRACT_TEST = "test/compute-contract.unit.test.ts"
+LAUNCH_CONTRACT = "shared/contract/compute-launch.ts"
 
 
 def ts_strings(array_source: str) -> list:
@@ -204,3 +206,53 @@ def test_the_patterns_the_dialect_refuses_are_exactly_nemar_clis_lists():
     # The two that settle which problem is named first, and where a class ends.
     assert include.include_pattern_problem("[][z-a]") == "empty_class"
     assert include.include_pattern_problem("[z-a][]") == "inverted_range"
+
+
+def ts_string(source: str, name: str) -> str:
+    """A double-quoted string literal `NAME = "...";`, which may start on the next line."""
+    found = re.search(r"\b" + re.escape(name) + r'\s*=\s*"([^"\n]*)";', source)
+    assert found, name
+    return found.group(1)
+
+
+def ts_number(source: str, name: str) -> int:
+    found = re.search(r"\b" + re.escape(name) + r"\s*=\s*(\d+);", source)
+    assert found, name
+    return int(found.group(1))
+
+
+def ts_raw(source: str, name: str) -> str:
+    """A `String.raw` template with no backtick inside: ``NAME = String.raw`...`;``."""
+    found = re.search(r"\b" + re.escape(name) + r"\s*=\s*String\.raw`([^`]*)`;", source)
+    assert found, name
+    return found.group(1)
+
+
+def test_the_wire_format_is_nemar_clis():
+    source = at_ref(LAUNCH_CONTRACT).decode("utf-8")
+    assert ts_string(source, "SHELL_INERT_ENV_ALPHABET") == spec_mod.WIRE_ALPHABET
+    cap = re.search(r"export const LAUNCH_SPEC_MAX_BYTES = (\d+) \* (\d+);", source)
+    assert cap
+    assert int(cap.group(1)) * int(cap.group(2)) == spec_mod.MAX_SPEC_BYTES
+    formula = r"export const LAUNCH_SPEC_ENV_MAX_CHARS = Math\.ceil\(\(LAUNCH_SPEC_MAX_BYTES \* 4\) / 3\);"
+    assert re.search(formula, source), "the cap on the value is no longer ceil(bytes * 4 / 3)"
+    assert spec_mod.WIRE_MAX_CHARS == -(-spec_mod.MAX_SPEC_BYTES * 4 // 3)
+
+
+def test_the_refusal_words_are_nemar_clis():
+    # The same five words in the same order: the launcher logs the rule that fired, and a reader
+    # of the two logs sees one vocabulary. Log-only here, never a failure code or a detail.
+    source = at_ref(LAUNCH_CONTRACT).decode("utf-8")
+    assert list(spec_mod.WIRE_REASONS) == words(source, "LAUNCH_SPEC_ENV_REFUSALS")
+
+
+def test_the_golden_vectors_are_nemar_clis():
+    source = at_ref(CONTRACT_TEST).decode("utf-8")
+    assert ts_raw(source, "GOLDEN_TEXT") == golden.GOLDEN_TEXT
+    assert ts_string(source, "GOLDEN_SHA256") == golden.GOLDEN_SHA256
+    assert ts_string(source, "GOLDEN_ENV") == golden.GOLDEN_ENV
+    assert ts_number(source, "GOLDEN_ENV_LENGTH") == golden.GOLDEN_ENV_LENGTH
+    assert ts_string(source, "GOLDEN_ENV_SHA256") == golden.GOLDEN_ENV_SHA256
+    assert ts_string(source, "URLSAFE_SHA256") == golden.URLSAFE_SHA256
+    assert ts_string(source, "URLSAFE_ENV") == golden.URLSAFE_ENV
+    assert ts_string(source, "URLSAFE_ENV_SHA256") == golden.URLSAFE_ENV_SHA256

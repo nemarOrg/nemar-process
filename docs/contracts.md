@@ -10,7 +10,8 @@ Abbreviations: continuous integration (CI), JavaScript Object Notation (JSON), S
 | The seven failure codes and exit numbers 10 to 16 | `shared/compute-state.ts` (`LAUNCHER_FAILURE_CODES`) | `launcher/nemar_launch/codes.py` |
 | The launcher file names, the environment names (including `NEMAR_SIF_ROOT`), the environment allowlist, the output limits | `shared/contract/compute.ts` (`LAUNCHER_FILE_NAMES`, `LAUNCHER_ENV`, `JOB_ENV_ALLOWLIST`, `COMPUTE_MAX_OUTPUT_FILES`, `RESULT_MAX_FILE_BYTES`) | `launcher/nemar_launch/codes.py` and the schema's `env` |
 | The declared details per failure code, and which are the platform's | `shared/compute-state.ts` (`LAUNCHER_DETAILS`, `PLATFORM_LAUNCHER_DETAILS`, `RESULT_REFUSAL_DETAILS`) | `codes.LAUNCHER_DETAILS`, `codes.PLATFORM_LAUNCHER_DETAILS`, `codes.RESULT_REFUSAL_DETAILS` |
-| The golden vector for `launch_spec_digest` | nemar-cli's `test/compute-contract.unit.test.ts` | `tests/launcher/test_golden.py` |
+| The wire form of `NEMAR_LAUNCH_SPEC`: the alphabet, the cap on the value (87,382 characters) and the five words of a refusal | `shared/contract/compute-launch.ts` (`SHELL_INERT_ENV_ALPHABET`, `LAUNCH_SPEC_ENV_MAX_CHARS`, `LAUNCH_SPEC_ENV_REFUSALS`, and `decodeLaunchSpecEnv`, whose rules the launcher mirrors in order) | `launcher/nemar_launch/spec.py` (`WIRE_ALPHABET`, `WIRE_MAX_CHARS`, `WIRE_REASONS`, `decode_wire`) |
+| The golden vectors: the JSON text and its digest, and the environment value (1022 and 842 characters, the second holding `-` and `_`) and its digest | nemar-cli's `test/compute-contract.unit.test.ts` | `tests/launcher/test_golden.py` |
 
 Never edit the schema copy here.
 Change it in nemar-cli, then bump the pin.
@@ -27,6 +28,7 @@ The launcher's validator treats the schema this way because the schema says so; 
 
 - `test_the_schema_copy_is_the_pinned_bytes` needs no checkout and always runs: the copy must hash to the pinned digest, so it cannot be edited without bumping the pin.
 - `test_the_copies_match_nemar_cli_at_the_pinned_ref`, and the tests of the failure codes, file names, environment names (`NEMAR_SIF_ROOT` among them), output limits, results refusals, declared details (`LAUNCHER_DETAILS`, `PLATFORM_LAUNCHER_DETAILS`) and the `include` patterns the dialect refuses, compare against nemar-cli's own files at the pinned commit.
+  `test_the_wire_format_is_nemar_clis`, `test_the_refusal_words_are_nemar_clis` and `test_the_golden_vectors_are_nemar_clis` do the same for the wire form and the golden vectors.
   They use a nemar-cli checkout named by `NEMAR_CLI_DIR`, or a `nemar-cli` directory beside this checkout (or beside its worktree directory), through `git show <ref>:<path>`.
   Locally, with no checkout, they skip with a message that says the check did not run.
   In CI the workflow checks out exactly the pinned commit (sparse, `shared/` and `test/`) and sets `NEMAR_REQUIRE_DRIFT=1`, which turns that skip into a failure.
@@ -55,8 +57,8 @@ If a failure code, a launcher file name, an environment name, a declared detail 
 The bump checklist, in full:
 
 1. copy the schema byte for byte and update `tests/contract/nemar-cli-pin.json` (the commands above);
-2. replace the golden vector literals in `tests/launcher/test_golden.py` from nemar-cli's `test/compute-contract.unit.test.ts` (never edit one by hand), and keep the test on `spec.parse`: the vector must be valid under the launcher's own rules;
-3. update `codes.py` (failure codes, details, platform details, refusal words, limits, environment names);
+2. replace the golden vector literals in `tests/launcher/test_golden.py` (the JSON text and the environment value of both vectors, and their digests) from nemar-cli's `test/compute-contract.unit.test.ts` (never edit one by hand), and keep the tests on `spec.parse`: the vector must be valid under the launcher's own rules;
+3. update `codes.py` (failure codes, details, platform details, refusal words, limits, environment names) and, if the wire form changed, `spec.py` (the alphabet, the cap, the rules of `decode_wire` and their words) with the rows of `tests/launcher/test_wire.py`;
 4. update the header comment of `launcher/tapisjob_app.sh`, which lists the exit numbers and codes;
 5. update `docs/launcher.md` (the codes and details tables) and `docs/unverified.md`;
 6. run every gate, including the 3.9 leg, with `NEMAR_CLI_DIR` pointing at the checkout so no drift test skips.
