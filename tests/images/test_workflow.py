@@ -332,3 +332,11 @@ def test_the_pull_request_paths_include_what_the_launch_test_runs_on():
     paths = triggers(workflow())["pull_request"]["paths"]
     for needed in ("recipes/**", "launcher/**", "tests/e2e/**", "tests/fixtures/eeg/**"):
         assert needed in paths, needed
+
+
+def test_only_the_unprivileged_test_job_runs_repository_test_code_against_the_sif():
+    """The signing job holds the OIDC token and package write access: it runs no test from here."""
+    jobs = workflow()["jobs"]
+    for name, job in jobs.items():
+        runs_tests = "pytest" in step_commands(job)
+        assert runs_tests == (name == "test"), name

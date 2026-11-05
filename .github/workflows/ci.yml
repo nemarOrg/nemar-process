@@ -191,6 +191,11 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - name: Gates
         run: uv run --frozen --group runtime --extra cpu pytest tests/recipes --cov=recipes --cov-fail-under=85
+      # The launch end to end with the stand-in container runtime: the real launcher and the real
+      # recipe on the fixture, against stand-in routes. The same test runs in the SIF in
+      # image-nemar-python.yml, where the isolation is real.
+      - name: Launch end to end (stand-in runtime)
+        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer"
 
   deploy:
     # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
