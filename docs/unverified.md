@@ -110,9 +110,12 @@ These are the assumptions, in the order they would bite.
   Whether Tapis then writes `tapisjob.env` and `tapisjob.sh` only in the execution directory (so they could never be archived, whatever the filter says) is unconfirmed.
 - **The macros.**
   `${JobWorkingDir}` and `${JobUUID}` are Tapis's own and are not in the specification; their spelling and expansion are from the documentation.
-- **`jobWorkingDir` is read relative to `rootDir`.**
-  The documentation says so, and the template sets `rootDir` to the operator's 0700 scratch root and `jobWorkingDir` to `/jobs`.
-  If the tenant reads it as a host path, jobs would run in the wrong place and fail loudly at the first test; the alternative is `rootDir` of `/` and an absolute `jobWorkingDir`.
+- **Where Tapis creates a job's directories, and what it tells the job.**
+  From the Tapis source (to confirm on the tenant): Tapis creates the directories at `rootDir` plus the path, but the environment variables it gives the job (`_tapisExecSystemOutputDir` and the others) hold the rootDir-RELATIVE path.
+  The launcher reads `_tapisExecSystemOutputDir` as a host path, so the two agree only when `rootDir` is `/`.
+  The system template therefore sets `rootDir` to `/` and `jobWorkingDir` to the absolute `<scratch root>/jobs`, and `scripts/tapis_policy.py` computes the variable the way Tapis does and fails the registration of a system whose root is not `/`.
+  What keeps other accounts out of the scratch root is the host's own permission (mode 0700), not Tapis's `rootDir`.
+  If the first job on the `debug` partition shows the output directory somewhere else, stop: the launcher's directory contract is wrong and that is a launcher change, not a definition change.
 - **Default archive location.**
   With no archive system fields, Tapis archives to its default place on the execution system.
   Where that is, and that it is not under a home directory, is unconfirmed.

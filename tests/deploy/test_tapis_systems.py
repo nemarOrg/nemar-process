@@ -74,7 +74,8 @@ def test_it_allows_no_command_prefix_and_no_child_systems(system):
 def test_the_host_the_account_the_root_and_the_method_are_placeholders_in_the_file():
     raw = ts.raw(ts.EXEC_SYSTEM)
     assert raw["host"] == "${EXEC_HOST}"
-    assert raw["rootDir"] == "${EXEC_ROOT_DIR}"
+    assert raw["rootDir"] == "/"
+    assert raw["jobWorkingDir"] == "${EXEC_ROOT_DIR}/jobs"
     assert raw["defaultAuthnMethod"] == "${AUTHN_METHOD}"
 
 
@@ -82,10 +83,12 @@ def test_the_host_the_account_the_root_and_the_method_are_placeholders_in_the_fi
 
 
 def test_jobs_run_under_the_scratch_root_and_never_under_home(system):
-    assert system["rootDir"] == ts.example_values()["EXEC_ROOT_DIR"]
-    working = system["jobWorkingDir"]
-    assert working.startswith("/")
-    assert ".." not in working.split("/")
+    # rootDir is / : Tapis puts the rootDir-RELATIVE path in the variables the launcher reads as a
+    # host path, so the two agree only there (see test_tapis_policy.py). The scratch root is in
+    # jobWorkingDir.
+    root = ts.example_values()["EXEC_ROOT_DIR"]
+    assert system["rootDir"] == "/"
+    assert system["jobWorkingDir"] == root + "/jobs"
     for text in ts.strings_anywhere(system):
         assert "$HOME" not in text
         assert "HOST_EVAL" not in text

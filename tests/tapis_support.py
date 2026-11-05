@@ -20,6 +20,7 @@ SCHEMAS = DEPLOY / "schemas"
 APPS = DEPLOY / "apps"
 SYSTEMS = DEPLOY / "systems"
 EXAMPLE_ENV = DEPLOY / "example.env"
+LEDGER = DEPLOY / "released-versions.json"
 
 LAUNCH_APP = APPS / "nemar-launch.json"
 OBSERVER_APP = APPS / "nemar-observer.json"

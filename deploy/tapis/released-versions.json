@@ -1,0 +1,4 @@
+{
+  "comment": "The zip digest of each application version that has been released: published as a release asset or registered with a tenant. An entry is added by the owner when a version is published and is never changed or removed: the digest recorded in an application's notes must equal it (tests/deploy/test_tapis_policy.py), and scripts/register.py refuses to register a released version whose definition records another. Empty until the first publication (docs/operator.md).",
+  "released": {}
+}

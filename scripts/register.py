@@ -13,7 +13,10 @@ never change the document's structure. A placeholder named like a credential is 
 definition never carries one.
 
 THE CHECK. The rendered document must validate against the schema derived from Tapis's own OpenAPI
-file (``deploy/tapis/schemas/``) before anything is sent, so a typo is an error here and not a 400.
+file (``deploy/tapis/schemas/``) before anything is sent, so a typo is an error here and not a 400,
+and it must keep NEMAR's rules (``scripts/tapis_policy.py``, the same function the tests run on the
+committed files: launch files not archived, no archive system, the fixed paths, ``locked``, one static
+account, the directories as the launcher reads them). A definition that does not is exit status 2.
 
 THE DRY RUN (the default). Prints the method, path and body hash of each request it would make and
 sends nothing, not even a read. It needs no credentials.
@@ -49,6 +52,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, TextIO
 from urllib.parse import quote, urlsplit
 
+import tapis_policy
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -291,11 +295,14 @@ def schema_problems(kind: str, document: Any) -> list[str]:
 
 
 class Plan(NamedTuple):
+    kind: str
     label: str
     read_path: str
     create_path: str
     body: bytes
     digest: str
+    document: dict[str, Any]
+    values: dict[str, str]
 
 
 def plan(kind: str, path: Path, file_values: Mapping[str, str], env: Mapping[str, str]) -> Plan:
@@ -316,13 +323,26 @@ def plan(kind: str, path: Path, file_values: Mapping[str, str], env: Mapping[str
     problems = schema_problems(spec.schema, rendered)
     if problems:
         raise RenderError("{} does not match Tapis's schema: {}".format(path, "; ".join(problems)))
+    # NEMAR's own rules, the same function the tests run on the committed files: a stale or locally
+    # edited definition cannot register something weaker than CI checked.
+    if kind == "app":
+        weaker = tapis_policy.app_violations(rendered)
+    else:
+        # The operator's scratch root, even when an edited template no longer names it.
+        root = file_values.get("EXEC_ROOT_DIR") or env.get("EXEC_ROOT_DIR")
+        weaker = tapis_policy.system_violations(rendered, exec_root=root)
+    if weaker:
+        raise RenderError("{} is weaker than NEMAR's rules: {}".format(path, "; ".join(weaker)))
     body = canonical(rendered)
     return Plan(
+        kind=kind,
         label=spec.label(rendered),
         read_path=spec.read_path(rendered),
         create_path=spec.create_path,
         body=body,
         digest=hashlib.sha256(body).hexdigest(),
+        document=rendered,
+        values=values,
     )
 
 

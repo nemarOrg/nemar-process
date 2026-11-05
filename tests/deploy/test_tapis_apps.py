@@ -132,7 +132,13 @@ def test_the_launch_specification_is_required_and_carries_no_value_in_the_defini
 
 def test_the_launch_application_defines_exactly_these_variables():
     assert sorted(variables(ts.raw(ts.LAUNCH_APP))) == sorted(
-        [codes.ENV_SPEC, codes.ENV_SIF_ROOT, codes.ENV_LOCAL_DATASETS_ROOT, "TMPDIR"]
+        [
+            codes.ENV_SPEC,
+            codes.ENV_SIF_ROOT,
+            codes.ENV_LOCAL_DATASETS_ROOT,
+            codes.ENV_HOST_PYTHON,
+            "TMPDIR",
+        ]
     )
 
 
@@ -142,11 +148,15 @@ def test_the_scheduler_chooses_which_gpus_the_job_sees_not_the_definition():
         assert "CUDA_VISIBLE_DEVICES" not in ts.strings_anywhere(ts.raw(path))
 
 
-def test_the_host_interpreter_is_never_offered_to_a_submitter():
-    # NEMAR_HOST_PYTHON names a program the launcher runs outside the container: the operator's to
-    # fix in the definition if the node needs it (docs/operator.md), never a job's to set.
+def test_the_host_interpreter_is_declared_fixed_and_empty_so_a_request_cannot_set_one():
+    # NEMAR_HOST_PYTHON names a program the launcher runs outside the container. Tapis refuses a job
+    # request that sets a different value for a FIXED variable the application declares (from the
+    # Tapis source, to confirm on the tenant), and an empty value means "search the host" to the
+    # entry script. The operator fills it in a new registered version if the node needs it.
     for path in ts.APP_PATHS:
-        assert codes.ENV_HOST_PYTHON not in variables(ts.raw(path))
+        entry = variables(ts.raw(path))[codes.ENV_HOST_PYTHON]
+        assert entry["inputMode"] == "FIXED"
+        assert entry["value"] == ""
 
 
 def test_every_variable_has_an_input_mode_and_a_description(app):

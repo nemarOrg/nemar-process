@@ -39,6 +39,12 @@
           "description": "The root of NEMAR's own copy of datasets on the node, laid out as <root>/<dataset id>/<version>/. Fixed. A directory that does not exist is the same as no local copy: the launcher downloads."
         },
         {
+          "key": "NEMAR_HOST_PYTHON",
+          "value": "",
+          "inputMode": "FIXED",
+          "description": "Empty here: the interpreter the entry script uses is the first Python 3.9 or newer on the host. If the host needs a named one, the operator registers a new version that sets it. Declared and fixed so that a job request cannot set one."
+        },
+        {
           "key": "TMPDIR",
           "value": "${NODE_LOCAL_TMPDIR}",
           "inputMode": "FIXED",

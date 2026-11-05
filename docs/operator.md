@@ -57,7 +57,9 @@ A placeholder named like a credential (it holds `TOKEN`, `SECRET`, `PASSWORD`, `
 
 1. **Create the directories.**
    Create `EXEC_ROOT_DIR` on scratch with mode 0700, owned by the community account.
-   Tapis creates `<root>/jobs/exec/<job>`, `<root>/jobs/input/<job>` and `<root>/jobs/output/<job>` under it, so the execution directory (where the zip is unpacked and where Tapis writes its launch files) is never the output directory (what is archived), and neither is the home directory, whose quota these jobs would otherwise eat.
+   The system's `jobWorkingDir` is `<root>/jobs`, so Tapis creates `<root>/jobs/exec/<job>`, `<root>/jobs/input/<job>` and `<root>/jobs/output/<job>`: the execution directory (where the zip is unpacked and where Tapis writes its launch files) is never the output directory (what is archived), and neither is in the home directory, whose quota these jobs would otherwise eat.
+   The system's `rootDir` is `/`, on purpose: Tapis creates a job's directories at `rootDir` plus the path, but the variables it gives the job (`_tapisExecSystemOutputDir`) hold the rootDir-relative path, and the launcher reads that variable as a host path, so the two agree only when `rootDir` is `/`.
+   The root's mode 0700 is what keeps other accounts out; Tapis's `rootDir` is not used for that.
    Create `SIF_ROOT` and install the images into it; only the community account may write there, because the launcher trusts a file's name and does not hash it.
 2. **Check the host.**
    The launcher and the observer need Python 3.9 or newer outside the container.
@@ -118,6 +120,7 @@ The derivation refuses a keyword it has not been taught, so a newer specificatio
   After registering, read the application back and look at that field; after the first job, list its archive and look for the two files.
 - **The output directory is per job and is not the execution directory.**
   Both are under the job working directory and keyed by `${JobUUID}`, and neither is under a home directory.
+  `scripts/tapis_policy.py` computes the directory the way Tapis does and refuses a system whose `rootDir` is not `/` or whose working directory is not under the operator's scratch root.
 - **A variable a submitter must not change is `FIXED`.**
   `NEMAR_SIF_ROOT`, `NEMAR_LOCAL_DATASETS_ROOT` and `TMPDIR` are fixed in the launcher application, and `NEMAR_SLURM_ACCOUNT` in the observer's.
   The launch specification, the observer's URL and its token are `REQUIRED`: the job request supplies them.
