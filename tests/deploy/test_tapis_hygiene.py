@@ -38,7 +38,7 @@ TLDS = "edu|org|com|net|io|gov|dev|app|info|cloud"
 
 HOST_URL = re.compile(r"\bhttps?://([A-Za-z0-9.-]+)")
 BARE_HOST = re.compile(r"\b((?:[A-Za-z0-9-]+\.)+(?:" + TLDS + r"))\b(?!\.[A-Za-z])")
-ACCOUNT = re.compile(r"(?i)(?:--account[= ]|\s-A\s*|account\s*[:=]\s*)[\"']?[a-z]{3}\d{3}\b")
+ACCOUNT = re.compile(r"(?i)(?:--account[= ]|\s-A\s*|account\w*\s*[:=]\s*)[\"']?[a-z]{3}\d{3}\b")
 ALLOCATION = re.compile(r"\b" + "TG" + r"-[A-Z]{3}\d{6}\b")
 HOME_PATH = re.compile(
     r"(?<![\w/.$-])/(?:"
@@ -58,6 +58,7 @@ SAMPLES = {
     "a bare host": (BARE_HOST, "login.exa" + "mple.edu"),
     "an account": (ACCOUNT, "--account=ab" + "c123"),
     "an account after -A": (ACCOUNT, "sbatch -A ab" + "c123 job.sh"),
+    "an account in a variable": (ACCOUNT, "SLURM_ACCOUNT_CPU=ab" + "c123"),
     "an allocation": (ALLOCATION, "TG" + "-ABC123456"),
     "a home path": (HOME_PATH, "/ho" + "me/someone/x"),
     "a scratch path": (HOME_PATH, "/scra" + "tch/someone/x"),

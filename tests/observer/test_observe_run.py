@@ -228,7 +228,9 @@ def test_a_huge_export_is_cut_to_fit_one_mebibyte_and_says_so(rig):
     result = run_main(["daily"], base_env(slurm, server, NEMAR_SLURM_ACCOUNT="example-cpu"))
     assert result.code == 0, result.err
     request = route.requests[0]
-    assert len(request.body) <= observe.MAX_BODY_BYTES
+    # One mebibyte, written out here so that changing the constant cannot move the goalposts.
+    assert observe.MAX_BODY_BYTES == 1024 * 1024
+    assert len(request.body) <= 1024 * 1024
     body = route.bodies()[0]
     accounting = body["accounting"]
     assert accounting["truncated"] is True
@@ -236,7 +238,7 @@ def test_a_huge_export_is_cut_to_fit_one_mebibyte_and_says_so(rig):
     assert 0 < accounting["rows_included"] < 20000
     assert len(accounting["jobs"]) == accounting["rows_included"]
     # The cut is as late as it can be: one more row would not have fitted.
-    assert len(request.body) > observe.MAX_BODY_BYTES - 1000
+    assert len(request.body) > 1024 * 1024 - 1000
 
 
 # ---- what cannot be read is said, not zeroed ---------------------------------------------------------
