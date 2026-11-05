@@ -36,7 +36,8 @@ The image therefore has no licence label, because one value would be wrong for m
 
 The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED=0`, runs as a non-root user, and carries labels for the source commit (`org.opencontainers.image.revision`) and the lock's SHA-256 (`io.nemar.lock-sha256`).
 Its bases are digests: `python:3.12-slim` (used by two stages, with the same digest) and the `uv` image, each named with its version in the Dockerfile's comments.
-The recipes package arrives in a later phase; this one installs the placeholder `nemar_process` (the signalJourney validator pointed at the vendored schema).
+The image also holds the recipes package `nemar_process` (the signalJourney validator pointed at the vendored schema, the common layer and `nemar_floor`) and the command `nemar-recipe` in `/opt/venv/bin` (see [recipes.md](recipes.md)).
+The command is a two-line script that `python -m nemar_process` stands behind; a launch specification names it as an argument vector, for example `["nemar-recipe", "run", "nemar-floor", "--dataset-dir", "/data/<id>", ...]`.
 
 ## How a consumer refers to it
 
@@ -154,8 +155,12 @@ The digest file, `nemar-python-<version>-cpu-digests.json`, holds the image dige
 
 `images/nemar-python/smoke.py` prints one JSON document and nothing else on standard output.
 It imports every pinned package, lists every installed distribution with its version, runs one real eegprep step on `tests/fixtures/smoke/smoke.set` (`pop_loadset`, `pop_eegfiltnew`, `clean_flatlines`), and validates a hand-written signalJourney record with `nemar_process.sj.validator()`, which must also reject the same record without `pipelineInfo`.
+It then runs `nemar-recipe version` and prints what it said; `scripts/check_smoke_pins.py` requires it to name the pinned eegprep and the registered recipes, and, for an image, requires that it ran as the script on the path and not as the module.
 `scripts/check_smoke_pins.py` compares the document with `pyproject.toml` and `uv.lock`: every pin and every locked version must match, nothing that leads to MATLAB or Octave may be installed, torch must be a CPU build, and, for an image, the thread and hash environment and the `/opt/venv` prefix must be as the Dockerfile sets them.
-The fixture is synthetic and a smoke input only (see its README); the scientific fixtures belong to the recipes.
+The fixture is synthetic and a smoke input only (see its README); the scientific fixture is `tests/fixtures/eeg/`, which the recipes' tests and the launch end to end use.
+
+The pull-request job also runs the launch end to end in the SIF it just built: `tests/e2e/test_floor_launch.py` runs the real launcher against a stand-in data plane that serves the scientific fixture, runs `nemar-recipe run nemar-floor` in the SIF as a job would, uploads to stand-in outputs routes, and compares the result with a direct run of the same fixture.
+It runs in the unprivileged `test` job only (the signing job holds the OIDC token and runs no test from this repository).
 
 ## Published images
 
