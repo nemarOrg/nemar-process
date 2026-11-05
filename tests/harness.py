@@ -8,6 +8,7 @@ own logic.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import io
@@ -70,9 +71,24 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def encode_spec(spec: Mapping) -> bytes:
-    """ASCII-only compact JSON, as NEMAR's Worker writes it (non-ASCII characters as escapes)."""
+def spec_text(spec: Mapping) -> bytes:
+    """The JSON text of a launch specification: ASCII-only compact JSON, as NEMAR's Worker writes
+    it (non-ASCII characters as escapes). ``launch_spec_digest`` is taken over these bytes."""
     return json.dumps(spec, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+
+
+def wire_encode(text: bytes) -> bytes:
+    """The environment value for a JSON text: base64url (RFC 4648 section 5), no padding.
+
+    Written with the standard library's encoder and not with the launcher's code, so the tests
+    that decode it check the launcher against an independent implementation.
+    """
+    return base64.urlsafe_b64encode(text).rstrip(b"=")
+
+
+def encode_spec(spec: Mapping) -> bytes:
+    """The value of ``NEMAR_LAUNCH_SPEC`` for ``spec``: the one helper every test builds it with."""
+    return wire_encode(spec_text(spec))
 
 
 def make_bundle(files: Mapping[str, str | bytes], executable: tuple = ()) -> bytes:

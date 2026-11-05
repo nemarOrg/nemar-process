@@ -300,19 +300,31 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         slurm_id = env.get(ENV_SLURM_JOB_ID)
         state.slurm_job_id = slurm_id if slurm_id and _SLURM_ID.match(slurm_id) else None
         raw = env.raw(ENV_SPEC)
+        text: bytes | None = None
         if raw is None:
-            state.digest = spec.digest_of(b"")  # the digest of no bytes
             state.fail(
                 Failure("runtime_error", "invalid_spec", "the launch specification is not set")
             )
         else:
-            state.digest = spec.digest_of(raw)
             try:
-                job = spec.parse(raw)
+                text = spec.decode_wire(raw)
+            except spec.SpecError as problem:
+                # The value is not base64url of an ASCII text. Which rule fired is a fixed word;
+                # the value, which holds the job token once decoded, is never logged.
+                log.error("the launch specification value was refused: {}".format(problem.reason))
+                state.fail(
+                    Failure("runtime_error", problem.detail, "the launch specification was refused")
+                )
+        # The digest is of the TEXT the value decodes to; with no text (the variable is not set, or
+        # its value is not one) there are no bytes to hash.
+        state.digest = spec.digest_of(b"" if text is None else text)
+        if text is not None:
+            try:
+                job = spec.parse_text(text)
                 state.job_id = job.job_id
                 state.image = {"uri": job.image["uri"], "digest": job.image["digest"]}
             except spec.SpecError as problem:
-                state.job_id = spec.recover_job_id(raw)
+                state.job_id = spec.recover_job_id(text)
                 state.fail(
                     Failure("runtime_error", problem.detail, "the launch specification was refused")
                 )
