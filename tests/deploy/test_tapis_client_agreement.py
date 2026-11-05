@@ -184,10 +184,70 @@ def test_the_client_sends_no_archive_field_but_the_filter():
     assert "execSystemId" not in block
 
 
+# The shape the client's request schema must keep, as it is written in schemas.ts:
+#   envVariables: z.array(z.object({ key: z.literal(LAUNCH_SPEC_ENV_KEY), value: ... }).strict()).length(1)
+# This is the control that keeps a request from adding a variable of its own: Tapis lets a job request
+# add ANY variable the application does not declare (FIXED blocks only declared names; from the Tapis
+# source, to confirm on the tenant), so NEMAR_HOST_PYTHON's sibling SLURM_TMPDIR, PATH, LD_PRELOAD and
+# the rest are guarded only by this closed, one-element, one-key array.
+ENV_ARRAY = re.compile(
+    r"envVariables: z \.array\( z \.object\(\{ key: z\.literal\(LAUNCH_SPEC_ENV_KEY\),"
+    r".*?\}\) \.strict\(\),? \) \.length\(1\),? archiveFilter:"
+)
+
+
+def env_array_problems(schemas_source: str) -> list[str]:
+    """What is wrong with how the client's request schema declares its environment variables."""
+    squashed = squash(without_comments(schemas_source))
+    found = []
+    if "envVariables:" not in squashed:
+        return ["the request schema has no envVariables"]
+    if not ENV_ARRAY.search(squashed):
+        found.append(
+            "envVariables is not one closed element whose key is the literal LAUNCH_SPEC_ENV_KEY, "
+            "with .length(1)"
+        )
+    if "LAUNCH_SPEC_ENV_KEY = LAUNCHER_ENV.SPEC" not in squashed:
+        found.append("LAUNCH_SPEC_ENV_KEY is not LAUNCHER_ENV.SPEC")
+    return found
+
+
+REAL_SHAPE = """
+        envVariables: z
+          .array(
+            z
+              .object({
+                key: z.literal(LAUNCH_SPEC_ENV_KEY),
+                value: z.string().min(1).max(LAUNCH_SPEC_MAX_BYTES),
+              })
+              .strict(),
+          )
+          .length(1),
+        archiveFilter: z.object({ includeLaunchFiles: z.literal(false) }).strict(),
+"""
+SPEC_KEY = "export const LAUNCH_SPEC_ENV_KEY = LAUNCHER_ENV.SPEC;\n"
+
+
+def test_the_pinned_shape_is_recognised_and_each_way_of_opening_it_is_not():
+    assert env_array_problems(SPEC_KEY + REAL_SHAPE) == []
+    for name, broken in {
+        "no length": REAL_SHAPE.replace(".length(1)", ""),
+        "a longer array": REAL_SHAPE.replace(".length(1)", ".length(2)"),
+        "a minimum only": REAL_SHAPE.replace(".length(1)", ".min(1)"),
+        "any key": REAL_SHAPE.replace("z.literal(LAUNCH_SPEC_ENV_KEY)", "z.string()"),
+        "any key from a list": REAL_SHAPE.replace("z.literal(LAUNCH_SPEC_ENV_KEY)", "z.enum(KEYS)"),
+        "an open element": REAL_SHAPE.replace(
+            ".strict(),\n          )", ".passthrough(),\n          )"
+        ),
+    }.items():
+        assert env_array_problems(SPEC_KEY + broken), name
+    assert env_array_problems(REAL_SHAPE)
+    assert env_array_problems("export const x = 1;")
+
+
 def test_the_client_sends_one_environment_variable_and_it_is_the_launch_specification():
-    schemas = without_comments(client_file("schemas"))
-    assert "key: z.literal(LAUNCH_SPEC_ENV_KEY)" in schemas
-    assert "LAUNCH_SPEC_ENV_KEY = LAUNCHER_ENV.SPEC" in schemas
+    schemas = client_file("schemas")
+    assert env_array_problems(schemas) == []
     contract = client_file("contract")
     for key, name in CLIENT_LAUNCHER_ENV.items():
         assert re.search(r"\b{}: \"{}\"".format(key, name), contract), key
