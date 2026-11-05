@@ -5,7 +5,7 @@ development environment does not have; the gate for these tests is
 
     uv run --frozen --group runtime --extra cpu pytest tests/recipes --cov=recipes --cov-fail-under=85
 
-Where eegprep is not installed, `tests/recipes/conftest.py` leaves the modules that need it
+Where eegprep is not installed, `tests/recipe_plugin.py` leaves the modules that need it
 uncollected, with a line in the report header that says so, so that the repository-wide gates still
 run in the development environment. In CI ``NEMAR_REQUIRE_RUNTIME=1`` turns that into a failure:
 nothing is left out there unnoticed.

@@ -116,6 +116,7 @@ include = [
     "scripts/make_smoke_fixture.py",
     "recipes/nemar_process/**",
     "tests/recipes/**",
+    "tests/recipe_plugin.py",
     "tests/recipe_support.py",
 ]
 
