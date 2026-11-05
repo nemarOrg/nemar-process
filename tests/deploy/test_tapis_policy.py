@@ -635,6 +635,16 @@ def test_each_forbidden_addition_to_a_stored_definition_is_named_by_path(name):
     assert policy.stored_violations(document) == [path]
 
 
+@pytest.mark.parametrize(
+    "value", [True, 1, "true", "yes", []], ids=["true", "one", "text", "yes", "list"]
+)
+def test_launch_files_that_are_not_exactly_false_are_forbidden_in_a_stored_definition(value):
+    document = {"jobAttributes": {"parameterSet": {"archiveFilter": {"includeLaunchFiles": value}}}}
+    assert policy.stored_violations(document) == [
+        "/jobAttributes/parameterSet/archiveFilter/includeLaunchFiles"
+    ]
+
+
 def test_what_a_tenant_leaves_empty_or_null_is_not_a_violation():
     quiet = {
         "jobAttributes": {
