@@ -55,13 +55,18 @@ def test_the_line_noise_excess_is_the_legacy_formula_checked_against_scipys_welc
     assert set(found) == {50, 60}
     for frequency in (50, 60):
         assert found[frequency] == pytest.approx(oracle_excess(data, srate, frequency), abs=1e-6)
-    assert found[50] > found[60] > 0
+    low, high = found[60], found[50]
+    assert low is not None
+    assert high is not None
+    assert high > low > 0
 
 
 def test_white_noise_has_no_excess_at_either_frequency():
     found = qc.line_noise_excess(eeg_like(noise(6, 60, 250), 250))
-    assert abs(found[50]) < 1.5
-    assert abs(found[60]) < 1.5
+    for frequency in (50, 60):
+        excess = found[frequency]
+        assert excess is not None
+        assert abs(excess) < 1.5
 
 
 def test_the_excess_is_the_mean_over_channels_of_the_db_not_the_db_of_a_mean():
@@ -71,7 +76,10 @@ def test_the_excess_is_the_mean_over_channels_of_the_db_not_the_db_of_a_mean():
     found = qc.line_noise_excess(eeg_like(data, srate))
     assert found[50] == pytest.approx(oracle_excess(data, srate, 50), abs=1e-6)
     only_one = qc.line_noise_excess(eeg_like(data[:1], srate))[50]
-    assert found[50] < only_one
+    mean_of_dbs = found[50]
+    assert mean_of_dbs is not None
+    assert only_one is not None
+    assert mean_of_dbs < only_one
 
 
 def test_a_frequency_whose_neighbourhood_does_not_fit_under_nyquist_is_not_measurable():
@@ -253,6 +261,7 @@ def test_degenerate_geometry_is_not_usable(label, points, reason):
     guard = qc.location_guard(chanlocs_of(points))
     assert guard.usable is False, label
     assert guard.reason == reason
+    assert guard.rank is not None
     assert guard.rank < 3
 
 

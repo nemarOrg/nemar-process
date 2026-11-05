@@ -90,8 +90,7 @@ def removed_names(before: list[str], kept: np.ndarray) -> list[str]:
 def process(loaded: Loaded) -> FloorResult:
     """Run the floor on a loaded recording. Consumes ``loaded.eeg``."""
     recipe = plans.Plan(steps.RECIPE_ID, steps.RECIPE_VERSION)
-    eeg = loaded.eeg
-    loaded.eeg = None  # the floor owns it from here; the raw copy is not kept
+    eeg = loaded.take()  # the floor owns it from here; the raw copy is not kept
     n_input = int(eeg["nbchan"])
     srate = float(eeg["srate"])
     duration = int(eeg["pnts"]) / srate

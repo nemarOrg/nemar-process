@@ -178,3 +178,84 @@ def write_fif(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     raw.save(str(path), overwrite=True, verbose=False)
     return path
+
+
+def floor_literals() -> dict:
+    """Function and parameters of every step the floor executes on the fixture, written by hand.
+
+    This is the test's own table: it is not read from the recipe, so a changed value in the recipe
+    fails against it, in the plan and in the record the command writes.
+    """
+    import numpy as np
+
+    return {
+        "load": (
+            "eegprep.pop_load_frombids",
+            {
+                "bidschanloc": True,
+                "bidsevent": False,
+                "bidsmetadata": True,
+                "dtype": "float64",
+                "eventtype": None,
+                "infer_locations": False,
+                "numeric_null": [],
+                "return_report": True,
+                "verbose": False,
+            },
+        ),
+        "signal_channels": ("eegprep.pop_select", {"channel_types": ["EEG", "untyped"]}),
+        "flatline": (
+            "eegprep.clean_flatlines",
+            {"max_flatline_duration": 5.0, "max_allowed_jitter": 20.0},
+        ),
+        "drift": (
+            "eegprep.clean_drifts",
+            {"transition": [0.25, 0.75], "attenuation": 80.0, "method": "fft"},
+        ),
+        "line_noise_measure": (
+            "eegprep.functions.sigprocfunc.spectopo.compute_spectra",
+            {
+                "frequencies_hz": [50, 60],
+                "threshold_db": 10.0,
+                "percent": 100,
+                "winsize": None,
+                "overlap": 0,
+                "nfft": None,
+                "wintype": "hamming",
+                "peak": "nearest_bin",
+                "neighbor_bin_offsets": [-6, -5, -4, -3, -2, 2, 3, 4, 5, 6],
+                "statistic": "mean_over_channels_of_db",
+            },
+        ),
+        "bad_channels": (
+            "eegprep.clean_channels",
+            {
+                "corr_threshold": 0.8,
+                "noise_threshold": 4.0,
+                "window_len": 5.0,
+                "max_broken_time": 0.4,
+                "num_samples": 50,
+                "subset_size": 0.25,
+                "rng_seed": 5489,
+            },
+        ),
+        "bad_windows": (
+            "eegprep.clean_windows",
+            {
+                "max_bad_channels": 0.2,
+                "zthresholds": [-3.5, 5.0],
+                "window_len": 1.0,
+                "window_overlap": 0.66,
+                "max_dropout_fraction": 0.1,
+                "min_clean_fraction": 0.25,
+                "truncate_quant": [0.022, 0.6],
+                "step_sizes": [0.01, 0.01],
+                # the 13 floats of numpy.arange(1.7, 3.6, 0.15), the default eegprep applies
+                "shape_range": np.arange(1.7, 3.6, 0.15).tolist(),
+            },
+        ),
+        "qc": (
+            "nemar_process.qc.floor_metrics",
+            {"spectrum_hz": [1, 70], "robust_amplitude": "1.4826*MAD"},
+        ),
+    }

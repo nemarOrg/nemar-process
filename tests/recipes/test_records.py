@@ -16,7 +16,7 @@ import re
 import pytest
 from nemar_process import sj
 from nemar_process.common import files, plan, records
-from recipe_support import DATASET, RECORDING
+from recipe_support import DATASET, RECORDING, floor_literals
 
 
 @pytest.fixture(scope="module")
@@ -287,3 +287,17 @@ def test_a_record_that_does_not_pass_its_own_checks_is_never_written(monkeypatch
         "invalid_record",
     )
     assert not list(tmp_path.rglob("*signalJourney.json"))
+
+
+def test_each_step_of_the_written_record_runs_with_the_pinned_parameters(record):
+    """Test 1 of the issue, asserted through the record: the test's own table, not the recipe's."""
+    literals = floor_literals()
+    steps = record["processingSteps"]
+    assert [s["stepId"] for s in steps] == list(literals)
+    for step in steps:
+        function, parameters = literals[step["stepId"]]
+        assert step["name"] == function, step["stepId"]
+        assert step["parameters"] == parameters, step["stepId"]
+    # and the drift step is the one whose transition is not eegprep's default
+    drift = next(s for s in steps if s["stepId"] == "drift")
+    assert drift["parameters"]["transition"] == [0.25, 0.75]

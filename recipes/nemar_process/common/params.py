@@ -30,7 +30,7 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): jsonable(item) for key, item in value.items()}
     if isinstance(value, type):
-        return value.__name__
+        return getattr(value, "__name__", str(value))
     return value
 
 
@@ -41,7 +41,9 @@ def signature_defaults(function: Callable, names: Iterable[str]) -> dict[str, An
     for name in names:
         default = parameters[name].default
         if default is inspect.Parameter.empty:
-            raise ValueError("{} has no default for {}".format(function.__name__, name))
+            raise ValueError(
+                "{} has no default for {}".format(getattr(function, "__name__", function), name)
+            )
         defaults[name] = jsonable(default)
     return defaults
 

@@ -42,7 +42,7 @@ import signal
 import sys
 import uuid
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -297,7 +297,7 @@ def exit_for(counts: dict[str, int]) -> tuple[int, str]:
 
 
 @contextlib.contextmanager
-def quiet() -> Iterator[None]:
+def quiet() -> Generator[None]:
     """eegprep logs and warns a great deal about fields it does not need; the command reports its
     own line per recording."""
     saved = logging.root.manager.disable
@@ -311,7 +311,7 @@ def quiet() -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def terminated_as_exit() -> Iterator[None]:
+def terminated_as_exit() -> Generator[None]:
     """A SIGTERM ends the run through ``SystemExit``, so the private directory is removed and what
     was finished stays."""
     if not hasattr(signal, "SIGTERM"):  # pragma: no cover

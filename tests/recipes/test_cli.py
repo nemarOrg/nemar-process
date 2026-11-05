@@ -15,7 +15,14 @@ import pytest
 from nemar_process import cli as command
 from nemar_process.common import files, records
 from nemar_process.common.errors import RecordingError, RecordingSkipped
-from recipe_support import DATASET, RECORDING, copy_fixture, touch_tree, tree_digest
+from recipe_support import (
+    DATASET,
+    RECORDING,
+    copy_fixture,
+    floor_literals,
+    touch_tree,
+    tree_digest,
+)
 
 LABEL = "desc-nemarfloor"
 
@@ -133,6 +140,19 @@ def test_the_row_carries_the_content_hash_of_the_record_file(first_run):
     assert records.content_sha256(record) == row["record_content_sha256"]
     record["extensions"]["nemar"]["plan_hash"] = "sha256:" + "0" * 64
     assert records.content_sha256(record) != row["record_content_sha256"]
+
+
+def test_the_record_the_command_wrote_has_each_step_with_its_pinned_parameters(first_run):
+    path = (
+        first_run["out"]
+        / "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_signalJourney.json"
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    literals = floor_literals()
+    for step in record["processingSteps"]:
+        function, parameters = literals[step["stepId"]]
+        assert (step["name"], step["parameters"]) == (function, parameters), step["stepId"]
+    assert [s["stepId"] for s in record["processingSteps"]] == list(literals)
 
 
 def test_the_default_output_directory_is_product_under_nemar_out(tmp_path, monkeypatch, cli):
