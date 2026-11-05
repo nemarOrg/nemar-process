@@ -27,6 +27,7 @@ import pytest
 import tapis_support as ts
 from nemar_launch import __version__ as launcher_version
 from nemar_launch import codes
+from nemar_launch import spec as spec_mod
 
 TAPIS_ARCHIVE_FIELDS = (
     "archiveSystemId",
@@ -128,6 +129,20 @@ def test_the_launch_specification_is_required_and_carries_no_value_in_the_defini
     spec = found[codes.ENV_SPEC]
     assert spec["inputMode"] == "REQUIRED"
     assert spec.get("value", "") == ""
+
+
+def test_the_launch_specification_variable_is_described_by_its_wire_form():
+    # The variable holds the specification's JSON text in base64url, not the text: the description
+    # says so, with the longest value, so an operator reading the definition is not told it is JSON.
+    # A text only: the mode and the empty value are the test above.
+    description = variables(ts.raw(ts.LAUNCH_APP))[codes.ENV_SPEC]["description"]
+    wire_form = "base64url of the launch specification JSON text, at most {:,} characters".format(
+        spec_mod.WIRE_MAX_CHARS
+    )
+    assert wire_form in description
+    assert "JSON, ASCII" not in description
+    assert "64 KiB" not in description
+    assert "upload token" in description  # still says that the value is a secret
 
 
 def test_the_launch_application_defines_exactly_these_variables():

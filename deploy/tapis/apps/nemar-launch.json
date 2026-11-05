@@ -24,7 +24,7 @@
         {
           "key": "NEMAR_LAUNCH_SPEC",
           "inputMode": "REQUIRED",
-          "description": "The launch specification (JSON, ASCII, at most 64 KiB), supplied by NEMAR for each job. It holds the job's upload token."
+          "description": "The launch specification: base64url of the launch specification JSON text, at most 87,382 characters, supplied by NEMAR for each job. It holds the job's upload token."
         },
         {
           "key": "NEMAR_SIF_ROOT",
@@ -59,7 +59,7 @@
   },
   "tags": ["nemar", "launcher"],
   "notes": {
-    "launcher_sha256": "d56830fe8dbe1c49310ed078992be40c612d37c67d8384857271ebb122b14d64",
+    "launcher_sha256": "bb67e8f794f3f443aa35ef35a4e1f0fac7a43be0935be116507bf26132e10e8c",
     "source": "https://github.com/nemarOrg/nemar-process"
   }
 }
