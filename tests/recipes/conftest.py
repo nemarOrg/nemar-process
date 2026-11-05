@@ -34,3 +34,16 @@ def fixture_result():
     from recipe_support import loaded_fixture
 
     return process(loaded_fixture())
+
+
+@pytest.fixture(scope="session")
+def floor_product(tmp_path_factory):
+    """The floor's files and record for the fixture recording, written once: (directory, product)."""
+    from nemar_process.common import io
+    from nemar_process.nemar_floor import RECIPE
+    from recipe_support import DATASET, loaded_fixture, make_context
+
+    directory = tmp_path_factory.mktemp("product")
+    (recording,) = io.discover(DATASET)
+    product = RECIPE.run_recording(recording, make_context(), directory, loaded=loaded_fixture())
+    return directory, product

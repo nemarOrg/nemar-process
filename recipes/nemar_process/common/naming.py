@@ -55,3 +55,10 @@ def product_path(relative_path: str, recipe_label: str, suffix: str, extension: 
 def dataset_path(recipe_label: str, suffix: str, extension: str) -> str:
     """A dataset-level file, at the root of the product."""
     return "desc-{}_{}.{}".format(recipe_label, suffix, extension)
+
+
+def product_entities(relative_path: str, recipe_label: str) -> dict[str, str]:
+    """The entities of a product file: the recording's, with ``desc`` carrying the label."""
+    entities = entity_labels(relative_path)
+    entities["desc"] = entities.get("desc", "") + recipe_label
+    return entities

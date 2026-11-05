@@ -125,3 +125,21 @@ def copy_fixture(destination: Path, *, without: tuple[str, ...] = ()) -> Path:
     for name in without:
         (destination / "sub-CUCOV076" / "eeg" / name).unlink()
     return destination
+
+
+def make_context(**identity):
+    """A run context for the fixture dataset, with a fixed identity and the real engine stamp."""
+    from nemar_process.common import determinism
+    from nemar_process.common.recipe import Identity, RunContext
+
+    values = {
+        "dataset_id": DATASET_ID,
+        "dataset_version": DATASET_VERSION,
+        "source_commit": "0123456789abcdef0123456789abcdef01234567",
+        "image_digest": "sha256:" + "b" * 64,
+        "run_id": "run-under-test",
+    }
+    values.update(identity)
+    with determinism.pinned_threads():
+        engine = determinism.engine_info()
+    return RunContext(DATASET, Identity(**values), engine, dict(determinism.SEEDS))
