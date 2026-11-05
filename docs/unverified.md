@@ -100,15 +100,35 @@ The application and system schemas are derived from Tapis's own OpenAPI files (c
 Answers marked "from source" were read in the Tapis source (branch `local`, release 26Q2.1) by a reviewer; each is to be confirmed on the tenant, and each says so.
 These are the assumptions, in the order they would bite.
 
-### Blocked: the encoding of the launch specification
+### The encoding of the launch specification, and what still blocks registration
 
 **Registration is BLOCKED.**
-Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
-Tapis writes each environment variable into launch files (`tapisjob.env` and `tapisjob.sh`) that a shell reads, and the launch specification travels in one of them as JSON text.
-The description in the launch schema says its bytes "survive Tapis, the shell and the locale": that has not been established, and nothing here relies on it.
-The change spans nemar-cli's shared contract, its client and the launcher, and it is the owner's to schedule; this phase changes none of them, and the schema copy here stays byte for byte nemar-cli's.
+Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
+the release-asset procedure (immutable releases, tag rulesets and a reviewed release workflow),
+whether the entry scripts delete the launch files after the job starts,
+whether the launcher adds `--no-mount hostfs`,
+and confirmation on the tenant of every Tapis behaviour marked "from source, to confirm on the tenant".
+The encoding of the launch specification is no longer one of them:
+the value of `NEMAR_LAUNCH_SPEC` is the base64url encoding (no padding) of the specification's JSON text,
+so a shell that sources the launch file reads only letters, digits, `-` and `_`,
+and the launcher decodes it strictly.
 No job with a real token is to be submitted before then either, and the observer's application waits with the rest.
 A dry run of `scripts/register.py` is safe.
+
+Tapis writes each environment variable into launch files (`tapisjob.env` and `tapisjob.sh`) that a shell reads, and the launch specification travels in one of them.
+Its first design sent the JSON text, which is not safe there: the scheduler quotes a value only conditionally, so a value with no space loses its quotes, and a `$`, a backtick or a backslash in a user's string is expanded or breaks the quoting.
+The value is now the text in base64url without padding ([launcher.md](launcher.md)), made only of `A-Za-z0-9-_`, which no shell treats as special whether or not the scheduler quotes it.
+This repository's tests show that against a stand-in of the quoting rule, with real shells; they do not show what Tapis does.
+Still unconfirmed, each to be confirmed on the tenant:
+
+- **The quoting rule.**
+  From source, to confirm on the tenant: the scheduler leaves a value bare unless it holds a space, one of `&`, `>`, `<`, `|` or `;`, or a backtick, and otherwise double-quotes it and escapes only the double quote.
+  The encoded value is safe under that rule and under any other that leaves letters, digits, `-` and `_` alone.
+  After the first job, read the launch file in the execution directory and compare its line with the value NEMAR sent.
+- **Any other change to a value.**
+  Whether Tapis trims, wraps, expands a macro in or limits the length of a value is unconfirmed (the longest value is 87,382 characters).
+  A value that arrives changed is refused by the launcher with a log line naming the rule, `not_base64url`, `bad_length` or `too_long`, and no part of the value.
+  A macro such as `${JobUUID}` cannot match, since the value holds no `$` and no brace.
 
 ### Archiving and directories
 
@@ -147,7 +167,7 @@ A dry run of `scripts/register.py` is safe.
   So `SLURM_TMPDIR` (which the launcher prefers to the fixed `TMPDIR`), `PATH`, `LD_PRELOAD` and the rest are guarded only by NEMAR's client, whose request schema declares exactly one variable, `NEMAR_LAUNCH_SPEC`, in a closed one-element array; `tests/deploy/test_tapis_client_agreement.py` pins that shape against the client's source.
   The definitions can add one guard of their own, and do: `NEMAR_HOST_PYTHON` is declared `FIXED` with an empty value, which (from source) Tapis accepts and which makes it refuse a request that sets a different value; the entry scripts read an empty value as "search the host".
 - **The longest environment value.**
-  A launch specification may be up to 64 KiB.
+  A launch specification may be up to 64 KiB of JSON text, which is up to 87,382 characters as the base64url value.
   Tapis may limit an environment variable's length, or the length of the generated launch script.
   If it does, large specifications fail at submit; this is an escalation.
 - **Empty `REQUIRED` variables.**

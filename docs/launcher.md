@@ -7,7 +7,7 @@ The node holds no storage credential.
 
 Nothing the container writes is trusted: NEMAR accounts for a job from what the launcher records, outside the container.
 
-Abbreviations used here: JavaScript Object Notation (JSON), American Standard Code for Information Interchange (ASCII), Secure Hash Algorithm 256 (SHA-256), Hypertext Transfer Protocol (HTTP) and its secure form (HTTPS), application programming interface (API), Uniform Resource Locator (URL), process identifier (PID), Singularity Image Format (SIF), graphics processing unit (GPU), comma-separated values (CSV), continuous integration (CI), out of memory (OOM), Unicode Transformation Format (UTF-8, UTF-16).
+Abbreviations used here: JavaScript Object Notation (JSON), American Standard Code for Information Interchange (ASCII), Secure Hash Algorithm 256 (SHA-256), Hypertext Transfer Protocol (HTTP) and its secure form (HTTPS), application programming interface (API), Uniform Resource Locator (URL), process identifier (PID), Singularity Image Format (SIF), graphics processing unit (GPU), comma-separated values (CSV), continuous integration (CI), out of memory (OOM), Unicode Transformation Format (UTF-8, UTF-16), Request for Comments (RFC), null character (NUL).
 Cloudflare R2 object storage is called R2.
 
 ## Contents of the zip
@@ -43,13 +43,53 @@ If no usable Python is found, or `_tapisExecSystemOutputDir` is unset, the scrip
 
 ## The launch specification
 
-The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`: JSON, ASCII only (every character at or above U+007F is written as a `\uXXXX` escape), at most 64 KiB.
+The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`.
+The document is JSON text, ASCII only (every character at or above U+007F is written as a `\uXXXX` escape), at most 64 KiB.
 `launcher/schema/launch-spec.v1.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
 The launcher validates against it with a small validator of its own, because it may use only the standard library; a schema keyword the validator does not implement is an error, never ignored.
 
-**Whether this encoding is safe through Tapis's launch files and the shell that reads them is NOT established, and is BLOCKED.**
-The schema's description says the bytes "survive Tapis, the shell and the locale"; treat that sentence as unverified and superseded by this one (the schema copy here is nemar-cli's, byte for byte, and is not edited here).
-Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together. No job with a real token is to be submitted before then either ([unverified.md](unverified.md)).
+### The environment value: base64url
+
+The variable does not hold the JSON text.
+It holds that text encoded as base64url without padding: the 64 characters of section 5 of RFC 4648 (`A-Za-z0-9-_`), no `=`, no line break, so at most 87,382 characters (`ceil(65536 * 4 / 3)`) for a text of 64 KiB.
+The text, its digest and its 64 KiB cap are unchanged in meaning; only the value that travels is encoded.
+
+Why: the scheduler writes each environment value into a launch file that a shell sources on the node, and it quotes a value only when it holds a space, one of `&`, `>`, `<`, `|` or `;`, or a backtick, and then double-quotes it and escapes only the double quote (from the scheduler's source, to confirm on the tenant).
+Compact JSON is not safe there.
+A value with no space is left bare, so the shell removes its quotes.
+A `$`, a backtick or a backslash in a user's string is expanded, runs a command or breaks the quoting.
+The encoded value holds no character a shell treats as special, so it reaches the launcher unchanged whether or not the scheduler quotes it.
+`tests/launcher/test_shell_quoting.py` implements that quoting rule, sources the launch file with each of `sh`, `dash` and `bash`, and shows both halves: the raw JSON form breaks (and runs a command a user put in a string), and the encoded form comes back exactly and runs nothing.
+
+The decoder (`spec.decode_wire`) is strict and bounded, uses only the standard library, and checks the length before it reads a byte.
+Every refusal is `runtime_error` with detail `invalid_spec`: there is no new failure code, and no older form is accepted, because nothing was ever registered with a tenant on one.
+The log names the rule that fired, as one fixed word, and never any part of the value, which holds the job token once decoded.
+
+| The value is refused when | Word in the log |
+|---|---|
+| it is empty | `empty` |
+| it is longer than 87,382 characters (judged by the length alone, before anything else is read) | `too_long` |
+| it holds any character outside `A-Za-z0-9-_`: padding, `+` or `/` of the standard alphabet, whitespace, a line break, a quote, a raw JSON document | `not_base64url` |
+| its length is 1 modulo 4, which no byte string encodes to | `bad_length` |
+| it decodes to a byte at or above 0x80 | `not_ascii` |
+| it decodes to a NUL | `has_nul` |
+
+A value that decodes to text which is not one JSON object, or which fails the schema, is refused by the rules below with the same detail and no word.
+The trailing bits of the last character are not checked, as in nemar-cli's decoder (the encoder writes zeros).
+
+**Registration is still BLOCKED, and no longer by the encoding.**
+Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
+the release-asset procedure (immutable releases, tag rulesets and a reviewed release workflow),
+whether the entry scripts delete the launch files after the job starts,
+whether the launcher adds `--no-mount hostfs`,
+and confirmation on the tenant of every Tapis behaviour marked "from source, to confirm on the tenant".
+The encoding of the launch specification is no longer one of them:
+the value of `NEMAR_LAUNCH_SPEC` is the base64url encoding (no padding) of the specification's JSON text,
+so a shell that sources the launch file reads only letters, digits, `-` and `_`,
+and the launcher decodes it strictly.
+No job with a real token is to be submitted before then either ([unverified.md](unverified.md)).
+
+### The document
 
 | Key | Meaning |
 |---|---|
@@ -79,8 +119,9 @@ The local copy and the data plane's routes use the same string.
 The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it).
 The launcher does not hash the image: only its name ties it to the digest.
 
-The launcher hashes the raw bytes of the environment value before it parses them (`os.environb`), and records the SHA-256 as `launch_spec_digest` in `provenance.json`, even for a document it then refuses.
-It is not the job row's `spec_digest`, which NEMAR computes over the job specification it stores.
+The launcher reads the environment value as bytes (`os.environb`), decodes it, hashes the JSON text it decodes to before it parses that text, and records the SHA-256 as `launch_spec_digest` in `provenance.json`, even for a text it then refuses.
+The digest is over the text and never over the encoded value, and it is not the job row's `spec_digest`, which NEMAR computes over the job specification it stores.
+A value that does not decode to a text has no text to hash: its digest is that of no bytes (as when the variable is not set), and the job is unnamed.
 
 `entry` runs as `python /code/<entry> <args>` for `runtime: python`, and as `/code/<entry> <args>` for `runtime: image`.
 A `command` runs as given, followed by `args`.
@@ -263,7 +304,7 @@ A signal death of the entry is reported as 128 plus the signal, as a shell does,
 
 | Variable | Who sets it | Meaning |
 |---|---|---|
-| `NEMAR_LAUNCH_SPEC` | the Worker, through Tapis | the launch specification; holds the job token |
+| `NEMAR_LAUNCH_SPEC` | the Worker, through Tapis | the launch specification as base64url of its JSON text; holds the job token |
 | `_tapisExecSystemOutputDir` | Tapis | the output directory |
 | `NEMAR_HOST_PYTHON` | the application definition, optional | the host Python to use |
 | `NEMAR_LOCAL_DATASETS_ROOT` | the application definition, optional | root of NEMAR's own copy of datasets, `<root>/<id>/<version>/` |

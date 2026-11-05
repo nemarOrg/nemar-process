@@ -41,7 +41,15 @@ Container tests need a real Apptainer or Singularity binary; they skip with a st
 Tapis archives `tapisjob.env`, which holds the job token, unless `jobAttributes.parameterSet.archiveFilter.includeLaunchFiles` is `false`.
 A job request's own value wins whenever it is set and the application's is only the fallback, so NEMAR's client, which sets it on every job, is the control, and a test pins that the two agree; the same holds for variables, since a request may add any variable an application does not declare and only the client's closed one-variable schema stops it.
 Every host, account, path and credential is a placeholder or an environment variable, and `scripts/register.py` refuses a definition that breaks `scripts/tapis_policy.py`, never changes an existing version, and registers an application only if the file at its `containerImage` has the recorded digest.
-Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
+Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
+the release-asset procedure (immutable releases, tag rulesets and a reviewed release workflow),
+whether the entry scripts delete the launch files after the job starts,
+whether the launcher adds `--no-mount hostfs`,
+and confirmation on the tenant of every Tapis behaviour marked "from source, to confirm on the tenant".
+The encoding of the launch specification is no longer one of them:
+the value of `NEMAR_LAUNCH_SPEC` is the base64url encoding (no padding) of the specification's JSON text,
+so a shell that sources the launch file reads only letters, digits, `-` and `_`,
+and the launcher decodes it strictly.
 Changing a definition, the policy, the derivation or the archive filter is a security change: it needs a test that fails when the line is mutated, and a reviewer.
 What the operator supplies and does is in [`docs/operator.md`](docs/operator.md).
 
@@ -50,6 +58,7 @@ What the operator supplies and does is in [`docs/operator.md`](docs/operator.md)
 The launch specification schema `launcher/schema/launch-spec.v1.json` is copied byte for byte from nemar-cli's `shared/contract/compute-launch.schema.json`.
 Never edit it here: change it in nemar-cli, then bump the pin described in `docs/contracts.md`.
 The seven failure codes and exit numbers 10 to 16 in `launcher/nemar_launch/codes.py` are nemar-cli's list in nemar-cli's order.
+The environment value `NEMAR_LAUNCH_SPEC` is the base64url encoding of the document's JSON text, decoded strictly by `launcher/nemar_launch/spec.py` (`docs/launcher.md`); a digest is over the text, never over the value, and a refusal is `invalid_spec`, never a new code.
 
 ### Never hand-bump a version, never set a secret, never touch production
 

@@ -6,9 +6,18 @@ Nothing here is registered by CI or by a coding agent, and no tenant, host, acco
 Real values live in secrets and in the gated documentation, never here.
 
 **Registration is BLOCKED.**
-Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
+Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
+the release-asset procedure (immutable releases, tag rulesets and a reviewed release workflow),
+whether the entry scripts delete the launch files after the job starts,
+whether the launcher adds `--no-mount hostfs`,
+and confirmation on the tenant of every Tapis behaviour marked "from source, to confirm on the tenant".
+The encoding of the launch specification is no longer one of them:
+the value of `NEMAR_LAUNCH_SPEC` is the base64url encoding (no padding) of the specification's JSON text,
+so a shell that sources the launch file reads only letters, digits, `-` and `_`,
+and the launcher decodes it strictly.
 No job with a real token is to be submitted before then either.
-The launch specification is the value of `NEMAR_LAUNCH_SPEC`; Tapis writes it into launch files a shell reads, and the current encoding, JSON text, has not been shown safe there ([unverified.md](unverified.md)).
+The launch specification is the value of `NEMAR_LAUNCH_SPEC`: its JSON text in base64url, up to 87,382 characters ([launcher.md](launcher.md)).
+Tapis writes it into launch files a shell reads, and that alphabet is one a shell cannot misread ([unverified.md](unverified.md)).
 Dry runs are safe.
 
 Abbreviations used here: application programming interface (API), JavaScript Object Notation (JSON), Secure Shell (SSH), Secure Hash Algorithm 256 (SHA-256), Singularity Image Format (SIF), continuous integration (CI), Message Passing Interface (MPI), Simple Storage Service (S3).
@@ -147,7 +156,7 @@ The derivation refuses a keyword it has not been taught, so a newer specificatio
 ## The rules the definitions keep
 
 - **Launch files are not archived: the client is the control and the application is the fallback.**
-  Tapis writes the job's launch files, `tapisjob.env` and `tapisjob.sh`, and archives them with the output unless told not to; `tapisjob.env` holds the launch specification, which holds the job's upload token (the observer's token too).
+  Tapis writes the job's launch files, `tapisjob.env` and `tapisjob.sh`, and archives them with the output unless told not to; `tapisjob.env` holds the launch specification, which holds the job's upload token (the observer's token too); base64url is an encoding, not a protection, so the file is as sensitive as the token.
   The Tapis field is `jobAttributes.parameterSet.archiveFilter.includeLaunchFiles`.
   From the Tapis source (to confirm on the tenant): a job request's own value wins whenever it is set, and the application's value is used only when the request leaves it out, with Tapis's default being `true`.
   NEMAR's Tapis client sets it to `false` on every job it submits, and both applications set it to `false` too, so a request that omits it is still covered.
