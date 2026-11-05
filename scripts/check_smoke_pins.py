@@ -11,6 +11,8 @@ declares, so the tests, the pull-request job and the release job all ask the sam
 * nothing that leads to MATLAB or Octave is installed, by name (``NO_MATLAB`` and the substring
   rule in ``forbidden_names``);
 * torch is a CPU build, and Python is the 3.12 series;
+* the recipe command ran and names the pinned eegprep and the recipes the repository registers
+  (``recipe_command``), and with ``--image`` it was the script ``nemar-recipe`` on the path;
 * with ``--image``: the thread and hash environment the Dockerfile sets, and the environment at
   ``/opt/venv``.
 
@@ -116,6 +118,32 @@ def expected_versions(pyproject: Path, lock: Path) -> dict[str, set[str]]:
     return expected
 
 
+def recipe_command_problems(
+    command: dict | None, expected: dict[str, set[str]], image: bool
+) -> list[str]:
+    """What is wrong with the recipe command's part of the smoke document."""
+    if not command:
+        return ["recipe_command is missing: the smoke test did not run the recipe command"]
+    problems = []
+    version = command.get("version") or {}
+    pinned = expected.get("eegprep", set())
+    if version.get("eegprep") not in pinned:
+        problems.append(
+            "nemar-recipe says eegprep {} but the declaration says {}".format(
+                version.get("eegprep"), " or ".join(sorted(pinned))
+            )
+        )
+    if "nemar-floor" not in (version.get("recipes") or {}):
+        problems.append("nemar-recipe does not list the recipe nemar-floor")
+    if image and command.get("via") != "nemar-recipe":
+        problems.append(
+            "the recipe command ran as {!r}: in an image it is the script nemar-recipe".format(
+                command.get("via")
+            )
+        )
+    return problems
+
+
 def check(smoke: dict, pyproject: Path, lock: Path, image: bool = False) -> list[str]:
     """Problems, one string each, between the smoke document and the declaration and lock."""
     problems: list[str] = []
@@ -141,6 +169,9 @@ def check(smoke: dict, pyproject: Path, lock: Path, image: bool = False) -> list
         problems.append(
             "python is {}, not the {}x series".format(smoke.get("python"), PYTHON_SERIES)
         )
+    problems += recipe_command_problems(
+        smoke.get("recipe_command"), expected_versions(pyproject, lock), image
+    )
     if image:
         environment = smoke.get("environment") or {}
         for key, value in IMAGE_ENV.items():
