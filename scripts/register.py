@@ -21,9 +21,15 @@ account, the directories as the launcher reads them). A definition that does not
 THE DRY RUN (the default). Prints the method, path and body hash of each request it would make and
 sends nothing, not even a read. It needs no credentials.
 
-``--apply``. For each definition: ``GET`` it; if it exists, leave it exactly as it is (a registered
-version is never changed: publish a new version); if it is absent, ``POST`` it. A 409 on the ``POST``
-means it appeared after the read: that is an error, because this run did not look at what is there.
+``--apply``. First, for each application, the file at ``containerImage`` is fetched and its sha256
+must equal the digest in the application's ``notes``: Tapis fetches and unzips that file with no digest
+check of its own, so this is where the record is compared with the file (exit status 1, nothing
+registered, if they differ). The repository's example values are refused (exit status 2). Then, for
+each definition: ``GET`` it; if it exists, compare it with the rendered one (Tapis's added fields are
+ignored) and leave it exactly as it is, but exit status 1 naming the PATHS that differ, never their
+values (a registered version is never changed: publish a new version); if it is absent, ``POST`` it.
+A 409 on the ``POST`` means it appeared after the read: that is an error, because this run did not
+look at what is there.
 No other verb is ever sent, and nothing about permissions, sharing or credentials: those are the
 operator's, by other means (docs/operator.md).
 
@@ -32,8 +38,9 @@ both from the environment, never from an argument. The token travels in ``X-Tapi
 no output (a service that echoes it in an error body is redacted), and no redirect is followed.
 The base address is not printed either: it names a tenant.
 
-Exit status: 0 done (or dry run); 1 the tenant refused or failed; 2 the definition, the values or the
-environment are wrong, with nothing sent.
+Exit status: 0 done (or dry run); 1 the tenant refused or failed, a registered definition differs, or
+the zip is not the recorded one; 2 the definition, the values or the environment are wrong, with
+nothing sent.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple, TextIO
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 import tapis_policy
 from jsonschema import Draft202012Validator
@@ -65,6 +72,13 @@ MAX_VALUE_CHARS = 1024
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 TIMEOUT_SECONDS = 30
 MAX_BODY_BYTES = 1024 * 1024
+MAX_ZIP_BYTES = 64 * 1024 * 1024
+MAX_REDIRECTS = 5
+REDACT_SLICE = 16
+MAX_DRIFT_PATHS = 25
+LEDGER = ROOT / "deploy" / "tapis" / "released-versions.json"
+# The stand-in values of deploy/tapis/example.env: fine for a dry run and CI, never for a tenant.
+RESERVED_VALUE = re.compile(r"(?i)example[.-]|/path/to/")
 
 
 class RenderError(ValueError):
@@ -251,6 +265,84 @@ def canonical(document: object) -> bytes:
     )
 
 
+def redact(text: str, token: str) -> str:
+    """``text`` with the token, and any 16-character slice of it, replaced by ``[token]``.
+
+    A real token is a long JWT: a service that echoes part of one must not get it past a filter that
+    only knows the whole. The whole text is redacted, before anything is cut or filtered.
+    """
+    if not token:
+        return text
+    text = text.replace(token, "[token]")
+    if len(token) < REDACT_SLICE:
+        return text
+    slices = {token[i : i + REDACT_SLICE] for i in range(len(token) - REDACT_SLICE + 1)}
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i : i + REDACT_SLICE] in slices:
+            j = i + REDACT_SLICE
+            while j < n and text[j - REDACT_SLICE + 1 : j + 1] in slices:
+                j += 1
+            out.append("[token]")
+            i = j
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _same_scalar(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return expected is actual
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        return expected == actual
+    return type(expected) is type(actual) and expected == actual
+
+
+def differences(expected: Any, actual: Any, path: str = "") -> list[str]:
+    """The paths at which ``actual`` is not what ``expected`` says; never a value.
+
+    ``actual`` may hold more than ``expected``: Tapis adds fields (its tenant, identifiers, dates and
+    the defaults of what was left out). A list must be as long as expected, element by element.
+    """
+    here = path or "/"
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return [here]
+        found: list[str] = []
+        for key, value in expected.items():
+            sub = "{}/{}".format(path, key)
+            if key not in actual:
+                found.append(sub)
+            else:
+                found += differences(value, actual[key], sub)
+        return found
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            return [here]
+        found = []
+        for index, (want, have) in enumerate(zip(expected, actual, strict=True)):
+            found += differences(want, have, "{}/{}".format(path, index))
+        return found
+    return [] if _same_scalar(expected, actual) else [here]
+
+
+def reserved_values(values: Mapping[str, str]) -> list[str]:
+    """The placeholders whose values are the repository's stand-ins (``example.org``, ``/path/to/``, ``example-*``)."""
+    return sorted(name for name, value in values.items() if RESERVED_VALUE.search(value))
+
+
+def load_ledger(path: Path) -> dict[str, Any]:
+    try:
+        released = json.loads(path.read_text(encoding="utf-8")).get("released")
+    except (OSError, ValueError, AttributeError):
+        raise RenderError("the released-versions ledger cannot be read") from None
+    if not isinstance(released, dict):
+        raise RenderError('the released-versions ledger has no "released" map')
+    return released
+
+
 # ---- what each kind of definition is registered with ---------------------------------------------
 
 
@@ -305,7 +397,13 @@ class Plan(NamedTuple):
     values: dict[str, str]
 
 
-def plan(kind: str, path: Path, file_values: Mapping[str, str], env: Mapping[str, str]) -> Plan:
+def plan(
+    kind: str,
+    path: Path,
+    file_values: Mapping[str, str],
+    env: Mapping[str, str],
+    released: Mapping[str, Any] | None = None,
+) -> Plan:
     """Render one file and check it; raises ``RenderError`` for every way it is not fit to send."""
     spec = KINDS[kind]
     try:
@@ -327,6 +425,7 @@ def plan(kind: str, path: Path, file_values: Mapping[str, str], env: Mapping[str
     # edited definition cannot register something weaker than CI checked.
     if kind == "app":
         weaker = tapis_policy.app_violations(rendered)
+        weaker += tapis_policy.ledger_violations([rendered], released or {})
     else:
         # The operator's scratch root, even when an edited template no longer names it.
         root = file_values.get("EXEC_ROOT_DIR") or env.get("EXEC_ROOT_DIR")
@@ -412,18 +511,37 @@ class Tenant:
                 message = parsed["message"]
         except ValueError:
             pass
-        message = "".join(c for c in message if c.isprintable())[:200].replace(
-            self.token, "[token]"
-        )
+        # Redact the WHOLE message first: truncating first would let a long token slip through.
+        message = "".join(c for c in redact(message, self.token) if c.isprintable())[:200]
         return "{} {} answered {}{}".format(method, path, status, ": " + message if message else "")
+
+
+class Drift(Exception):
+    """A definition already registered does not match the one rendered now."""
+
+    def __init__(self, paths: list[str]) -> None:
+        super().__init__("drift")
+        self.paths = paths
+
+
+def _stored(data: bytes) -> Any:
+    try:
+        parsed = json.loads(data.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    return parsed.get("result") if isinstance(parsed, dict) else None
 
 
 def apply(tenant: Tenant, item: Plan, out: TextIO) -> None:
     status, data = tenant.send("GET", item.read_path)
     if status == 200:
+        stored = _stored(data)
+        paths = differences(item.document, stored) if isinstance(stored, dict) else ["/"]
+        if paths:
+            raise Drift(paths)
         print(
-            "{}: exists, left unchanged (a registered version is never modified; "
-            "publish a new version to change it)".format(item.label),
+            "{}: exists and matches this definition; left unchanged (a registered version is "
+            "never modified: publish a new version to change it)".format(item.label),
             file=out,
         )
         return
@@ -443,6 +561,77 @@ def apply(tenant: Tenant, item: Plan, out: TextIO) -> None:
     raise RequestFailed(tenant.describe("POST", item.create_path, status, data))
 
 
+def fetch_digest(url: str, max_bytes: int = MAX_ZIP_BYTES) -> str:
+    """The SHA-256 of the file at ``url`` (an https address, or loopback http). No credential is sent.
+
+    Redirects are followed (a release asset is served from object storage), at most five, never
+    from https to http, and every hop must itself be https or loopback http. At most 64 MiB are read.
+    """
+    current = url
+    for _hop in range(MAX_REDIRECTS + 1):
+        try:
+            parts = urlsplit(current)
+            host, port = parts.hostname, parts.port
+        except ValueError:
+            raise RequestFailed("containerImage is not an address") from None
+        plain_ok = parts.scheme == "http" and host in LOOPBACK
+        if (
+            (parts.scheme != "https" and not plain_ok)
+            or not host
+            or parts.username
+            or parts.password
+        ):
+            raise RequestFailed("containerImage is not an https address (or loopback http)")
+        make = (
+            http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        )
+        connection = make(host, port, timeout=TIMEOUT_SECONDS)
+        target = (parts.path or "/") + ("?" + parts.query if parts.query else "")
+        try:
+            connection.request(
+                "GET", target, headers={"User-Agent": "nemar-register", "Accept": "*/*"}
+            )
+            response = connection.getresponse()
+            if response.status in (301, 302, 303, 307, 308):
+                response.read(65536)  # the redirect's own body, so the connection closes cleanly
+                following = urljoin(current, response.getheader("Location") or "")
+                if parts.scheme == "https" and urlsplit(following).scheme != "https":
+                    raise RequestFailed("containerImage redirects from https to http")
+                current = following
+                continue
+            if response.status != 200:
+                raise RequestFailed("containerImage answered HTTP {}".format(response.status))
+            digest, total = hashlib.sha256(), 0
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    return digest.hexdigest()
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RequestFailed(
+                        "containerImage is larger than {} bytes".format(MAX_ZIP_BYTES)
+                    )
+                digest.update(chunk)
+        except (OSError, http.client.HTTPException) as problem:
+            raise RequestFailed(
+                "fetching containerImage failed: {}".format(type(problem).__name__)
+            ) from None
+        finally:
+            connection.close()
+    raise RequestFailed("containerImage redirects too many times")
+
+
+def verify_zip(item: Plan) -> None:
+    """The zip Tapis will fetch and unzip (with no digest check of its own) is the one the definition records."""
+    name, expected = tapis_policy.digest_note(item.document)
+    actual = fetch_digest(str(item.document.get("containerImage")))
+    if actual != expected:
+        raise RequestFailed(
+            "{}: the file at containerImage has sha256 {}, but notes.{} records {}; nothing was "
+            "registered".format(item.label, actual, name, expected)
+        )
+
+
 # ---- the command line --------------------------------------------------------------------------------
 
 
@@ -451,6 +640,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vars", metavar="FILE", help="NAME=value lines for the placeholders")
     parser.add_argument(
         "--apply", action="store_true", help="register what is absent (default: a dry run)"
+    )
+    parser.add_argument(
+        "--ledger", metavar="FILE", default=str(LEDGER), help="the released-versions ledger"
     )
     kinds = parser.add_subparsers(dest="kind", required=True)
     for kind in KINDS:
@@ -472,10 +664,18 @@ def main(
 
     try:
         file_values = load_vars(Path(args.vars).read_text(encoding="utf-8")) if args.vars else {}
-        plans = [plan(args.kind, Path(name), file_values, env) for name in args.files]
+        released = load_ledger(Path(args.ledger))
+        plans = [plan(args.kind, Path(name), file_values, env, released) for name in args.files]
         tenant = None
         if args.apply:
             tenant = _tenant_from(env)
+            stand_ins = reserved_values({k: v for item in plans for k, v in item.values.items()})
+            if stand_ins:
+                raise RenderError(
+                    "--apply refuses the repository's example values; fill in real ones for: {}".format(
+                        ", ".join(stand_ins)
+                    )
+                )
     except (RenderError, OSError) as problem:
         print("register: {}".format(problem), file=err)
         return 2
@@ -491,15 +691,45 @@ def main(
                 ),
                 file=out,
             )
+            if item.kind == "app":
+                print(
+                    "  --apply first fetches containerImage and checks its sha256 against the notes",
+                    file=out,
+                )
         return 0
 
+    try:
+        # Before anything reaches the tenant: Tapis fetches and unzips containerImage with no digest
+        # check of its own, so this is the only place the recorded digest is compared with the file.
+        for item in plans:
+            if item.kind == "app":
+                verify_zip(item)
+    except RequestFailed as problem:
+        print("register: {}".format(problem), file=err)
+        return 1
+
+    drifted = False
     for item in plans:
         try:
             apply(tenant, item, out)
+        except Drift as drift:
+            shown = drift.paths[:MAX_DRIFT_PATHS]
+            more = len(drift.paths) - len(shown)
+            print(
+                "register: {}: exists but differs from this definition at {}{} ({} difference(s)); "
+                "nothing was changed".format(
+                    item.label,
+                    ", ".join(shown),
+                    " and {} more".format(more) if more else "",
+                    len(drift.paths),
+                ),
+                file=err,
+            )
+            drifted = True
         except RequestFailed as problem:
             print("register: {}".format(problem), file=err)
             return 1
-    return 0
+    return 1 if drifted else 0
 
 
 def _tenant_from(env: Mapping[str, str]) -> Tenant:

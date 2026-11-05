@@ -31,6 +31,7 @@ class TapisStandin:
         post_status: int | None = None,
         redirect_reads_to: str | None = None,
         echo_token_in_errors: bool = False,
+        echo_slice: tuple[int, int] | None = None,
     ) -> None:
         self.token = token
         self.apps: dict[tuple[str, str], dict[str, Any]] = {}
@@ -42,6 +43,10 @@ class TapisStandin:
         self.redirect_reads_to = redirect_reads_to
         # Put the request's token into an error body, as a careless service could.
         self.echo_token_in_errors = echo_token_in_errors
+        # Put only this slice of the request's token into an error body.
+        self.echo_slice = echo_slice
+        # Answer a read of anything stored with exactly these bytes (an answer that cannot be compared).
+        self.raw_found: bytes | None = None
 
     # ---- the routes --------------------------------------------------------------------------
 
@@ -72,7 +77,20 @@ class TapisStandin:
             stored = self.systems.get(system.group(1))
         if stored is None:
             return self._error(404, "not found", presented)
-        return Response.json_body(200, {"status": "success", "message": "found", "result": stored})
+        if self.raw_found is not None:
+            return Response(status=200, body=self.raw_found)
+        # A real tenant adds fields to what was posted (its tenant, identifiers, dates, defaults):
+        # the script must ignore them and notice a change to anything it sent.
+        added = {
+            "tenant": "stand-in-tenant",
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "created": "2026-11-04T00:00:00Z",
+            "updated": "2026-11-04T00:00:00Z",
+            "deleted": False,
+        }
+        return Response.json_body(
+            200, {"status": "success", "message": "found", "result": {**added, **stored}}
+        )
 
     def _create(self, request: Request, presented: str | None) -> Response:
         if self.post_status is not None:
@@ -99,4 +117,39 @@ class TapisStandin:
         text = message
         if self.echo_token_in_errors and presented:
             text = "{} (token {})".format(message, presented)
+        if self.echo_slice is not None and presented:
+            start, end = self.echo_slice
+            text = "{} {} {}".format("x" * 120, presented[start:end], "y" * 120)
         return Response.json_body(status, {"status": "error", "message": text})
+
+
+class ZipStandin:
+    """A stand-in for where an application's zip is published (a release asset URL).
+
+    ``/zips/<name>`` serves the bytes it was given, ``/via/<name>`` redirects there (a release asset
+    is served from object storage), ``/loop`` redirects to itself and ``/elsewhere`` to a plain http
+    address that is not loopback. It never sees a Tapis token, and a test checks that.
+    """
+
+    def __init__(self, files: dict[str, bytes], *, status: int | None = None) -> None:
+        self.files = files
+        self.status = status
+
+    def handle(self, request: Request) -> Response | None:
+        if request.method != "GET":
+            return None
+        path = request.path
+        if path.startswith("/zips/"):
+            if self.status is not None:
+                return Response.json_body(self.status, {"error": "forced"})
+            body = self.files.get(path[len("/zips/") :])
+            if body is None:
+                return Response.json_body(404, {"error": "no such file"})
+            return Response(status=200, body=body, headers={"Content-Type": "application/zip"})
+        if path.startswith("/via/"):
+            return Response(status=302, headers={"Location": "/zips/" + path[len("/via/") :]})
+        if path == "/loop":
+            return Response(status=302, headers={"Location": "/loop"})
+        if path == "/elsewhere":
+            return Response(status=302, headers={"Location": "http://zips.example.org/x.zip"})
+        return None
