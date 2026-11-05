@@ -93,7 +93,7 @@ TOKEN_RE = re.compile(r"[\x21-\x7e]+")
 # power down, % powering down, $ maintenance, @ reboot issued, ^ reboot requested, - planned, + and
 # a further flag.
 STATE_SUFFIX = "*~#!%$@^-+"
-TABLE_EDGE = "│"  # the vertical bar of the table expanse-client draws
+TABLE_EDGE = "\u2502"  # U+2502, the box-drawing bar of the table (not an ASCII pipe)
 
 
 class ConfigError(ValueError):
