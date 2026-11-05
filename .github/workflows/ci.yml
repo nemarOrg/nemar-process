@@ -229,3 +229,25 @@ jobs:
           else
             echo "::warning title=launch schema differs from nemar-cli dev::Bump the pin (docs/contracts.md) once the change is reviewed."
           fi
+
+  nemar-cli-tapis-latest:
+    # Advisory: says, without failing, when nemar-cli's compute epic branch has changed the files the
+    # Tapis definitions are compared with (the client and the contract) since the commit the pin
+    # `tests/contract/nemar-cli-tapis-pin.json` names, so the agreement test is moved deliberately.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compare the pin with the epic branch
+        run: |
+          set -euo pipefail
+          ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')
+          branch=feature/issue-2005-epic-compute-core
+          changed=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename' | grep -E '^(backend/src/services/tapis/|shared/contract/compute\.ts$)' || true)
+          if [ -n "$changed" ]; then
+            echo "::warning title=nemar-cli's Tapis client moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Read them, update the agreement test if the request changed, then bump the pin in tests/contract/nemar-cli-tapis-pin.json."
+          else
+            echo "the Tapis client and contract files are unchanged since the pin"
+          fi
