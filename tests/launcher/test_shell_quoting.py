@@ -158,6 +158,10 @@ CASES = {
         True,
     ),
     "non-ASCII, as JSON escapes": (document("caf\u00e9", "\U0001f600"), True),
+    "control characters and DEL, as JSON escapes": (
+        document("a b", "x\x7fy", "\x01\x1f", "bell\x07"),
+        False,
+    ),
     "everything at once": (
         document(
             "a b", INJECTION, BACKTICKS, '"', "'", "\\", ";", "&", "|", "<", ">", "\n", "$HOME", "*"
@@ -260,6 +264,26 @@ def test_some_old_form_values_survive_which_is_why_the_list_is_not_the_hazard(sh
 # ---- the new form: base64url ---------------------------------------------------------------------
 
 NEW_CASES = {**{name: text_of(name) for name in CASES}, "exactly 64 KiB of the same": CAP_TEXT}
+
+
+def is_printable(text: bytes) -> bool:
+    return all(0x20 <= byte <= 0x7E for byte in text)
+
+
+def test_every_text_of_the_corpus_is_printable_ascii():
+    # The launcher refuses a decoded byte outside 0x20 to 0x7e, and the Worker never writes one: it
+    # escapes the control characters and everything from U+007F up (DEL included), so the text holds
+    # their ESCAPES. The characters a shell treats as special are all printable, so nothing hostile is
+    # lost; a corpus text with a raw control character would test a value that cannot arrive.
+    for name, text in NEW_CASES.items():
+        assert is_printable(text), name
+    for name in CASES:
+        assert is_printable(text_of(name)), name
+    assert b"\\u007f" in text_of("control characters and DEL, as JSON escapes")
+    assert b"\\u0001" in text_of("control characters and DEL, as JSON escapes")
+    # and the test would see the one that is not
+    assert not is_printable(b'{"a":"b\x01c"}')
+    assert not is_printable(b'{"a":"b\x7fc"}')
 
 
 @pytest.mark.parametrize("name", list(NEW_CASES))
@@ -383,6 +407,7 @@ ADVERSARIAL_ARGS = [
 
 def test_a_job_with_adversarial_arguments_runs_whole_through_the_launch_file(rig, shell, cwd):
     spec = rig.script_spec(PRINT_ARGS, args=ADVERSARIAL_ARGS)
+    assert is_printable(spec_text(spec))
     proc = launch_through_the_file(rig, shell, cwd, spec)
     assert proc.returncode == 0, proc.stderr
     assert_the_arguments_arrived_whole(rig, cwd, ADVERSARIAL_ARGS)
@@ -402,6 +427,7 @@ def test_a_job_at_the_cap_runs_whole_through_the_launch_file(rig, shell, cwd):
         args = candidate
     spec = dict(probe, args=args)
     assert len(spec_text(spec)) > CAP - 1500
+    assert is_printable(spec_text(spec))
     proc = launch_through_the_file(rig, shell, cwd, spec)
     assert proc.returncode == 0, proc.stderr
     assert_the_arguments_arrived_whole(rig, cwd, args)

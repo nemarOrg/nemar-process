@@ -72,9 +72,12 @@ def sha256_hex(data: bytes) -> str:
 
 
 def spec_text(spec: Mapping) -> bytes:
-    """The JSON text of a launch specification: ASCII-only compact JSON, as NEMAR's Worker writes
-    it (non-ASCII characters as escapes). ``launch_spec_digest`` is taken over these bytes."""
-    return json.dumps(spec, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    """The JSON text of a launch specification, as NEMAR's Worker writes it: compact and printable
+    ASCII only (0x20 to 0x7e). Control characters are JSON escapes, and every character from U+007F
+    up, DEL included, is a ``\\uXXXX`` escape (``json.dumps`` leaves DEL alone; the Worker does not).
+    ``launch_spec_digest`` is taken over these bytes."""
+    text = json.dumps(spec, ensure_ascii=True, separators=(",", ":"))
+    return text.replace("\x7f", "\\u007f").encode("ascii")
 
 
 def wire_encode(text: bytes) -> bytes:

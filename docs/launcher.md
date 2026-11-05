@@ -44,7 +44,7 @@ If no usable Python is found, or `_tapisExecSystemOutputDir` is unset, the scrip
 ## The launch specification
 
 The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`.
-The document is JSON text, ASCII only (every character at or above U+007F is written as a `\uXXXX` escape), at most 64 KiB.
+The document is JSON text, printable ASCII only (every byte is 0x20 to 0x7E: a control character is a JSON escape, and every character at or above U+007F, DEL included, is a `\uXXXX` escape), at most 64 KiB.
 `launcher/schema/launch-spec.v1.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
 The launcher validates against it with a small validator of its own, because it may use only the standard library; a schema keyword the validator does not implement is an error, never ignored.
 
@@ -61,21 +61,27 @@ A `$`, a backtick or a backslash in a user's string is expanded, runs a command 
 The encoded value holds no character a shell treats as special, so it reaches the launcher unchanged whether or not the scheduler quotes it.
 `tests/launcher/test_shell_quoting.py` implements that quoting rule, sources the launch file with each of `sh`, `dash` and `bash`, and shows both halves: the raw JSON form breaks (and runs a command a user put in a string), and the encoded form comes back exactly and runs nothing.
 
-The decoder (`spec.decode_wire`) is strict and bounded, uses only the standard library, and checks the length before it reads a byte.
+The decoder (`spec.decode_wire`) mirrors nemar-cli's `decodeLaunchSpecEnv` rule for rule.
+It is strict and bounded, uses only the standard library, and checks the length before it reads a byte.
 Every refusal is `runtime_error` with detail `invalid_spec`: there is no new failure code, and no older form is accepted, because nothing was ever registered with a tenant on one.
 The log names the rule that fired, as one fixed word, and never any part of the value, which holds the job token once decoded.
 
-| The value is refused when | Word in the log |
-|---|---|
-| it is empty | `empty` |
-| it is longer than 87,382 characters (judged by the length alone, before anything else is read) | `too_long` |
-| it holds any character outside `A-Za-z0-9-_`: padding, `+` or `/` of the standard alphabet, whitespace, a line break, a quote, a raw JSON document | `not_base64url` |
-| its length is 1 modulo 4, which no byte string encodes to | `bad_length` |
-| it decodes to a byte at or above 0x80 | `not_ascii` |
-| it decodes to a NUL | `has_nul` |
+The checks run in this order, and the first to fail names the word:
 
+| # | The value is refused when | Word in the log |
+|---|---|---|
+| 1 | it is not bytes (an unset variable is `None`) | `not_base64url` |
+| 2 | it is empty | `empty` |
+| 3 | it is longer than 87,382 characters (judged by the length alone, before anything else is read) | `too_long` |
+| 4 | it holds any character outside `A-Za-z0-9-_`: padding, `+` or `/` of the standard alphabet, whitespace, a line break, a quote, a raw JSON document | `not_base64url` |
+| 5 | its length is 1 modulo 4, which no byte string encodes to | `bad_length` |
+| 6 | once the `=` padding is restored by length (two signs for 2 modulo 4, one for 3, none for 0) and the value decoded, any byte is outside 0x20 to 0x7E: a control character, a tab or a newline, DEL, or anything at or above 0x80 | `not_printable` |
+| 7 | it is not the canonical encoding of what it decodes to (encoding the decoded text again does not give the value back), which refuses non-zero trailing bits | `not_base64url` |
+
+An accepted value decodes to printable ASCII, not empty, and at most 65,536 bytes.
+`QQ` is accepted (it is `A`); `QR` decodes to the same byte and is refused, because it is not the value the encoder writes.
+For a value with a character outside ASCII, `too_long` and `not_base64url` are both conforming answers, since languages count a length in different units (this launcher counts bytes); only an ASCII value has its word pinned.
 A value that decodes to text which is not one JSON object, or which fails the schema, is refused by the rules below with the same detail and no word.
-The trailing bits of the last character are not checked, as in nemar-cli's decoder (the encoder writes zeros).
 
 **Registration is still BLOCKED, and no longer by the encoding.**
 Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
