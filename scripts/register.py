@@ -26,8 +26,9 @@ must equal the digest in the application's ``notes``: Tapis fetches and unzips t
 check of its own, so this is where the record is compared with the file (exit status 1, nothing
 registered, if they differ). The repository's example values are refused (exit status 2). Then, for
 each definition: ``GET`` it; if it exists, compare it with the rendered one (Tapis's added fields are
-ignored) and leave it exactly as it is, but exit status 1 naming the PATHS that differ, never their
-values (a registered version is never changed: publish a new version); if it is absent, ``POST`` it.
+ignored, but what it adds that the rules forbid is not) and leave it exactly as it is, but exit status
+1 naming the PATHS that differ, never their values (a registered version is never changed: publish a
+new version); if it is absent, ``POST`` it.
 A 409 on the ``POST`` means it appeared after the read: that is an error, because this run did not
 look at what is there.
 No other verb is ever sent, and nothing about permissions, sharing or credentials: those are the
@@ -305,8 +306,10 @@ def _same_scalar(expected: Any, actual: Any) -> bool:
 def differences(expected: Any, actual: Any, path: str = "") -> list[str]:
     """The paths at which ``actual`` is not what ``expected`` says; never a value.
 
-    ``actual`` may hold more than ``expected``: Tapis adds fields (its tenant, identifiers, dates and
-    the defaults of what was left out). A list must be as long as expected, element by element.
+    ONE-DIRECTIONAL: ``actual`` may hold more than ``expected``, because Tapis adds fields (its tenant,
+    identifiers, dates and the defaults of what was left out). What it adds that the rules forbid is
+    caught separately by ``tapis_policy.stored_violations``. A list must be as long as expected, element
+    by element, so a list Tapis reorders is reported as a difference (fail-closed noise).
     """
     here = path or "/"
     if isinstance(expected, dict):
@@ -583,7 +586,15 @@ def apply(tenant: Tenant, item: Plan, out: TextIO) -> None:
     status, data = tenant.send("GET", item.read_path)
     if status == 200:
         stored = _stored(data)
-        paths = differences(item.document, stored) if isinstance(stored, dict) else ["/"]
+        if isinstance(stored, dict):
+            # What the rendered definition sets must be as stored, and what it leaves out must not
+            # have been filled with something the rules forbid (Tapis's own additions are ignored).
+            paths = sorted(
+                set(differences(item.document, stored))
+                | set(tapis_policy.stored_violations(stored))
+            )
+        else:
+            paths = ["/"]
         if paths:
             raise Drift(paths)
         print(

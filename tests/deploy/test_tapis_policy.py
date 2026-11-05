@@ -568,3 +568,80 @@ def test_register_checks_a_system_against_the_applications_the_repository_commit
     code, _out, err = run_register(["--vars", str(ts.EXAMPLE_ENV), "system", str(ts.EXEC_SYSTEM)])
     assert code == 2
     assert "execSystemOutputDir" in err
+
+
+# ---- the denylist for a definition a tenant already holds ----------------------------------------------
+
+STORED_FORBIDDEN = {
+    "an archive system": (
+        {"jobAttributes": {"archiveSystemId": "x"}},
+        "/jobAttributes/archiveSystemId",
+    ),
+    "an archive directory": (
+        {"jobAttributes": {"archiveSystemDir": "/x"}},
+        "/jobAttributes/archiveSystemDir",
+    ),
+    "an include filter": (
+        {"jobAttributes": {"parameterSet": {"archiveFilter": {"includes": ["*"]}}}},
+        "/jobAttributes/parameterSet/archiveFilter/includes",
+    ),
+    "launch files back on": (
+        {"jobAttributes": {"parameterSet": {"archiveFilter": {"includeLaunchFiles": True}}}},
+        "/jobAttributes/parameterSet/archiveFilter/includeLaunchFiles",
+    ),
+    "file inputs": ({"jobAttributes": {"fileInputs": [{}]}}, "/jobAttributes/fileInputs"),
+    "file input arrays": (
+        {"jobAttributes": {"fileInputArrays": [{}]}},
+        "/jobAttributes/fileInputArrays",
+    ),
+    "a command prefix": ({"jobAttributes": {"cmdPrefix": "x"}}, "/jobAttributes/cmdPrefix"),
+    "an mpi command": ({"jobAttributes": {"mpiCmd": "x"}}, "/jobAttributes/mpiCmd"),
+    "mpi": ({"jobAttributes": {"isMpi": True}}, "/jobAttributes/isMpi"),
+    "application arguments": (
+        {"jobAttributes": {"parameterSet": {"appArgs": [{}]}}},
+        "/jobAttributes/parameterSet/appArgs",
+    ),
+    "container arguments": (
+        {"jobAttributes": {"parameterSet": {"containerArgs": [{}]}}},
+        "/jobAttributes/parameterSet/containerArgs",
+    ),
+    "job variables": ({"jobEnvVariables": [{"key": "LD_PRELOAD"}]}, "/jobEnvVariables"),
+    "a command prefix on the system": ({"enableCmdPrefix": True}, "/enableCmdPrefix"),
+    "child systems": ({"allowChildren": True}, "/allowChildren"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(STORED_FORBIDDEN))
+def test_each_forbidden_addition_to_a_stored_definition_is_named_by_path(name):
+    document, path = STORED_FORBIDDEN[name]
+    assert policy.stored_violations(document) == [path]
+
+
+def test_what_a_tenant_leaves_empty_or_null_is_not_a_violation():
+    quiet = {
+        "jobAttributes": {
+            "archiveSystemId": None,
+            "archiveSystemDir": None,
+            "fileInputs": [],
+            "fileInputArrays": [],
+            "cmdPrefix": None,
+            "mpiCmd": None,
+            "isMpi": False,
+            "parameterSet": {
+                "appArgs": [],
+                "containerArgs": [],
+                "archiveFilter": {"includes": [], "includeLaunchFiles": False},
+            },
+        },
+        "jobEnvVariables": [],
+        "enableCmdPrefix": False,
+        "allowChildren": False,
+    }
+    assert policy.stored_violations(quiet) == []
+    assert policy.stored_violations({}) == []
+    assert policy.stored_violations({"jobAttributes": "not a map"}) == []
+
+
+def test_a_stored_violation_never_carries_the_value():
+    found = policy.stored_violations({"jobAttributes": {"archiveSystemId": "SECRETMARKER"}})
+    assert "SECRETMARKER" not in "".join(found)

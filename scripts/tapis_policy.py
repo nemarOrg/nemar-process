@@ -310,6 +310,58 @@ def system_violations(system: Mapping[str, Any], exec_root: str | None = None) -
     return bad
 
 
+def _truthy(value: Any) -> bool:
+    return bool(value)
+
+
+def _set(value: Any) -> bool:
+    return value is not None
+
+
+def _true(value: Any) -> bool:
+    return value is True
+
+
+def _not_false(value: Any) -> bool:
+    return value is not False
+
+
+# Fields the rules forbid, and the value that counts as the field being set. Checked on a definition
+# a tenant ALREADY holds: a comparison with the rendered definition ignores what Tapis adds, so a
+# stored definition with a forbidden addition would otherwise be reported as matching.
+STORED_DENYLIST: tuple[tuple[tuple[str, ...], Any], ...] = (
+    (("jobAttributes", "archiveSystemId"), _set),
+    (("jobAttributes", "archiveSystemDir"), _set),
+    (("jobAttributes", "parameterSet", "archiveFilter", "includes"), _truthy),
+    (("jobAttributes", "parameterSet", "archiveFilter", "includeLaunchFiles"), _not_false),
+    (("jobAttributes", "fileInputs"), _truthy),
+    (("jobAttributes", "fileInputArrays"), _truthy),
+    (("jobAttributes", "cmdPrefix"), _truthy),
+    (("jobAttributes", "mpiCmd"), _truthy),
+    (("jobAttributes", "isMpi"), _true),
+    (("jobAttributes", "parameterSet", "appArgs"), _truthy),
+    (("jobAttributes", "parameterSet", "containerArgs"), _truthy),
+    (("jobEnvVariables",), _truthy),
+    (("enableCmdPrefix",), _true),
+    (("allowChildren",), _true),
+)
+
+
+def stored_violations(stored: Mapping[str, Any]) -> list[str]:
+    """The PATHS at which a registered definition holds something the rules forbid; never a value."""
+    found = []
+    for path, forbidden in STORED_DENYLIST:
+        node: Any = stored
+        for step in path:
+            node = node.get(step) if isinstance(node, Mapping) else None
+            if node is None:
+                break
+        else:
+            if forbidden(node):
+                found.append("/" + "/".join(path))
+    return found
+
+
 class JobPaths(NamedTuple):
     """Where one job directory is, as Tapis tells the job and as the host has it."""
 

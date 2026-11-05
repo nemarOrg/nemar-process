@@ -129,6 +129,9 @@ A dry run of `scripts/register.py` is safe; `--apply` of the launch application 
 - **Default archive location.**
   With no archive system fields, Tapis archives to its default place on the execution system.
   Where that is, and that it is not under a home directory, is unconfirmed.
+- **What a read of a registered definition looks like.**
+  `scripts/register.py` compares the stored definition with the rendered one, and also refuses a stored one that holds a forbidden field the rendered one leaves out (a non-null `archiveSystemId` or `archiveSystemDir`, a non-empty `archiveFilter.includes`, `fileInputs` or `jobEnvVariables`, and so on).
+  Unconfirmed: that Tapis returns what was posted in the same order (a list it reorders is reported as a difference), and that it leaves `archiveSystemId` and `archiveSystemDir` null when they were not set (if it fills them with the execution system's defaults on read, every registered application will be reported as drifted; both are fail-closed noise, to be loosened only after a real read has been seen).
 - **Job directories are never removed by Tapis**, so they accumulate (the observer adds one every 15 minutes); the site's scratch purge policy is what bounds them.
 - **Tokens stay on disk.**
   Every launcher job's specification, and with it the job's token, stays in `exec/<job>/tapisjob.env` until the directory is purged, and the token is valid for the job's run (up to 7 days on the preemptible partitions).

@@ -112,8 +112,10 @@ A definition that is weaker than the rules is refused with exit status 2, so a s
 2. It downloads the file each application names as `containerImage` and refuses, exit status 1 and nothing registered, unless its SHA-256 is the one in the application's `notes`.
 3. For each definition it reads what is registered.
    If nothing is, it creates it.
-   If something is, it compares it with the rendered definition (the fields Tapis adds are ignored) and changes nothing: it exits with status 1 naming the paths that differ, never their values, and reports success only if they match.
-   A second run therefore does nothing, and a drifted definition is never mistaken for a registered one.
+   If something is, it changes nothing and compares two things: every field the rendered definition sets must be as stored (the fields Tapis adds are ignored), and the stored definition must not hold, in a field the rendered one leaves out, something the rules forbid (an archive system or directory, archive includes, launch files re-enabled, file inputs, a command prefix, MPI, application or container arguments, job variables on the system).
+   It exits with status 1 naming the paths that differ, never their values, and reports success only if both hold.
+   A second run therefore does nothing.
+   What the comparison does not see is a field Tapis adds that the rules do not forbid, and a list is compared position by position, so a list Tapis reorders is reported as a difference (noise that fails closed).
    The system has no version, so a changed template can never land: to change it, reconcile it by hand.
 
 An existing version is left exactly as it is: a registered application version is never modified, and both applications are created `locked`, so Tapis refuses to modify one either.

@@ -670,10 +670,84 @@ def test_the_script_runs_as_a_program(tenant, tmp_path):
     assert ("nemar-launch", "0.1.0") in standin.apps
 
 
+# ---- a registered definition with a forbidden ADDITION is drift, not a match ---------------------------
+
+
+def stored_app_with_additions(tmp_path, server):
+    app = local_app(tmp_path, server)
+    stored = copy.deepcopy(rendered(app))
+    attributes = stored["jobAttributes"]
+    attributes["archiveSystemId"] = "an-archive-nobody-asked-for"
+    attributes["fileInputs"] = [{"name": "x", "targetPath": "/somewhere/secret-target"}]
+    attributes["parameterSet"]["archiveFilter"]["includes"] = ["secret-pattern-*"]
+    return app, stored
+
+
+def test_a_stored_application_with_forbidden_additions_is_drift_and_names_only_paths(
+    tenant, tmp_path
+):
+    standin, server, _zips = tenant
+    app, stored = stored_app_with_additions(tmp_path, server)
+    # Sent fields are unchanged: only what the rendered definition leaves out was filled in.
+    assert register.differences(rendered(app), stored) == []
+    standin.apps[("nemar-launch", "0.1.0")] = stored
+    code, out, err = run(["--apply", "app", str(app)], apply_env(server))
+    assert code == 1
+    for path in (
+        "/jobAttributes/archiveSystemId",
+        "/jobAttributes/fileInputs",
+        "/jobAttributes/parameterSet/archiveFilter/includes",
+    ):
+        assert path in err
+    for value in ("an-archive-nobody-asked-for", "secret-target", "secret-pattern"):
+        assert value not in out + err
+    assert "matches" not in out
+    assert tenant_requests(server) == [("GET", APP_PATH)]
+
+
+def test_a_stored_system_with_job_variables_is_drift_and_names_only_the_path(tenant):
+    standin, server, _zips = tenant
+    stored = copy.deepcopy(rendered(ts.EXEC_SYSTEM))
+    stored["jobEnvVariables"] = [{"key": "LD_PRELOAD", "value": "/tmp/evil.so"}]
+    standin.systems["nemar-exec"] = stored
+    code, out, err = run(["--apply", "system", str(ts.EXEC_SYSTEM)], apply_env(server))
+    assert code == 1
+    assert "/jobEnvVariables" in err
+    assert "LD_PRELOAD" not in out + err
+    assert "evil.so" not in out + err
+
+
+def test_additions_the_rules_do_not_forbid_are_still_ignored(tenant, tmp_path):
+    standin, server, _zips = tenant
+    app = local_app(tmp_path, server)
+    stored = copy.deepcopy(rendered(app))
+    stored["jobAttributes"]["archiveSystemId"] = None
+    stored["jobAttributes"]["fileInputs"] = []
+    stored["jobAttributes"]["isMpi"] = False
+    stored["jobAttributes"]["parameterSet"]["archiveFilter"]["includes"] = []
+    stored["maxJobs"] = -1
+    standin.apps[("nemar-launch", "0.1.0")] = stored
+    code, out, err = run(["--apply", "app", str(app)], apply_env(server))
+    assert code == 0, err
+    assert "matches this definition" in out
+
+
+def test_a_list_tapis_reorders_is_reported_as_drift(tenant, tmp_path):
+    # Fail-closed noise: the comparison is positional, so a reordered list is a difference.
+    standin, server, _zips = tenant
+    app = local_app(tmp_path, server)
+    stored = copy.deepcopy(rendered(app))
+    stored["jobAttributes"]["parameterSet"]["envVariables"].reverse()
+    standin.apps[("nemar-launch", "0.1.0")] = stored
+    code, _out, err = run(["--apply", "app", str(app)], apply_env(server))
+    assert code == 1
+    assert "/jobAttributes/parameterSet/envVariables/0" in err
+
+
 # ---- differences, as a function -------------------------------------------------------------------------------
 
 
-def test_differences_ignores_what_tapis_adds_and_names_what_changed():
+def test_differences_alone_ignores_additions_which_stored_violations_checks_separately():
     sent = {"a": 1, "b": {"c": "x", "d": [1, 2]}, "e": [{"k": 1}], "f": True}
     stored = {
         "a": 1,
