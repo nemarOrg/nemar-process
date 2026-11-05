@@ -561,8 +561,11 @@ class Tenant:
                 message = parsed["message"]
         except ValueError:
             pass
-        # Redact the WHOLE message first: truncating first would let a long token slip through.
-        message = "".join(c for c in redact(message, self.token) if c.isprintable())[:200]
+        # In this order and no other: drop what is not printable FIRST (invisible characters could
+        # break a token up so that redaction misses it and the filter would put it back together),
+        # then redact the WHOLE message, and only then cut (a cut first can leave the start of a token
+        # too short for the slice rule to see).
+        message = redact("".join(c for c in message if c.isprintable()), self.token)[:200]
         return "{} {} answered {}{}".format(method, path, status, ": " + message if message else "")
 
 

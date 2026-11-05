@@ -389,6 +389,46 @@ def test_a_refused_token_stops_the_run_and_the_token_is_not_in_the_message(tmp_p
     assert "the-real-one" not in out + err
 
 
+# ---- the ORDER of filtering, redacting and cutting -------------------------------------------------------
+
+
+def described(token: str, message: str) -> str:
+    tenant_for_text = register.Tenant("http://127.0.0.1:9", token)
+    body = json.dumps({"message": message}).encode("utf-8")
+    return tenant_for_text.describe("GET", "/x", 500, body)
+
+
+def test_a_token_broken_up_by_zero_width_characters_is_redacted():
+    # Printable-looking text with U+200B every eight characters: neither the whole token nor a
+    # 16-character slice matches it as written, and a filter that strips the invisible characters
+    # AFTER redacting would put the token back together in the output.
+    broken = "​".join(LONG_TOKEN[i : i + 8] for i in range(0, len(LONG_TOKEN), 8))
+    assert LONG_TOKEN not in broken
+    text = described(LONG_TOKEN, "refused " + broken)
+    assert windows(text, LONG_TOKEN) == []
+    assert "​" not in text
+
+
+@pytest.mark.parametrize("invisible", ["​", "‍", "﻿", "⁠", "\x00", "\x1b"])
+def test_any_non_printable_character_inside_the_token_is_filtered_before_redaction(invisible):
+    spread = invisible.join(LONG_TOKEN[i : i + 5] for i in range(0, len(LONG_TOKEN), 5))
+    text = described(LONG_TOKEN, "x " + spread)
+    assert windows(text, LONG_TOKEN) == []
+
+
+PREFIXED = "QZX" + LONG_TOKEN
+
+
+@pytest.mark.parametrize("visible", range(1, 16))
+def test_the_cut_never_leaves_the_start_of_a_token(visible):
+    # The cut at 200 characters lands `visible` characters into the token: with the token redacted
+    # AFTER the cut, those 1 to 15 characters are too few for the slice rule to see.
+    filler = "f" * (200 - visible)
+    text = described(PREFIXED, filler + PREFIXED)
+    assert PREFIXED[:visible] not in text
+    assert "Q" not in text
+
+
 # ---- the zip is the recorded one ------------------------------------------------------------------------
 
 
