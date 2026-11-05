@@ -534,6 +534,69 @@ def test_a_dry_run_fetches_nothing(tenant, tmp_path):
     assert server.requests == []
 
 
+# ---- which redirects the zip download may follow -------------------------------------------------------
+# No TLS stand-in is available, so the rule is a pure function and is tested as one. The case that
+# matters is a release asset served over https that redirects to plain http.
+
+
+@pytest.mark.parametrize(
+    ("from_scheme", "to_url", "allowed"),
+    [
+        ("https", "https://objects.example.org/asset.zip", True),
+        ("https", "/relative-would-have-been-joined-first", False),
+        ("https", "http://127.0.0.1:8080/asset.zip", False),
+        ("https", "http://objects.example.org/asset.zip", False),
+        ("http", "http://127.0.0.1:8080/asset.zip", True),
+        ("http", "https://objects.example.org/asset.zip", True),
+        ("http", "http://objects.example.org/asset.zip", False),
+        ("https", "ftp://objects.example.org/asset.zip", False),
+        ("https", "https://user:pw@objects.example.org/asset.zip", False),
+        ("https", "https:///no-host", False),
+    ],
+)
+def test_redirect_allowed(from_scheme, to_url, allowed):
+    assert register.redirect_allowed(from_scheme, to_url) is allowed
+
+
+def test_an_https_address_and_loopback_http_are_the_only_addresses():
+    assert register.address_ok("https://objects.example.org/a.zip")
+    assert register.address_ok("http://127.0.0.1:1/a.zip")
+    assert register.address_ok("http://localhost/a.zip")
+    assert not register.address_ok("http://objects.example.org/a.zip")
+    assert not register.address_ok("file:///etc/passwd")
+    assert not register.address_ok("https://user@objects.example.org/")
+    assert not register.address_ok("https://[::1")  # an address urlsplit refuses
+
+
+# ---- text that is not text, and a ledger that is not a ledger -----------------------------------------
+
+
+def test_a_vars_file_that_is_not_utf8_is_a_usage_error_not_a_traceback(tmp_path):
+    values = tmp_path / "values.env"
+    values.write_bytes(b"EXEC_HOST=login.cluster.invalid\nNOTE=\xff\xfe\n")
+    code, _out, err = run(["app", str(ts.LAUNCH_APP)], {}, vars_file=values)
+    assert code == 2
+    assert err.startswith("register: ")
+
+
+def test_a_definition_that_is_not_utf8_is_a_usage_error_not_a_traceback(tmp_path):
+    broken = tmp_path / "broken.json"
+    broken.write_bytes(b'{"id": "\xff\xfe"}')
+    code, _out, err = run(["app", str(broken)], {})
+    assert code == 2
+    assert "cannot be read as text" in err
+
+
+def test_a_ledger_that_is_not_utf8_is_a_usage_error_not_a_traceback(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_bytes(b'{"released": \xff}')
+    code, _out, err = run(
+        ["--ledger", str(ledger), "app", str(ts.LAUNCH_APP)], {}, vars_file=ts.EXAMPLE_ENV
+    )
+    assert code == 2
+    assert "ledger" in err
+
+
 # ---- the ledger of released versions ---------------------------------------------------------------------
 
 

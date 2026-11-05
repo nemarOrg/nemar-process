@@ -334,6 +334,24 @@ def test_a_ledger_entry_that_is_not_a_map_is_caught():
     ]
 
 
+def test_a_ledger_entry_that_is_not_a_map_does_not_crash_the_check_of_an_application():
+    # An application whose id has such an entry is the case the second loop used to trip over.
+    for odd in ("0.1.0", ["0.1.0"], 5, None):
+        broken: Any = {"nemar-launch": odd}
+        found = policy.ledger_violations([launch()], broken)
+        assert found == ["the ledger entry for nemar-launch is not a map of versions"]
+
+
+def test_a_ledger_with_an_odd_entry_for_another_application_leaves_this_one_checked():
+    released: Any = {"someone-else": "x", "nemar-launch": {"0.1.0": DIGEST_A}}
+    found = policy.ledger_violations([app_with(DIGEST_B)], released)
+    assert (
+        "nemar-launch 0.1.0 is released with a different zip digest than its definition records"
+        in found
+    )
+    assert "the ledger entry for someone-else is not a map of versions" in found
+
+
 def test_the_committed_ledger_keeps_the_committed_definitions():
     ledger = json.loads(ts.LEDGER.read_text(encoding="utf-8"))
     released = ledger["released"]

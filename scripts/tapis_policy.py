@@ -433,7 +433,10 @@ def ledger_violations(
                     )
                 )
     for app in apps:
-        recorded = (released.get(str(app.get("id"))) or {}).get(str(app.get("version")))
+        entry = released.get(str(app.get("id")))
+        if not isinstance(entry, Mapping):
+            continue  # absent, or not a map (already reported above): nothing to compare with
+        recorded = entry.get(str(app.get("version")))
         if recorded is None:
             continue
         _name, digest = digest_note(app)

@@ -449,8 +449,8 @@ def plan(
     spec = KINDS[kind]
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
-        raise RenderError("{} cannot be read".format(path)) from None
+    except (OSError, ValueError):
+        raise RenderError("{} cannot be read as text".format(path)) from None
     try:
         document = json.loads(text)
     except ValueError:
@@ -622,6 +622,25 @@ def apply(tenant: Tenant, item: Plan, out: TextIO) -> None:
     raise RequestFailed(tenant.describe("POST", item.create_path, status, data))
 
 
+def address_ok(url: str) -> bool:
+    """An https address, or loopback http, with a host and no credentials."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if not host or parts.username or parts.password:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK)
+
+
+def redirect_allowed(from_scheme: str, to_url: str) -> bool:
+    """A redirect must lead to an address that is itself allowed, and never from https down to http."""
+    if not address_ok(to_url):
+        return False
+    return not (from_scheme == "https" and urlsplit(to_url).scheme != "https")
+
+
 def fetch_digest(url: str, max_bytes: int = MAX_ZIP_BYTES) -> str:
     """The SHA-256 of the file at ``url`` (an https address, or loopback http). No credential is sent.
 
@@ -630,19 +649,16 @@ def fetch_digest(url: str, max_bytes: int = MAX_ZIP_BYTES) -> str:
     """
     current = url
     for _hop in range(MAX_REDIRECTS + 1):
-        try:
-            parts = urlsplit(current)
-            host, port = parts.hostname, parts.port
-        except ValueError:
-            raise RequestFailed("containerImage is not an address") from None
-        plain_ok = parts.scheme == "http" and host in LOOPBACK
-        if (
-            (parts.scheme != "https" and not plain_ok)
-            or not host
-            or parts.username
-            or parts.password
-        ):
+        if not address_ok(current):
             raise RequestFailed("containerImage is not an https address (or loopback http)")
+        parts = urlsplit(current)
+        host = parts.hostname or ""  # address_ok has seen to it that there is one
+        try:
+            port = parts.port
+        except ValueError:
+            raise RequestFailed(
+                "containerImage is not an https address (or loopback http)"
+            ) from None
         make = (
             http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
         )
@@ -656,8 +672,11 @@ def fetch_digest(url: str, max_bytes: int = MAX_ZIP_BYTES) -> str:
             if response.status in (301, 302, 303, 307, 308):
                 response.read(65536)  # the redirect's own body, so the connection closes cleanly
                 following = urljoin(current, response.getheader("Location") or "")
-                if parts.scheme == "https" and urlsplit(following).scheme != "https":
-                    raise RequestFailed("containerImage redirects from https to http")
+                if not redirect_allowed(parts.scheme, following):
+                    raise RequestFailed(
+                        "containerImage redirects to something that is not an https address "
+                        "(or loopback http), or from https down to http"
+                    )
                 current = following
                 continue
             if response.status != 200:
@@ -669,9 +688,7 @@ def fetch_digest(url: str, max_bytes: int = MAX_ZIP_BYTES) -> str:
                     return digest.hexdigest()
                 total += len(chunk)
                 if total > max_bytes:
-                    raise RequestFailed(
-                        "containerImage is larger than {} bytes".format(MAX_ZIP_BYTES)
-                    )
+                    raise RequestFailed("containerImage is larger than {} bytes".format(max_bytes))
                 digest.update(chunk)
         except (OSError, http.client.HTTPException) as problem:
             raise RequestFailed(
@@ -737,7 +754,7 @@ def main(
                         ", ".join(stand_ins)
                     )
                 )
-    except (RenderError, OSError) as problem:
+    except (RenderError, OSError, ValueError) as problem:
         print("register: {}".format(problem), file=err)
         return 2
 
