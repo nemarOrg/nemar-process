@@ -332,7 +332,9 @@ DOCUMENT_REFUSALS = {
     ),
     "JSON with a float": wire_encode(spec_text(base()).replace(b'"gpus":0', b'"gpus":0.5')),
     "JSON with NaN": wire_encode(b'{"job_id": NaN}'),
-    "nesting too deep to read": wire_encode(b"[" * 5000),
+    # Deep enough to raise RecursionError on every Python from 3.9 to 3.12 (5000 does not on 3.12,
+    # which reads it to the end and fails on the missing close) and still within the 64 KiB cap.
+    "nesting too deep to read": wire_encode(b"[" * 30_000),
     "a control character inside a string": wire_encode(b'{"job_id":"a\x01b"}'),
     "an unknown key": encode_spec(dict(base(), surprise=1)),
     "a missing key": encode_spec({k: v for k, v in base().items() if k != "job_token"}),

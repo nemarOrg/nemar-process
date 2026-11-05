@@ -324,7 +324,17 @@ def test_a_duplicate_key_is_refused():
 
 @pytest.mark.parametrize(
     "text",
-    [b"", b"[]", b"null", b"{", b'{"job_id": NaN}', b"\x00", b'{"a":1} trailing', b"[" * 5000],
+    [
+        b"",
+        b"[]",
+        b"null",
+        b"{",
+        b'{"job_id": NaN}',
+        b"\x00",
+        b'{"a":1} trailing',
+        b"[" * 5000,
+        b"[" * 30_000,  # RecursionError on every Python from 3.9 to 3.12 (5000 is one only on 3.9)
+    ],
 )
 def test_text_that_is_not_one_json_object_is_refused(text):
     refused(wire_encode(text))  # as an environment value
