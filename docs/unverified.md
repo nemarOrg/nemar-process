@@ -123,11 +123,11 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
 - **Loaders.**
   The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` were run here.
   A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and a `.bdf` were read in eegprep's source and not run.
-- **A recording in which every channel has a flat portion.**
-  eegprep's `clean_flatlines` then removes nothing and says so only through a log warning, so the floor has no mask to read.
-  The recording succeeds, `_channels.tsv` calls every signal channel good and `percentGood` is 100 (observed on a constant four-channel set); `robustAmplitude` is 0 for a constant channel, which is how a reader can see it.
-  This is wrong in the direction that matters, and it is not handled: whether such a recording should fail with a code of its own, or be annotated as all bad, is a decision for the owner.
-  The reproduction is a comment on sccn/eegprep#535.
+- **The all-flat failure listens to a log warning.**
+  eegprep's `clean_flatlines` removes nothing, and says so only by a warning on its module's logger, when every channel has a flat portion; the floor fails such a recording (`all_channels_flat`).
+  The detection depends on that logger name and level, taken from the function's module at run time and not from a message text.
+  Two tests (a constant recording and a pause shared by all channels) fail if eegprep changes either, but a release of eegprep that does so would be noticed only when they run.
+  A pause every channel shares fails the whole recording: that cost is stated in [recipes.md](recipes.md).
 - **A truncated EDF** loads with fewer samples and only a reader warning.
   The launcher's size and checksum checks, and the SHA-256 the recipe records for each input, are what catch a damaged copy; the recipe adds no check of its own.
 - **Memory.**

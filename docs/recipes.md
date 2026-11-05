@@ -73,6 +73,7 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `failed` | `file_not_found` | a `--recording` path is not a file |
 | `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or the data are epoched |
 | `failed` | `non_finite_samples` | the loaded data contain NaN or infinity |
+| `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
 | `failed` | `step_failed` | an eegprep step raised; the `step` column names it; only the exception's class name is kept |
 | `failed` | `out_of_memory` | `MemoryError` (a SIGKILL by the kernel ends the job and the launcher records it) |
 | `failed` | `disk_error` | writing or moving the recording's files failed |
@@ -225,10 +226,11 @@ The window step removes about half of the samples at eegprep's defaults on this 
 
 ## Known limits
 
-- A recording in which every channel has a flat portion is reported as fully good.
-  eegprep's `clean_flatlines` removes nothing in that case and says so only through a log warning, so the floor has no mask to read.
-  The recording succeeds, `_channels.tsv` calls every signal channel good, and `percentGood` is 100; `robustAmplitude` is 0 for a constant channel.
-  Treating it as a failure, or as all bad, is a decision for the owner (see [unverified.md](unverified.md)); the reproduction is a comment on sccn/eegprep#535.
+- A recording in which every channel has a flat portion fails (`all_channels_flat`, step `flatline`), and the cost is that a pause every channel shares fails the whole recording.
+  eegprep's `clean_flatlines` removes nothing in that case and says so only through a log warning, so there is no mask to read and any figure for the recording would call every channel good.
+  The floor listens to that warning for the length of the call (`common/capture.py`), because the command silences logging for the whole run.
+  The condition is eegprep's (a flat portion of more than 5 s in every channel), not a constant recording, so a 10 s pause common to all channels is enough.
+  The reproduction is a comment on sccn/eegprep#535.
 
 ## Decisions the owner has not yet confirmed
 

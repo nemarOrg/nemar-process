@@ -11,6 +11,7 @@ import stat
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 from nemar_process import cli as command
 from nemar_process.common import files, records
@@ -22,6 +23,7 @@ from recipe_support import (
     floor_literals,
     touch_tree,
     tree_digest,
+    write_set,
 )
 
 LABEL = "desc-nemarfloor"
@@ -265,6 +267,19 @@ def test_recordings_found_and_none_succeeded_is_exit_four_with_the_record_writte
     assert json.loads(out.strip().splitlines()[-1])["result"] == "no_recording_succeeded"
     assert table_rows(tmp_path / "o")[0]["code"] == "unsupported_format"
     assert (tmp_path / "o" / "desc-nemarfloor_signalJourney.json").is_file()
+
+
+def test_a_recording_whose_channels_are_all_flat_is_one_failed_row_at_flatline(tmp_path, cli):
+    dataset = tmp_path / "dataset"
+    write_set(dataset / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", np.zeros((4, 250 * 70)) + 5.0)
+    out = tmp_path / "o"
+    code, stdout, err = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", out)
+    assert code == 4  # recordings were found and none succeeded
+    (row,) = table_rows(out)
+    assert (row["status"], row["code"], row["step"]) == ("failed", "all_channels_flat", "flatline")
+    assert "status=failed code=all_channels_flat step=flatline" in err
+    assert json.loads(stdout.strip().splitlines()[-1])["counts"]["failed"] == 1
+    assert not [name for name in product_files(out) if name.startswith("sub-01")]
 
 
 def test_a_requested_path_that_is_not_a_file_is_one_failed_row_and_the_run_goes_on(tmp_path, cli):

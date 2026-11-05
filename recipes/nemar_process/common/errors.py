@@ -19,6 +19,9 @@ FILE_NOT_FOUND = "file_not_found"
 UNSUPPORTED_FORMAT = "unsupported_format"
 NO_SIGNAL_CHANNELS = "no_signal_channels"
 DUPLICATE_RECORDING = "duplicate_recording"
+ALL_CHANNELS_FLAT = "all_channels_flat"
+ALL_CHANNELS_FLAGGED = "all_channels_flagged"
+TOO_LARGE = "too_large"
 
 
 class RecordingError(Exception):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 
 import numpy as np
 import pytest
@@ -263,22 +264,56 @@ def test_a_low_sampling_rate_without_locations_cannot_use_the_nolocs_criterion(t
     assert result.plan.has_step("bad_windows")
 
 
-def test_known_limit_a_recording_with_every_channel_flat_is_reported_as_fully_good(tmp_path):
-    """Pins a limit that docs/recipes.md states, so a change in eegprep or here is seen at once.
+def flat_failure(tmp_path, data):
+    """Run the floor on `data` (channels by samples, 250 Hz, no locations); return what it raised."""
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingError) as caught:
+        process(io.load(recording))
+    return caught.value
 
-    eegprep's `clean_flatlines` removes nothing when every channel has a flat portion and says so only
-    through a log warning (sccn/eegprep#535), so the floor has no mask to read: the recording
-    succeeds and every signal channel is called good. The constant channels are visible only in the
-    robust amplitude, which is zero. Whether such a recording should fail, or be annotated as all
-    bad, is the owner's decision; when it is made, this test is the one to change.
+
+def test_a_recording_whose_channels_are_all_constant_fails_at_flatline(tmp_path):
+    """eegprep removes nothing when every channel is flat and only logs a warning; the floor fails.
+
+    Before this, such a recording succeeded with every channel called good (sccn/eegprep#535).
     """
-    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", np.zeros((4, 250 * 70)) + 5.0)
+    error = flat_failure(tmp_path, np.zeros((4, 250 * 70)) + 5.0)
+    assert (error.status, error.code, error.step, error.detail) == (
+        "failed",
+        "all_channels_flat",
+        "flatline",
+        None,
+    )
+    assert str(error) == "all_channels_flat in flatline"
+
+
+def test_a_pause_shared_by_all_channels_fails_the_same_way(tmp_path):
+    """The cost of the rule: eegprep's condition is a flat portion in every channel, not a constant
+    recording, so a 10 s pause that every channel shares fails the whole recording."""
+    data = np.random.default_rng(11).standard_normal((4, 250 * 70)) * 10.0
+    data[:, 20 * 250 : 30 * 250] = 0.0
+    error = flat_failure(tmp_path, data)
+    assert (error.code, error.step) == ("all_channels_flat", "flatline")
+
+
+def test_the_failure_is_found_while_logging_is_disabled_as_the_command_runs(tmp_path):
+    saved = logging.root.manager.disable
+    logging.disable(logging.WARNING)
+    try:
+        error = flat_failure(tmp_path, np.zeros((4, 250 * 70)) + 5.0)
+    finally:
+        logging.disable(saved)
+    assert error.code == "all_channels_flat"
+
+
+def test_a_pause_in_some_channels_only_is_still_annotated_not_failed(tmp_path):
+    data = np.random.default_rng(12).standard_normal((6, 250 * 70)) * 10.0
+    data[:3, 20 * 250 : 30 * 250] = 0.0  # three channels pause, three do not
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
     (recording,) = io.discover(tmp_path)
     result = process(io.load(recording))
-    assert result.plan.step("flatline").quality == {"nRemoved": 0, "removedChannels": []}
-    assert result.kept_after_flatline.all()
-    assert result.metrics["channels"]["percentGood"] == 100.0
-    assert result.metrics["robustAmplitude"]["values"] == [0.0, 0.0, 0.0, 0.0]
+    assert result.plan.step("flatline").quality["removedChannels"] == ["Ch1", "Ch2", "Ch3"]
 
 
 def test_a_recording_with_no_eeg_channel_is_skipped_not_failed(tmp_path):

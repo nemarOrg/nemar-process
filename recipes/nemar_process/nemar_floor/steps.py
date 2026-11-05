@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from eegprep import clean_windows, pop_load_frombids
+from eegprep import clean_flatlines, clean_windows, pop_load_frombids
 
 from nemar_process.common import io, qc
 from nemar_process.common.determinism import SEEDS
@@ -59,6 +59,9 @@ SIGNAL_CHANNEL_TYPES = ["EEG", "untyped"]
 
 FLATLINE_FUNCTION = "eegprep.clean_flatlines"
 FLATLINE_CALL: dict[str, Any] = {"max_flatline_duration": 5.0, "max_allowed_jitter": 20.0}
+# eegprep removes nothing, and only logs a warning on this logger, when every channel has a flat
+# portion (sccn/eegprep#535); the floor listens to it for the length of the call and fails.
+FLATLINE_LOGGER = clean_flatlines.__module__
 
 DRIFT_FUNCTION = "eegprep.clean_drifts"
 DRIFT_CALL: dict[str, Any] = {"transition": (0.25, 0.75), "attenuation": 80.0, "method": "fft"}

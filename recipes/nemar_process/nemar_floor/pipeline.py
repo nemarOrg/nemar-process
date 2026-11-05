@@ -30,8 +30,10 @@ from eegprep import (
 
 from nemar_process.common import io, qc
 from nemar_process.common import plan as plans
+from nemar_process.common.capture import logged_warnings
 from nemar_process.common.determinism import rounded
 from nemar_process.common.errors import (
+    ALL_CHANNELS_FLAT,
     INTERNAL_ERROR,
     NO_SIGNAL_CHANNELS,
     RecordingError,
@@ -143,9 +145,13 @@ def process(loaded: Loaded) -> FloorResult:
     n_signal = len(signal_names)
 
     # 3 flatline, on the unfiltered copy
-    with guarded("flatline"):
+    with guarded("flatline"), logged_warnings(steps.FLATLINE_LOGGER) as notices:
         work = clean_flatlines(work, **steps.FLATLINE_CALL)
     kept_after_flatline = channel_mask(work, n_signal, "flatline")
+    if notices and kept_after_flatline.all():
+        # every channel has a flat portion: eegprep refused to remove any, and a floor that went on
+        # would call them all good. The cost is that a pause every channel shares fails the recording.
+        raise RecordingError(ALL_CHANNELS_FLAT, "flatline")
     flat = removed_names(signal_names, kept_after_flatline)
     recipe.add_step(
         "flatline",
