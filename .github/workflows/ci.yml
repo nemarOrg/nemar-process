@@ -160,6 +160,53 @@ jobs:
           uv lock --check
           uv run pytest tests/images --cov=recipes --cov=scripts
 
+  deploy:
+    # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
+    # files, the registration script and the queue observer (docs/operator.md).
+    name: deploy (tapis definitions and observer)
+    runs-on: ubuntu-24.04
+    env:
+      # In CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
+      NEMAR_REQUIRE_TAPIS_DRIFT: "1"
+      NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the nemar-cli pin of the Tapis client
+        id: pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the definitions are compared with the client's own source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli-tapis
+          sparse-checkout: |
+            /backend/src/services/tapis/
+            /shared/contract/compute.ts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Gates
+        run: |
+          uv sync --frozen
+          # The schemas are what the vendored specifications derive, and nothing else.
+          uv run python scripts/derive_tapis_schemas.py --check
+          # The digests recorded in the applications are those of the reproducible zips.
+          uv run python scripts/build_launcher_zip.py --check
+          uv run python scripts/build_observer_zip.py --check
+          # Each application and each rendered template validates; registration, rendering,
+          # hygiene and the observer are tested against local stand-ins.
+          uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
+
+      - name: Observer tests on its Python floor (3.9)
+        run: uv run --no-project --python 3.9 --with pytest pytest tests/observer
+
   nemar-cli-latest:
     # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.
     runs-on: ubuntu-24.04
