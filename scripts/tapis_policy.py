@@ -46,6 +46,10 @@ CREDENTIAL_KEYS = frozenset(
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 UUID_SAMPLE = "00000000-0000-0000-0000-000000000000"
+DIRECTORY_FIELDS = ("execSystemExecDir", "execSystemInputDir", "execSystemOutputDir")
+# The one shape of an application's directory: the job working directory, plain segments, the job.
+# No ".", ".." or empty segment, so the directory can never leave the working directory.
+DIRECTORY_SHAPE = re.compile(r"\$\{JobWorkingDir\}/(?:[A-Za-z0-9_-]+/)+\$\{JobUUID\}")
 WORKING_DIR_MACRO = "${JobWorkingDir}"
 JOB_UUID_MACRO = "${JobUUID}"
 
@@ -183,20 +187,32 @@ def app_violations(app: Mapping[str, Any]) -> list[str]:
 def _directory_violations(app: Mapping[str, Any]) -> list[str]:
     bad: list[str] = []
     attributes = app.get("jobAttributes") or {}
-    execution = attributes.get("execSystemExecDir")
-    output = attributes.get("execSystemOutputDir")
-    for name, value in (("execSystemExecDir", execution), ("execSystemOutputDir", output)):
+    found: dict[str, str] = {}
+    for name in DIRECTORY_FIELDS:
+        value = attributes.get(name)
         if not isinstance(value, str):
             bad.append("jobAttributes.{} must be set".format(name))
             continue
+        found[name] = value
         if JOB_UUID_MACRO not in value:
             bad.append("jobAttributes.{} must be per job (hold the job's identifier)".format(name))
         if not value.startswith(WORKING_DIR_MACRO + "/"):
             bad.append("jobAttributes.{} must be under the job working directory".format(name))
-    if isinstance(execution, str) and isinstance(output, str):
-        a, b = execution.rstrip("/"), output.rstrip("/")
-        if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
-            bad.append("the output directory must be neither the execution directory nor inside it")
+        if not DIRECTORY_SHAPE.fullmatch(value):
+            bad.append(
+                "jobAttributes.{} must be ${{JobWorkingDir}}/<plain segments>/${{JobUUID}} with no "
+                "'.', '..' or empty segment".format(name)
+            )
+    names = sorted(found)
+    for index, first in enumerate(names):
+        for second in names[index + 1 :]:
+            a, b = found[first].rstrip("/"), found[second].rstrip("/")
+            if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+                bad.append(
+                    "jobAttributes.{} and jobAttributes.{} must be neither the same nor nested".format(
+                        first, second
+                    )
+                )
     for text in strings_anywhere(app):
         if "$HOME" in text or "HOST_EVAL" in text or text.startswith("~"):
             bad.append("no value may point into a home directory")
@@ -264,7 +280,11 @@ def system_violations(system: Mapping[str, Any], exec_root: str | None = None) -
         or working != posixpath.normpath(working)
     ):
         bad.append("jobWorkingDir must be a normalised absolute path")
-    elif exec_root is not None and not working.startswith(exec_root.rstrip("/") + "/"):
+    elif working.startswith("//"):
+        bad.append("jobWorkingDir must not start with a double slash")
+    elif exec_root is None:
+        bad.append("the operator's scratch root is not known: jobWorkingDir cannot be checked")
+    elif not working.startswith(exec_root.rstrip("/") + "/"):
         bad.append("jobWorkingDir must be under the operator's scratch root")
     if isinstance(working, str) and (
         "$HOME" in working or "HOST_EVAL" in working or working.startswith("~")
@@ -291,33 +311,56 @@ def system_violations(system: Mapping[str, Any], exec_root: str | None = None) -
 
 
 class JobPaths(NamedTuple):
-    """Where one job's output directory is, as Tapis tells the job and as the host has it."""
+    """Where one job directory is, as Tapis tells the job and as the host has it."""
 
-    variable: str  # what _tapisExecSystemOutputDir holds: relative to rootDir
+    expanded: str  # the template with the macros filled in, as Tapis would use it
+    variable: str  # what the _tapis...Dir variable holds: relative to rootDir
     host: str  # where the directory really is: rootDir plus that
 
 
 def tapis_job_paths(
-    system: Mapping[str, Any], app: Mapping[str, Any], job_uuid: str = UUID_SAMPLE
+    system: Mapping[str, Any],
+    app: Mapping[str, Any],
+    job_uuid: str = UUID_SAMPLE,
+    field: str = "execSystemOutputDir",
 ) -> JobPaths:
-    """The output directory of a job, computed the way Tapis does (rootDir-relative semantics)."""
-    template = str((app.get("jobAttributes") or {}).get("execSystemOutputDir", ""))
-    relative = template.replace(WORKING_DIR_MACRO, str(system.get("jobWorkingDir", ""))).replace(
+    """One of a job's directories, computed the way Tapis does (rootDir-relative semantics)."""
+    template = str((app.get("jobAttributes") or {}).get(field, ""))
+    expanded = template.replace(WORKING_DIR_MACRO, str(system.get("jobWorkingDir", ""))).replace(
         JOB_UUID_MACRO, job_uuid
     )
-    variable = posixpath.normpath(relative)
+    variable = posixpath.normpath(expanded)
     host = posixpath.normpath(posixpath.join(str(system.get("rootDir", "")), variable.lstrip("/")))
-    return JobPaths(variable, host)
+    return JobPaths(expanded, variable, host)
 
 
 def path_violations(system: Mapping[str, Any], app: Mapping[str, Any], exec_root: str) -> list[str]:
-    """The path the launcher will use (the variable, read as a host path) must be where Tapis made it, under the root."""
-    paths = tapis_job_paths(system, app)
+    """Each directory the launcher or Tapis uses must be normalised, must be where Tapis makes it, and be under the root.
+
+    The launcher reads the variable as a host path, so for every one of the three directories (the
+    execution, input and output directories) the variable and the real place must be the same, and
+    neither may leave the operator's scratch root.
+    """
     bad: list[str] = []
-    if paths.variable != paths.host:
-        bad.append("the launcher would read a different directory from the one Tapis makes")
-    if not paths.variable.startswith(exec_root.rstrip("/") + "/"):
-        bad.append("the launcher's output directory would not be under the operator's scratch root")
+    prefix = exec_root.rstrip("/") + "/"
+    for field in DIRECTORY_FIELDS:
+        if not isinstance((app.get("jobAttributes") or {}).get(field), str):
+            continue
+        paths = tapis_job_paths(system, app, field=field)
+        if paths.expanded != posixpath.normpath(paths.expanded):
+            bad.append(
+                "{}: the directory is not normalised (a '.', '..' or empty segment)".format(field)
+            )
+        if paths.variable != paths.host:
+            bad.append(
+                "{}: the launcher would read a different directory from the one Tapis makes".format(
+                    field
+                )
+            )
+        if not paths.variable.startswith(prefix) or not paths.host.startswith(prefix):
+            bad.append(
+                "{}: the directory would not be under the operator's scratch root".format(field)
+            )
     return bad
 
 

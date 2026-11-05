@@ -178,10 +178,10 @@ LAUNCH_CHANGES = {
     "an http image": "containerImage must be an https address",
     "no digest note": "exactly one *_sha256",
     "a bad digest note": "64 lowercase hex digits",
-    "output is exec": "neither the execution directory nor inside it",
+    "output is exec": "must be neither the same nor nested",
     "output not per job": "execSystemOutputDir must be per job",
     "output not under the working dir": "execSystemOutputDir must be under the job working directory",
-    "output nested in exec": "neither the execution directory nor inside it",
+    "output nested in exec": "must be neither the same nor nested",
     "home": "home directory",
     "a credential": "password is a credential field",
     "cuda pinned": "CUDA_VISIBLE_DEVICES must not be defined",
@@ -400,3 +400,171 @@ def test_register_checks_the_working_directory_against_the_operators_own_root(tm
     code, _out, err = run_register(["--vars", str(values), "system", str(broken)])
     assert code == 2
     assert "scratch root" in err
+
+
+# ---- no directory leaves the scratch root (every one of the three, and the system) -------------------
+
+LEAVING = {
+    "execSystemExecDir": "${JobWorkingDir}/../../exec/${JobUUID}",
+    "execSystemInputDir": "${JobWorkingDir}/../in/${JobUUID}",
+    "execSystemOutputDir": "${JobWorkingDir}/../../output/${JobUUID}",
+}
+SHAPES_THAT_ARE_NOT_PLAIN = {
+    "a dot segment": "${JobWorkingDir}/./exec/${JobUUID}",
+    "an empty segment": "${JobWorkingDir}//exec/${JobUUID}",
+    "a trailing slash": "${JobWorkingDir}/exec/${JobUUID}/",
+    "no segment": "${JobWorkingDir}/${JobUUID}",
+    "a space": "${JobWorkingDir}/ex ec/${JobUUID}",
+}
+
+
+@pytest.mark.parametrize("field", sorted(LEAVING))
+def test_a_dot_dot_in_any_of_the_three_directories_is_caught_by_the_application_rules(field):
+    app = launch()
+    app["jobAttributes"][field] = LEAVING[field]
+    found = policy.app_violations(app)
+    assert any(field in line and "'..'" in line for line in found), found
+
+
+@pytest.mark.parametrize("field", sorted(LEAVING))
+def test_a_dot_dot_in_any_of_the_three_directories_is_caught_where_the_launcher_reads_it(field):
+    app = launch()
+    app["jobAttributes"][field] = LEAVING[field]
+    found = policy.path_violations(system(), app, EXEC_ROOT)
+    assert any(field in line and "not normalised" in line for line in found), found
+
+
+def test_a_dot_dot_that_stays_under_the_root_is_still_not_normalised():
+    # ../in resolves to a place under the scratch root, so only the normalisation rule sees it.
+    app = launch()
+    app["jobAttributes"]["execSystemInputDir"] = LEAVING["execSystemInputDir"]
+    found = policy.path_violations(system(), app, EXEC_ROOT)
+    assert found == [
+        "execSystemInputDir: the directory is not normalised (a '.', '..' or empty segment)"
+    ]
+
+
+def test_a_dot_dot_that_leaves_the_root_is_caught_as_leaving_it():
+    app = launch()
+    app["jobAttributes"]["execSystemExecDir"] = LEAVING["execSystemExecDir"]
+    found = policy.path_violations(system(), app, EXEC_ROOT)
+    assert any(
+        "execSystemExecDir" in line and "not be under the operator's scratch root" in line
+        for line in found
+    )
+
+
+@pytest.mark.parametrize("name", sorted(SHAPES_THAT_ARE_NOT_PLAIN))
+def test_a_directory_that_is_not_the_one_plain_shape_is_caught(name):
+    app = launch()
+    app["jobAttributes"]["execSystemInputDir"] = SHAPES_THAT_ARE_NOT_PLAIN[name]
+    found = policy.app_violations(app)
+    assert any(
+        "execSystemInputDir must be ${JobWorkingDir}/<plain segments>" in line for line in found
+    ), found
+
+
+def test_the_input_directory_is_required_too():
+    app = launch()
+    del app["jobAttributes"]["execSystemInputDir"]
+    assert "jobAttributes.execSystemInputDir must be set" in policy.app_violations(app)
+
+
+def test_a_double_leading_slash_in_the_working_directory_is_caught():
+    changed = system()
+    changed["jobWorkingDir"] = "//evil/jobs"
+    found = policy.system_violations(changed, exec_root=EXEC_ROOT)
+    assert "jobWorkingDir must not start with a double slash" in found
+
+
+def test_an_empty_segment_in_the_working_directory_is_caught():
+    changed = system()
+    changed["jobWorkingDir"] = EXEC_ROOT + "/jobs//x"
+    found = policy.system_violations(changed, exec_root=EXEC_ROOT)
+    assert "jobWorkingDir must be a normalised absolute path" in found
+
+
+def test_a_system_cannot_be_checked_without_the_scratch_root():
+    changed = system()
+    changed["jobWorkingDir"] = "/data/someone/jobs"
+    found = policy.system_violations(changed, exec_root=None)
+    assert any("scratch root is not known" in line for line in found)
+
+
+def vars_without(tmp_path: Path, *names: str) -> Path:
+    kept = [
+        line
+        for line in ts.EXAMPLE_ENV.read_text(encoding="utf-8").splitlines()
+        if not any(line.startswith(name + "=") for name in names)
+    ]
+    target = tmp_path / "vars.env"
+    target.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    return target
+
+
+def test_register_refuses_a_system_with_no_scratch_root_to_check_it_against(tmp_path):
+    # The template names a working directory outright, so no placeholder brings EXEC_ROOT_DIR in.
+    def fixed(document):
+        document["jobWorkingDir"] = "/data/someone/jobs"
+
+    system_file = weaker_copy(tmp_path, ts.EXEC_SYSTEM, fixed)
+    values = vars_without(tmp_path, "EXEC_ROOT_DIR")
+    code, _out, err = run_register(["--vars", str(values), "system", str(system_file)])
+    assert code == 2
+    assert "EXEC_ROOT_DIR is required to check the job directories" in err
+
+
+def test_register_refuses_an_application_with_no_scratch_root_to_check_it_against(tmp_path):
+    values = vars_without(tmp_path, "EXEC_ROOT_DIR")
+    code, _out, err = run_register(["--vars", str(values), "app", str(ts.LAUNCH_APP)])
+    assert code == 2
+    assert "EXEC_ROOT_DIR is required to check the job directories" in err
+
+
+def test_register_refuses_a_double_slash_working_directory(tmp_path):
+    def double(document):
+        document["jobWorkingDir"] = "//evil"
+
+    broken = weaker_copy(tmp_path, ts.EXEC_SYSTEM, double)
+    code, _out, err = run_register(["--vars", str(ts.EXAMPLE_ENV), "system", str(broken)])
+    assert code == 2
+    assert "double slash" in err
+
+
+def test_register_refuses_an_application_whose_directory_leaves_the_root(tmp_path):
+    def leaving(document):
+        document["jobAttributes"]["execSystemExecDir"] = "$${JobWorkingDir}/../../exec/$${JobUUID}"
+
+    broken = weaker_copy(tmp_path, ts.LAUNCH_APP, leaving)
+    code, _out, err = run_register(["--vars", str(ts.EXAMPLE_ENV), "app", str(broken)])
+    assert code == 2
+    assert "execSystemExecDir" in err
+
+
+def test_register_checks_an_application_against_the_system_template_the_repository_commits(
+    tmp_path, monkeypatch
+):
+    # A system template whose working directory climbs out of the root: the application's own shape
+    # is fine, but its directories, computed against that system, leave the scratch root.
+    template = ts.raw(ts.EXEC_SYSTEM)
+    template["jobWorkingDir"] = "${EXEC_ROOT_DIR}/jobs/../.."
+    target = tmp_path / "exec.json.tmpl"
+    target.write_text(json.dumps(template), encoding="utf-8")
+    monkeypatch.setattr(register, "COMMITTED_SYSTEM", target)
+    code, _out, err = run_register(["--vars", str(ts.EXAMPLE_ENV), "app", str(ts.LAUNCH_APP)])
+    assert code == 2
+    assert "not be under the operator's scratch root" in err
+
+
+def test_register_checks_a_system_against_the_applications_the_repository_commits(
+    tmp_path, monkeypatch
+):
+    apps = tmp_path / "apps"
+    apps.mkdir()
+    document = ts.raw(ts.LAUNCH_APP)
+    document["jobAttributes"]["execSystemOutputDir"] = "$${JobWorkingDir}/../../out/$${JobUUID}"
+    (apps / "nemar-launch.json").write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(register, "COMMITTED_APPS", apps)
+    code, _out, err = run_register(["--vars", str(ts.EXAMPLE_ENV), "system", str(ts.EXEC_SYSTEM)])
+    assert code == 2
+    assert "execSystemOutputDir" in err

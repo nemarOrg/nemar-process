@@ -77,6 +77,8 @@ MAX_REDIRECTS = 5
 REDACT_SLICE = 16
 MAX_DRIFT_PATHS = 25
 LEDGER = ROOT / "deploy" / "tapis" / "released-versions.json"
+COMMITTED_SYSTEM = ROOT / "deploy" / "tapis" / "systems" / "exec.json.tmpl"
+COMMITTED_APPS = ROOT / "deploy" / "tapis" / "apps"
 # The stand-in values of deploy/tapis/example.env: fine for a dry run and CI, never for a tenant.
 RESERVED_VALUE = re.compile(r"(?i)example[.-]|/path/to/")
 
@@ -397,6 +399,42 @@ class Plan(NamedTuple):
     values: dict[str, str]
 
 
+def _committed(path: Path) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise RenderError("the committed definition {} cannot be read".format(path.name)) from None
+    if not isinstance(document, dict):
+        raise RenderError("the committed definition {} is not an object".format(path.name))
+    return document
+
+
+def committed_system(exec_root: str) -> dict[str, Any]:
+    """The root and working directory the committed system template makes, with the operator's scratch root."""
+    template = _committed(COMMITTED_SYSTEM)
+    fill = lambda value: string.Template(str(value)).safe_substitute(EXEC_ROOT_DIR=exec_root)  # noqa: E731
+    return {
+        "rootDir": fill(template.get("rootDir", "")),
+        "jobWorkingDir": fill(template.get("jobWorkingDir", "")),
+    }
+
+
+def committed_applications() -> list[dict[str, Any]]:
+    """The directory templates of the committed applications, with Tapis's macros unescaped."""
+    found = []
+    for path in sorted(COMMITTED_APPS.glob("*.json")):
+        attributes = _committed(path).get("jobAttributes") or {}
+        found.append(
+            {
+                "jobAttributes": {
+                    name: str(attributes.get(name, "")).replace("$$", "$")
+                    for name in tapis_policy.DIRECTORY_FIELDS
+                }
+            }
+        )
+    return found
+
+
 def plan(
     kind: str,
     path: Path,
@@ -423,13 +461,22 @@ def plan(
         raise RenderError("{} does not match Tapis's schema: {}".format(path, "; ".join(problems)))
     # NEMAR's own rules, the same function the tests run on the committed files: a stale or locally
     # edited definition cannot register something weaker than CI checked.
+    # The operator's scratch root, even when an edited template no longer names it. Without it the
+    # job directories cannot be checked, and a definition that cannot be checked is refused.
+    root = file_values.get("EXEC_ROOT_DIR") or env.get("EXEC_ROOT_DIR")
+    if not root:
+        raise RenderError(
+            "EXEC_ROOT_DIR is required to check the job directories (set it, even when this "
+            "definition does not name it)"
+        )
     if kind == "app":
         weaker = tapis_policy.app_violations(rendered)
         weaker += tapis_policy.ledger_violations([rendered], released or {})
+        weaker += tapis_policy.path_violations(committed_system(root), rendered, root)
     else:
-        # The operator's scratch root, even when an edited template no longer names it.
-        root = file_values.get("EXEC_ROOT_DIR") or env.get("EXEC_ROOT_DIR")
         weaker = tapis_policy.system_violations(rendered, exec_root=root)
+        for app in committed_applications():
+            weaker += tapis_policy.path_violations(rendered, app, root)
     if weaker:
         raise RenderError("{} is weaker than NEMAR's rules: {}".format(path, "; ".join(weaker)))
     body = canonical(rendered)
