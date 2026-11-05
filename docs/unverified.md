@@ -66,7 +66,7 @@ None of this has been observed on the node's runtime, which may be a commercial 
 ## Not done in this phase
 
 - No image is published by the launcher's phase; the container tests use a small public image. The runtime image, its build and its smoke tests are in [images.md](images.md).
-- No Tapis application or system definition is written, validated or registered, and no observer exists (phase 6).
+- The Tapis application and system definitions and the observer are written and validated in CI (see the last section), but nothing is registered with a tenant and nothing has run on a node.
 - A symlink or special file that cannot be unlinked even after the directory's permissions are widened, a directory that cannot be listed even after the same, and an entry that vanishes between the directory listing and its `lstat`, have no test: an unprivileged test cannot make any of them on demand (the walk records each as `outputs_unreadable` or skips it, and the code paths are read, not run).
 
 ## The runtime image (nemar-python)
@@ -91,3 +91,120 @@ None of these is in place; each needs a repository setting, not a code change.
 - **Protect publication.** The workflow refuses a commit that is not reachable from `main`, but that check lives in a file the tagged commit supplies. A tag ruleset on `image-nemar-python-v*`, branch protection or a ruleset on `main`, or an environment with required reviewers on the `publish` and `sign` jobs (which the workflow does not name today) would stop a person with write access who edits the file and pushes a tag. Until one exists, a signature that passes the documented check does not mean the commit was reviewed.
 - **GHCR.** Confirm that publishing is enabled for the repository and set `nemar-python` and `nemar-python-sif` public so a node can pull without credentials.
 - **The SIF package.** `apptainer push` creates `nemar-python-sif`, and it cannot set `org.opencontainers.image.source`, so GHCR does not link the package to this repository by itself. The first release creates it with the workflow's token; link the package to the repository and give the workflow write access before the first release. The second release is the likely point of failure; [images.md](images.md) says what to do when a run fails after the image was pushed (re-run only the failed jobs, never use an unsigned tag, publish a new version if the SIF tag already exists).
+
+## The Tapis definitions and the observer
+
+[operator.md](operator.md) says what the definitions are and how they are registered.
+Nothing here has run against a real tenant or a real node.
+The application and system schemas are derived from Tapis's own OpenAPI files (commits recorded in `deploy/tapis/openapi/SOURCE`), so a field name is as Tapis spells it, but the specifications say nothing about behaviour, and no stand-in response was recorded from a real tenant.
+Answers marked "from source" were read in the Tapis source (branch `local`, release 26Q2.1) by a reviewer; each is to be confirmed on the tenant, and each says so.
+These are the assumptions, in the order they would bite.
+
+### Blocked: the encoding of the launch specification
+
+**Registration is BLOCKED.**
+Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
+Tapis writes each environment variable into launch files (`tapisjob.env` and `tapisjob.sh`) that a shell reads, and the launch specification travels in one of them as JSON text.
+The description in the launch schema says its bytes "survive Tapis, the shell and the locale": that has not been established, and nothing here relies on it.
+The change spans nemar-cli's shared contract, its client and the launcher, and it is the owner's to schedule; this phase changes none of them, and the schema copy here stays byte for byte nemar-cli's.
+No job with a real token is to be submitted before then either, and the observer's application waits with the rest.
+A dry run of `scripts/register.py` is safe.
+
+### Archiving and directories
+
+- **The request is the control and the application is the fallback.**
+  From source: a job request's own `archiveFilter.includeLaunchFiles` wins whenever the request sets it, and the application's value is used only when the request leaves it out; Tapis's own default is `true` (`JobParmSetMarshaller.mergeArchiveFilters`).
+  NEMAR's client sets it to `false` on every job it submits, so the client is what keeps `tapisjob.env` out of the archive, and the applications' `false` covers a request that omits it.
+  The setting is sometimes written `archiveIncludeLaunchFiles`, but the specification has no such field: the derived schema refuses an unknown key, and `archiveFilter.includeLaunchFiles` is the only field that exists.
+  To confirm on the tenant: after the first job, that the archive holds neither launch file.
+- **The applications' `excludes` do not reach the launch files.**
+  From source: Tapis copies the launch files by name from the execution directory, and when the archive directory is the output directory it skips the filters entirely.
+  The applications still list both files in `excludes`, as a record of intent and for the case the filter is applied; it is not the control.
+- **The macros.**
+  `${JobWorkingDir}` and `${JobUUID}` are Tapis's own and are not in the specification; their spelling and expansion are from the documentation.
+- **Where Tapis creates a job's directories, and what it tells the job.**
+  From source: Tapis creates the directories at `rootDir` plus the path, but the environment variables it gives the job (`_tapisExecSystemOutputDir` and the others) hold the rootDir-RELATIVE path.
+  The launcher reads `_tapisExecSystemOutputDir` as a host path, so the two agree only when `rootDir` is `/`.
+  The system template therefore sets `rootDir` to `/` and `jobWorkingDir` to the absolute `<scratch root>/jobs`, and `scripts/tapis_policy.py` computes the variable the way Tapis does and refuses to register a system whose root is not `/`.
+  What keeps other accounts out of the scratch root is the host's own permission (mode 0700), not Tapis's `rootDir`.
+  With `rootDir` `/`, any Tapis Files permission on `nemar-exec` reaches the community account's whole filesystem view, not only the scratch root; that is why the system is never shared with anyone but NEMAR's own service identity.
+  If the first job on the `debug` partition shows the output directory somewhere else, stop: the launcher's directory contract is wrong and that is a launcher change, not a definition change.
+- **Default archive location.**
+  With no archive system fields, Tapis archives to its default place on the execution system.
+  Where that is, and that it is not under a home directory, is unconfirmed.
+- **What a read of a registered definition looks like.**
+  `scripts/register.py` compares the stored definition with the rendered one, and also refuses a stored one that holds a forbidden field the rendered one leaves out (a non-null `archiveSystemId` or `archiveSystemDir`, a non-empty `archiveFilter.includes`, `fileInputs` or `jobEnvVariables`, and so on).
+  Unconfirmed: that Tapis returns what was posted in the same order (a list it reorders is reported as a difference), and that it leaves `archiveSystemId` and `archiveSystemDir` null when they were not set (if it fills them with the execution system's defaults on read, every registered application will be reported as drifted; both are fail-closed noise, to be loosened only after a real read has been seen).
+- **Job directories are never removed by Tapis**, so they accumulate (the observer adds one every 15 minutes); the site's scratch purge policy is what bounds them.
+- **Tokens stay on disk.**
+  Every launcher job's specification, and with it the job's token, stays in `exec/<job>/tapisjob.env` until the directory is purged, and the token is valid for the job's run (up to 7 days on the preemptible partitions).
+  Deleting `./tapisjob.env` from the entry scripts after the job starts is an owner decision, pending a check on the tenant that nothing else reads the file; it is not implemented.
+
+### Variables and the job request
+
+- **A request can add any variable the application does not declare.**
+  From source: only names starting with `_tapis` are reserved, and `FIXED` blocks only names the application declares.
+  So `SLURM_TMPDIR` (which the launcher prefers to the fixed `TMPDIR`), `PATH`, `LD_PRELOAD` and the rest are guarded only by NEMAR's client, whose request schema declares exactly one variable, `NEMAR_LAUNCH_SPEC`, in a closed one-element array; `tests/deploy/test_tapis_client_agreement.py` pins that shape against the client's source.
+  The definitions can add one guard of their own, and do: `NEMAR_HOST_PYTHON` is declared `FIXED` with an empty value, which (from source) Tapis accepts and which makes it refuse a request that sets a different value; the entry scripts read an empty value as "search the host".
+- **The longest environment value.**
+  A launch specification may be up to 64 KiB.
+  Tapis may limit an environment variable's length, or the length of the generated launch script.
+  If it does, large specifications fail at submit; this is an escalation.
+- **Empty `REQUIRED` variables.**
+  The definitions give a `REQUIRED` variable no value; whether Tapis accepts that in a definition is unconfirmed.
+- **`locked` at creation.**
+  Both applications are created `locked`, so Tapis refuses to modify a version; whether Tapis accepts the flag on a create, and whether disabling a locked version still works, is unconfirmed.
+  The owner can unlock a version (by Tapis's own route, with the owner's own tooling; `register.py` never calls it) to correct a mistake before first use.
+- **The zip is fetched with no digest check.**
+  From source: Tapis's zip stager fetches `containerImage` and unzips it, and checks nothing about its content.
+  The URL is a GitHub release asset, which is mutable while immutable releases are off, so the digest in the definition's `notes` is only a record: `scripts/register.py --apply` downloads the file and refuses to register unless its SHA-256 is that digest, a ledger (`deploy/tapis/released-versions.json`) makes a released version's digest permanent, and the publishing steps are the owner's ([operator.md](operator.md)).
+  Whether the tenant fetches a URL that redirects to object storage, and whether it restricts which hosts a ZIP application may come from, is unconfirmed.
+  No workflow publishes the zips as release assets yet.
+
+### Running a job
+
+- **Reading `tapisjob.exitcode`.**
+  From source: for a `FORK` ZIP job Tapis checks the process and then reads `<output directory>/tapisjob.exitcode`, and a missing file counts as success; the observer's entry script therefore writes it, as the launcher's does.
+  For a `BATCH` job Tapis documents the file for `FORK` jobs only; how it turns a non-zero exit of a `BATCH` ZIP job into `FAILED` or `FINISHED` is unconfirmed.
+- **Slurm's grace period.**
+  How long Slurm waits between SIGTERM (the termination signal) and SIGKILL (the kill signal) when a job is cancelled or reaches its limit, its `KillWait` setting, is unconfirmed.
+  The launcher records the result inside 10 seconds of the signal; a shorter wait loses the record.
+- **The account option.**
+  The system gives each logical queue a scheduler option `--account=<account>`, the CPU account for the CPU partitions and the GPU account for the GPU ones.
+  Whether Tapis applies a logical queue's scheduler options (and not only a job's or an application's) is unconfirmed; so is the spelling of NEMAR's client's `--gpus=N`, listed in nemar-cli.
+- **Memory.**
+  From source: Tapis always sends `--mem`.
+  A whole-node job that omits memory would be charged a full node but limited to the application's default, 2048 MB, so NEMAR's client must always send memory per partition (a note for phase A5).
+- **Queue limits.**
+  The logical queues' limits (nodes, cores, memory, minutes and the running-plus-queued job counts used as `maxJobsPerUser`) were read from the public Expanse user guide on 2026-11-04 and are unverified until measured; the template says so in its `notes`.
+  The client sets no per-job ceiling for `large-shared` and the two preemptible partitions, so these limits are their only cap.
+  The user guide gives some of its limits per group, not per user, and the preemptible partitions are not refunded; a limit that is too low only holds a job in Tapis, and one that is too high is refused by the scheduler.
+- **No scheduler profile.**
+  The system sets no `batchSchedulerProfile`, so no module is loaded for a job; whether the site needs one is unconfirmed.
+- **Outbound HTTPS from the login node**, for the observer's post to NEMAR, is a separate question from the one for compute nodes; both are for the site operator.
+- **The container's mounts (a launcher follow-up).**
+  `--no-mount bind-paths` does not cover a site whose runtime configuration sets `mount hostfs = yes`, which would put the host's file systems, including the execution directories that hold tokens, in the container.
+  Adding `--no-mount hostfs` is a change to the launcher's container arguments, which is a security change in another phase: the owner and driver decide.
+
+### The observer
+
+- **A `FORK` application on the login node (design question 6).**
+  Whether the site allows `squeue`, `sinfo`, `sacct` and `expanse-client` to run on a login node every 15 minutes through Tapis is a question for the site operator, and the observer cannot run as designed without it.
+- **The environment of a `FORK` job.**
+  Whether it has the Slurm commands on its `PATH`, and whether `expanse-client`'s module (`sdsc`) is loaded in it, is unconfirmed.
+- **`expanse-client`.**
+  The observer runs `expanse-client user -r expanse` and `-r expanse_gpu`, the invocation and the resource names the public user guide shows, and recognises only the table the guide shows (rows drawn with the vertical bar, a header naming PROJECT, USED, AVAILABLE and USED BY PROJECT, a whole number in each of the last three columns).
+  Anything else is reported as the lines that were printed.
+  Whether the client works non-interactively under a Tapis job (the guide lists an authentication flag) and what it prints there is unconfirmed, and so is the unit of the figures.
+- **The Slurm formats.**
+  The observer's fixtures follow the formats the Slurm manual documents for `sinfo -o`, `squeue -o` and `sacct --format`; none was captured from a cluster.
+  `squeue --start` is asked with an explicit format (`%i|%P|%T|%S`), which the manual says overrides the one `--start` implies; which jobs `sacct -X -S -E` selects for a day, and the time zone of its times, are also unconfirmed.
+  A state word or reason the observer has not seen is carried as printed, and a row in another format is counted, never guessed at.
+- **The receiving route and the observation contract.**
+  `POST` of a `nemar.observation.v1` document with a bearer token is NEMAR's, built in the gateway epic; the observer is tested against a stand-in of it, and its header comment is the only description of the document today.
+  Phase A7 must pin the contract in BOTH repositories: a JSON Schema in nemar-cli's shared contract, a run identifier that is the Tapis job's UUID so a retried post is idempotent, a per-run token separate from every job's token, a 2xx answer with no redirect, and `raw_lines` treated as untrusted text.
+  This pull request is safe to merge before that, because the observer does nothing until NEMAR submits it.
+
+### Also listed above
+
+Whether `--no-mount bind-paths` has its effect, that the PID namespace exists, and whether the site allows `--net --network none` are under [The node](#the-node); the host Python, outbound HTTPS from the nodes, the local dataset root layout and the SIF's compatibility with the cluster's Apptainer are there and under [The runtime image](#the-runtime-image-nemar-python).

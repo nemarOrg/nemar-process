@@ -36,6 +36,15 @@ A stand-in replaces a system outside this repository (the data plane, NEMAR's AP
 A test that cannot fail is worse than no test: mutate the line a test guards and watch it fail before trusting it.
 Container tests need a real Apptainer or Singularity binary; they skip with a stated reason where there is none and are required in continuous integration (CI).
 
+### The Tapis definitions: the client is the control, and they hold no operator value
+
+Tapis archives `tapisjob.env`, which holds the job token, unless `jobAttributes.parameterSet.archiveFilter.includeLaunchFiles` is `false`.
+A job request's own value wins whenever it is set and the application's is only the fallback, so NEMAR's client, which sets it on every job, is the control, and a test pins that the two agree; the same holds for variables, since a request may add any variable an application does not declare and only the client's closed one-variable schema stops it.
+Every host, account, path and credential is a placeholder or an environment variable, and `scripts/register.py` refuses a definition that breaks `scripts/tapis_policy.py`, never changes an existing version, and registers an application only if the file at its `containerImage` has the recorded digest.
+Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
+Changing a definition, the policy, the derivation or the archive filter is a security change: it needs a test that fails when the line is mutated, and a reviewer.
+What the operator supplies and does is in [`docs/operator.md`](docs/operator.md).
+
 ### One shared contract with nemar-cli
 
 The launch specification schema `launcher/schema/launch-spec.v1.json` is copied byte for byte from nemar-cli's `shared/contract/compute-launch.schema.json`.
@@ -62,6 +71,10 @@ uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images   # the l
 uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher   # the launcher on its floor
 uv run python scripts/build_launcher_zip.py --check
 uv lock --check && uv run pytest tests/images --cov=recipes --cov=scripts   # the runtime image's declaration, lock, fixture, Dockerfile, workflows
+uv run python scripts/derive_tapis_schemas.py --check   # the Tapis schemas are what the vendored OpenAPI files derive
+uv run python scripts/build_observer_zip.py --check
+uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85   # the Tapis definitions, register.py and the observer
+uv run --no-project --python 3.9 --with pytest pytest tests/observer   # the observer on its floor
 ```
 
 ## Workflow
@@ -79,8 +92,9 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
 | `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
 | `recipes/nemar_process/` | the recipes package; for now the placeholder `sj.py` and the vendored signalJourney schema in `_vendor/` |
-| `scripts/` | `build_launcher_zip.py` (deterministic zip, `--check`), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
-| `tests/` | `launcher/` tests, `images/` tests, `standin/` HTTP stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `contract/` pins |
-| `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `upstream.md`, `contracts.md`, `unverified.md` |
+| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
+| `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `contract/` pins |
+| `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
 | `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
-| `deploy/tapis/`, `observer/` | later phases |
+| `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, `released-versions.json` (the ledger of released zip digests), the vendored Tapis OpenAPI files and the schemas derived from them |
+| `observer/` | `observe.py` (stdlib, Python 3.9) and its entry script |

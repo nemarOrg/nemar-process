@@ -1,0 +1,71 @@
+{
+  "id": "nemar-observer",
+  "version": "0.1.0",
+  "description": "NEMAR queue observer. Summarises the Slurm queue for the community account's partitions, reads the allocation balance and posts one observation to NEMAR. Runs on the execution system's login node. Every job is owned by NEMAR.",
+  "runtime": "ZIP",
+  "containerImage": "https://github.com/nemarOrg/nemar-process/releases/download/nemar-observer-v0.1.0/nemar-observer-0.1.0.zip",
+  "jobType": "FORK",
+  "strictFileInputs": true,
+  "locked": true,
+  "jobAttributes": {
+    "description": "One run of the nemar-observer zip: every 15 minutes in quick mode, once a day in daily mode.",
+    "execSystemId": "nemar-exec",
+    "execSystemExecDir": "$${JobWorkingDir}/exec/$${JobUUID}",
+    "execSystemInputDir": "$${JobWorkingDir}/input/$${JobUUID}",
+    "execSystemOutputDir": "$${JobWorkingDir}/output/$${JobUUID}",
+    "archiveMode": "ALWAYS",
+    "archiveOnAppError": true,
+    "maxMinutes": 10,
+    "parameterSet": {
+      "envVariables": [
+        {
+          "key": "NEMAR_OBSERVER_URL",
+          "inputMode": "REQUIRED",
+          "description": "The NEMAR route the observation is posted to (https). Supplied by NEMAR for each run."
+        },
+        {
+          "key": "NEMAR_OBSERVER_TOKEN",
+          "inputMode": "REQUIRED",
+          "description": "The bearer token for that route, valid for this run only. Supplied by NEMAR for each run; never printed, and never archived (the launch files, which hold it, are not)."
+        },
+        {
+          "key": "NEMAR_OBSERVE_MODE",
+          "value": "quick",
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "description": "quick (queue summary and balance) or daily (adds the previous day's accounting export)."
+        },
+        {
+          "key": "NEMAR_OBSERVE_JOBIDS",
+          "inputMode": "INCLUDE_ON_DEMAND",
+          "description": "Slurm job ids (Tapis remoteJobId) NEMAR wants expected start times for, separated by commas. At most 500 are used."
+        },
+        {
+          "key": "NEMAR_OBSERVE_DAY",
+          "inputMode": "INCLUDE_ON_DEMAND",
+          "description": "The day of the accounting export, YYYY-MM-DD. The default is yesterday in UTC."
+        },
+        {
+          "key": "NEMAR_HOST_PYTHON",
+          "value": "",
+          "inputMode": "FIXED",
+          "description": "Empty here: the interpreter the entry script uses is the first Python 3.9 or newer on the host. If the host needs a named one, the operator registers a new version that sets it. Declared and fixed so that a job request cannot set one."
+        },
+        {
+          "key": "NEMAR_SLURM_ACCOUNT",
+          "value": "${SLURM_ACCOUNT_CPU},${SLURM_ACCOUNT_GPU}",
+          "inputMode": "FIXED",
+          "description": "The scheduler accounts the daily accounting export is for. Fixed: a job request cannot ask about another account."
+        }
+      ],
+      "archiveFilter": {
+        "includeLaunchFiles": false,
+        "excludes": ["tapisjob.env", "tapisjob.sh"]
+      }
+    }
+  },
+  "tags": ["nemar", "observer"],
+  "notes": {
+    "observer_sha256": "29bc8123e67f5a6c45207f78e29982d99e6cc103aeb3ebf6660133c6599a6f25",
+    "source": "https://github.com/nemarOrg/nemar-process"
+  }
+}

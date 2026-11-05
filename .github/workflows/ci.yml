@@ -160,6 +160,53 @@ jobs:
           uv lock --check
           uv run pytest tests/images --cov=recipes --cov=scripts
 
+  deploy:
+    # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
+    # files, the registration script and the queue observer (docs/operator.md).
+    name: deploy (tapis definitions and observer)
+    runs-on: ubuntu-24.04
+    env:
+      # In CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
+      NEMAR_REQUIRE_TAPIS_DRIFT: "1"
+      NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the nemar-cli pin of the Tapis client
+        id: pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the definitions are compared with the client's own source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli-tapis
+          sparse-checkout: |
+            /backend/src/services/tapis/
+            /shared/contract/compute.ts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Gates
+        run: |
+          uv sync --frozen
+          # The schemas are what the vendored specifications derive, and nothing else.
+          uv run python scripts/derive_tapis_schemas.py --check
+          # The digests recorded in the applications are those of the reproducible zips.
+          uv run python scripts/build_launcher_zip.py --check
+          uv run python scripts/build_observer_zip.py --check
+          # Each application and each rendered template validates; registration, rendering,
+          # hygiene and the observer are tested against local stand-ins.
+          uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
+
+      - name: Observer tests on its Python floor (3.9)
+        run: uv run --no-project --python 3.9 --with pytest pytest tests/observer
+
   nemar-cli-latest:
     # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.
     runs-on: ubuntu-24.04
@@ -181,4 +228,32 @@ jobs:
             echo "launcher/schema/launch-spec.v1.json equals nemar-cli dev"
           else
             echo "::warning title=launch schema differs from nemar-cli dev::Bump the pin (docs/contracts.md) once the change is reviewed."
+          fi
+
+  nemar-cli-tapis-latest:
+    # Advisory: says, without failing, when nemar-cli's compute epic branch has changed the files the
+    # Tapis definitions are compared with (the client and the contract) since the commit the pin
+    # `tests/contract/nemar-cli-tapis-pin.json` names, so the agreement test is moved deliberately.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compare the pin with the epic branch
+        run: |
+          set -euo pipefail
+          ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')
+          branch=feature/issue-2005-epic-compute-core
+          # The API call comes first and on its own: a failure of it (the branch is gone once the epic
+          # merges, or the commit is unknown) must not read as "nothing changed".
+          if ! files=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename'); then
+            echo "::warning title=nemar-cli's Tapis client could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
+            exit 0
+          fi
+          changed=$(printf '%s\n' "$files" | grep -E '^(backend/src/services/tapis/|shared/contract/compute\.ts$)' || true)
+          if [ -n "$changed" ]; then
+            echo "::warning title=nemar-cli's Tapis client moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Read them, update the agreement test if the request changed, then bump the pin in tests/contract/nemar-cli-tapis-pin.json."
+          else
+            echo "the Tapis client and contract files are unchanged since the pin"
           fi

@@ -1,0 +1,65 @@
+{
+  "id": "nemar-launch",
+  "version": "0.1.0",
+  "description": "NEMAR launcher. Fetches a code bundle, stages datasets, runs the entry in a contained image and uploads the results through NEMAR's own routes. Every job is owned by NEMAR.",
+  "runtime": "ZIP",
+  "containerImage": "https://github.com/nemarOrg/nemar-process/releases/download/nemar-launch-v0.1.0/nemar-launch-0.1.0.zip",
+  "jobType": "BATCH",
+  "strictFileInputs": true,
+  "locked": true,
+  "jobAttributes": {
+    "description": "One launch of the nemar-launch zip. The execution system, queue and resources are set when the job is submitted; the defaults below are the smallest job that fits every queue.",
+    "execSystemId": "nemar-exec",
+    "execSystemExecDir": "$${JobWorkingDir}/exec/$${JobUUID}",
+    "execSystemInputDir": "$${JobWorkingDir}/input/$${JobUUID}",
+    "execSystemOutputDir": "$${JobWorkingDir}/output/$${JobUUID}",
+    "archiveMode": "ALWAYS",
+    "archiveOnAppError": true,
+    "nodeCount": 1,
+    "coresPerNode": 1,
+    "memoryMB": 2048,
+    "maxMinutes": 30,
+    "parameterSet": {
+      "envVariables": [
+        {
+          "key": "NEMAR_LAUNCH_SPEC",
+          "inputMode": "REQUIRED",
+          "description": "The launch specification (JSON, ASCII, at most 64 KiB), supplied by NEMAR for each job. It holds the job's upload token."
+        },
+        {
+          "key": "NEMAR_SIF_ROOT",
+          "value": "${SIF_ROOT}",
+          "inputMode": "FIXED",
+          "description": "The directory on the node that holds the image files, each named by its digest (64 hex digits, then .sif). Fixed: a job request cannot point the launcher at another directory."
+        },
+        {
+          "key": "NEMAR_LOCAL_DATASETS_ROOT",
+          "value": "${LOCAL_DATASETS_ROOT}",
+          "inputMode": "FIXED",
+          "description": "The root of NEMAR's own copy of datasets on the node, laid out as <root>/<dataset id>/<version>/. Fixed. A directory that does not exist is the same as no local copy: the launcher downloads."
+        },
+        {
+          "key": "NEMAR_HOST_PYTHON",
+          "value": "",
+          "inputMode": "FIXED",
+          "description": "Empty here: the interpreter the entry script uses is the first Python 3.9 or newer on the host. If the host needs a named one, the operator registers a new version that sets it. Declared and fixed so that a job request cannot set one."
+        },
+        {
+          "key": "TMPDIR",
+          "value": "${NODE_LOCAL_TMPDIR}",
+          "inputMode": "FIXED",
+          "description": "A node-local directory for the launcher's scratch space (code, datasets and the container's /tmp). Fixed, and never inside the archived output directory. The scheduler's own SLURM_TMPDIR, when set, takes precedence."
+        }
+      ],
+      "archiveFilter": {
+        "includeLaunchFiles": false,
+        "excludes": ["tapisjob.env", "tapisjob.sh"]
+      }
+    }
+  },
+  "tags": ["nemar", "launcher"],
+  "notes": {
+    "launcher_sha256": "dd6dfbbb3aa3739efef755cfc0f9ca43fec25ee47423053a7d90f2a9bd2e771b",
+    "source": "https://github.com/nemarOrg/nemar-process"
+  }
+}

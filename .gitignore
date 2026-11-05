@@ -11,5 +11,6 @@ dist/
 .claude/*.local.md
 .nemar-cli/
 .nemar-cli-dev/
+.nemar-cli-tapis/
 .cache/
 .signaljourney/

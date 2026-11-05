@@ -60,6 +60,19 @@ FORBIDDEN = {
 }
 
 
+# Files this test does not look in, for one label each: exactly the two vendored OpenAPI files, whose
+# sha256 is pinned in `deploy/tapis/openapi/SOURCE`. Their `servers` list names the Tapis project's
+# public development server, which is not a NEMAR tenant. Nothing else in that directory is exempt, and
+# tests/deploy/test_tapis_hygiene.py checks that these are the files SOURCE pins and bounds every host
+# the directory may name.
+EXEMPT = {
+    "a Tapis tenant host": (
+        "deploy/tapis/openapi/AppsAPI.yaml",
+        "deploy/tapis/openapi/SystemsAPI.yaml",
+    )
+}
+
+
 def tracked_text_files():
     listed = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=False
@@ -82,7 +95,9 @@ def test_no_tracked_file_contains(label):
     hits = [
         name
         for name, text in tracked_text_files()
-        if (suffixes is None or name.endswith(suffixes)) and pattern.search(text)
+        if (suffixes is None or name.endswith(suffixes))
+        and not name.startswith(EXEMPT.get(label, ()))
+        and pattern.search(text)
     ]
     assert hits == [], "{} in {}".format(label, hits)
 

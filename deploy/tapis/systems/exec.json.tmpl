@@ -1,0 +1,132 @@
+{
+  "id": "nemar-exec",
+  "description": "NEMAR execution system: SSH to the cluster's login node, Slurm batch, one static community account. Registered by scripts/register.py from this template; every operator value is a placeholder (docs/operator.md). There is no credential and no storage system here. rootDir is / because the launcher reads Tapis's rootDir-relative directory variables as host paths; the jobs live under the operator's scratch root through jobWorkingDir.",
+  "systemType": "LINUX",
+  "host": "${EXEC_HOST}",
+  "effectiveUserId": "${COMMUNITY_ACCOUNT}",
+  "defaultAuthnMethod": "${AUTHN_METHOD}",
+  "rootDir": "/",
+  "canExec": true,
+  "canRunBatch": true,
+  "enableCmdPrefix": false,
+  "allowChildren": false,
+  "jobRuntimes": [{ "runtimeType": "ZIP" }],
+  "jobWorkingDir": "${EXEC_ROOT_DIR}/jobs",
+  "batchScheduler": "SLURM",
+  "batchDefaultLogicalQueue": "shared",
+  "batchLogicalQueues": [
+    {
+      "name": "shared",
+      "hpcQueueName": "shared",
+      "maxNodeCount": 1,
+      "maxCoresPerNode": 128,
+      "maxMemoryMB": 249208,
+      "maxMinutes": 2880,
+      "maxJobsPerUser": 4096,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_CPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "compute",
+      "hpcQueueName": "compute",
+      "maxNodeCount": 32,
+      "maxCoresPerNode": 128,
+      "maxMemoryMB": 249208,
+      "maxMinutes": 2880,
+      "maxJobsPerUser": 64,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_CPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "debug",
+      "hpcQueueName": "debug",
+      "maxNodeCount": 2,
+      "maxCoresPerNode": 128,
+      "maxMemoryMB": 249208,
+      "maxMinutes": 30,
+      "maxJobsPerUser": 2,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_CPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "large-shared",
+      "hpcQueueName": "large-shared",
+      "maxNodeCount": 1,
+      "maxCoresPerNode": 128,
+      "maxMemoryMB": 2048000,
+      "maxMinutes": 2880,
+      "maxJobsPerUser": 4,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_CPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "preempt",
+      "hpcQueueName": "preempt",
+      "maxNodeCount": 32,
+      "maxCoresPerNode": 128,
+      "maxMemoryMB": 249208,
+      "maxMinutes": 10080,
+      "maxJobsPerUser": 128,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_CPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "gpu",
+      "hpcQueueName": "gpu",
+      "maxNodeCount": 4,
+      "maxCoresPerNode": 40,
+      "maxMemoryMB": 377308,
+      "maxMinutes": 2880,
+      "maxJobsPerUser": 8,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_GPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "gpu-shared",
+      "hpcQueueName": "gpu-shared",
+      "maxNodeCount": 1,
+      "maxCoresPerNode": 40,
+      "maxMemoryMB": 377308,
+      "maxMinutes": 2880,
+      "maxJobsPerUser": 24,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_GPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "gpu-debug",
+      "hpcQueueName": "gpu-debug",
+      "maxNodeCount": 2,
+      "maxCoresPerNode": 40,
+      "maxMemoryMB": 377308,
+      "maxMinutes": 30,
+      "maxJobsPerUser": 2,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_GPU}", "inputMode": "FIXED" }
+      ]
+    },
+    {
+      "name": "gpu-preempt",
+      "hpcQueueName": "gpu-preempt",
+      "maxNodeCount": 1,
+      "maxCoresPerNode": 40,
+      "maxMemoryMB": 377308,
+      "maxMinutes": 10080,
+      "maxJobsPerUser": 24,
+      "schedulerOptions": [
+        { "name": "account", "arg": "--account=${SLURM_ACCOUNT_GPU}", "inputMode": "FIXED" }
+      ]
+    }
+  ],
+  "tags": ["nemar"],
+  "notes": {
+    "queue_limits": "from the public user guide; unverified",
+    "limits_read": "2026-11-04"
+  }
+}
