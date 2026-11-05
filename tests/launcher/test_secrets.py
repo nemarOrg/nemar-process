@@ -18,6 +18,7 @@ from harness import JOB_ID, TOKEN, encode_spec, launch_script, spec_text
 
 FORBIDDEN = [
     TOKEN,
+    TOKEN[:16],  # a stretch of the token is as much a leak as the token
     PRESIGN_SIGNATURE,
     "X-Amz",
     "X-Compute-Job-Token",
