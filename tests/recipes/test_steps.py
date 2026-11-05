@@ -263,6 +263,24 @@ def test_a_low_sampling_rate_without_locations_cannot_use_the_nolocs_criterion(t
     assert result.plan.has_step("bad_windows")
 
 
+def test_known_limit_a_recording_with_every_channel_flat_is_reported_as_fully_good(tmp_path):
+    """Pins a limit that docs/recipes.md states, so a change in eegprep or here is seen at once.
+
+    eegprep's `clean_flatlines` removes nothing when every channel has a flat portion and says so only
+    through a log warning (sccn/eegprep#535), so the floor has no mask to read: the recording
+    succeeds and every signal channel is called good. The constant channels are visible only in the
+    robust amplitude, which is zero. Whether such a recording should fail, or be annotated as all
+    bad, is the owner's decision; when it is made, this test is the one to change.
+    """
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", np.zeros((4, 250 * 70)) + 5.0)
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    assert result.plan.step("flatline").quality == {"nRemoved": 0, "removedChannels": []}
+    assert result.kept_after_flatline.all()
+    assert result.metrics["channels"]["percentGood"] == 100.0
+    assert result.metrics["robustAmplitude"]["values"] == [0.0, 0.0, 0.0, 0.0]
+
+
 def test_a_recording_with_no_eeg_channel_is_skipped_not_failed(tmp_path):
     data = np.random.default_rng(7).standard_normal((3, 250 * 20))
     write_set(
