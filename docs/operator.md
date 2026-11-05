@@ -6,8 +6,9 @@ Nothing here is registered by CI or by a coding agent, and no tenant, host, acco
 Real values live in secrets and in the gated documentation, never here.
 
 **Registration is BLOCKED.**
-Nothing is to be registered with a tenant, and no job with a real token submitted, until a shell-inert encoding of the launch specification (the value of `NEMAR_LAUNCH_SPEC`) lands in the shared contract, the launcher and NEMAR's client together.
-Tapis writes that value into launch files a shell reads, and the current encoding, JSON text, has not been shown safe there ([unverified.md](unverified.md)).
+Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
+No job with a real token is to be submitted before then either.
+The launch specification is the value of `NEMAR_LAUNCH_SPEC`; Tapis writes it into launch files a shell reads, and the current encoding, JSON text, has not been shown safe there ([unverified.md](unverified.md)).
 Dry runs are safe.
 
 Abbreviations used here: application programming interface (API), JavaScript Object Notation (JSON), Secure Shell (SSH), Secure Hash Algorithm 256 (SHA-256), Singularity Image Format (SIF), continuous integration (CI), Message Passing Interface (MPI), Simple Storage Service (S3).
@@ -38,6 +39,7 @@ Every job on the execution system runs as one static host account, the community
 So no end user needs, or may be given, Tapis access of any kind.
 Do not share the system or either application with anyone but NEMAR's own service identity, and do not grant anyone permissions on them.
 `scripts/register.py` never calls the sharing or permission routes, and a test pins that.
+With `rootDir` `/`, any Tapis Files permission on `nemar-exec` reaches the community account's whole filesystem view, not only the scratch root; that is why the system is never shared with anyone but NEMAR's own service identity.
 
 ## What the operator supplies
 
@@ -65,12 +67,12 @@ A placeholder named like a credential (it holds `TOKEN`, `SECRET`, `PASSWORD`, `
 1. **Create the directories.**
    Create `EXEC_ROOT_DIR` on scratch with mode 0700, owned by the community account.
    The system's `jobWorkingDir` is `<root>/jobs`, so Tapis creates `<root>/jobs/exec/<job>`, `<root>/jobs/input/<job>` and `<root>/jobs/output/<job>`: the execution directory (where the zip is unpacked and where Tapis writes its launch files) is never the output directory (what is archived), and neither is in the home directory, whose quota these jobs would otherwise eat.
-   The system's `rootDir` is `/`, on purpose: Tapis creates a job's directories at `rootDir` plus the path, but the variables it gives the job (`_tapisExecSystemOutputDir`) hold the rootDir-relative path, and the launcher reads that variable as a host path, so the two agree only when `rootDir` is `/`.
+   The system's `rootDir` is `/`, on purpose: Tapis creates a job's directories at `rootDir` plus the path, but the variables it gives the job (`_tapisExecSystemOutputDir`) hold the rootDir-relative path (from source, to confirm on the tenant), and the launcher reads that variable as a host path, so the two agree only when `rootDir` is `/`.
    The root's mode 0700 is what keeps other accounts out; Tapis's `rootDir` is not used for that.
    Create `SIF_ROOT` and install the images into it; only the community account may write there, because the launcher trusts a file's name and does not hash it.
 2. **Check the host.**
    The launcher and the observer need Python 3.9 or newer outside the container.
-   Both applications declare `NEMAR_HOST_PYTHON` as `FIXED` with an empty value, which the entry scripts read as "search the host", and which makes Tapis refuse a job request that sets another value.
+   Both applications declare `NEMAR_HOST_PYTHON` as `FIXED` with an empty value, which the entry scripts read as "search the host", and which makes Tapis refuse a job request that sets another value (from source, to confirm on the tenant).
    If the host's `python3` is older, register a new version of both applications that gives it the path of a newer interpreter.
 3. **Publish the zips (owner items).**
    Both definitions name a GitHub release asset: `nemar-launch-<version>.zip` under the tag `nemar-launch-v<version>`, and `nemar-observer-<version>.zip` under `nemar-observer-v<version>`, in this repository.
@@ -118,7 +120,7 @@ A definition that is weaker than the rules is refused with exit status 2, so a s
    What the comparison does not see is a field Tapis adds that the rules do not forbid, and a list is compared position by position, so a list Tapis reorders is reported as a difference (noise that fails closed).
    The system has no version, so a changed template can never land: to change it, reconcile it by hand.
 
-An existing version is left exactly as it is: a registered application version is never modified, and both applications are created `locked`, so Tapis refuses to modify one either.
+An existing version is left exactly as it is: a registered application version is never modified, and both applications are created `locked`, so Tapis refuses to modify one either (from source, to confirm on the tenant).
 To change an application, publish a new version, which follows the launcher's or the observer's version (versions are the release process's, never edited by hand).
 The owner can unlock a version with Tapis's own route to correct a mistake before first use (this script never calls it); the default sizes of the launch application, 2048 MB and 30 minutes, are changed the same way or by a new version.
 A 409 on the create means the definition appeared after the read; that is reported as an error, because the run did not look at what is there.
@@ -160,7 +162,7 @@ The derivation refuses a keyword it has not been taught, so a newer specificatio
   From source (to confirm): Tapis lets a job request add any variable the application does not declare, reserving only names that start with `_tapis`, and `FIXED` blocks only names the application declares.
   A request could therefore add `SLURM_TMPDIR` (which the launcher prefers to `TMPDIR`), `PATH` or `LD_PRELOAD`.
   What stops it is NEMAR's client, whose request schema declares exactly one variable, `NEMAR_LAUNCH_SPEC`, in a closed one-element array, pinned by the agreement test.
-  Declaring `NEMAR_HOST_PYTHON` as `FIXED` with an empty value is the one guard the definitions can add: Tapis accepts the empty value and refuses a request that sets a different one.
+  Declaring `NEMAR_HOST_PYTHON` as `FIXED` with an empty value is the one guard the definitions can add: Tapis accepts the empty value and refuses a request that sets a different one (from source, to confirm on the tenant).
   The launch specification, the observer's URL and its token are `REQUIRED`: the job request supplies them.
   The scheduler's `CUDA_VISIBLE_DEVICES` is not defined at all, because a value in a definition would hide the one the scheduler sets for each job; the launcher passes the scheduler's value into the container for a GPU job when it is plain.
 - **No archive system, no storage credential.**

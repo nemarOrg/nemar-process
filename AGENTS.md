@@ -41,7 +41,7 @@ Container tests need a real Apptainer or Singularity binary; they skip with a st
 Tapis archives `tapisjob.env`, which holds the job token, unless `jobAttributes.parameterSet.archiveFilter.includeLaunchFiles` is `false`.
 A job request's own value wins whenever it is set and the application's is only the fallback, so NEMAR's client, which sets it on every job, is the control, and a test pins that the two agree; the same holds for variables, since a request may add any variable an application does not declare and only the client's closed one-variable schema stops it.
 Every host, account, path and credential is a placeholder or an environment variable, and `scripts/register.py` refuses a definition that breaks `scripts/tapis_policy.py`, never changes an existing version, and registers an application only if the file at its `containerImage` has the recorded digest.
-Registration is blocked until the launch specification has a shell-inert encoding in the shared contract, the launcher and the client.
+Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
 Changing a definition, the policy, the derivation or the archive filter is a security change: it needs a test that fails when the line is mutated, and a reviewer.
 What the operator supplies and does is in [`docs/operator.md`](docs/operator.md).
 

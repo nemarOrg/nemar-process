@@ -102,11 +102,13 @@ These are the assumptions, in the order they would bite.
 
 ### Blocked: the encoding of the launch specification
 
-**Registration is BLOCKED, and stays blocked until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client, together.**
+**Registration is BLOCKED.**
+Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
 Tapis writes each environment variable into launch files (`tapisjob.env` and `tapisjob.sh`) that a shell reads, and the launch specification travels in one of them as JSON text.
 The description in the launch schema says its bytes "survive Tapis, the shell and the locale": that has not been established, and nothing here relies on it.
 The change spans nemar-cli's shared contract, its client and the launcher, and it is the owner's to schedule; this phase changes none of them, and the schema copy here stays byte for byte nemar-cli's.
-A dry run of `scripts/register.py` is safe; `--apply` of the launch application is not to be run, and nobody is to submit a job with a real token before the encoding is settled.
+No job with a real token is to be submitted before then either, and the observer's application waits with the rest.
+A dry run of `scripts/register.py` is safe.
 
 ### Archiving and directories
 
@@ -125,6 +127,7 @@ A dry run of `scripts/register.py` is safe; `--apply` of the launch application 
   The launcher reads `_tapisExecSystemOutputDir` as a host path, so the two agree only when `rootDir` is `/`.
   The system template therefore sets `rootDir` to `/` and `jobWorkingDir` to the absolute `<scratch root>/jobs`, and `scripts/tapis_policy.py` computes the variable the way Tapis does and refuses to register a system whose root is not `/`.
   What keeps other accounts out of the scratch root is the host's own permission (mode 0700), not Tapis's `rootDir`.
+  With `rootDir` `/`, any Tapis Files permission on `nemar-exec` reaches the community account's whole filesystem view, not only the scratch root; that is why the system is never shared with anyone but NEMAR's own service identity.
   If the first job on the `debug` partition shows the output directory somewhere else, stop: the launcher's directory contract is wrong and that is a launcher change, not a definition change.
 - **Default archive location.**
   With no archive system fields, Tapis archives to its default place on the execution system.

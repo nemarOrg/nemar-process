@@ -49,7 +49,7 @@ The launcher validates against it with a small validator of its own, because it 
 
 **Whether this encoding is safe through Tapis's launch files and the shell that reads them is NOT established, and is BLOCKED.**
 The schema's description says the bytes "survive Tapis, the shell and the locale"; treat that sentence as unverified and superseded by this one (the schema copy here is nemar-cli's, byte for byte, and is not edited here).
-Nothing is registered with a tenant, and no job with a real token is submitted, until a shell-inert encoding of the specification lands in the shared contract, the launcher and NEMAR's client together ([unverified.md](unverified.md)).
+Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together. No job with a real token is to be submitted before then either ([unverified.md](unverified.md)).
 
 | Key | Meaning |
 |---|---|
