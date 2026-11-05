@@ -65,7 +65,7 @@
   },
   "tags": ["nemar", "observer"],
   "notes": {
-    "observer_sha256": "d751eb3dc084eb9974918b07299140e7f69fae8be721724a04f20ac2a19c6e89",
+    "observer_sha256": "29bc8123e67f5a6c45207f78e29982d99e6cc103aeb3ebf6660133c6599a6f25",
     "source": "https://github.com/nemarOrg/nemar-process"
   }
 }

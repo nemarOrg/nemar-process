@@ -96,31 +96,75 @@ def run_script(unpacked, env, *args):
     )
 
 
+def exit_file(out):
+    return (out / "tapisjob.exitcode").read_text(encoding="utf-8")
+
+
 def test_the_script_runs_the_program_and_returns_its_status(unpacked, tmp_path):
     route = ObserverRoute()
     slurm = default_bin(tmp_path)
+    out = tmp_path / "output" / "job"
     with StandinServer(route) as server:
-        env = base_env(slurm, server, NEMAR_HOST_PYTHON=sys.executable)
+        env = base_env(
+            slurm,
+            server,
+            NEMAR_HOST_PYTHON=sys.executable,
+            _tapisExecSystemOutputDir=str(out),
+        )
         done = run_script(unpacked, env, "quick")
     assert done.returncode == 0, done.stderr
     assert len(route.requests) == 1
     assert TOKEN not in done.stdout + done.stderr
+    assert exit_file(out) == "0\n"
 
 
-def test_a_status_other_than_zero_comes_through(unpacked):
+def test_a_failing_step_leaves_a_non_zero_exit_file_for_tapis_to_read(unpacked, tmp_path):
+    # For a FORK job Tapis reads <output dir>/tapisjob.exitcode, and a missing file counts as
+    # success, so a failed post must leave a non-zero one.
+    out = tmp_path / "out"
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "NEMAR_HOST_PYTHON": sys.executable,
+        "_tapisExecSystemOutputDir": str(out),
+    }
+    done = run_script(unpacked, env, "quick")
+    assert done.returncode == 2
+    assert "NEMAR_OBSERVER_URL" in done.stderr
+    assert exit_file(out) == "2\n"
+
+
+def test_a_post_that_is_not_delivered_is_a_non_zero_exit_file(unpacked, tmp_path):
+    slurm = default_bin(tmp_path)
+    out = tmp_path / "out"
+    with StandinServer(ObserverRoute([400])) as server:
+        env = base_env(
+            slurm, server, NEMAR_HOST_PYTHON=sys.executable, _tapisExecSystemOutputDir=str(out)
+        )
+        done = run_script(unpacked, env, "quick")
+    assert done.returncode == 1
+    assert exit_file(out) == "1\n"
+    assert TOKEN not in done.stdout + done.stderr
+
+
+def test_with_no_usable_python_the_script_exits_13_says_why_and_writes_the_file(unpacked, tmp_path):
+    out = tmp_path / "out"
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "NEMAR_HOST_PYTHON": "/nonexistent/python",
+        "_tapisExecSystemOutputDir": str(out),
+    }
+    done = run_script(unpacked, env, "quick")
+    assert done.returncode == 13
+    assert "no Python 3.9 or newer" in done.stderr
+    assert exit_file(out) == "13\n"
+
+
+def test_without_an_output_directory_the_script_refuses(unpacked):
     done = run_script(
         unpacked, {"PATH": "/usr/bin:/bin", "NEMAR_HOST_PYTHON": sys.executable}, "quick"
     )
-    assert done.returncode == 2
-    assert "NEMAR_OBSERVER_URL" in done.stderr
-
-
-def test_with_no_usable_python_the_script_exits_13_and_says_why(unpacked):
-    done = run_script(
-        unpacked, {"PATH": "/usr/bin:/bin", "NEMAR_HOST_PYTHON": "/nonexistent/python"}, "quick"
-    )
     assert done.returncode == 13
-    assert "no Python 3.9 or newer" in done.stderr
+    assert "_tapisExecSystemOutputDir is not set" in done.stderr
 
 
 def test_the_script_never_echoes_the_environment(unpacked):

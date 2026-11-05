@@ -1,8 +1,14 @@
 #!/bin/sh
 # nemar-observe: the entry point Tapis runs for the observer (a ZIP-runtime, FORK application), on
-# the execution system's login node. It finds a usable host Python (3.9 or newer) and runs
-# lib/observe.py in isolated mode (no PYTHON* variables, no user site, no site module), passing on
-# its arguments and its exit status. For a FORK job Tapis reads the exit status itself.
+# the execution system's login node. It finds a usable host Python (3.9 or newer), runs lib/observe.py
+# in isolated mode (no PYTHON* variables, no user site, no site module) with the same arguments, and
+# leaves the program's exit status in ${_tapisExecSystemOutputDir}/tapisjob.exitcode and as its own.
+#
+# WHY THE FILE. For a FORK job Tapis checks that the process is gone and then reads
+# <output dir>/tapisjob.exitcode; a missing file counts as success (from the Tapis source, to
+# confirm on the tenant). A failed post would then be reported FINISHED, so this script writes the
+# file itself, as the launcher's script does. The variable holds the rootDir-relative path, which is
+# the host path because the system's rootDir is / (docs/operator.md).
 #
 # POSIX sh and shell builtins only. It never echoes the environment: NEMAR_OBSERVER_TOKEN is in it.
 #
@@ -14,6 +20,18 @@ umask 077
 here=${0%/*}
 [ "$here" = "$0" ] && here=.
 here=$(cd "$here" && pwd -P)
+
+out=${_tapisExecSystemOutputDir:-}
+if [ -z "$out" ]; then
+  echo "nemar-observe: _tapisExecSystemOutputDir is not set" >&2
+  exit 13
+fi
+
+finish() {
+  mkdir -p "$out" 2>/dev/null
+  printf '%s\n' "$1" > "$out/tapisjob.exitcode"
+  exit "$1"
+}
 
 usable() {
   "$1" -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
@@ -36,7 +54,9 @@ fi
 
 if [ -z "$py" ]; then
   echo "nemar-observe: no Python 3.9 or newer found on this host" >&2
-  exit 13
+  finish 13
 fi
 
-exec "$py" -I -S "$here/lib/observe.py" "$@"
+"$py" -I -S "$here/lib/observe.py" "$@"
+status=$?
+finish "$status"
