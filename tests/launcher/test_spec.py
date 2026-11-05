@@ -314,6 +314,11 @@ def test_non_ascii_bytes_are_refused_but_the_escape_is_accepted():
     refused(wire_encode(text.replace(b"\\u00e9", b"\xe9")))  # a Latin-1 byte in the text
     # and the same bytes as the raw text, with no encoding at all, are not a value
     refused(text.replace(b"\\u00e9", b"\xe9"))
+    # `parse_text` is a door of its own: non-ASCII text is refused there too, not only by the wire
+    for bad in (text.replace(b"\\u00e9", "\u00e9".encode()), text.replace(b"\\u00e9", b"\xe9")):
+        with pytest.raises(spec_mod.SpecError) as info:
+            spec_mod.parse_text(bad)
+        assert info.value.detail == "invalid_spec"
 
 
 def test_a_duplicate_key_is_refused():
