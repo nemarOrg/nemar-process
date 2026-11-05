@@ -16,6 +16,7 @@ import json
 import math
 import os
 import platform
+from datetime import UTC, datetime
 from importlib import metadata
 from typing import Any
 
@@ -85,6 +86,16 @@ def engine_info(limit: int = 1) -> dict[str, Any]:
         "environment": {name: os.environ.get(name) for name in RECORDED_ENVIRONMENT},
         "commonLayer": COMMON_VERSION,
     }
+
+
+def utc_now() -> str:
+    """The wall clock, to the second, in UTC: ``2026-11-05T02:04:56Z``.
+
+    The only place a recipe reads the clock, and every value it returns lands in a key the
+    determinism comparison excludes (``executionDate``, ``executionDateTime``, ``started_utc``,
+    ``finished_utc``).
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def canonical_json(value: Any) -> str:

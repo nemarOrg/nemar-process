@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 # The type tags a parameter table uses.
-TAGS = ("float", "int", "str", "bool", "floats", "ints", "any")
+TAGS = ("float", "int", "str", "bool", "floats", "ints", "strs", "any")
 
 
 def jsonable(value: Any) -> Any:
@@ -62,6 +62,8 @@ def cast(tag: str, value: Any) -> Any:
         return [float(item) for item in value]
     if tag == "ints":
         return [int(item) for item in value]
+    if tag == "strs":
+        return [str(item) for item in value]
     if tag == "any":
         return jsonable(value)
     raise ValueError("unknown type tag {!r}".format(tag))
