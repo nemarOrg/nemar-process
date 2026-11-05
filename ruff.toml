@@ -1,6 +1,6 @@
 target-version = "py312"
 line-length = 100
-extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev"]
+extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev", ".nemar-cli-tapis"]
 
 # The launcher and the observer run on a compute node under whatever Python the host has; the
 # floor is 3.9. The launcher tests run on 3.9 too, so they keep to the same syntax.
@@ -8,6 +8,8 @@ extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev"]
 "launcher/**" = "py39"
 "observer/**" = "py39"
 "tests/launcher/**" = "py39"
+"tests/observer/**" = "py39"
+"tests/observer_support.py" = "py39"
 "tests/standin/**" = "py39"
 
 [lint]
@@ -24,8 +26,9 @@ ignore = [
 [lint.per-file-ignores]
 "tests/**" = ["S", "ARG", "PT011", "T201"]
 "scripts/**" = ["T201"]
-# The launcher prints its own diagnostics to stderr on purpose.
+# The launcher and the observer print their own diagnostics on purpose.
 "launcher/**" = ["T201"]
+"observer/**" = ["T201"]
 
 [format]
 quote-style = "double"
