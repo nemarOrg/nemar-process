@@ -245,7 +245,13 @@ jobs:
           set -euo pipefail
           ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')
           branch=feature/issue-2005-epic-compute-core
-          changed=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename' | grep -E '^(backend/src/services/tapis/|shared/contract/compute\.ts$)' || true)
+          # The API call comes first and on its own: a failure of it (the branch is gone once the epic
+          # merges, or the commit is unknown) must not read as "nothing changed".
+          if ! files=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename'); then
+            echo "::warning title=nemar-cli's Tapis client could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
+            exit 0
+          fi
+          changed=$(printf '%s\n' "$files" | grep -E '^(backend/src/services/tapis/|shared/contract/compute\.ts$)' || true)
           if [ -n "$changed" ]; then
             echo "::warning title=nemar-cli's Tapis client moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Read them, update the agreement test if the request changed, then bump the pin in tests/contract/nemar-cli-tapis-pin.json."
           else
