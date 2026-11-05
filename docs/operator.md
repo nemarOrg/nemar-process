@@ -22,8 +22,10 @@ Abbreviations used here: application programming interface (API), JavaScript Obj
 | `deploy/tapis/example.env` | an example value for every placeholder; CI renders every definition with it |
 | `deploy/tapis/openapi/` | Tapis's own Applications and Systems specifications, vendored byte for byte (`SOURCE` says from where; `LICENSE-tapis` is their licence) |
 | `deploy/tapis/schemas/` | the JSON Schemas derived from those specifications |
+| `deploy/tapis/released-versions.json` | the ledger of released application versions and their zip digests, empty until the first publication |
 | `scripts/derive_tapis_schemas.py` | derives the schemas; `--check` fails on any difference |
 | `scripts/register.py` | renders the definitions and registers what is absent; a dry run unless told otherwise |
+| `scripts/tapis_policy.py` | the invariants every definition must keep, one function shared by `register.py` and the tests |
 | `scripts/build_observer_zip.py` | builds the observer zip, byte for byte the same every time |
 | `observer/` | `observe.py`, the observer program, and `tapisjob_app.sh`, the entry Tapis runs |
 

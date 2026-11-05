@@ -92,9 +92,9 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
 | `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
 | `recipes/nemar_process/` | the recipes package; for now the placeholder `sj.py` and the vendored signalJourney schema in `_vendor/` |
-| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `register.py` (dry run by default), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
+| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
 | `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `contract/` pins |
 | `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
 | `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
-| `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, the vendored Tapis OpenAPI files and the schemas derived from them |
+| `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, `released-versions.json` (the ledger of released zip digests), the vendored Tapis OpenAPI files and the schemas derived from them |
 | `observer/` | `observe.py` (stdlib, Python 3.9) and its entry script |
