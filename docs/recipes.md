@@ -4,7 +4,7 @@ A recipe is a short, fixed sequence of eegprep calls that annotates every electr
 The first recipe is `nemar-floor`.
 The command that runs recipes is `nemar-recipe` (`python -m nemar_process` outside the image).
 
-Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), BrainVision header file (VHDR), EEGLAB dataset file (SET), Functional Image File Format (FIF), electrocardiography (ECG), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Basic Linear Algebra Subprograms (BLAS), Coordinated Universal Time (UTC), Singularity Image Format (SIF), hertz (Hz), decibel (dB), microvolt (uV).
+Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL).
 
 Two rules bind every recipe (see [`AGENTS.md`](../AGENTS.md)).
 A recipe holds no numerics: every signal-processing call is an eegprep function, and a step eegprep lacks is added to eegprep upstream, never written here.
@@ -21,13 +21,28 @@ nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity opti
 nemar-recipe version
 ```
 
-- `--dataset-dir` is the directory the launcher mounts read-only (`/data/<id>`). The command never writes there; a test makes the tree read-only and runs it.
-- `--out` defaults to `$NEMAR_OUT/product`. The command is an argument vector, so a shell never expands the variable in a launch specification. With neither `--out` nor `NEMAR_OUT` the exit code is 2.
-- `--recording` selects recordings by path relative to the dataset directory and is repeatable. A path that is not a file is one `failed` row with the code `file_not_found`, and the run goes on. A file that is not an EEG recording the command discovers is skipped as `unsupported_format`.
-- Identity is never guessed. `--dataset-id` is the directory's base name only when that is `nm`, `on` or `xx` and six digits. `--dataset-version` is the data-plane tag (`latest` or `vN.N.N`). `--image-digest` falls back to the environment variable `NEMAR_IMAGE_DIGEST`; the launch specification's `env` allowlist has no name for a digest, so the argument is the way a job passes it.
-- `run` refuses an `--out` that already holds product files (exit 5), writes one recording at a time into a private directory under `--out`, and moves its files into place only when every file and the record exist. A failed recording leaves no partial file. A SIGTERM ends the run through a normal exit (143), so what was finished stays and the private directory goes.
-- `aggregate` rebuilds the recordings table and the dataset record from product directories. It copies every per-recording file byte for byte, merges the tables sorted by path, and writes the dataset record as `run` would have. Two inputs that name the same recording are an error (exit 1, with the path). It sums each input's `ignored_datatypes`, so chunks of one dataset should not overlap on files of other datatypes.
-- Standard error carries one line per recording, `recording=<path> status=<status> code=<code>`, with `step=` and `error=` (an exception's class name) when there are any. Standard output carries one final JSON line with the counts. NEMAR never parses either.
+- `--dataset-dir` is the directory the launcher mounts read-only (`/data/<id>`).
+  The command never writes there; a test makes the tree read-only and runs it.
+- `--out` defaults to `$NEMAR_OUT/product`.
+  The command is an argument vector, so a shell never expands the variable in a launch specification.
+  With neither `--out` nor `NEMAR_OUT` the exit code is 2.
+- `--recording` selects recordings by path relative to the dataset directory and is repeatable.
+  A path that is not a file is one `failed` row with the code `file_not_found`, and the run goes on.
+  A file that is not an EEG recording the command discovers is skipped as `unsupported_format`.
+- Identity is never guessed.
+  `--dataset-id` is the directory's base name only when that is `nm`, `on` or `xx` and six digits.
+  `--dataset-version` is the data-plane tag (`latest` or `vN.N.N`).
+  `--image-digest` falls back to the environment variable `NEMAR_IMAGE_DIGEST`; the launch specification's `env` allowlist has no name for a digest, so the argument is the way a job passes it.
+- `run` refuses an `--out` that already holds product files (exit 5), writes one recording at a time into a private directory under `--out`, and moves its files into place only when every file and the record exist.
+  A failed recording leaves no partial file.
+  A SIGTERM ends the run through a normal exit (143), so what was finished stays and the private directory goes.
+- `aggregate` rebuilds the recordings table and the dataset record from product directories.
+  It copies every per-recording file byte for byte, merges the tables sorted by path, and writes the dataset record as `run` would have.
+  Two inputs that name the same recording are an error (exit 1, with the path).
+  It sums each input's `ignored_datatypes`, so chunks of one dataset should not overlap on files of other datatypes.
+- Standard error carries one line per recording, `recording=<path> status=<status> code=<code>`, with `step=` and `error=` (an exception's class name) when there are any.
+  Standard output carries one final JSON line with the counts.
+  NEMAR never parses either.
 
 | Exit | Word | When |
 |---|---|---|
@@ -183,6 +198,7 @@ Its columns are `path`, `datatype`, `status`, `code`, `step`, `n_channels`, `n_s
 `extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.0/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` 0, and `records` for the failed and skipped only), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
 The record is at most 256 KB (262,144 bytes): rows are added in path order while the serialized record stays at or under 200,000 bytes, and the rest are counted in `rows_truncated` and live only in the table file; the report's `records` is capped at 200 entries with `records_truncated`.
 Both caps are deterministic.
+At about 420 bytes a row as indented JSON, roughly 300 rows fit; a larger dataset reads the remaining rows from the table file, and the counts, the distributions and the plan variants cover every recording.
 
 ### Determinism
 
@@ -190,19 +206,29 @@ Two runs on one machine and one image are byte-identical in every TSV, `_filters
 Nothing else in any file varies.
 `tests/recipes/test_determinism_runs.py` runs the command in separate processes, once more with different thread variables in the environment, and compares.
 
-- Threads are pinned to one for the whole run (`threadpoolctl` around the run, and the thread variables set before any library that loads later reads them); the record holds `threads: 1` and the pool inventory as found. On a machine where `threadpoolctl` detects no pool (NumPy on Apple's Accelerate) the inventory is empty and the pin can only be observed in the test through torch's OpenMP pool; Linux CI has the real pools.
+- Threads are pinned to one for the whole run (`threadpoolctl` around the run, and the thread variables set before any library that loads later reads them); the record holds `threads: 1` and the pool inventory as found.
+  On a machine where `threadpoolctl` detects no pool (NumPy on Apple's Accelerate) the inventory is empty and the pin can only be observed in the test through torch's OpenMP pool; Linux CI has the real pools.
 - The RANSAC seed is 5489 inside eegprep and recorded; a test compares the recorded value with eegprep's source.
 - eegprep is float64 end to end.
-- `record_content_sha256` in the table is the SHA-256 of the record's canonical JSON with the clock and run id removed. It is not the hash of the file's bytes, because the file holds the clock and a byte hash would make the table differ between runs; the launcher's manifest holds each file's own SHA-256.
+- `record_content_sha256` in the table is the SHA-256 of the record's canonical JSON with the clock and run id removed.
+  It is not the hash of the file's bytes, because the file holds the clock and a byte hash would make the table differ between runs; the launcher's manifest holds each file's own SHA-256.
 
-Equality across hosts (macOS and Linux, x86 and arm) is not claimed.
-Decisions (masks, channel statuses, segment rows, applied filters) are expected to be bitwise equal and floats equal within the rounding; `tests/recipes/test_golden_decisions.py` pins the fixture's decisions so a Linux run says whether that holds.
+Equality across hosts is claimed only as far as it was observed.
+The fixture's decisions (masks, channel statuses, segment rows, applied filters, the plan hash) were generated on macOS arm64 and reproduced by continuous integration on a hosted Linux x86-64 runner (`tests/recipes/test_golden_decisions.py`).
+Floats were not compared across hosts, and no other architecture was run.
 
 ## The fixture
 
 `tests/fixtures/eeg/` holds one real recording and its sidecars (see its README for the source, the licence and the checksums).
 Observed on the reference machine (macOS arm64): no flat channel, bad channels `O1` and `T6`, 40 bad segments, 49.4043 percent good samples, 90.4762 percent good channels, a drift kernel of 1,005 samples, line noise 0.072 dB at 50 Hz and 7.480 dB at 60 Hz.
 The window step removes about half of the samples at eegprep's defaults on this recording; the floor annotates only, so nothing is lost.
+
+## Known limits
+
+- A recording in which every channel has a flat portion is reported as fully good.
+  eegprep's `clean_flatlines` removes nothing in that case and says so only through a log warning, so the floor has no mask to read.
+  The recording succeeds, `_channels.tsv` calls every signal channel good, and `percentGood` is 100; `robustAmplitude` is 0 for a constant channel.
+  Treating it as a failure, or as all bad, is a decision for the owner (see [unverified.md](unverified.md)); the reproduction is a comment on sccn/eegprep#535.
 
 ## Decisions the owner has not yet confirmed
 
@@ -215,7 +241,7 @@ The driver adopted the plan's recommendations pending the owner; each is reversi
 | O3 | A run with failed recordings exits 0 with the counts in the record; exit 4 only when none succeeded. |
 | O4 | The 60 s minimum for the bad-channel and bad-window steps and the 4-channel minimum are constants in `nemar_floor/steps.py`; a change is a recipe version bump. |
 | O5 | The line-noise statistic is the legacy mean over channels. A median over channels would be robust to one or two bad channels; consider it for 1.1.0 once the pilot shows how often it flips a decision. |
-| O6 | The decisions on the fixture are pinned (`test_golden_decisions.py`), from the reference machine; the first Linux run settles whether they hold across hosts, and a difference is a finding to record. |
+| O6 | The decisions on the fixture are pinned (`test_golden_decisions.py`), generated on the reference machine (macOS arm64); CI reproduced them on Linux x86-64, and a difference on another host is a finding to record. |
 | O7 | The extra file `desc-nemarfloor_recordings.tsv` and the `--image-digest` argument change what Epic A's recipe dispatcher must pass and read. |
 | O8 | The eegprep version is recorded, not enforced: `nemar-floor` does not refuse another version, and the fixture test and the pinned decisions are what notice a change. |
 

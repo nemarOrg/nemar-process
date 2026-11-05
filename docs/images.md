@@ -160,7 +160,7 @@ It then runs `nemar-recipe version` and prints what it said; `scripts/check_smok
 The fixture is synthetic and a smoke input only (see its README); the scientific fixture is `tests/fixtures/eeg/`, which the recipes' tests and the launch end to end use.
 
 The pull-request job also runs the launch end to end in the SIF it just built: `tests/e2e/test_floor_launch.py` runs the real launcher against a stand-in data plane that serves the scientific fixture, runs `nemar-recipe run nemar-floor` in the SIF as a job would, uploads to stand-in outputs routes, and compares the result with a direct run of the same fixture.
-It runs in the unprivileged `test` job only (the signing job holds the OIDC token and runs no test from this repository).
+It runs in the unprivileged `test` job only (the signing job holds the OpenID Connect (OIDC) token and runs no test from this repository).
 
 ## Published images
 

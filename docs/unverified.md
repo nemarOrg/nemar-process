@@ -99,18 +99,46 @@ None of these is in place; each needs a repository setting, not a code change.
 ## The recipes (`nemar-floor`)
 
 [recipes.md](recipes.md) says what the recipe does.
-These are the facts nothing has confirmed yet.
+These are the facts nothing has confirmed yet, and what continuous integration (CI) has observed since.
 
-- **Equality across hosts.** Everything was run on one machine (macOS arm64, NumPy on Apple's Accelerate). Two runs there are byte-identical, but a borderline channel or window decision could flip on Linux, where NumPy uses OpenBLAS. `tests/recipes/test_golden_decisions.py` pins the fixture's decisions from the reference machine, and the first Linux CI run is what settles it: a difference there is a finding to record, not to hide.
-- **The thread pin on Linux.** `threadpoolctl` detects no pool on the reference machine, so the recorded inventory is empty there and the test that every pool reports one thread skips with a stated reason; CI on Linux has the pools and runs it. The pin itself (the thread variables set before a library loads, `threadpool_limits` for the pools already loaded) is observed locally through torch's OpenMP pool only.
-- **The launch end to end in the SIF.** There is no container runtime on the development machine. The test runs with the stand-in runtime locally and in CI (`ci.yml`), and in the real SIF in the image workflow's pull-request job, where it has not yet been seen to pass until that job runs. Cross-environment equality of the state files between the container and the host is asserted there for the first time.
-- **Units.** `robustAmplitude` is in the unit the loader delivers: uV for EDF and BDF, as read. A source in another unit would be wrong by a constant factor; it is recorded as "as loaded" and not verified for other sources.
-- **Loaders.** The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` here. A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and `.bdf` from the fixture's own acquisition system were read in eegprep's source and not run.
-- **A recording whose every channel is flat.** eegprep's flatline step keeps every channel when all are flat (observed on a constant set), so the later steps run on them and the floor says nothing special; not handled and not tested.
-- **A truncated EDF** loads with fewer samples and only a reader warning. The launcher's size and checksum checks, and the SHA-256 the recipe records for each input, are what catch a damaged copy; the recipe adds no check of its own.
-- **Memory.** A run holds about three float64 copies of the longest recording at its peak. For a recording of an hour at 1 kHz with 128 channels that is about 11 GB; nothing was measured at that size. A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
-- **Staging cost.** pybids indexes the whole staged tree once per process; the cost for a job that stages tens of thousands of files is unmeasured. Job authors include `dataset_description.json` and the recording's `channels.tsv`, `electrodes.tsv`, `coordsystem.json` and `eeg.json` and nothing else they can avoid.
-- **The dataset record's size cap** truncates the embedded rows above roughly 1,500 recordings (about 130 bytes a row against a 200,000-byte budget); the table file is complete and hashed.
+Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), microvolt (uV), Secure Hash Algorithm 256 (SHA-256).
+
+- **Equality across hosts.**
+  The decisions pinned in `tests/recipes/test_golden_decisions.py` were generated on one machine (macOS arm64, NumPy on Apple's Accelerate) and reproduced by CI on a hosted Linux runner (ubuntu-24.04, x86-64, NumPy on OpenBLAS) on 2026-11-05.
+  That is one recording and two hosts, and it compares decisions only: no float of `_qc.json` was compared across hosts, and no other architecture or BLAS was run.
+  A difference on another host is a finding to record, not to hide.
+- **The thread pin.**
+  `threadpoolctl` detects no pool on the macOS machine, so there the recorded inventory is empty and the test that every pool reports one thread skips with a stated reason.
+  On the Linux runner it found the pools, and the test ran and passed.
+  Whether an unpinned run would give different answers was not measured; the recipe pins the count, and a run with the thread variables set to 4 in its environment wrote the same files.
+- **The launch end to end in the SIF.**
+  There is no container runtime on the development machine.
+  The test ran with the stand-in runtime locally and in CI (`ci.yml`, job `recipes`).
+  Its container half runs in the image workflow's pull-request job, and this document does not say that job passed.
+  Comparing the container's state files with a direct run on the same host is the first time equality between the container and the host is asserted.
+- **Units.**
+  `robustAmplitude` is in the unit the loader delivers: microvolts (uV) for EDF and BDF files, as read.
+  A source in another unit would be wrong by a constant factor.
+  It is recorded as "as loaded" and not verified for other sources.
+- **Loaders.**
+  The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` were run here.
+  A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and a `.bdf` were read in eegprep's source and not run.
+- **A recording in which every channel has a flat portion.**
+  eegprep's `clean_flatlines` then removes nothing and says so only through a log warning, so the floor has no mask to read.
+  The recording succeeds, `_channels.tsv` calls every signal channel good and `percentGood` is 100 (observed on a constant four-channel set); `robustAmplitude` is 0 for a constant channel, which is how a reader can see it.
+  This is wrong in the direction that matters, and it is not handled: whether such a recording should fail with a code of its own, or be annotated as all bad, is a decision for the owner.
+  The reproduction is a comment on sccn/eegprep#535.
+- **A truncated EDF** loads with fewer samples and only a reader warning.
+  The launcher's size and checksum checks, and the SHA-256 the recipe records for each input, are what catch a damaged copy; the recipe adds no check of its own.
+- **Memory.**
+  A run holds about three float64 copies of the longest recording at its peak.
+  For a recording of an hour at 1 kHz with 128 channels that is about 11 GB; nothing was measured at that size.
+  A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
+- **Staging cost.**
+  The phase plan read in eegprep's source that pybids indexes the whole staged tree once per process; the cost for a job that stages tens of thousands of files was not measured.
+  Job authors include `dataset_description.json` and the recording's `channels.tsv`, `electrodes.tsv`, `coordsystem.json` and `eeg.json` and nothing else they can avoid.
+- **The dataset record's size cap** keeps about 300 rows in the record: 312 of 5,000 rows fit in a test with session-level paths, at about 420 bytes a row as indented JSON.
+  The rest are in the table file, which is complete and hashed, and the counts, the distributions and the plan variants cover every recording.
 
 ## The Tapis definitions and the observer
 
