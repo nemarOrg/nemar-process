@@ -95,8 +95,8 @@ With the drift filter first, planted flat segments of 6, 8, 12, 20 and 30 s were
 | 4 | `drift` | `eegprep.clean_drifts` | `transition=(0.25, 0.75)`, `attenuation=80.0`, `method='fft'` | eegprep's default transition is (0.5, 1), so it is passed; the record holds the kernel's length and SHA-256 |
 | 5 | `line_noise_measure` | `eegprep.functions.sigprocfunc.spectopo.compute_spectra` | defaults read from its signature (`percent=100`, `winsize=None`, `overlap=0`, `nfft=None`, `wintype='hamming'`) plus `frequencies_hz=[50,60]`, `threshold_db=10.0`, `peak='nearest_bin'`, `neighbor_bin_offsets=[-6,-5,-4,-3,-2,2,3,4,5,6]`, `statistic='mean_over_channels_of_db'` | measurement only; the estimator is described below |
 | 6 | `line_noise_50`, `line_noise_60` | `eegprep.pop_eegfiltnew` | `locutoff=f-1.0`, `hicutoff=f+1.0`, `revfilt=True`, `gui=False`; applied `filtorder=None`, `minphase=False`, `usefftfilt=False`, `channels=None`, `chantype=None`, `plotfreqz=False` | each only when its excess is at least 10 dB; ascending; the notch is not 2 Hz wide: eegprep designs a 1 Hz transition with -6 dB cutoffs at `f-0.5` and `f+0.5` and an order of `ceil(3.3*srate/2)*2` (660 at 200 Hz), and the record states the design that was applied |
-| 7 | `bad_channels` | `eegprep.clean_channels` (RANSAC) or `eegprep.clean_channels_nolocs` | RANSAC: `corr_threshold=0.8`, `noise_threshold=4.0`, `window_len=5.0`, `max_broken_time=0.4`, `num_samples=50`, `subset_size=0.25`, and the seed 5489 that eegprep fixes inside (`rng_seed`, recorded, not an argument). Nolocs: `min_corr=0.45`, `ignored_quantile=0.1`, `window_len=2.0`, `max_broken_time=0.5`, `linenoise_aware=True` | the branch rule is below |
-| 8 | `bad_windows` | `eegprep.clean_windows` | `max_bad_channels=0.2`, `zthresholds=(-3.5, 5.0)`; applied defaults read from the signature (`window_len`, `window_overlap`, `max_dropout_fraction`, `min_clean_fraction`, `truncate_quant`, `step_sizes`, `shape_range`) | the cleaned copy is discarded and the sample mask kept |
+| 7 | `bad_channels` | `eegprep.clean_channels` (RANSAC) or `eegprep.clean_channels_nolocs` | RANSAC: `corr_threshold=0.8`, `noise_threshold=4.0`, `window_len=5.0`, `max_broken_time=0.4`, `num_samples=50`, `subset_size=0.25`, and the seed 5489 that eegprep fixes inside (`rng_seed`, recorded, not an argument). Nolocs: `min_corr=0.45`, `ignored_quantile=0.1`, `window_len=2.0`, `max_broken_time=0.5`, `linenoise_aware=True`. Both branches also record the `rules` that gated the step | the branch rule is below |
+| 8 | `bad_windows` | `eegprep.clean_windows` | `max_bad_channels=0.2`, `zthresholds=(-3.5, 5.0)`; applied defaults read from the signature (`window_len`, `window_overlap`, `max_dropout_fraction`, `min_clean_fraction`, `truncate_quant`, `step_sizes`, `shape_range`) and the `rules` that gated the step | the cleaned copy is discarded and the sample mask kept |
 | 9 | `qc` | `nemar_process.qc.floor_metrics` | `spectrum_hz=[1,70]`, `robust_amplitude='1.4826*MAD'` | measurement only |
 
 Steps 2 to 8 act on one working copy; the raw copy is dropped after the signal channels are selected, so a recording of an hour at 1 kHz with 128 channels (3.7 GB per float64 copy) needs about three copies at its peak.
@@ -105,7 +105,9 @@ Every step rebinds `work = step(work, ...)` and never relies on whether eegprep 
 ### The rules
 
 A rule is evaluated per recording from what was measured and is named in the record's `rules` and `skipped_steps`.
-All thresholds are constants in `nemar_floor/steps.py`, and a change to one is a recipe version bump (decision O4).
+The thresholds are constants in `nemar_floor/steps.py` and `common/qc.py`, and a change to one is a recipe version bump (decision O4).
+They are also recorded in the parameters of the step they govern, under `rules`, so that the plan hash changes with them even when every decision comes out the same: `short_recording_s`, `few_channels`, `min_located_channels` and `min_nolocs_srate_hz` on `bad_channels`, `short_recording_s` on `bad_windows`, and the line-noise threshold as `threshold_db` on `line_noise_measure`.
+A step that was skipped has no parameters, so a recording that skipped a step records the reason and not the constant.
 
 | Rule | Fires when | Effect |
 |---|---|---|

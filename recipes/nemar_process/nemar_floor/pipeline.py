@@ -288,7 +288,7 @@ def process(loaded: Loaded) -> FloorResult:
                 raise RecordingError(ALL_CHANNELS_FLAGGED, "bad_channels")
             if int((~flagged).sum()) != int(work["nbchan"]):
                 raise RecordingError(INTERNAL_ERROR, "bad_channels", "channel_mask_inconsistent")
-            function, parameters = steps.NOLOCS_FUNCTION, steps.NOLOCS_CALL
+            function, parameters = steps.NOLOCS_FUNCTION, steps.nolocs_parameters()
         else:
             recipe.add_skip("bad_channels", steps.NOLOCS_FUNCTION, "sampling_rate_too_low")
     kept_final = (

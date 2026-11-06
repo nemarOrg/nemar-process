@@ -128,13 +128,34 @@ def band_stop_parameters(frequency: int) -> dict[str, Any]:
     return {**BAND_STOP_APPLIED, **band_stop_call(frequency)}
 
 
+def bad_channel_rules() -> dict[str, Any]:
+    """The constants that decide whether the bad-channel step runs and which branch it takes."""
+    return {
+        "short_recording_s": SHORT_RECORDING_S,
+        "few_channels": FEW_CHANNELS,
+        "min_located_channels": qc.MIN_LOCATED_CHANNELS,
+        "min_nolocs_srate_hz": MIN_NOLOCS_SRATE_HZ,
+    }
+
+
 def ransac_parameters() -> dict[str, Any]:
-    """The RANSAC branch's parameters: the call, and the seed eegprep fixes inside (no argument)."""
-    return {**RANSAC_CALL, "rng_seed": SEEDS["clean_channels.ransac"]}
+    """The RANSAC branch's parameters: the call, the seed eegprep fixes inside (no argument) and
+    the rules that decided to run it."""
+    return {**RANSAC_CALL, "rng_seed": SEEDS["clean_channels.ransac"], "rules": bad_channel_rules()}
+
+
+def nolocs_parameters() -> dict[str, Any]:
+    """The no-locations branch's parameters: the call and the rules that decided to run it."""
+    return {**NOLOCS_CALL, "rules": bad_channel_rules()}
 
 
 def windows_parameters() -> dict[str, Any]:
-    return {**signature_defaults(clean_windows, WINDOWS_APPLIED), **WINDOWS_CALL}
+    """The window step's parameters: the call, what eegprep applies, and the rule that gates it."""
+    return {
+        **signature_defaults(clean_windows, WINDOWS_APPLIED),
+        **WINDOWS_CALL,
+        "rules": {"short_recording_s": SHORT_RECORDING_S},
+    }
 
 
 def load_parameters() -> dict[str, Any]:

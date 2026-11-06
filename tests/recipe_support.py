@@ -252,6 +252,12 @@ def floor_literals() -> dict:
                 "num_samples": 50,
                 "subset_size": 0.25,
                 "rng_seed": 5489,
+                "rules": {
+                    "short_recording_s": 60.0,
+                    "few_channels": 4,
+                    "min_located_channels": 4,
+                    "min_nolocs_srate_hz": 110.0,
+                },
             },
         ),
         "bad_windows": (
@@ -267,6 +273,7 @@ def floor_literals() -> dict:
                 "step_sizes": [0.01, 0.01],
                 # the 13 floats of numpy.arange(1.7, 3.6, 0.15), the default eegprep applies
                 "shape_range": np.arange(1.7, 3.6, 0.15).tolist(),
+                "rules": {"short_recording_s": 60.0},
             },
         ),
         "qc": (

@@ -99,6 +99,27 @@ def test_a_parameter_that_is_not_in_the_table_is_refused_so_the_table_stays_comp
         made.add_step("x", "eegprep.no_such_function", {}, description="x")
 
 
+def test_a_nested_mapping_parameter_is_typed_key_by_key():
+    made = plan.Plan("r", "1")
+    step = made.add_step(
+        "bad_channels",
+        "eegprep.clean_channels",
+        {"rules": {"short_recording_s": 60, "min_located_channels": 4.0}},
+        description="x",
+    )
+    assert step.parameters == {"rules": {"short_recording_s": 60.0, "min_located_channels": 4}}
+    assert type(step.parameters["rules"]["short_recording_s"]) is float
+    assert type(step.parameters["rules"]["min_located_channels"]) is int
+
+
+def test_a_key_of_a_nested_mapping_that_is_not_in_the_table_is_refused():
+    made = plan.Plan("r", "1")
+    with pytest.raises(KeyError, match="no_such_rule"):
+        made.add_step(
+            "windows", "eegprep.clean_windows", {"rules": {"no_such_rule": 1}}, description="x"
+        )
+
+
 def test_a_step_id_is_used_once():
     made = sample_plan()
     with pytest.raises(ValueError, match="flatline"):

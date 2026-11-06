@@ -52,6 +52,12 @@ def test_a_recording_with_no_locations_takes_the_nolocs_branch_and_says_so(tmp_p
         "window_len": 2.0,
         "max_broken_time": 0.5,
         "linenoise_aware": True,
+        "rules": {
+            "short_recording_s": 60.0,
+            "few_channels": 4,
+            "min_located_channels": 4,
+            "min_nolocs_srate_hz": 110.0,
+        },
     }
     assert result.bad_channels_branch == "nolocs"
     # the channels the criterion removed are named, and the masks agree with the names

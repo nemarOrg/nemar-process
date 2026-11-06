@@ -13,6 +13,8 @@ same decisions share a hash, so a dataset record can count variants.
 Parameters are typed in ``PARAMETER_TYPES``, one row per eegprep function: ``5.0`` and ``5`` are
 different text, so every parameter is cast to its table type before it is hashed, and a parameter
 that is not in the table is refused, which keeps the table complete. Adding a step is adding a row.
+A parameter that is itself a mapping (the ``rules`` of a step: the constants that decided whether it
+ran) has a nested row, and its keys are held to the same standard.
 
 Upstream gap, sccn/eegprep#537, and the risk of a private import (docs/recipes.md): ``pop_eegfiltnew``
 does not return the filter design it applied;
@@ -37,8 +39,17 @@ from nemar_process.common.params import cast
 
 EEGPREP_URL = "https://github.com/sccn/eegprep"
 
-# function path -> parameter -> type tag (see params.TAGS)
-PARAMETER_TYPES: dict[str, dict[str, str]] = {
+# The constants of the rules that decide whether a step runs and which branch it takes (decision
+# O4), recorded in the parameters of the step they govern so that the plan hash changes with them.
+BAD_CHANNEL_RULES = {
+    "short_recording_s": "float",
+    "few_channels": "int",
+    "min_located_channels": "int",
+    "min_nolocs_srate_hz": "float",
+}
+
+# function path -> parameter -> type tag (see params.TAGS), or the tags of a nested mapping
+PARAMETER_TYPES: dict[str, dict[str, Any]] = {
     "eegprep.pop_load_frombids": {
         "dtype": "str",
         "bidsevent": "bool",
@@ -86,6 +97,7 @@ PARAMETER_TYPES: dict[str, dict[str, str]] = {
         "num_samples": "int",
         "subset_size": "float",
         "rng_seed": "int",
+        "rules": BAD_CHANNEL_RULES,
     },
     "eegprep.clean_channels_nolocs": {
         "min_corr": "float",
@@ -93,6 +105,7 @@ PARAMETER_TYPES: dict[str, dict[str, str]] = {
         "window_len": "float",
         "max_broken_time": "float",
         "linenoise_aware": "bool",
+        "rules": BAD_CHANNEL_RULES,
     },
     "eegprep.clean_windows": {
         "max_bad_channels": "float",
@@ -104,22 +117,32 @@ PARAMETER_TYPES: dict[str, dict[str, str]] = {
         "truncate_quant": "floats",
         "step_sizes": "floats",
         "shape_range": "floats",
+        "rules": {"short_recording_s": "float"},
     },
     "nemar_process.qc.floor_metrics": {"spectrum_hz": "ints", "robust_amplitude": "str"},
 }
+
+
+def _typed_mapping(where: str, table: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for name, value in values.items():
+        if name not in table:
+            raise KeyError("{} has no parameter {} in the table".format(where, name))
+        kind = table[name]
+        if isinstance(kind, dict):
+            out[name] = (
+                None if value is None else _typed_mapping("{}.{}".format(where, name), kind, value)
+            )
+        else:
+            out[name] = cast(kind, value)
+    return out
 
 
 def typed(function: str, parameters: dict[str, Any]) -> dict[str, Any]:
     """The parameters cast to the types the table gives this function."""
     if function not in PARAMETER_TYPES:
         raise KeyError("no parameter types for {}".format(function))
-    table = PARAMETER_TYPES[function]
-    out = {}
-    for name, value in parameters.items():
-        if name not in table:
-            raise KeyError("{} has no parameter {} in the table".format(function, name))
-        out[name] = cast(table[name], value)
-    return out
+    return _typed_mapping(function, PARAMETER_TYPES[function], parameters)
 
 
 def software_of(function: str) -> dict[str, Any]:

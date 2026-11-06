@@ -20,9 +20,9 @@ from eegprep import (
     clean_windows,
     pop_select,
 )
-from nemar_process.common import io
+from nemar_process.common import io, qc
 from nemar_process.common.errors import RecordingError, RecordingSkipped
-from nemar_process.nemar_floor import outputs, process
+from nemar_process.nemar_floor import outputs, process, steps
 from recipe_support import (
     DATASET,
     SMOKE_SET,
@@ -376,6 +376,48 @@ def test_one_channel_that_shares_nothing_is_removed_and_the_others_are_kept(tmp_
     assert quality["branch"] == "nolocs"
     assert quality["removedChannels"] == ["Ch8"]
     assert result.kept_final.tolist() == [True] * 7 + [False]
+
+
+def synthetic_floor(directory):
+    """Six correlated channels of 70 s at 250 Hz, no locations: every step but the band-stops runs."""
+    data = correlated_channels(np.random.default_rng(30), 6, 250 * 70)
+    write_set(directory / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(directory)
+    return process(io.load(recording))
+
+
+@pytest.mark.parametrize(
+    ("module", "name", "changed", "recorded_in"),
+    [
+        (
+            steps,
+            "SHORT_RECORDING_S",
+            50.0,
+            [
+                ("bad_channels", ("rules", "short_recording_s")),
+                ("bad_windows", ("rules", "short_recording_s")),
+            ],
+        ),
+        (steps, "FEW_CHANNELS", 3, [("bad_channels", ("rules", "few_channels"))]),
+        (steps, "MIN_NOLOCS_SRATE_HZ", 105.0, [("bad_channels", ("rules", "min_nolocs_srate_hz"))]),
+        (qc, "MIN_LOCATED_CHANNELS", 5, [("bad_channels", ("rules", "min_located_channels"))]),
+        (qc, "LINE_THRESHOLD_DB", 12.0, [("line_noise_measure", ("threshold_db",))]),
+    ],
+)
+def test_the_plan_hash_changes_with_each_rule_constant(
+    tmp_path, monkeypatch, module, name, changed, recorded_in
+):
+    """A rule constant is part of the plan, so a recording processed under another one never shares
+    a hash with it, even when every decision came out the same."""
+    baseline = synthetic_floor(tmp_path / "before")
+    monkeypatch.setattr(module, name, changed)
+    result = synthetic_floor(tmp_path / "after")
+    assert result.plan.hash() != baseline.plan.hash()
+    for step_id, keys in recorded_in:
+        value = result.plan.step(step_id).parameters
+        for key in keys:
+            value = value[key]
+        assert value == changed, (step_id, keys)
 
 
 def test_a_recording_with_no_eeg_channel_is_skipped_not_failed(tmp_path):

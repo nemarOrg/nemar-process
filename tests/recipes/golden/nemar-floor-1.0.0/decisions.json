@@ -23,7 +23,7 @@
     "Pg2"
   ],
   "not_assessed_channels": [],
-  "plan_hash": "sha256:4f83a35b4dcc3d7a445a85db4f10435230583bab447496503528841d1f72b525",
+  "plan_hash": "sha256:ffa6a154580dd7099bb4f2a6a5bf7a9b3f1f2ffc6a99e9a2603124702ebe35fd",
   "recipe": {
     "id": "nemar-floor",
     "version": "1.0.0"
