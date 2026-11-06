@@ -39,9 +39,12 @@ nemar-recipe version
   The signal can arrive between two moves of one recording's files, and the move then removes the files it had placed and the directories it had made, so a recording is whole or absent.
   Every file is written under a temporary name beside its target and renamed over it, so a reader never sees half of the dataset record, and an interrupted write leaves the old file and no temporary one.
 - `aggregate` rebuilds the recordings table and the dataset record from product directories.
-  It copies every per-recording file byte for byte, merges the tables sorted by path, and writes the dataset record as `run` would have.
-  Two inputs that name the same recording are an error (exit 1, with the path).
-  It sums each input's `ignored_datatypes`, so chunks of one dataset should not overlap on files of other datatypes.
+  It reads every input first and refuses the whole merge, writing nothing, when an input is missing, holds no recordings table or no dataset record (a run that did not end), holds a table or record it cannot read, or disagrees with another about the dataset id, the dataset version, the source commit or the image digest (exit 6).
+  An identity argument may fill in what the inputs leave unknown and may not contradict them.
+  Two inputs that name the same recording, or hold the same file, are an error (exit 1, with the path), found before anything is copied.
+  It then copies every per-recording file byte for byte into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, and moves everything into place at the end.
+  A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.
+  It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
 - Standard error carries one line per recording, `recording=<path> status=<status> code=<code>`, with `step=` and `error=` (an exception's class name) when there are any.
   Standard output carries one final JSON line with the counts.
   NEMAR never parses either.

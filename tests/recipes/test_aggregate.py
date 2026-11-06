@@ -7,6 +7,8 @@ all of them gives, without rerunning anything.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 
 import numpy as np
 import pytest
@@ -40,8 +42,11 @@ def stripped(path):
     return record
 
 
-def run(cli, dataset, out, recordings=()):
-    arguments = ["run", "nemar-floor", "--dataset-dir", dataset, "--out", out, *IDENTITY]
+RECORD = "desc-nemarfloor_signalJourney.json"
+
+
+def run(cli, dataset, out, recordings=(), identity=IDENTITY):
+    arguments = ["run", "nemar-floor", "--dataset-dir", dataset, "--out", out, *identity]
     for recording in recordings:
         arguments += ["--recording", recording]
     code, _, _ = cli(*arguments)
@@ -158,6 +163,159 @@ def test_an_input_that_is_not_a_product_directory_is_refused(runs, cli, tmp_path
         *IDENTITY,
     )
     assert code == 6
+
+
+def files_of(root):
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+
+
+def merge(cli, out, *inputs, identity=IDENTITY):
+    arguments = ["aggregate", "nemar-floor", "--out", out, *identity]
+    for directory in inputs:
+        arguments += ["--in", directory]
+    return cli(*arguments)
+
+
+def test_an_input_without_its_dataset_record_is_refused_and_nothing_is_written(runs, cli, tmp_path):
+    """A product directory with no record is a run that did not end (killed, or still going)."""
+    unfinished = tmp_path / "unfinished"
+    shutil.copytree(runs["a"], unfinished)
+    (unfinished / RECORD).unlink()
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, unfinished, runs["b"])
+    assert code == 6
+    assert "an input directory holds no dataset record" in err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("broken", ["table", "record"])
+def test_an_input_whose_table_or_record_cannot_be_read_is_refused_with_only_the_class(
+    runs, cli, tmp_path, broken
+):
+    damaged = tmp_path / "damaged"
+    shutil.copytree(runs["a"], damaged)
+    name = "desc-nemarfloor_recordings.tsv" if broken == "table" else RECORD
+    (damaged / name).write_text("not what it should be\n", encoding="utf-8")
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, damaged, runs["b"])
+    assert code == 6
+    assert "an input directory holds a table or record that cannot be read (" in err
+    assert str(tmp_path) not in err
+    assert not out.exists()
+
+
+def test_the_dataset_identity_is_what_the_inputs_say_when_the_aggregate_is_told_nothing(
+    runs, cli, tmp_path
+):
+    out = tmp_path / "o"
+    code, _, _ = merge(cli, out, runs["a"], runs["b"], identity=[])
+    assert code == 0
+    nemar = json.loads((out / RECORD).read_text(encoding="utf-8"))["extensions"]["nemar"]
+    assert nemar["dataset"] == {"id": "on007823", "version": "v1.0.0", "source_commit": None}
+    assert nemar["image"] == {"digest": "sha256:" + "c" * 64}
+
+
+@pytest.mark.parametrize(
+    ("changed", "field"),
+    [
+        (["--dataset-id", "on000001"], "dataset id"),
+        (["--dataset-version", "v2.0.0"], "dataset version"),
+        (["--source-commit", "d" * 40], "source commit"),
+        (["--image-digest", "sha256:" + "d" * 64], "image digest"),
+    ],
+)
+def test_inputs_from_different_datasets_runs_or_images_are_refused(
+    multi, cli, tmp_path, changed, field
+):
+    """Chunks of one campaign agree on what they ran on; a merge of anything else is a mistake."""
+    base = {pair[0]: pair[1] for pair in (IDENTITY[i : i + 2] for i in range(0, 6, 2))}
+    base["--source-commit"] = "e" * 40
+    other = {**base, changed[0]: changed[1]}
+
+    def given(values):
+        return [item for pair in values.items() for item in pair]
+
+    one = run(cli, multi, tmp_path / "one", CHUNK_B[:1], identity=given(base))
+    two = run(cli, multi, tmp_path / "two", CHUNK_B[1:], identity=given(other))
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, one, two, identity=[])
+    assert code == 6
+    assert "the inputs disagree about the {}".format(field) in err
+    assert not out.exists()
+
+
+def test_an_identity_argument_that_the_inputs_contradict_is_refused(runs, cli, tmp_path):
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, runs["a"], runs["b"], identity=["--dataset-version", "v3.0.0"])
+    assert code == 6
+    assert "the inputs disagree about the dataset version" in err
+    assert not out.exists()
+
+
+def test_a_file_that_two_inputs_hold_is_found_before_anything_is_copied(runs, cli, tmp_path):
+    clash = tmp_path / "clash"
+    shutil.copytree(runs["b"], clash)
+    carried = next(
+        p
+        for p in runs["a"].rglob("*")
+        if p.is_file() and "/" in p.relative_to(runs["a"]).as_posix()
+    )
+    target = clash / carried.relative_to(runs["a"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(carried, target)
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, runs["a"], clash)
+    assert code == 1
+    assert "two inputs hold the same file: " + carried.relative_to(runs["a"]).as_posix() in err
+    assert [p for p in out.rglob("*") if p.is_file()] == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_an_input_file_that_cannot_be_read_is_exit_six_and_leaves_the_output_empty(
+    runs, cli, tmp_path
+):
+    damaged = tmp_path / "damaged"
+    shutil.copytree(runs["b"], damaged)
+    victim = next(p for p in sorted(damaged.rglob("*_qc.json")))
+    victim.chmod(0)
+    out = tmp_path / "o"
+    try:
+        code, _, err = merge(cli, out, runs["a"], damaged)
+    finally:
+        victim.chmod(0o644)
+    assert code == 6
+    assert "an input file cannot be read (PermissionError)" in err
+    assert str(tmp_path) not in err
+    assert [p for p in out.rglob("*") if p.is_file()] == []
+    assert not (out / ".partial").exists()
+
+
+def test_an_output_that_cannot_take_the_copies_is_exit_five_and_leaves_no_product_file(
+    runs, cli, tmp_path
+):
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / ".partial").write_text("a file where the staging directory goes", encoding="utf-8")
+    code, _, err = merge(cli, out, runs["a"], runs["b"])
+    assert code == 5
+    assert "the output cannot be written (" in err
+    assert [p.name for p in out.iterdir()] == [".partial"]
+
+
+def test_an_input_kept_in_a_directory_named_partial_is_still_merged(runs, cli, tmp_path):
+    """The staging directory's name is skipped inside an input, never in the path to the input."""
+    hidden = tmp_path / ".partial" / "a"
+    shutil.copytree(runs["a"], hidden)
+    plain, hidden_out = tmp_path / "plain", tmp_path / "hidden"
+    assert merge(cli, plain, runs["a"], runs["b"])[0] == 0
+    assert merge(cli, hidden_out, hidden, runs["b"])[0] == 0
+    assert files_of(hidden_out) == files_of(plain)
+
+
+def test_a_finished_aggregate_leaves_no_staging_directory(runs, cli, tmp_path):
+    out = tmp_path / "o"
+    assert merge(cli, out, runs["a"], runs["b"])[0] == 0
+    assert not (out / ".partial").exists()
 
 
 def test_the_output_must_be_a_new_product_directory(runs, cli):

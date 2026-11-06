@@ -28,6 +28,8 @@ numbers 10 to 16 are not used here):
 Each recording runs inside one failure boundary: its files are written into a private directory
 under ``--out`` and moved into place only when every file and the record exist, so a failed
 recording leaves no partial files, and its row is appended to the table in every case.
+``aggregate`` reads and checks every input before it writes anything, stages its output under
+``--out`` and moves it into place at the end.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ import sys
 import uuid
 import warnings
 from collections.abc import Generator, Sequence
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -435,69 +438,165 @@ def run_one(
 # ---- aggregate --------------------------------------------------------------------------------
 
 
+class InputUnusable(Exception):
+    """An ``--in`` directory that cannot be merged; the message says why without naming a path."""
+
+
+@dataclass
+class ProductInput:
+    """What one ``--in`` directory holds: its table's rows, what its dataset record says, its files."""
+
+    rows: list[dict[str, Any]]
+    started_utc: str
+    ignored: dict[str, int]
+    dataset_id: str | None
+    dataset_version: str | None
+    source_commit: str | None
+    image_digest: str | None
+    files: dict[str, Path]  # relative path -> where it is; neither the table nor the record
+
+
+def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: str) -> ProductInput:
+    """Read one product directory, or raise ``InputUnusable``.
+
+    A directory without its dataset record is a run that did not end, and is refused with the
+    rest: its table may be missing rows and its counts of other datatypes are not known.
+    """
+    if not directory.is_dir():
+        raise InputUnusable("an input directory is missing or not a directory")
+    if not (directory / table_name).is_file():
+        raise InputUnusable("an input directory holds no recordings table")
+    if not (directory / record_name).is_file():
+        raise InputUnusable("an input directory holds no dataset record")
+    try:
+        rows = table.read_rows(directory / table_name, recipe.columns)
+        record = json.loads((directory / record_name).read_text(encoding="utf-8"))
+        nemar = record["extensions"]["nemar"]
+        dataset = nemar["dataset"]
+        found = ProductInput(
+            rows=rows,
+            started_utc=nemar["report"]["started_utc"],
+            ignored={str(name): int(count) for name, count in nemar["ignored_datatypes"].items()},
+            dataset_id=dataset["id"],
+            dataset_version=dataset["version"],
+            source_commit=dataset["source_commit"],
+            image_digest=nemar["image"]["digest"],
+            files={},
+        )
+        listed = sorted(directory.rglob("*"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise InputUnusable(
+            "an input directory holds a table or record that cannot be read ({})".format(
+                type(error).__name__
+            )
+        ) from error
+    for path in listed:
+        relative = path.relative_to(directory)
+        if PARTIAL in relative.parts or relative.as_posix() in (table_name, record_name):
+            continue
+        if path.is_file():
+            found.files[relative.as_posix()] = path
+    return found
+
+
+def agreed(name: str, given: str | None, found: list[str | None]) -> str | None:
+    """The one value the inputs (and the command line, when it says) have for ``name``, or None."""
+    values = {value for value in [given, *found] if value is not None}
+    if len(values) > 1:
+        raise InputUnusable("the inputs disagree about the {}".format(name))
+    return values.pop() if values else None
+
+
+def agreed_identity(given: Identity, inputs: list[ProductInput]) -> Identity:
+    """The identity of the merged run: what the inputs share, which no argument may contradict."""
+    return Identity(
+        dataset_id=agreed("dataset id", given.dataset_id, [i.dataset_id for i in inputs]),
+        dataset_version=agreed(
+            "dataset version", given.dataset_version, [i.dataset_version for i in inputs]
+        ),
+        source_commit=agreed(
+            "source commit", given.source_commit, [i.source_commit for i in inputs]
+        ),
+        image_digest=agreed("image digest", given.image_digest, [i.image_digest for i in inputs]),
+        run_id=given.run_id,
+    )
+
+
+def copy_file(source: Path, target: Path) -> None:
+    """Copy a file; a source that cannot be read is an input problem, a target that cannot be
+    written is an output problem."""
+    try:
+        reader = source.open("rb")
+    except OSError as error:
+        raise InputUnusable(
+            "an input file cannot be read ({})".format(type(error).__name__)
+        ) from error
+    with reader:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as writer:
+            shutil.copyfileobj(reader, writer)
+
+
 def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     recipe = REGISTRY[args.recipe]
-    inputs = [Path(name) for name in args.inputs]
     out = Path(args.out)
-    for directory in inputs:
-        if not directory.is_dir():
-            print("an input directory is missing or not a directory", file=sys.stderr)
-            return EXIT_DATASET_UNREADABLE
     try:
-        identity = identity_of(args, None)
+        given = identity_of(args, None)
     except ValueError as error:
         parser.error(str(error))
+    validator = sj.validator()  # built once, before anything is read or written
+    table_name = naming.dataset_path(recipe.label, "recordings", "tsv")
+    record_name = naming.dataset_path(recipe.label, "signalJourney", "json")
+    try:
+        inputs = [read_input(Path(name), recipe, table_name, record_name) for name in args.inputs]
+        identity = agreed_identity(given, inputs)
+    except InputUnusable as error:
+        print(error, file=sys.stderr)
+        return EXIT_DATASET_UNREADABLE
+    merged: dict[str, dict[str, Any]] = {}
+    targets: dict[str, Path] = {}
+    ignored: dict[str, int] = {}
+    for item in inputs:
+        for row in item.rows:
+            if row["path"] in merged:
+                print("two inputs name the same recording: {}".format(row["path"]), file=sys.stderr)
+                return EXIT_INTERNAL
+            merged[row["path"]] = row
+        for relative, source in item.files.items():
+            if relative in targets:
+                print("two inputs hold the same file: {}".format(relative), file=sys.stderr)
+                return EXIT_INTERNAL
+            targets[relative] = source
+        for datatype, count in item.ignored.items():
+            ignored[datatype] = ignored.get(datatype, 0) + count
     try:
         prepare_out(out, recipe.label)
     except OutputUnusable as error:
         print("the output directory cannot be used: {}".format(error), file=sys.stderr)
         return EXIT_OUTPUT_UNUSABLE
-    table_name = naming.dataset_path(recipe.label, "recordings", "tsv")
-    record_name = naming.dataset_path(recipe.label, "signalJourney", "json")
-    merged: dict[str, dict[str, Any]] = {}
-    ignored: dict[str, int] = {}
-    started: list[str] = []
-    for directory in inputs:
-        if not (directory / table_name).is_file():
-            print("an input directory holds no recordings table", file=sys.stderr)
-            return EXIT_DATASET_UNREADABLE
-        for row in table.read_rows(directory / table_name, recipe.columns):
-            if row["path"] in merged:
-                print("two inputs name the same recording: {}".format(row["path"]), file=sys.stderr)
-                return EXIT_INTERNAL
-            merged[row["path"]] = row
-        if (directory / record_name).is_file():
-            nemar = json.loads((directory / record_name).read_text(encoding="utf-8"))["extensions"][
-                "nemar"
-            ]
-            started.append(nemar["report"]["started_utc"])
-            for datatype, count in nemar["ignored_datatypes"].items():
-                ignored[datatype] = ignored.get(datatype, 0) + count
-    for directory in inputs:
-        for path in sorted(directory.rglob("*")):
-            relative = path.relative_to(directory).as_posix()
-            if not path.is_file() or relative in (table_name, record_name) or PARTIAL in path.parts:
-                continue
-            target = out / relative
-            if target.exists():
-                print("two inputs hold the same file: {}".format(relative), file=sys.stderr)
-                return EXIT_INTERNAL
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, target)
-    with determinism.pinned_threads():
-        context = RunContext(
-            Path("."), identity, determinism.engine_info(), dict(determinism.SEEDS), sj.validator()
-        )
-        with table.TableWriter(out / table_name, recipe.columns) as writer:
-            for path in sorted(merged):
-                writer.append(merged[path])
-        record = finalize(
-            recipe,
-            out,
-            context,
-            dict(sorted(ignored.items())),
-            min(started) if started else determinism.utc_now(),
-        )
+    started = min(item.started_utc for item in inputs)
+    staging = out / PARTIAL / "aggregate"
+    try:
+        with determinism.pinned_threads():
+            context = RunContext(
+                Path("."), identity, determinism.engine_info(), dict(determinism.SEEDS), validator
+            )
+            staging.mkdir(parents=True)
+            for relative, source in sorted(targets.items()):
+                copy_file(source, staging / relative)
+            with table.TableWriter(staging / table_name, recipe.columns) as writer:
+                for path in sorted(merged):
+                    writer.append(merged[path])
+            record = finalize(recipe, staging, context, dict(sorted(ignored.items())), started)
+            files.move_into_place(staging, out, [*sorted(targets), table_name, record_name])
+    except InputUnusable as error:
+        print(error, file=sys.stderr)
+        return EXIT_DATASET_UNREADABLE
+    except OSError as error:
+        print("the output cannot be written ({})".format(type(error).__name__), file=sys.stderr)
+        return EXIT_OUTPUT_UNUSABLE
+    finally:
+        shutil.rmtree(out / PARTIAL, ignore_errors=True)
     code, word = exit_for(record["extensions"]["nemar"]["counts"])
     result_line(recipe, record, word)
     return code
