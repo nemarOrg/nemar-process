@@ -24,7 +24,6 @@ from nemar_process.common import io, plan, qc
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from nemar_process.nemar_floor import outputs, process, steps
 from recipe_support import (
-    DATASET,
     SMOKE_SET,
     correlated_channels,
     floor_literals,
@@ -250,7 +249,12 @@ def test_a_set_saved_with_an_empty_etc_runs_the_whole_floor(tmp_path):
     assert step_of(plan, "flatline").quality["removedChannels"] == ["Ch8"]
     assert step_of(plan, "bad_channels").function == "eegprep.clean_channels_nolocs"
     assert step_of(plan, "bad_channels").quality["branch"] == "nolocs"
-    assert step_of(plan, "bad_windows").quality["nSegments"] >= 0
+    # the window step ran on the recording and its record agrees with the mask it returned
+    assert result.sample_mask is not None
+    assert step_of(plan, "bad_windows").quality["nSegments"] == len(qc.runs(result.sample_mask))
+    assert step_of(plan, "bad_windows").quality["nSamplesRemoved"] == int(
+        (~result.sample_mask).sum()
+    )
     assert "locations-usable" not in plan.rules
 
 
@@ -459,7 +463,3 @@ def test_a_step_eegprep_cannot_run_is_a_step_failure_with_only_the_error_class(t
         "ValueError",
     )
     assert str(error) == "step_failed in drift (ValueError)"
-
-
-def test_the_dataset_directory_the_fixture_came_from_is_still_the_committed_tree():
-    assert (DATASET / "dataset_description.json").is_file()

@@ -110,7 +110,7 @@ def test_the_uncontaminated_fixture_has_no_band_stop_and_after_equals_before(fix
     assert fixture_result.line_before[50] == pytest.approx(0.0717, abs=1e-3)
 
 
-def test_the_threshold_is_ten_db_and_both_frequencies_can_be_removed_in_ascending_order():
+def test_both_frequencies_can_be_removed_and_in_ascending_order():
     loaded = contaminated(50.0, 20.0)
     t = np.arange(loaded.eeg["pnts"]) / loaded.eeg["srate"]
     loaded.eeg["data"] = loaded.eeg["data"] + 20.0 * np.sin(2 * np.pi * 60.0 * t)

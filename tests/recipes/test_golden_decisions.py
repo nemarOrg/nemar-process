@@ -8,9 +8,8 @@ Two rules sit on them (docs/recipes.md):
 
 * any change under `recipes/nemar_process/common/` that alters a byte of these files is a
   `nemar-floor` version bump; one that does not bumps only `COMMON_VERSION`'s patch;
-* they were generated on one machine (macOS arm64). The first run on Linux shows whether the
-  decisions are equal across hosts; if they are not, that is a finding to record (O6), not a
-  reason to loosen this test.
+* they were generated on macOS (arm64) and reproduced by CI on a hosted Linux runner (x86-64). A
+  difference on another host is a finding to record (O6), not a reason to loosen this test.
 """
 
 from __future__ import annotations
@@ -23,8 +22,8 @@ import pytest
 MESSAGE = (
     "{} differs from the pinned decision. If a recipe or the common layer changed on purpose, that "
     "is a nemar-floor version bump and the golden files are regenerated with "
-    "scripts/make_floor_golden.py. If nothing changed and this is the first run on a new host, "
-    "record the difference as a finding (docs/recipes.md, O6)."
+    "scripts/make_floor_golden.py. If nothing changed and this is a new host, record the "
+    "difference as a finding (docs/recipes.md, O6)."
 )
 
 
@@ -35,14 +34,6 @@ def test_a_fresh_run_makes_the_pinned_decisions(floor_product):
     for name, text in fresh.items():
         pinned = (golden.GOLDEN / name).read_text(encoding="utf-8")
         assert text == pinned, MESSAGE.format(name)
-
-
-def test_the_pinned_plan_hash_is_the_hash_of_the_pinned_plan(floor_product):
-    _, product = floor_product
-    pinned = json.loads((golden.GOLDEN / "decisions.json").read_text(encoding="utf-8"))
-    assert product.record["extensions"]["nemar"]["plan_hash"] == pinned["plan_hash"], (
-        MESSAGE.format("plan_hash")
-    )
 
 
 def test_the_decisions_are_the_ones_the_phase_plan_observed_on_the_fixture():
@@ -62,19 +53,46 @@ def test_the_decisions_are_the_ones_the_phase_plan_observed_on_the_fixture():
     assert sum(1 for line in channels if "\tbad\t" in line) == 2
 
 
-def test_the_script_agrees_with_the_committed_files():
-    assert golden.main(["--check"]) == 0
+def test_the_script_makes_what_the_fixture_run_makes(floor_product):
+    """`produce` is what the script writes the golden files from; it is the one extra run here."""
+    directory, product = floor_product
+    assert golden.produce() == golden.golden_files(directory, product.record)
 
 
-def test_the_script_notices_a_changed_golden_file(tmp_path, monkeypatch, capsys):
+def test_the_script_agrees_with_the_committed_files(floor_product):
+    directory, product = floor_product
+    assert golden.main(["--check"], produced=golden.golden_files(directory, product.record)) == 0
+
+
+def test_the_script_notices_a_changed_golden_file(floor_product, tmp_path, monkeypatch, capsys):
     import shutil
 
+    directory, product = floor_product
     copy = tmp_path / "golden"
     shutil.copytree(golden.GOLDEN, copy)
     (copy / "channels.tsv").write_text("name\ttype\n", encoding="utf-8")
     monkeypatch.setattr(golden, "GOLDEN", copy)
-    assert golden.main(["--check"]) == 1
+    fresh = golden.golden_files(directory, product.record)
+    assert golden.main(["--check"], produced=fresh) == 1
     assert "channels.tsv differs" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["channels.tsv", "badsegments.tsv", "decisions.json"])
+def test_a_golden_file_that_is_missing_fails_the_check_and_is_never_written_by_it(
+    floor_product, tmp_path, monkeypatch, capsys, name
+):
+    """The comparison is strict in both directions: no file to compare with is a difference."""
+    import shutil
+
+    directory, product = floor_product
+    copy = tmp_path / "golden"
+    shutil.copytree(golden.GOLDEN, copy)
+    (copy / name).unlink()
+    monkeypatch.setattr(golden, "GOLDEN", copy)
+    fresh = golden.golden_files(directory, product.record)
+    assert golden.main(["--check"], produced=fresh) == 1
+    assert "{} differs".format(name) in capsys.readouterr().err
+    assert not (copy / name).exists()
 
 
 @pytest.mark.parametrize("name", ["channels.tsv", "badsegments.tsv", "decisions.json"])

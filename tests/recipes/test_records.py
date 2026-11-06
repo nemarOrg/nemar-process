@@ -276,8 +276,28 @@ def test_every_step_names_a_function_that_exists(record):
     assert software == {"eegprep", "nemar_process"}
 
 
-def test_the_summary_metrics_are_the_scalars_of_the_qc_file(record):
-    assert record["summaryMetrics"] == {
+def test_the_summary_metrics_are_the_scalars_of_the_qc_file(record, floor_product):
+    directory, product = floor_product
+    qc = json.loads(
+        (directory / product.record_path.replace("signalJourney", "qc")).read_text(encoding="utf-8")
+    )
+    summary = record["summaryMetrics"]
+    channels, samples = qc["channels"], qc["samples"]
+    assert summary == {
+        "nChannelsInput": channels["nInput"],
+        "nSignalChannels": channels["nSignal"],
+        "nGoodChannels": channels["nGood"],
+        "nNoiseOnlyChannels": channels["nNoiseOnly"],
+        "nNotAssessedChannels": channels["nNotAssessed"],
+        "percentGoodChannels": channels["percentGood"],
+        "percentGoodSamples": samples["percentGood"],
+        "durationS": qc["durationS"],
+        "samplingRateHz": qc["samplingRateHz"],
+        "lineNoiseBeforeDb": qc["lineNoise"]["beforeDb"],
+        "lineNoiseAfterDb": qc["lineNoise"]["afterDb"],
+    }
+    # and the numbers themselves are the ones observed on the fixture
+    assert summary == {
         "nChannelsInput": 22,
         "nSignalChannels": 21,
         "nGoodChannels": 19,

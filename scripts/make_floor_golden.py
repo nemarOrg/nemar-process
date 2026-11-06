@@ -5,7 +5,9 @@ fixture recording: the channel table, the bad segments, and a small JSON of the 
 rules, the skipped steps and the applied filters. They hold no float beyond the table's rounding and
 no measurement that depends on how a sum is accumulated, so they are the part of the output that
 should be equal on every host. ``tests/recipes/test_golden_decisions.py`` compares a fresh run with
-them; the first run on Linux shows whether they are equal across hosts (docs/recipes.md, O6).
+them. They were generated on macOS (arm64) and reproduced on a hosted Linux runner (x86-64) by CI;
+a difference on another host is a finding to record (docs/recipes.md, O6), not a reason to loosen
+the comparison.
 
 Any change under ``recipes/nemar_process/common/`` that alters a byte of these files is a
 ``nemar-floor`` version bump; a change that does not bumps only ``COMMON_VERSION``'s patch.
@@ -80,14 +82,16 @@ def produce() -> dict[str, str]:
         return golden_files(Path(scratch), product.record)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, produced: dict[str, str] | None = None) -> int:
+    """Write or check the golden files; ``produced`` is what a run already made (it is not rerun)."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
         "--check", action="store_true", help="compare with the files, write nothing"
     )
     args = parser.parse_args(argv)
     sys.path.insert(0, str(ROOT / "recipes"))
-    produced = produce()
+    if produced is None:
+        produced = produce()
     if args.check:
         differs = [
             name

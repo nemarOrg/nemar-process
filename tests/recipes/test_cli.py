@@ -18,6 +18,8 @@ from nemar_process.common import files, records
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from recipe_support import (
     DATASET,
+    PINNED_COMMON_VERSION,
+    PINNED_RECIPE_VERSION,
     RECORDING,
     copy_fixture,
     edf_bytes,
@@ -104,7 +106,7 @@ def test_standard_error_has_one_line_per_recording_and_standard_output_the_count
     last = json.loads(first_run["stdout"].strip().splitlines()[-1])
     assert last == {
         "recipe": "nemar-floor",
-        "recipe_version": "1.0.0",
+        "recipe_version": PINNED_RECIPE_VERSION,
         "counts": {"discovered": 1, "succeeded": 1, "failed": 0, "skipped": 0},
         "result": "ok",
     }
@@ -444,8 +446,8 @@ def test_the_version_is_one_json_line(cli):
     assert code == 0
     document = json.loads(out)
     assert out.count("\n") == 1
-    assert document["recipes"] == {"nemar-floor": "1.0.0"}
-    assert document["common"] == "1.0.0"
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
+    assert document["common"] == PINNED_COMMON_VERSION
     assert set(document) == {"recipes", "common", "eegprep", "python", "numpy"}
 
 
@@ -602,9 +604,11 @@ def test_outcomes_map_exceptions_to_a_status_a_code_a_step_and_a_class_name():
     )
 
 
-def test_a_recording_whose_files_cannot_be_written_is_a_disk_error_and_the_rest_goes_on(
+def test_an_oserror_before_a_recording_is_loaded_is_mapped_to_disk_error_and_the_rest_goes_on(
     multi, tmp_path, cli
 ):
+    """Pins the mapping of an `OSError` that is not an input to `disk_error`: a file where the
+    private directory goes, so that the directory cannot be made and nothing is loaded at all."""
     out = tmp_path / "o"
     out.mkdir()
     (out / ".partial").write_text("a file where the private directory goes", encoding="utf-8")
@@ -622,6 +626,41 @@ def test_a_recording_whose_files_cannot_be_written_is_a_disk_error_and_the_rest_
     )
     assert code == 4
     assert err.count("status=failed code=disk_error") == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+def test_a_recording_whose_product_cannot_be_placed_is_a_disk_error_and_the_rest_goes_on(
+    multi, tmp_path, cli
+):
+    """A real write failure: the recording is loaded, processed and written whole in its private
+    directory, and the directory it belongs in refuses it. Its neighbour is not affected."""
+    out = tmp_path / "o"
+    refusing = out / "sub-02"
+    refusing.mkdir(parents=True)
+    refusing.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        code, _, err = cli(
+            "run",
+            "nemar-floor",
+            "--dataset-dir",
+            multi,
+            "--out",
+            out,
+            "--recording",
+            "sub-02/eeg/sub-02_task-smoke_eeg.set",
+            "--recording",
+            "sub-03/eeg/sub-03_task-smoke_eeg.set",
+        )
+    finally:
+        refusing.chmod(stat.S_IRWXU)
+    assert code == 0
+    assert "recording=sub-02/eeg/sub-02_task-smoke_eeg.set status=failed code=disk_error" in err
+    assert "error=PermissionError" in err
+    assert "recording=sub-03/eeg/sub-03_task-smoke_eeg.set status=succeeded" in err
+    rows = {r["path"]: r for r in table_rows(out)}
+    assert rows["sub-02/eeg/sub-02_task-smoke_eeg.set"]["detail"] == "PermissionError"
+    assert not list((out / "sub-02").rglob("*"))
+    assert not (out / ".partial").exists()
 
 
 def test_a_run_that_is_given_a_sigterm_keeps_what_it_finished(multi, tmp_path):
@@ -658,7 +697,7 @@ def test_a_run_that_is_given_a_sigterm_keeps_what_it_finished(multi, tmp_path):
         pytest.skip("the run finished before it could be interrupted")
     process.send_signal(signal.SIGTERM)
     process.wait(timeout=60)
-    assert process.returncode in (128 + signal.SIGTERM, -signal.SIGTERM)
+    assert process.returncode == 128 + signal.SIGTERM  # the handler's exit, not the signal's death
     assert len(table_path.read_text(encoding="utf-8").splitlines()) >= 2
     assert not (out / ".partial").exists()
     # every recording that has a row has all of its files, and none has only some
