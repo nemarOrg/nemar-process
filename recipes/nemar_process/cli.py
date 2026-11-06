@@ -454,7 +454,11 @@ class InputUnusable(Exception):
 
 @dataclass
 class ProductInput:
-    """What one ``--in`` directory holds: its table's rows, what its dataset record says, its files."""
+    """What one ``--in`` directory holds: its table's rows, what its dataset record says, its files.
+
+    The recipe, the engine and the seeds are what the rows were made with. The merged record states
+    them from the inputs: the aggregate runs none of the steps, and may run elsewhere.
+    """
 
     rows: list[dict[str, Any]]
     started_utc: str
@@ -463,6 +467,9 @@ class ProductInput:
     dataset_version: str | None
     source_commit: str | None
     image_digest: str | None
+    recipe: dict[str, Any]
+    engine: dict[str, Any]
+    seeds: dict[str, Any]
     files: dict[str, Path]  # relative path -> where it is; neither the table nor the record
 
 
@@ -483,6 +490,9 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
         record = json.loads((directory / record_name).read_text(encoding="utf-8"))
         nemar = record["extensions"]["nemar"]
         dataset = nemar["dataset"]
+        engine = dict(nemar["engine"])
+        if not {"package", "version"} <= engine.keys():
+            raise ValueError("an engine stamp names a package and its version")
         found = ProductInput(
             rows=rows,
             started_utc=nemar["report"]["started_utc"],
@@ -491,6 +501,9 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
             dataset_version=dataset["version"],
             source_commit=dataset["source_commit"],
             image_digest=nemar["image"]["digest"],
+            recipe={"id": nemar["recipe"]["id"], "version": nemar["recipe"]["version"]},
+            engine=engine,
+            seeds=dict(nemar["seeds"]),
             files={},
         )
         listed = sorted(directory.rglob("*"))
@@ -509,12 +522,32 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
     return found
 
 
-def agreed(name: str, given: str | None, found: list[str | None]) -> str | None:
-    """The one value the inputs (and the command line, when it says) have for ``name``, or None."""
-    values = {value for value in [given, *found] if value is not None}
-    if len(values) > 1:
+def shared(name: str, found: list[Any]) -> Any:
+    """The one value every input has for ``name``, where having none is a value like another.
+
+    Inputs that differ cannot be merged: a value stated for rows that one of them cannot vouch for
+    is a claim nobody made.
+    """
+    first = found[0]
+    if any(value != first for value in found[1:]):
         raise InputUnusable("the inputs disagree about the {}".format(name))
-    return values.pop() if values else None
+    return first
+
+
+def agreed(name: str, given: str | None, found: list[str | None]) -> str | None:
+    """The one value the inputs have for ``name``, which the command line may confirm and not give.
+
+    The command line is a claim about the inputs' provenance, not a source for it: a value the
+    inputs do not have is refused, as is one they contradict.
+    """
+    value = shared(name, found)
+    if given is not None and given != value:
+        if value is None:
+            raise InputUnusable(
+                "the inputs have no {}, and the command line may not give one".format(name)
+            )
+        raise InputUnusable("the inputs disagree about the {}".format(name))
+    return value
 
 
 def agreed_identity(given: Identity, inputs: list[ProductInput]) -> Identity:
@@ -560,6 +593,13 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
     try:
         inputs = [read_input(Path(name), recipe, table_name, record_name) for name in args.inputs]
         identity = agreed_identity(given, inputs)
+        made_by = shared("recipe", [item.recipe for item in inputs])
+        if made_by != {"id": recipe.id, "version": recipe.version}:
+            raise InputUnusable(
+                "the inputs were made by another version of the recipe than the one running"
+            )
+        engine = shared("engine", [item.engine for item in inputs])
+        seeds = shared("seeds", [item.seeds for item in inputs])
     except InputUnusable as error:
         print(error, file=sys.stderr)
         return EXIT_DATASET_UNREADABLE
@@ -588,9 +628,7 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
     staging = out / PARTIAL / "aggregate"
     try:
         with determinism.pinned_threads():
-            context = RunContext(
-                Path("."), identity, determinism.engine_info(), dict(determinism.SEEDS), validator
-            )
+            context = RunContext(Path("."), identity, engine, seeds, validator)
             staging.mkdir(parents=True)
             for relative, source in sorted(targets.items()):
                 copy_file(source, staging / relative)

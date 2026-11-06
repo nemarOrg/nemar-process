@@ -41,7 +41,10 @@ nemar-recipe version
   Every file is written under a temporary name beside its target and renamed over it, so a reader never sees half of the dataset record, and an interrupted write leaves the old file and no temporary one.
 - `aggregate` rebuilds the recordings table and the dataset record from product directories.
   It reads every input first and refuses the whole merge, writing nothing, when an input is missing, holds no recordings table or no dataset record (a run that did not end), holds a table or record it cannot read, or disagrees with another about the dataset id, the dataset version, the source commit or the image digest (exit 6).
-  An identity argument may fill in what the inputs leave unknown and may not contradict them.
+  Having no value is a value like another: a chunk that knows its source commit and one that does not disagree, because the merged record would state a commit for rows that nobody can vouch for.
+  An identity argument may confirm what the inputs say, and may neither contradict it nor give what they lack, because the command line is a claim about the inputs' provenance and not a source for it.
+  The inputs must also agree about the recipe, the engine stamp and the seeds, and they must have been made by the version of the recipe that is running, because the merged record's steps are that recipe's.
+  The merged record states the recipe, the engine and the seeds of its inputs, not those of the process that merges them, which ran none of the steps and may run on another machine.
   Two inputs that name the same recording, or hold the same file, are an error (exit 1, with the path), found before anything is copied.
   It then copies every per-recording file byte for byte into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, and moves everything into place at the end.
   A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.

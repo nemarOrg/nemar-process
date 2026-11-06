@@ -244,11 +244,181 @@ def test_inputs_from_different_datasets_runs_or_images_are_refused(
     assert not out.exists()
 
 
+def edited(source, destination, change):
+    """A copy of a product directory whose dataset record `change` has edited (`extensions.nemar`)."""
+    shutil.copytree(source, destination)
+    path = destination / RECORD
+    record = json.loads(path.read_text(encoding="utf-8"))
+    change(record["extensions"]["nemar"])
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return destination
+
+
+COMMIT = "e" * 40
+# Each identity field: its name in the messages, its option, the value the chunks of `runs` carry
+# (None when they carry none), how to give the field a value in a record, and how to blank it.
+FIELDS = {
+    "dataset id": (
+        "--dataset-id",
+        "on007823",
+        lambda nemar: nemar["dataset"].update(id="on007823"),
+        lambda nemar: nemar["dataset"].update(id=None),
+    ),
+    "dataset version": (
+        "--dataset-version",
+        "v1.0.0",
+        lambda nemar: nemar["dataset"].update(version="v1.0.0"),
+        lambda nemar: nemar["dataset"].update(version=None),
+    ),
+    "source commit": (
+        "--source-commit",
+        COMMIT,
+        lambda nemar: nemar["dataset"].update(source_commit=COMMIT),
+        lambda nemar: nemar["dataset"].update(source_commit=None),
+    ),
+    "image digest": (
+        "--image-digest",
+        "sha256:" + "c" * 64,
+        lambda nemar: nemar["image"].update(digest="sha256:" + "c" * 64),
+        lambda nemar: nemar["image"].update(digest=None),
+    ),
+}
+
+
+@pytest.mark.parametrize("field", FIELDS)
+def test_a_field_that_one_input_has_and_another_lacks_is_a_disagreement(
+    runs, cli, tmp_path, monkeypatch, field
+):
+    """No value is a value: merging a chunk that knows its commit with one that does not would
+    state the commit for rows that nobody can vouch for."""
+    monkeypatch.delenv("NEMAR_IMAGE_DIGEST", raising=False)
+    _, _, give, blank = FIELDS[field]
+    with_value = edited(runs["a"], tmp_path / "with", give)
+    without = edited(runs["b"], tmp_path / "without", blank)
+    for name, inputs in (("o", (with_value, without)), ("p", (without, with_value))):
+        out = tmp_path / name
+        code, _, err = merge(cli, out, *inputs, identity=[])
+        assert code == 6
+        assert "the inputs disagree about the {}".format(field) in err
+        assert not out.exists()
+
+
+@pytest.mark.parametrize("field", FIELDS)
+def test_the_command_line_cannot_give_a_field_that_the_inputs_lack(
+    runs, cli, tmp_path, monkeypatch, field
+):
+    monkeypatch.delenv("NEMAR_IMAGE_DIGEST", raising=False)
+    option, value, _, blank = FIELDS[field]
+    first = edited(runs["a"], tmp_path / "first", blank)
+    second = edited(runs["b"], tmp_path / "second", blank)
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, first, second, identity=[option, value])
+    assert code == 6
+    assert "the inputs have no {}, and the command line may not give one".format(field) in err
+    assert not out.exists()
+
+
+def test_the_command_line_can_confirm_a_field_that_the_inputs_have(runs, cli, tmp_path):
+    first = edited(runs["a"], tmp_path / "first", FIELDS["source commit"][2])
+    second = edited(runs["b"], tmp_path / "second", FIELDS["source commit"][2])
+    out = tmp_path / "o"
+    assert merge(cli, out, first, second, identity=["--source-commit", COMMIT])[0] == 0
+    record = json.loads((out / RECORD).read_text(encoding="utf-8"))
+    assert record["extensions"]["nemar"]["dataset"]["source_commit"] == COMMIT
+    assert record["extensions"]["nemar"]["report"]["source_commit"] == COMMIT
+
+
 def test_an_identity_argument_that_the_inputs_contradict_is_refused(runs, cli, tmp_path):
     out = tmp_path / "o"
     code, _, err = merge(cli, out, runs["a"], runs["b"], identity=["--dataset-version", "v3.0.0"])
     assert code == 6
     assert "the inputs disagree about the dataset version" in err
+    assert not out.exists()
+
+
+def test_inputs_made_by_different_versions_of_the_recipe_are_refused(runs, cli, tmp_path):
+    older = edited(runs["a"], tmp_path / "older", lambda n: n["recipe"].update(version="0.9.0"))
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, older, runs["b"])
+    assert code == 6
+    assert "the inputs disagree about the recipe" in err
+    assert not out.exists()
+
+
+def test_inputs_made_by_a_version_of_the_recipe_that_is_not_the_one_running_are_refused(
+    runs, cli, tmp_path
+):
+    """The merged record's steps are the running recipe's: it cannot describe rows made by another."""
+
+    def older(nemar):
+        nemar["recipe"].update(version="0.9.0")
+
+    first, second = (edited(runs[name], tmp_path / name, older) for name in ("a", "b"))
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, first, second)
+    assert code == 6
+    assert "the inputs were made by another version of the recipe than the one running" in err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("what", "change"),
+    [
+        ("engine", lambda nemar: nemar["engine"].update(version="0.4.0")),
+        ("engine", lambda nemar: nemar["engine"].update(numpy="1.0.0")),
+        ("seeds", lambda nemar: nemar["seeds"].update({"clean_channels.ransac": 1})),
+    ],
+    ids=["engine version", "a library", "seeds"],
+)
+def test_inputs_that_ran_on_different_engines_are_refused(runs, cli, tmp_path, what, change):
+    other = edited(runs["a"], tmp_path / "other", change)
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, other, runs["b"])
+    assert code == 6
+    assert "the inputs disagree about the {}".format(what) in err
+    assert not out.exists()
+
+
+def test_the_merged_record_states_the_engine_and_seeds_of_its_inputs_and_not_the_aggregates(
+    runs, cli, tmp_path
+):
+    """The aggregate runs somewhere else, and may run another python: it ran none of the steps."""
+    stamp = {"version": "0.4.0", "python": "3.0.0", "threads": 3}
+
+    def ran_elsewhere(nemar):
+        nemar["engine"].update(stamp)
+        nemar["seeds"] = {"clean_channels.ransac": 7}
+
+    first, second = (edited(runs[name], tmp_path / name, ran_elsewhere) for name in ("a", "b"))
+    out = tmp_path / "o"
+    assert merge(cli, out, first, second)[0] == 0
+    nemar = json.loads((out / RECORD).read_text(encoding="utf-8"))["extensions"]["nemar"]
+    assert {key: nemar["engine"][key] for key in stamp} == stamp
+    assert nemar["seeds"] == {"clean_channels.ransac": 7}
+    assert nemar["report"]["engine_version"] == "nemar-floor@{}/eegprep==0.4.0/{}".format(
+        nemar["recipe"]["version"], "sha256:" + "c" * 64
+    )
+    assert (
+        nemar["recipe"]
+        == json.loads((runs["a"] / RECORD).read_text(encoding="utf-8"))["extensions"]["nemar"][
+            "recipe"
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("stamp", "value"),
+    [("engine", "none"), ("engine", {}), ("seeds", "none"), ("recipe", "none")],
+    ids=["engine text", "engine with no package", "seeds text", "recipe text"],
+)
+def test_an_input_whose_stamp_is_not_one_is_unreadable_and_not_merged(
+    runs, cli, tmp_path, stamp, value
+):
+    broken = edited(runs["a"], tmp_path / "broken", lambda nemar: nemar.update({stamp: value}))
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, broken, runs["b"])
+    assert code == 6
+    assert "an input directory holds a table or record that cannot be read (" in err
     assert not out.exists()
 
 
