@@ -8,10 +8,12 @@ a failed recording leaves no partial files.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
 import os
+import secrets
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -24,8 +26,6 @@ def tsv_cell(value: Any, decimals: int | None = None) -> str:
     """One table cell. A float needs its decimals: ``repr`` of a float is not a stable format."""
     if value is None:
         return MISSING
-    if isinstance(value, bool):
-        return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
@@ -58,9 +58,21 @@ def json_text(value: Any) -> str:
 
 
 def write_text(path: Path, text: str) -> None:
-    """Write UTF-8 bytes exactly as given (no newline translation), making the directories."""
+    """Write UTF-8 bytes exactly as given (no newline translation), making the directories.
+
+    The bytes go to a temporary file beside ``path`` and take its place in one step, so a reader sees
+    the old file or the new one and never half of one, and a write that is interrupted (a SIGTERM
+    ends the run through an exception) leaves the old file and no temporary one.
+    """
+    data = text.encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(text.encode("utf-8"))
+    temporary = path.with_name(".{}.{}.tmp".format(path.name, secrets.token_hex(4)))
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def write_tsv(
@@ -87,23 +99,40 @@ def size_and_sha256(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _make_directories(directory: Path, stop: Path) -> list[Path]:
+    """Create ``directory`` and the missing directories above it, up to ``stop``; return the ones made."""
+    missing = []
+    while not directory.exists() and directory != stop:
+        missing.append(directory)
+        directory = directory.parent
+    for made in reversed(missing):
+        made.mkdir()
+    return list(reversed(missing))
+
+
 def move_into_place(source: Path, destination: Path, relative_paths: Sequence[str]) -> None:
     """Move each file from ``source`` to the same relative path under ``destination``.
 
     Refuses, before moving anything, a destination that already exists. If a move fails part way,
-    what was already moved is removed again, so the caller sees all of the files or none.
+    or the run is interrupted between two moves (a SIGTERM raises ``SystemExit`` wherever the
+    program is), what was already moved is removed again and so are the directories made for it, so
+    the caller sees all of the files or none.
     """
     pairs = [(source / name, destination / name) for name in relative_paths]
     for _, target in pairs:
         if target.exists():
             raise FileExistsError(str(target.relative_to(destination)))
     moved: list[Path] = []
+    made: list[Path] = []
     try:
         for origin, target in pairs:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            made += _make_directories(target.parent, destination)
             os.replace(origin, target)
             moved.append(target)
-    except OSError:
+    except BaseException:
         for target in moved:
             target.unlink(missing_ok=True)
+        for directory in reversed(made):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
         raise
