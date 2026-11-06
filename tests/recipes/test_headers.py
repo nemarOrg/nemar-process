@@ -543,15 +543,8 @@ def test_a_stale_datfile_beside_samples_that_are_in_the_set_is_not_followed(tmp_
     check(path, LIMIT)
 
 
-def a_structure_array_of_two():
-    two = np.zeros((1, 2), dtype=[("data", "O")])
-    two[0, 0], two[0, 1] = ("a",), ("b",)
-    return two
-
-
 EEG_THAT_IS_NOT_ONE_STRUCTURE = [
     pytest.param(0.0, id="EEG is a number"),
-    pytest.param(a_structure_array_of_two(), id="EEG is a structure array of two"),
     pytest.param("not a structure", id="EEG is text"),
 ]
 

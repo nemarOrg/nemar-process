@@ -110,8 +110,10 @@ Two things are decided from it.
   A link into the dataset's own annex is inside, and is followed.
   The sidecars that eegprep reports having read (channels, electrodes, coordinate system) are held to the same rule after the load and before anything is written, and so are the companions the record lists as inputs.
   A set that holds its samples names no file, so a stale `datfile` beside them is not followed and not checked.
-  A set is read as `pop_loadset` reads it: the `EEG` variable counts only when it is a single 1 by 1 structure, and otherwise the variables at the top level of the file are the dataset and the names they hold are followed, so they are checked, whatever `EEG` is (a number, text, an array of structures).
-  An `EEG` that is a cell is refused, because eegprep unwraps a cell that holds a structure and the check does not model it.
+  A set is read as `pop_loadset` reads it: the `EEG` variable counts only when it is a single 1 by 1 structure, and otherwise, when `EEG` is a number, text or a logical array, the variables at the top level of the file are the dataset and the names they hold are followed, so they are checked.
+  An `EEG` of any other kind (an array of structures, a cell, a MATLAB object) is refused as `unreadable_header`, because eegprep unwraps some of them to a structure and the check does not model that.
+  A file that saves a variable name twice is refused, because eegprep keeps the last of them and a read by name keeps the first.
+  A `datfile` that is not text is refused when `data` says `in set file`, because eegprep makes a file name of it with `str`, and `1.0` or `['ab' 'cd']` is a name that this check cannot see; a missing or empty `datfile` names no file.
 - **How much the recording declares and holds.**
   Channels times samples, as the loader would hold them, is compared with `MAX_CHANNEL_SAMPLES` in `common/io.py`, and a recording over it fails as `too_large` at step `load` before any of it is read.
   The number is what the reader consumes, which is not always what the header says.

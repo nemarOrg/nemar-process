@@ -74,6 +74,12 @@ MAT_MATRIX, MAT_COMPRESSED = 14, 15
 # The bytes a compressed element is read and inflated in at a time.
 INFLATE_STEP = 1 << 20
 IN_SET_FILE = "in set file"
+# The MATLAB classes (as scipy names them) that eegprep does not unwrap when ``EEG`` is one of them:
+# it takes the top level of the file instead. ``EEG`` as any other class is refused.
+PLAIN_KINDS = frozenset(
+    {"double", "single", "char", "logical"}
+    | {f"{sign}int{bits}" for sign in ("", "u") for bits in (8, 16, 32, 64)}
+)
 # What reading a header can raise when the file is not what its extension says.
 UNPARSABLE = (
     EOFError,
@@ -263,20 +269,36 @@ def _vhdr_values(
 # ---- EEGLAB sets ------------------------------------------------------------------------------
 
 
-def _text(value: Any) -> str:
-    """A MATLAB character array as text; anything else is no text."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, np.ndarray) and value.size == 1 and value.dtype.kind in "SU":
-        return str(value.reshape(-1)[0])
-    return ""
+def _row_text(value: Any) -> str | None:
+    """The text of a MATLAB character row as ``loadmat`` holds it unsqueezed; None for any other value.
+
+    Unsqueezed, a row of text is an array of one string, which a 1 by 1 cell of text, squeezed, is
+    not told apart from: the way eegprep loads the file is the way this reads it.
+    """
+    if isinstance(value, np.ndarray) and value.dtype.kind == "U" and value.shape == (1,):
+        return str(value[0])
+    return None
+
+
+def _datfile_name(datfile: Any) -> str:
+    """The name in a ``datfile``, which eegprep makes of whatever it holds with ``str``.
+
+    Text is a name and nothing at all (no variable, an empty array) names no file. Any other value
+    becomes a name only eegprep's own rule can predict (``1.0``, ``['ab' 'cd']``), so it is refused.
+    """
+    if datfile is None or (isinstance(datfile, np.ndarray) and datfile.size == 0):
+        return ""
+    name = _row_text(datfile)
+    if name is None:
+        raise ValueError("a datfile that is not text names a file this check cannot predict")
+    return name
 
 
 def _set_references(data: Any, datfile: Any) -> tuple[tuple[str, str], ...]:
     """The data file a set names: ``data`` when it is a name, ``datfile`` when it says so."""
-    name = _text(data)
+    name = _row_text(data) or ""
     if name == IN_SET_FILE:
-        name = _text(datfile)
+        name = _datfile_name(datfile)
     return (("data", name),) if name and name != IN_SET_FILE else ()
 
 
@@ -284,10 +306,18 @@ def _product(extents: Any) -> int:
     return int(np.prod([int(extent) for extent in extents], dtype=np.int64))
 
 
+def _scalar(value: Any) -> float:
+    """The number in a MATLAB scalar; anything else is not one."""
+    array = np.asarray(value)
+    if array.dtype.kind not in "iuf" or array.size != 1:
+        raise ValueError("not a number")
+    return float(array.reshape(-1)[0])
+
+
 def _dimensions(variables: dict[str, Any]) -> int | None:
     """Channels times points times trials, when the set says all three."""
     try:
-        return _product([float(variables[name]) for name in ("nbchan", "pnts", "trials")])
+        return _product([_scalar(variables[name]) for name in ("nbchan", "pnts", "trials")])
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -367,8 +397,8 @@ def _footprint(path: Path, cap: int) -> int:
 def _set_struct(path: Path) -> Header:
     """A set that keeps its variables in an ``EEG`` structure, which cannot be sized unread."""
     loaded = scipy.io.loadmat(
-        str(path), variable_names=["EEG"], squeeze_me=True, struct_as_record=False, appendmat=False
-    )["EEG"]
+        str(path), variable_names=["EEG"], squeeze_me=False, struct_as_record=False, appendmat=False
+    )["EEG"][0, 0]
     fields = {
         name: getattr(loaded, name, None)
         for name in ("data", "datfile", "nbchan", "pnts", "trials")
@@ -379,20 +409,28 @@ def _set_struct(path: Path) -> Header:
     return _with_sidecar(path, _set_references(data, fields["datfile"]), declared)
 
 
+def _load(path: Path, name: str) -> Any:
+    """One variable of the set as eegprep's ``loadmat`` holds it, unsqueezed (the name is unique)."""
+    return scipy.io.loadmat(str(path), variable_names=[name], squeeze_me=False, appendmat=False)[
+        name
+    ]
+
+
 def _set_flat(path: Path, listed: dict[str, tuple[Any, str]]) -> Header:
     """A set that keeps its variables at the top level of the file."""
-    text_names = [name for name in ("data", "datfile") if listed.get(name, ((), ""))[1] == "char"]
-    texts = (
-        scipy.io.loadmat(str(path), variable_names=text_names, squeeze_me=True, appendmat=False)
-        if text_names
-        else {}
-    )
-    references = _set_references(texts.get("data"), texts.get("datfile"))
+    data = datfile = None
+    if listed.get("data", ((), ""))[1] == "char":
+        data = _load(path, "data")
+    if _row_text(data) == IN_SET_FILE and "datfile" in listed:
+        datfile = _load(path, "datfile")
+    references = _set_references(data, datfile)
     shape, kind = listed.get("data", ((), ""))
     if kind in ("double", "single") or kind.startswith(("int", "uint")):
         return _with_sidecar(path, references, _product(shape))
     names = [name for name in ("nbchan", "pnts", "trials") if name in listed]
-    dimensions = scipy.io.loadmat(str(path), variable_names=names, squeeze_me=True, appendmat=False)
+    dimensions = scipy.io.loadmat(
+        str(path), variable_names=names, squeeze_me=False, appendmat=False
+    )
     return _with_sidecar(path, references, _dimensions(dimensions))
 
 
@@ -401,8 +439,9 @@ def _set(path: Path, max_values: int) -> Header:
 
     ``dataset_from_mat`` takes the ``EEG`` variable when it unwraps to one structure, and otherwise
     the variables at the top level of the file, ``EEG`` among them ignored. A single structure is a
-    1 by 1 ``struct``; a number, text or an array of structures is no dataset, and a 1 by 1 ``cell``
-    that holds a structure is unwrapped to one, which is not modeled here and is refused.
+    1 by 1 ``struct``, and a number, text or a logical array is no dataset. Every other ``EEG`` (an
+    array of structures, a cell that may hold a structure, a MATLAB object that is unwrapped to one)
+    is refused rather than modeled, and so is a file that saves a variable name twice.
 
     Nothing is loaded before the variables are counted: a set whose variables take more than a
     limit's worth of values (``MAT_VALUE_BYTES`` each, with ``MAT_MARGIN_BYTES`` for the rest) is
@@ -422,12 +461,18 @@ def _set(path: Path, max_values: int) -> Header:
     footprint = _footprint(path, cap)
     if footprint > cap:
         return Header(values=footprint // MAT_VALUE_BYTES)
-    listed = {name: (shape, kind) for name, shape, kind in scipy.io.whosmat(str(path))}
+    variables = scipy.io.whosmat(str(path))
+    names = [name for name, _, _ in variables]
+    if len(set(names)) != len(names):
+        # loadmat of the whole file keeps the last of two variables of a name, as eegprep does, and
+        # loadmat by name stops at the first: the two would read different datasets
+        raise ValueError("a variable of the set is saved twice")
+    listed = {name: (shape, kind) for name, shape, kind in variables}
     shape, kind = listed.get("EEG", ((), ""))
-    if kind == "cell":
-        raise ValueError("an EEG variable that is a cell is not one this check reads")
     if kind == "struct" and tuple(shape) == (1, 1):
         return _set_struct(path)
+    if "EEG" in listed and kind not in PLAIN_KINDS:
+        raise ValueError("an EEG that is neither one structure nor a plain value is not read")
     return _set_flat(path, listed)
 
 
