@@ -125,7 +125,10 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   A `.set` with a separate `.fdt` and a `.bdf` were read in eegprep's source and not run through the whole floor.
   A MATLAB v7.3 `.set` is refused by the header check (`unreadable_header`), unread, because eegprep's reader for it follows external storage, links and virtual datasets to files anywhere; a large set saved in that format is refused until an HDF5 walk is written.
   The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, and on EDF and BDF headers written byte by byte.
-  It has not run on a set saved by MATLAB's EEGLAB, so its reading of that layout rests on eegprep's loader and on SciPy files shaped like it.
+  It ran on sets written byte by byte as MATLAB writes an empty field (a matrix of no bytes, which SciPy never writes), and its walk of the element headers agrees with SciPy's on eighteen of the files written by MATLAB versions 5.3 to 8 that SciPy ships in its test data.
+  It also read, once and without keeping them, the five sets saved by MATLAB's EEGLAB that were on the development machine (saved on macOS and Linux between 2013 and 2025: EEGLAB's sample data and test set, a plugin's test set, and an example set from another project), and accepted all five with the sizes it gave before the walk was written.
+  Those five are not in the repository, because it was not established that they may be copied into it, so a future change is tested against the byte-built sets and not against them.
+  Nothing else saved by MATLAB's EEGLAB was run, so the reading of that layout still rests on eegprep's loader, on five files and on files shaped like them.
   A header that cannot be read is refused (`unreadable_header`), so a legitimate file that this parser reads differently from eegprep's loader would be refused too; the parser mirrors eegprep 0.5.0's rules and is not run against files from other writers.
 - **A link out of the dataset is checked where the recipe can know of it.**
   The recording, the data and marker files of a header and the `.fdt` of a set are checked before eegprep reads anything.

@@ -133,6 +133,8 @@ Two things are decided from it.
   A set that holds more fails as `too_large`, and the count stops at the header that passes the cap, so the data of a variable are not read to find out.
   A compressed top-level variable is read only as far as its header, and the data of a member of a cell or a structure are inflated a step at a time and dropped, so the count holds a step of memory and not the file; the file size alone bounds nothing for a compressed set.
   Samples are sized by their shape whatever their kind, text excepted, so logical samples are not `nbchan` times `pnts`.
+  A member of a structure or a cell may be a matrix of no bytes, a tag and nothing after it, which is how MATLAB writes `[]` in a field or a cell; SciPy reads it as an empty array and the count follows it as an empty member.
+  A variable cannot be empty so, and a top-level matrix of no bytes is refused.
   The count refuses what it cannot follow, as `unreadable_header`: a sparse matrix, a function handle or an object (eegprep loads every variable, and the size of these is not known), data with more bytes than the dimensions can hold, and matrices nested deeper than 32 levels.
   It follows at most 5,000,000 elements, the bound on its own work, and a set with more fails as `too_large`.
   The data of a top-level variable are not inflated, so a damaged stream there is found by eegprep and not by the check; the cap still bounds what it can hold.

@@ -16,7 +16,7 @@ import json
 import tracemalloc
 import zlib
 from pathlib import Path
-from struct import pack
+from struct import pack, unpack
 
 import numpy as np
 import pytest
@@ -643,3 +643,124 @@ def test_the_count_is_of_what_a_realistic_set_holds_and_a_small_set_loads(tmp_pa
         tmp_path / (STEM + ".set"), data=np.zeros((4, 2000), dtype=np.float32), struct=True
     )
     headers.check(small, 4 * 2000, EVERYWHERE)
+
+
+# ---- a set saved by MATLAB: an empty field is a matrix of no bytes -----------------------------
+#
+# MATLAB writes `[]` in a field of a structure array, or in a cell, as a matrix element whose byte
+# count is zero: a tag and nothing after it. SciPy reads one as an empty array and never writes one,
+# so a set written by SciPy cannot show it. The channel locations of every set saved by MATLAB's
+# EEGLAB that was at hand had an empty field, and the walk refused all five, reading the next tag
+# as the array flags of the empty element. The sets here are written byte by byte as MATLAB writes
+# them: those five were not added, because it was not established that they may be copied here.
+
+EMPTY_MEMBER = pack("<II", MI_MATRIX, 0)
+FIELD_NAME_WIDTH = 32  # MATLAB writes each field name in 32 bytes, a null among them
+
+
+def structure(name, dims, fields, members, order="<"):
+    """A structure array written by hand: the width of a field name, the names, then the members
+    element by element (`members` is packed already, one for each field of each element)."""
+    names = b"".join(field.ljust(FIELD_NAME_WIDTH, b"\0") for field in fields)
+    body = pack(order + "I", (4 << 16) | MI_INT32) + pack(order + "i", FIELD_NAME_WIDTH)
+    body += pack(order + "II", MI_INT8, len(names)) + padded(names) + b"".join(members)
+    return matrix(name, MX_STRUCT, dims, parts=0, members=body, order=order)
+
+
+def characters(text):
+    """A row of text as MATLAB 6 and 7 store it, in 16-bit units."""
+    payload = text.encode("utf-16-le")
+    return matrix(b"", MX_CHAR, (1, len(text)), stored="uint16", payload=payload)
+
+
+def elements_of(path):
+    """The variables of a MAT-file that is not compressed, each whole, by name and in order."""
+    raw, pieces, position = path.read_bytes(), {}, 128
+    for name, _, _ in scipy.io.whosmat(str(path)):
+        _, count = unpack("<II", raw[position : position + 8])
+        pieces[name] = raw[position : position + 8 + count]
+        position += 8 + count
+    assert position == len(raw)
+    return pieces
+
+
+def a_set_as_matlab_saves_it(path, scratch, *, struct, compress):
+    """A set whose channel locations have an empty field in every element (`sph_radius`) and whose
+    `eventdescription` is a cell of empty cells, all of them with no bytes. The rest is SciPy's."""
+    variables = elements_of(write_raw_set(scratch / path.name, data=np.zeros((4, 2000))))
+    members = []
+    for index in range(4):
+        members += [characters(f"Ch{index + 1}"), characters("EEG"), EMPTY_MEMBER]
+    fields = [b"labels", b"type", b"sph_radius"]
+    variables["chanlocs"] = structure(b"chanlocs", (1, 4), fields, members)
+    variables["eventdescription"] = matrix(
+        b"eventdescription", MX_CELL, (1, 3), parts=0, members=EMPTY_MEMBER * 3
+    )
+    if struct:
+        names = [name.encode() for name in variables]
+        variables = {"EEG": structure(b"EEG", (1, 1), names, list(variables.values()))}
+    return mat_file(path, list(variables.values()), compress=compress)
+
+
+@pytest.mark.parametrize("compress", [False, True], ids=["stored", "compressed"])
+@pytest.mark.parametrize(
+    "struct", [False, True], ids=["variables at the top level", "EEG structure"]
+)
+def test_a_set_with_the_empty_members_matlab_writes_is_read_and_loads(tmp_path, struct, compress):
+    root, path, _ = crafted(tmp_path)
+    a_set_as_matlab_saves_it(path, tmp_path / "scratch", struct=struct, compress=compress)
+    if not compress:  # the premise: the four fields and the three cells have no bytes
+        assert path.read_bytes().count(EMPTY_MEMBER) == 4 + 3
+    loaded = pop_loadset(str(path))  # eegprep reads it
+    assert np.asarray(loaded["data"]).shape == (4, 2000)
+    assert [np.size(location["sph_radius"]) for location in loaded["chanlocs"]] == [0] * 4
+    assert headers.read(path, LIMIT).values == 4 * 2000
+    headers.check(path, LIMIT, EVERYWHERE)
+    (recording,) = io.discover(root)
+    assert np.asarray(io.load(recording).eeg["data"]).shape == (4, 2000)
+
+
+def test_a_matrix_of_no_bytes_is_not_a_variable_at_the_top_level(tmp_path):
+    """Only a member of a structure or a cell may be empty in that way: a variable has a name."""
+    packed = zlib.compress(EMPTY_MEMBER, 1)
+    path = tmp_path / (STEM + ".set")
+    path.write_bytes(HEADERS["<"] + pack("<II", MI_COMPRESSED, len(packed)) + packed)
+    assert refusal(path, SMALL) == UNREADABLE
+
+
+# The versioned files that SciPy ships in its test data, all of them written by MATLAB (5.3 to 8),
+# read in place from the installed package and not copied. Each is followed by the walk, and the
+# walk must find the variables, and their sizes, that SciPy finds.
+MATLAB_FILES = Path(scipy.io.matlab.__file__).parent / "tests" / "data"
+WRITTEN_BY_MATLAB = [
+    "testcell_6.1_SOL2.mat",
+    "testcell_7.4_GLNX86.mat",
+    "testcellnest_6.5.1_GLNX86.mat",
+    "testcellnest_7.1_GLNX86.mat",
+    "testcomplex_7.4_GLNX86.mat",
+    "testdouble_6.5.1_GLNX86.mat",
+    "testemptycell_5.3_SOL2.mat",
+    "testemptycell_7.4_GLNX86.mat",
+    "testmatrix_7.1_GLNX86.mat",
+    "testmulti_7.4_GLNX86.mat",
+    "teststring_7.4_GLNX86.mat",
+    "teststringarray_6.1_SOL2.mat",
+    "teststruct_6.5.1_GLNX86.mat",
+    "teststructarr_7.1_GLNX86.mat",
+    "teststructnest_7.4_GLNX86.mat",
+    "test3dmatrix_7.4_GLNX86.mat",
+    "testbool_8_WIN64.mat",
+    "testunicode_7.1_GLNX86.mat",
+]
+
+
+@pytest.mark.parametrize("name", WRITTEN_BY_MATLAB)
+def test_the_walk_finds_what_scipy_finds_in_a_file_matlab_wrote(name):
+    path = MATLAB_FILES / name
+    assert path.is_file(), "SciPy's test data are not installed, and these files are the evidence"
+    found = [
+        (variable.name, variable.dims[:-1] if variable.mclass == MX_CHAR else variable.dims)
+        for variable in headers.walk(path, 10**9)[0]
+    ]
+    # a row of text is its characters, so SciPy reports the dimensions without the last
+    assert found == [(name, shape) for name, shape, _ in scipy.io.whosmat(str(path))]

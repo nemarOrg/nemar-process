@@ -535,6 +535,10 @@ def _matrix(stream: _Stream, order: str, counts: _Counts, depth: int) -> Variabl
     kind, nbytes, inline = _tag(stream, order)
     if kind != MAT_MATRIX or inline is not None:
         raise ValueError("not a matrix")
+    if nbytes == 0 and depth:
+        # MATLAB writes `[]` in a field or a cell as a matrix of no bytes, a tag and nothing after
+        # it, and SciPy reads it as an empty array. A variable has a name, so one is not empty so.
+        return Variable("", 0, (0, 0))
     end = stream.position + nbytes
     kind, count, inline = _tag(stream, order)
     if (kind, count, inline) != (MAT_UINT32, 8, None):
