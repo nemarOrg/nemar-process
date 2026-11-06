@@ -64,7 +64,7 @@ The encoded value holds no character a shell treats as special, so it reaches th
 The decoder (`spec.decode_wire`) mirrors nemar-cli's `decodeLaunchSpecEnv` rule for rule.
 It is strict and bounded, uses only the standard library, and checks the length before it reads a byte.
 Every refusal is `runtime_error` with detail `invalid_spec`: there is no new failure code, and no older form is accepted, because nothing was ever registered with a tenant on one.
-The log names the rule that fired, as one fixed word, and never any part of the value, which holds the job token once decoded.
+When a wire rule fires, the log names it as one fixed word, and never any part of the value, which holds the job token once decoded.
 
 The checks run in this order, and the first to fail names the word:
 
@@ -82,6 +82,8 @@ An accepted value decodes to printable ASCII, not empty, and at most 65,536 byte
 `QQ` is accepted (it is `A`); `QR` decodes to the same byte and is refused, because it is not the value the encoder writes.
 For a value with a character outside ASCII, `too_long` and `not_base64url` are both conforming answers, since languages count a length in different units (this launcher counts bytes); only an ASCII value has its word pinned.
 A value that decodes to text which is not one JSON object, or which fails the schema, is refused by the rules below with the same detail and no word.
+A prefix of a value whose length is a multiple of four characters is the canonical encoding of a printable prefix of the text, so it passes all seven checks.
+A value cut at a group boundary decodes to a truncated text and is refused by the JSON rules with no word, so a bare `failed: runtime_error (invalid_spec)` on a large job also points at truncation.
 
 **Registration is still BLOCKED, and no longer by the encoding.**
 Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:

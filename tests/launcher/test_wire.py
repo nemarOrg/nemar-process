@@ -716,6 +716,20 @@ def test_the_model_of_the_worker_writes_delete_and_the_controls_as_escapes():
     assert spec_mod.parse(wire_encode(text)).args == ["a\x7fb", "c\x01d\x1f", "e\nf\tg"]
 
 
+def test_a_value_cut_at_a_group_boundary_passes_every_wire_rule_and_fails_only_in_the_json_parser():
+    # The claim docs/unverified.md and docs/launcher.md make about truncation. A prefix of a canonical
+    # value whose length is a multiple of four characters is the canonical value of a prefix of the
+    # text (no spare bits are left over), and a prefix of printable text is printable, so rules 1 to
+    # 7 all pass; the truncated text is not a JSON object, and that refusal has no word.
+    text = spec_text(base())
+    value = wire_encode(text)
+    cuts = range(4, len(value), 4)
+    assert len(cuts) > 50
+    for cut in cuts:
+        assert spec_mod.decode_wire(value[:cut]) == text[: cut // 4 * 3], cut
+        assert refusal(spec_mod.parse, value[:cut]).reason is None, cut
+
+
 # ---- through the entry point ------------------------------------------------------------------
 
 
@@ -764,6 +778,20 @@ def test_a_value_that_decodes_to_a_refused_document_is_hashed_as_its_text(rig, v
     assert launch.provenance["launch_spec_digest"] == sha256_hex(text)
     assert launch.provenance["launch_spec_digest"] != sha256_hex(value)
     assert launch.provenance["job_id"] == spec_mod.recover_job_id(text)
+
+
+def test_a_truncated_value_leaves_a_bare_failure_in_the_log_with_no_word(rig):
+    # What an operator sees on a large job whose value was cut at a group boundary.
+    text = spec_text(rig.spec(command=["true"]))
+    value = wire_encode(text)
+    cut = value[: len(value) // 4 * 4 - 4]
+    launch = refused_run(rig, cut)
+    assert "failed: runtime_error (invalid_spec)" in launch.log
+    assert "refused" not in launch.log
+    assert all(word not in launch.log for word in spec_mod.WIRE_REASONS)
+    # the digest is of the truncated text, which names no job
+    assert launch.provenance["launch_spec_digest"] == sha256_hex(text[: len(cut) // 4 * 3])
+    assert launch.provenance["job_id"] == spec_mod.PLACEHOLDER_JOB_ID
 
 
 def test_the_job_is_named_from_the_decoded_text_of_a_refused_document(rig):

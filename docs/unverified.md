@@ -127,7 +127,9 @@ Still unconfirmed, each to be confirmed on the tenant:
   After the first job, read the launch file in the execution directory and compare its line with the value NEMAR sent.
 - **Any other change to a value.**
   Whether Tapis trims, wraps, expands a macro in or limits the length of a value is unconfirmed (the longest value is 87,382 characters).
-  A value that arrives changed is refused by the launcher with a log line naming the rule, `not_base64url`, `bad_length`, `too_long` or `not_printable`, and no part of the value.
+  A changed value is refused as `runtime_error` / `invalid_spec`.
+  When a wire rule fires, the log names it (`empty`, `too_long`, `not_base64url`, `bad_length` or `not_printable`) and no part of the value.
+  A value cut at a group boundary decodes to a truncated text and is refused by the JSON rules with no word, so a bare `failed: runtime_error (invalid_spec)` on a large job also points at truncation.
   A macro such as `${JobUUID}` cannot match, since the value holds no `$` and no brace.
 
 ### Archiving and directories

@@ -72,6 +72,27 @@ def test_no_page_still_says_the_encoding_blocks_registration(name):
     assert "stays byte for byte nemar-cli's" not in body
 
 
+TRUNCATION = (
+    "A value cut at a group boundary decodes to a truncated text and is refused by the JSON rules "
+    "with no word, so a bare `failed: runtime_error (invalid_spec)` on a large job also points at "
+    "truncation."
+)
+
+
+@pytest.mark.parametrize("name", ["docs/unverified.md", "docs/launcher.md"])
+def test_truncation_is_said_to_leave_no_word_in_the_log(name):
+    assert TRUNCATION in " ".join(text(name).split())
+
+
+@pytest.mark.parametrize("name", FILES)
+def test_no_page_says_every_refusal_is_named_in_the_log(name):
+    # Only a wire rule has a word. A value that passes them and fails in the JSON parser, a cut one
+    # among them, is a bare `invalid_spec`.
+    body = " ".join(text(name).split())
+    assert "A value that arrives changed is refused by the launcher with a log line" not in body
+    assert "The log names the rule that fired" not in body
+
+
 OWNER_ITEMS = {
     "immutable releases": "docs/operator.md",
     "Protect the tags with rulesets": "docs/operator.md",
