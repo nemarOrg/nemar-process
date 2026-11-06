@@ -9,6 +9,11 @@ so the only way to see that warning is to lift the disable for the duration of t
 raised to CRITICAL while the block runs, the target logger gets a handler of its own and stops
 propagating, and everything is put back on the way out. Only the fact that a warning was logged is
 used; its text is never written to a record, because a message can hold a path.
+
+The way back is registered before each change is made, in an ``ExitStack``. The SIGTERM handler
+raises ``SystemExit`` wherever the program is, and a change whose undo is not yet registered when the
+signal arrives (a ``try`` that begins after the changes, say) would stay in place for the rest of the
+process.
 """
 
 from __future__ import annotations
@@ -34,21 +39,16 @@ def logged_warnings(logger_name: str) -> Generator[list[str]]:
     library = logging.getLogger(logger_name.partition(".")[0])
     messages: list[str] = []
     handler = _Collector(messages)
-    saved_disable = logging.root.manager.disable
-    saved_library_level = library.level
-    saved_target_level = target.level
-    saved_propagate = target.propagate
-    logging.disable(logging.NOTSET)
-    if library is not target:
-        library.setLevel(logging.CRITICAL)
-    target.setLevel(logging.WARNING)
-    target.propagate = False
-    target.addHandler(handler)
-    try:
+    with contextlib.ExitStack() as restore:
+        restore.callback(logging.disable, logging.root.manager.disable)
+        logging.disable(logging.NOTSET)
+        if library is not target:
+            restore.callback(library.setLevel, library.level)
+            library.setLevel(logging.CRITICAL)
+        restore.callback(target.setLevel, target.level)
+        target.setLevel(logging.WARNING)
+        restore.callback(setattr, target, "propagate", target.propagate)
+        target.propagate = False
+        restore.callback(target.removeHandler, handler)
+        target.addHandler(handler)
         yield messages
-    finally:
-        target.removeHandler(handler)
-        target.propagate = saved_propagate
-        target.setLevel(saved_target_level)
-        library.setLevel(saved_library_level)
-        logging.disable(saved_disable)
