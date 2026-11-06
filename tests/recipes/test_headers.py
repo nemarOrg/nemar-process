@@ -9,6 +9,7 @@ a header names, wherever it is (docs/upstream.md), which is why the check exists
 from __future__ import annotations
 
 import json
+import warnings
 
 import h5py
 import numpy as np
@@ -140,6 +141,214 @@ def test_a_set_that_cannot_be_parsed_is_never_handed_to_the_loader(tmp_path, mon
     assert (caught.value.code, caught.value.step, caught.value.detail) == UNREADABLE[1:]
 
 
+# ---- what the reader consumes -----------------------------------------------------------------
+
+
+def with_records(content, count):
+    """The same file with the record count of its header (bytes 236 to 244) set to `count`."""
+    return content[:236] + str(count).ljust(8).encode("ascii") + content[244:]
+
+
+def edf_with_a_wrong_record_count(directory, declared, held, rate=100):
+    """A real EDF in a BIDS tree whose header declares `declared` records and whose file holds
+    `held` of them."""
+    target = bids_directory(directory) / (STEM + ".edf")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(with_records(edf_bytes(2, held, rate), declared))
+    return target
+
+
+def test_mne_ignores_the_record_count_of_a_header_that_disagrees_with_the_file_size(tmp_path):
+    """The crafted file of the review: one record declared, two held. MNE infers the count from the
+    size of the file, so what it loads is the file's, and so is what the check counts."""
+    target = edf_with_a_wrong_record_count(tmp_path, declared=1, held=2)
+    (recording,) = io.discover(tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loaded = io.load(recording)
+    assert loaded.eeg["data"].shape == (2, 200)  # two records of 100 samples, not one
+    header = headers.read(target, LIMIT)
+    assert header.values == loaded.eeg["data"].size == 2 * 2 * 100
+
+
+def test_a_record_count_that_is_too_small_does_not_get_a_recording_past_the_limit(tmp_path):
+    target = edf_with_a_wrong_record_count(tmp_path, declared=1, held=2)
+    # the header alone says 2 signals * 1 record * 100 values, a limit it would have met
+    assert refusal(target, 2 * 1 * 100) == ("failed", "too_large", "load", None)
+    headers.check(target, 2 * 2 * 100)  # the size of the file is the boundary
+    assert refusal(target, 2 * 2 * 100 - 1)[1] == "too_large"
+
+
+def test_a_record_count_that_is_too_large_is_what_the_header_claims_when_it_is_the_larger(tmp_path):
+    target = edf_with_a_wrong_record_count(tmp_path, declared=50, held=2)
+    assert headers.read(target, LIMIT).values == 2 * 50 * 100
+
+
+def test_an_edf_still_being_written_is_counted_from_the_file_as_mne_counts_it(tmp_path):
+    """No record count in the header (-1): the bytes after the header decide, by extension."""
+    for extension, bdf, width in ((".edf", False, 2), (".bdf", True, 3)):
+        path = tmp_path / ("sub-01_task-y_eeg" + extension)
+        content = edf_bytes(3, 4, [10, 20, 5], bdf=bdf)
+        path.write_bytes(with_records(content, -1))
+        data_values = (len(content) - 256 * 4) // width
+        assert data_values == 4 * 35
+        assert headers.read(path, LIMIT).values == 3 * 4 * 20
+
+
+def set_with_a_large_fdt(directory, declared_points=500, held_points=50_000):
+    """A real two-file set whose header declares 4 x `declared_points` values and whose `.fdt`
+    holds 4 x `held_points` (the file the loader reads whole)."""
+    eeg_dir = directory / "sub-01" / "eeg"
+    path = write_raw_set(
+        eeg_dir / (STEM + ".set"), data=STEM + ".fdt", points=declared_points, channels=4
+    )
+    write_fdt(eeg_dir / (STEM + ".fdt"), channels=4, points=held_points)
+    return path
+
+
+def test_eegprep_reads_the_whole_fdt_before_it_compares_it_with_the_header(tmp_path):
+    """The behaviour the size rule rests on: `np.fromfile` takes every value of the file."""
+    path = set_with_a_large_fdt(tmp_path)
+    with pytest.raises(ValueError, match="200000 samples, expected 2000"):
+        pop_loadset(str(path))
+
+
+def test_a_set_is_sized_by_the_fdt_it_names_and_not_by_what_its_header_declares(tmp_path):
+    path = set_with_a_large_fdt(tmp_path)
+    assert headers.read(path, LIMIT).values == 4 * 50_000
+    headers.check(path, 4 * 50_000)
+    assert refusal(path, 4 * 50_000 - 1) == ("failed", "too_large", "load", None)
+    assert refusal(path, 2 * 500)[1] == "too_large"  # the declared 2000 values would have passed
+
+
+def test_a_set_that_declares_more_than_its_fdt_holds_is_sized_by_the_declaration(tmp_path):
+    path = set_with_a_large_fdt(tmp_path, declared_points=50_000, held_points=500)
+    assert headers.read(path, LIMIT).values == 4 * 50_000
+
+
+def test_a_set_whose_fdt_is_missing_is_sized_by_its_declaration_and_left_to_fail_in_eegprep(
+    tmp_path,
+):
+    path = write_raw_set(tmp_path / (STEM + ".set"), data=STEM + ".fdt", points=500)
+    assert headers.read(path, LIMIT).values == 4 * 500
+
+
+def test_a_data_file_in_another_case_is_the_one_eegprep_resolves_and_the_one_that_is_sized(
+    tmp_path,
+):
+    path = write_brainvision(tmp_path, STEM, channels=4, samples=2000)
+    path.with_suffix(".eeg").rename(path.with_suffix(".EEG"))
+    assert pop_loadbv(str(path))["data"].shape == (4, 2000)  # eegprep alone finds it
+    assert headers.read(path, LIMIT).values == 4 * 2000
+    assert refusal(path, 4 * 2000 - 1)[1] == "too_large"
+
+
+def test_a_data_file_that_is_only_a_dat_is_the_one_eegprep_falls_back_to_and_is_sized(tmp_path):
+    path = write_brainvision(tmp_path, STEM, channels=4, samples=2000)
+    path.with_suffix(".eeg").rename(path.with_suffix(".dat"))
+    assert pop_loadbv(str(path))["data"].shape == (
+        4,
+        2000,
+    )  # the header names .eeg; eegprep finds .dat
+    assert headers.read(path, LIMIT).values == 4 * 2000
+    assert refusal(path, 4 * 2000 - 1)[1] == "too_large"
+
+
+def test_a_header_that_names_its_own_dat_is_accepted_and_sized_by_it(tmp_path):
+    path = write_brainvision(tmp_path, STEM, channels=4, samples=2000, data=STEM + ".dat")
+    path.with_suffix(".eeg").rename(path.with_suffix(".dat"))
+    assert pop_loadbv(str(path))["data"].shape == (4, 2000)
+    headers.check(path, 4 * 2000)
+    assert refusal(path, 4 * 2000 - 1)[1] == "too_large"
+
+
+def test_the_eeg_is_looked_for_before_the_dat_and_the_one_eegprep_reads_is_sized(tmp_path):
+    """The header names `.eeg`, which is there, so a larger `.dat` beside it is not read."""
+    path = write_brainvision(tmp_path, STEM, channels=4, samples=100)
+    path.with_suffix(".dat").write_bytes(b"\x00" * 4 * 100_000 * 2)
+    assert pop_loadbv(str(path))["data"].shape == (4, 100)
+    assert headers.read(path, LIMIT).values == 4 * 100
+
+
+def test_the_file_a_header_names_is_looked_for_before_the_fallbacks(tmp_path):
+    """The header names `.dat`, which is there, so a larger `.eeg` beside it is not read."""
+    path = write_brainvision(tmp_path, STEM, channels=4, samples=100, data=STEM + ".dat")
+    path.with_suffix(".eeg").rename(path.with_suffix(".dat"))
+    path.with_suffix(".eeg").write_bytes(b"\x00" * 4 * 100_000 * 2)
+    assert pop_loadbv(str(path))["data"].shape == (4, 100)
+    assert headers.read(path, LIMIT).values == 4 * 100
+
+
+def folds_case(directory):
+    (directory / "probe").touch()
+    return (directory / "PROBE").exists()
+
+
+def test_files_that_differ_only_in_case_are_all_companions_and_the_largest_is_sized(tmp_path):
+    """eegprep takes the first of them in the order the directory lists: the largest is the bound."""
+    if folds_case(tmp_path):
+        pytest.skip("this file system holds one file for names that differ only in case")
+    eeg_dir = bids_directory(tmp_path / "dataset")
+    path = write_brainvision(eeg_dir, STEM, channels=4, samples=100)
+    path.with_suffix(".eeg").rename(path.with_suffix(".EEG"))
+    path.with_suffix(".Eeg").write_bytes(b"\x00" * 4 * 1000 * 2)
+    assert headers.read(path, LIMIT).values == 4 * 1000
+    (recording,) = io.discover(tmp_path / "dataset")
+    assert recording.companions == (
+        "sub-01/eeg/" + STEM + ".EEG",
+        "sub-01/eeg/" + STEM + ".Eeg",
+        "sub-01/eeg/" + STEM + ".vmrk",
+    )
+
+
+def test_a_dat_beside_a_header_is_a_companion_and_the_records_inputs_name_it(tmp_path):
+    eeg_dir = bids_directory(tmp_path / "dataset")
+    path = write_brainvision(eeg_dir, STEM, channels=4, samples=2000)
+    path.with_suffix(".eeg").rename(path.with_suffix(".dat"))
+    (recording,) = io.discover(tmp_path / "dataset")
+    assert recording.companions == (
+        "sub-01/eeg/" + STEM + ".dat",
+        "sub-01/eeg/" + STEM + ".vmrk",
+    )
+    loaded = io.load(recording)
+    assert [item["path"] for item in loaded.inputs if item["role"] == "companion"] == [
+        "sub-01/eeg/" + STEM + ".dat",
+        "sub-01/eeg/" + STEM + ".vmrk",
+    ]
+
+
+def test_a_data_file_in_another_case_is_a_companion_too(tmp_path):
+    eeg_dir = bids_directory(tmp_path / "dataset")
+    path = write_brainvision(eeg_dir, STEM, channels=4, samples=2000)
+    path.with_suffix(".eeg").rename(path.with_suffix(".EEG"))
+    (recording,) = io.discover(tmp_path / "dataset")
+    assert "sub-01/eeg/" + STEM + ".EEG" in recording.companions
+
+
+def test_a_dat_with_no_header_beside_it_is_still_a_recording_nobody_reads(tmp_path):
+    root = tmp_path / "dataset"
+    (root / "sub-01" / "eeg").mkdir(parents=True)
+    (root / "sub-01" / "eeg" / (STEM + ".dat")).write_bytes(b"x")
+    (recording,) = io.discover(root)
+    assert (recording.extension, recording.supported) == (".dat", False)
+
+
+def test_a_header_whose_data_file_is_missing_is_refused_with_the_class_eegprep_would_raise(
+    tmp_path,
+):
+    path = write_brainvision(tmp_path, STEM)
+    path.with_suffix(".eeg").unlink()
+    assert refusal(path) == ("failed", "load_failed", "load", "FileNotFoundError")
+
+
+def test_a_header_with_a_binary_format_eegprep_does_not_read_cannot_be_sized_and_is_refused(
+    tmp_path,
+):
+    path = write_brainvision(tmp_path, STEM)
+    path.write_text(path.read_text(encoding="utf-8").replace("INT_16", "INT_64"), encoding="utf-8")
+    assert refusal(path) == ("failed", "load_failed", "load", "size_unknown")
+
+
 # ---- the size limit ---------------------------------------------------------------------------
 
 
@@ -205,6 +414,7 @@ def test_the_brainvision_value_width_follows_the_binary_format(tmp_path):
 
 def test_the_section_and_key_rules_are_eegpreps_case_folded_and_comments_skipped(tmp_path):
     path = tmp_path / (STEM + ".vhdr")
+    path.with_suffix(".eeg").write_bytes(b"\x00" * 8)
     path.write_text(
         "Brain Vision Data Exchange Header File Version 1.0\n"
         "[COMMON infos]\n"
@@ -219,6 +429,19 @@ def test_the_section_and_key_rules_are_eegpreps_case_folded_and_comments_skipped
         ("data", STEM + ".eeg"),
         ("markers", STEM + ".vmrk"),
     )
+
+
+def test_a_header_naming_a_file_of_another_recording_is_refused_for_it_before_anything_is_sized(
+    tmp_path,
+):
+    """The reference is the finding, whether or not the header's own data file is there."""
+    path = write_brainvision(tmp_path, STEM)
+    path.with_suffix(".eeg").unlink()
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(STEM + ".eeg", "/somewhere/else.eeg"),
+        encoding="utf-8",
+    )
+    assert refusal(path) == ("failed", "load_failed", "load", "external_reference")
 
 
 def test_a_header_that_names_a_file_twice_is_checked_for_both_names(tmp_path):

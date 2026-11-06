@@ -36,14 +36,16 @@ from nemar_process.common.errors import (
 from nemar_process.common.params import jsonable, signature_defaults
 
 SUPPORTED = (".edf", ".bdf", ".vhdr", ".set")
-# The most channels times samples a recording may declare in its header and still be loaded. A float64
+# The most channels times samples a recording may declare or hold and still be loaded. A float64
 # copy takes 8 bytes a value, so this is 8 GB a copy and about 24 GB at the peak of three copies
 # (docs/recipes.md). PROVISIONAL: the arithmetic of the peak, to be replaced by the scale
 # measurement (docs/unverified.md).
 MAX_CHANNEL_SAMPLES = 1_000_000_000
 COMPANION_EXTENSIONS = (".eeg", ".vmrk", ".fdt", ".json", ".tsv")
-# The files beside a recording that carry part of its data and are read through it.
-DATA_COMPANIONS = (".eeg", ".vmrk", ".fdt")
+# The files beside a recording that carry part of its data and are read through it. eegprep opens a
+# BrainVision header's ``.dat`` when its ``.eeg`` is not there, so the ``.dat`` is one of them, and
+# the ``.dat`` of a name no header has is a recording of a format nobody reads.
+DATA_COMPANIONS = (".eeg", ".vmrk", ".dat", ".fdt")
 IGNORED_DATATYPES = ("meg", "ieeg", "emg", "nirs", "motion")
 # Cleaning state an earlier run left in a set's `etc`; it would corrupt the mask bookkeeping.
 STALE_ETC_KEYS = ("clean_channel_mask", "clean_sample_mask", "clean_drifts_kernel")
@@ -152,20 +154,28 @@ def discover(dataset_dir: Path) -> list[Recording]:
         directory = base / "eeg"
         if not directory.is_dir():
             continue
-        for entry in sorted(directory.iterdir()):
+        entries = sorted(directory.iterdir())
+        # eegprep finds a BrainVision data file in another case, so a companion is found like that
+        by_name: dict[str, list[Path]] = {}
+        for entry in entries:
+            by_name.setdefault(entry.name.casefold(), []).append(entry)
+        for entry in entries:
             match = naming.match_recording(entry.name)
             if match is None or not (entry.is_file() or entry.is_symlink()):
                 continue
             extension = "." + match.group("extension").lower()
-            if extension in COMPANION_EXTENSIONS:
+            stem = match.group("stem") + "_eeg"
+            if extension in COMPANION_EXTENSIONS or (
+                extension == ".dat" and (stem + ".vhdr").casefold() in by_name
+            ):
                 continue
             relative = entry.relative_to(root).as_posix()
-            stem = match.group("stem") + "_eeg"
             companions = tuple(
                 sorted(
                     sibling.relative_to(root).as_posix()
                     for suffix in DATA_COMPANIONS
-                    if (sibling := entry.with_name(stem + suffix)).is_file()
+                    for sibling in by_name.get((stem + suffix).casefold(), ())
+                    if sibling.is_file()
                 )
             )
             found.append(
@@ -358,7 +368,8 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
     """Load a supported recording. Failures are ``RecordingError`` with a word and a class name.
 
     The header is read first (``headers.check``): a recording that names a file other than its own
-    companions, or declares more than ``max_channel_samples``, fails before eegprep reads any of it.
+    companions, or declares or holds more than ``max_channel_samples``, fails before eegprep reads any
+    of it.
     """
     try:
         headers.check(recording.abs_path, max_channel_samples)

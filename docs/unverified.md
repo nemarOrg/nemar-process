@@ -138,7 +138,7 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   For a recording of an hour at 1 kHz with 128 channels that is about 11 GB; nothing was measured at that size.
   A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
 - **The size limit is provisional.**
-  A recording whose header declares more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
+  A recording that declares or holds more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
   The number is arithmetic and not a measurement.
   Pre-registered follow-ups, to be settled by the scale measurement and not before: (1) measure the peak memory and the time of the floor at 100 million, 500 million and one billion values and set the limit from them; (2) run each recording in a child process, so that one that exhausts memory or is killed by the kernel fails alone, with a row in the table and the other recordings' products intact, instead of ending the run without a dataset record.
   Neither is built.

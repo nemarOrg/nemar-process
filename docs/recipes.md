@@ -66,7 +66,8 @@ Whether a run with some failed recordings is a job success is decision O3 below.
 ### Discovery and what happens to each recording
 
 A recording is a file `sub-*/[ses-*/]eeg/*_eeg.<ext>` at the top of the dataset directory.
-`.edf`, `.bdf`, `.vhdr` and `.set` are loaded; the companions `.eeg`, `.vmrk`, `.fdt`, `.json` and `.tsv` are not recordings; any other extension is skipped and never converted by another engine.
+`.edf`, `.bdf`, `.vhdr` and `.set` are loaded; the companions `.eeg`, `.vmrk`, `.fdt`, `.json` and `.tsv` are not recordings, and neither is a `.dat` that has a `.vhdr` of its name; any other extension is skipped and never converted by another engine.
+A companion is found with its case folded, because eegprep finds a BrainVision data file that way, and the record's inputs name every companion found.
 A link that points at nothing is a recording too: it fails to load and has its row, where it would otherwise vanish.
 Other datatypes (`meg`, `ieeg`, `emg`, `nirs`, `motion`) are not discovered; the dataset record counts them in `extensions.nemar.ignored_datatypes`.
 A run of the whole dataset counts all of them.
@@ -82,7 +83,7 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `skipped` | `duplicate_recording` | the product stem collides with an earlier recording (an `.edf` and a `.set` of one recording) |
 | `failed` | `file_not_found` | a `--recording` path is not a file |
 | `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or a file it was loaded with cannot be read (the detail is the exception's class name), or the data are epoched (`epoched_data`), or the sampling rate is not a positive finite number (`invalid_sampling_rate`), or there are no samples (`no_samples`), or the header names a file other than the recording's own companions (`external_reference`, below) |
-| `failed` | `too_large` | the header declares more channels times samples than the provisional limit of 1,000,000,000 values (step `load`; below) |
+| `failed` | `too_large` | the recording declares or holds more channels times samples than the provisional limit of 1,000,000,000 values (step `load`; below) |
 | `failed` | `non_finite_samples` | the loaded data contain NaN or infinity |
 | `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
 | `failed` | `all_channels_flagged` | the no-locations criterion flags every channel, so eegprep removes none and the recording cannot be annotated honestly (step `bad_channels`); on the RANSAC branch eegprep itself raises when more than 75 percent are flagged, which is `step_failed` |
@@ -99,14 +100,19 @@ Two things are decided from it.
 - **Files the header names.**
   A BrainVision header names its data file and its marker file, and an EEGLAB set names its data file, and eegprep 0.5.0 follows what they say: an absolute path, a `..`, or a path into another directory (`pop_loadbv` for `DataFile` and `MarkerFile`; `pop_loadset` for `data`, or for `datfile` when `data` is `in set file`).
   The file would be read as samples and summarised in the product, and the record's inputs would list the companions and not the file that was read.
-  A recording may name only its own companions as bare file names: `<stem>.eeg` and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
+  A recording may name only its own companions as bare file names: `<stem>.eeg` (or `<stem>.dat`) and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
   Anything else fails as `load_failed` with the detail `external_reference`, including a bare name that is not the recording's own and a name in another case.
   A set that holds its samples names no file, so a stale `datfile` beside them is not followed and not checked.
   A set is read as `pop_loadset` reads it: the `EEG` variable counts only when it is a single 1 by 1 structure, and otherwise the variables at the top level of the file are the dataset and the names they hold are followed, so they are checked, whatever `EEG` is (a number, text, an array of structures).
   An `EEG` that is a cell is refused, because eegprep unwraps a cell that holds a structure and the check does not model it.
-- **How much the header declares.**
+- **How much the recording declares and holds.**
   Channels times samples, as the loader would hold them, is compared with `MAX_CHANNEL_SAMPLES` in `common/io.py`, and a recording over it fails as `too_large` at step `load` before any of it is read.
-  The number comes from the header alone: signals times records times the highest rate for EDF and BDF, the size of the data file divided by the width of a value for BrainVision, and the dimensions or the shape of the samples for a set.
+  The number is what the reader consumes, which is not always what the header says.
+  For EDF and BDF it is signals times records times the highest rate, with the larger of two record counts: the one in the header and the one the size of the file gives, because MNE ignores a header count that disagrees with the file (`_read_edf_header`).
+  A value is two bytes in an EDF file and three in a BDF file.
+  For BrainVision it is the size of the data file divided by the width of a value, and the data file is the one eegprep opens (`_referenced_file`): the file `DataFile` names, else `<stem>.eeg`, else `<stem>.dat`, each looked for in another case too.
+  Several files that differ only in case are all counted and the largest decides, and a header whose data file is not there fails with the class `FileNotFoundError`, which is what eegprep raises.
+  For a set it is the larger of the dimensions or the shape of the samples the set declares and the number of four-byte values in the `.fdt` it names, because eegprep reads the whole `.fdt` with `np.fromfile` before it compares its count with the header.
   A set that keeps its variables in an `EEG` structure cannot be sized without reading it, so one whose file holds more four-byte values than the limit is sized by its file size and refused unread, and a smaller one is read.
   A header that cannot be read is refused and not passed on: eegprep would follow the files it names on the strength of a parse that this check could not make.
   The recording fails as `load_failed` with the detail `unreadable_header`, or with the class of the error when the file cannot be opened at all (what eegprep would raise), and a recording whose size cannot be worked out fails with `size_unknown`.
