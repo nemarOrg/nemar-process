@@ -42,8 +42,8 @@ DESCRIPTIONS = {
     "flatline": "Detect flat-line channels",
     "drift": "Remove slow drifts",
     "line_noise_measure": "Measure line noise",
-    "line_noise_50": "Remove 50 Hz line noise with a band-stop filter",
-    "line_noise_60": "Remove 60 Hz line noise with a band-stop filter",
+    "line_noise_50": "Remove 50 Hz line noise with a notch filter about 1 Hz wide at -6 dB",
+    "line_noise_60": "Remove 60 Hz line noise with a notch filter about 1 Hz wide at -6 dB",
     "bad_channels": "Detect bad channels",
     "bad_windows": "Detect bad windows",
     "qc": "Quality metrics",
@@ -120,7 +120,11 @@ SELECT_FUNCTION = "eegprep.pop_select"
 
 
 def band_stop_call(frequency: int) -> dict[str, Any]:
-    """The arguments of the band-stop for one line frequency: ``f-1`` to ``f+1`` Hz, notch mode."""
+    """The arguments of the band-stop for one line frequency: ``f-1`` and ``f+1`` Hz, notch mode.
+
+    The arguments are 2 Hz apart, but the notch eegprep designs from them is about 1 Hz wide at
+    -6 dB (cutoffs at ``f-0.5`` and ``f+0.5``); the step's metrics record the design applied.
+    """
     return {"locutoff": frequency - 1.0, "hicutoff": frequency + 1.0, "revfilt": True, "gui": False}
 
 

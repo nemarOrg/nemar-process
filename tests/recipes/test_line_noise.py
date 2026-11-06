@@ -12,7 +12,9 @@ import copy
 import numpy as np
 import pytest
 from eegprep import pop_eegfiltnew, pop_resample
+from nemar_process.common.plan import recorded_band_stop
 from nemar_process.nemar_floor import process
+from nemar_process.nemar_floor.steps import DESCRIPTIONS
 from recipe_support import loaded_fixture
 
 
@@ -74,6 +76,24 @@ def test_the_measurement_step_carries_before_after_and_whether_it_was_remeasured
         {"frequencyHz": 50, "order": 660, "transitionHz": 1.0, "cutoffHz": [49.5, 50.5]}
     ]
     assert noisy.metrics["lineNoise"]["removedHz"] == [50]
+
+
+def test_the_step_description_says_the_filter_is_a_notch_one_hertz_wide_at_minus_six_db(noisy):
+    for frequency in (50, 60):
+        description = DESCRIPTIONS["line_noise_{}".format(frequency)]
+        assert "{} Hz".format(frequency) in description
+        assert "notch" in description
+        assert "1 Hz wide at -6 dB" in description
+    assert noisy.plan.step("line_noise_50").description == DESCRIPTIONS["line_noise_50"]
+
+
+@pytest.mark.parametrize("srate", [128, 200, 250, 256, 500, 1000])
+def test_the_notch_eegprep_designs_is_one_hertz_wide_at_minus_six_db_centred_on_the_line(srate):
+    """The arguments are f-1 and f+1, the notch is not 2 Hz wide: the description rests on this."""
+    for frequency in (50, 60):
+        low, high = recorded_band_stop(float(srate), frequency)["cutoffHz"]
+        assert high - low == pytest.approx(1.0, abs=0.01)
+        assert (low + high) / 2 == pytest.approx(frequency, abs=1e-6)
 
 
 def test_a_band_stop_leaves_a_notch_below_its_neighbours_so_the_excess_after_is_negative(noisy):
