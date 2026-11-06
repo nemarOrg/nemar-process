@@ -159,7 +159,7 @@ def outcome_of(error: BaseException) -> tuple[str, str, str | None, str | None]:
     if isinstance(error, RecordingError):
         return error.status, error.code, error.step, error.detail
     if isinstance(error, MemoryError):
-        return "failed", OUT_OF_MEMORY, None, None
+        return "failed", OUT_OF_MEMORY, None, type(error).__name__
     if isinstance(error, OSError):
         return "failed", DISK_ERROR, None, type(error).__name__
     return "failed", INTERNAL_ERROR, None, type(error).__name__

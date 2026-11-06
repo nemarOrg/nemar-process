@@ -488,7 +488,7 @@ def test_outcomes_map_exceptions_to_a_status_a_code_a_step_and_a_class_name():
         None,
         None,
     )
-    assert command.outcome_of(MemoryError()) == ("failed", "out_of_memory", None, None)
+    assert command.outcome_of(MemoryError()) == ("failed", "out_of_memory", None, "MemoryError")
     assert command.outcome_of(PermissionError("/some/path")) == (
         "failed",
         "disk_error",

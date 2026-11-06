@@ -52,12 +52,16 @@ class RecordingSkipped(RecordingError):
 
 @contextlib.contextmanager
 def guarded(step_id: str):
-    """Turn what an eegprep call raises into ``step_failed`` for ``step_id``, keeping only the
-    exception's class name. A ``RecordingError`` passes as it is, and so does ``MemoryError``, which
-    the caller maps to ``out_of_memory``."""
+    """Turn what a step raises into a recorded failure of ``step_id``, keeping only a class name.
+
+    A ``RecordingError`` passes as it is. ``MemoryError`` is ``out_of_memory`` in this step, and any
+    other exception is ``step_failed`` in it: the step is what a reader needs to find the cause.
+    """
     try:
         yield
-    except (RecordingError, MemoryError):
+    except RecordingError:
         raise
+    except MemoryError as error:
+        raise RecordingError(OUT_OF_MEMORY, step_id, type(error).__name__) from error
     except Exception as error:
         raise RecordingError(STEP_FAILED, step_id, type(error).__name__) from error

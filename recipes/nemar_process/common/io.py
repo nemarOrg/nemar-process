@@ -27,6 +27,7 @@ from nemar_process.common.errors import (
     FILE_NOT_FOUND,
     LOAD_FAILED,
     NON_FINITE_SAMPLES,
+    OUT_OF_MEMORY,
     UNSUPPORTED_FORMAT,
     RecordingError,
     RecordingSkipped,
@@ -340,8 +341,10 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
         headers.check(recording.abs_path, max_channel_samples)
         eeg, report, function, parameters = _read(recording)
         located = qc.count_located(eeg["chanlocs"])
-    except (RecordingError, MemoryError):
+    except RecordingError:
         raise
+    except MemoryError as error:
+        raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
     except Exception as error:
         raise RecordingError(LOAD_FAILED, "load", type(error).__name__) from error
     eeg, notes = normalize(eeg)
