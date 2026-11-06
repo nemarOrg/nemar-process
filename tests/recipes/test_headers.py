@@ -18,7 +18,7 @@ import h5py
 import numpy as np
 import pytest
 import scipy.io
-from eegprep import pop_loadbv, pop_loadset
+from eegprep import pop_load_frombids, pop_loadbv, pop_loadset
 from nemar_process.common import headers, io
 from nemar_process.common.errors import RecordingError
 from recipe_support import (
@@ -99,6 +99,7 @@ def test_an_edf_still_being_written_is_sized_by_the_bytes_that_are_there(tmp_pat
 
 
 UNREADABLE = ("failed", "load_failed", "load", "unreadable_header")
+EXTERNAL = ("failed", "load_failed", "load", "external_reference")
 
 
 @pytest.mark.parametrize("content", [b"", b"not an edf file" * 40, b"0       " + b"x" * 400])
@@ -936,22 +937,99 @@ def test_eegprep_alone_reads_a_file_through_a_link_that_leaves_the_dataset(tmp_p
     assert pop_loadbv(str(header))["data"].shape == (4, 2000)
 
 
-def test_a_sidecar_that_is_a_link_out_of_the_dataset_is_refused_after_it_was_read(tmp_path):
-    """Which sidecars eegprep read is known only from what it reports, so these are refused after
-    the load, and still before a record or a file of the product exists."""
+def fixture_tree(tmp_path):
+    """A writable copy of the real fixture dataset, with its sidecars, and its one recording."""
     from recipe_support import copy_fixture
 
     root = copy_fixture(tmp_path / "dataset")
-    sidecar = next(root.rglob("*_electrodes.tsv"))
-    linked_out(sidecar, tmp_path / "elsewhere")
+    return root, root / "sub-CUCOV076" / "eeg"
+
+
+SIDECAR = "sub-CUCOV076_task-COVID_eeg.json"
+
+
+def test_an_eeg_sidecar_that_is_a_link_out_of_the_dataset_is_refused_before_eegprep_reads_it(
+    tmp_path, monkeypatch
+):
+    """eegprep reads the sidecars of the inheritance chain and names none of them in its report,
+    so a link there could not be found afterwards: this one says the line frequency is 123."""
+    root, eeg_dir = fixture_tree(tmp_path)
+    linked_out(eeg_dir / SIDECAR, tmp_path / "elsewhere")
+    (tmp_path / "elsewhere" / SIDECAR).write_text('{"PowerLineFrequency": 123}', encoding="utf-8")
+    (recording,) = io.discover(root)
+    eeg, report = pop_load_frombids(str(recording.abs_path), **io.BIDS_CALL)
+    assert (
+        eeg["etc"]["BIDS"]["PowerLineFrequency"] == 123
+    )  # eegprep alone reads it through the link
+    assert SIDECAR not in str(report)  # and does not say that it did
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
+
+
+def test_a_link_to_a_directory_out_of_the_dataset_is_refused_because_pybids_walks_it(
+    tmp_path, monkeypatch
+):
+    import bids
+
+    root, eeg_dir = fixture_tree(tmp_path)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "far_away.txt").write_text("somewhere else\n", encoding="utf-8")
+    (eeg_dir.parent / "extra").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    layout = bids.BIDSLayout(
+        str(root), validate=False, indexer=bids.BIDSLayoutIndexer(index_metadata=False)
+    )
+    assert any(name.endswith("far_away.txt") for name in layout.get(return_type="filename"))
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
     (recording,) = io.discover(root)
     with pytest.raises(RecordingError) as caught:
         io.load(recording)
-    assert (caught.value.code, caught.value.step, caught.value.detail) == (
-        "load_failed",
-        "load",
-        "external_reference",
-    )
+    assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        pytest.param("dataset_description.json", id="the description at the root"),
+        pytest.param("sub-CUCOV076/sub-CUCOV076_scans.tsv", id="a file of the subject"),
+        pytest.param("sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_channels.tsv", id="the channels"),
+        pytest.param("sub-CUCOV076/eeg/sub-CUCOV076_coordsystem.json", id="the coordinate system"),
+    ],
+)
+def test_any_link_out_of_the_dataset_at_the_root_or_in_the_subject_is_refused(
+    tmp_path, monkeypatch, link
+):
+    root, _ = fixture_tree(tmp_path)
+    linked_out(root / link, tmp_path / "elsewhere")
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
+    (recording,) = io.discover(root)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
+
+
+def test_a_sidecar_that_is_a_link_into_the_dataset_is_followed(tmp_path):
+    """Annexed content again: a link that stays inside is where the file is."""
+    root, eeg_dir = fixture_tree(tmp_path)
+    linked_out(eeg_dir / SIDECAR, root / ".git" / "annex")
+    (recording,) = io.discover(root)
+    assert io.load(recording).power_line_hz_declared == 60
+
+
+def test_a_stray_companion_that_is_a_link_out_of_the_dataset_is_refused_as_an_input(tmp_path):
+    """A `.vmrk` beside a set is listed among its inputs and hashed whole, and nothing names it, so
+    only the list of inputs can find it: a link to a file that never ends would stop the run."""
+    root = tmp_path / "dataset"
+    path, _ = tree_for("set", root)
+    stray = path.with_suffix(".vmrk")
+    stray.write_bytes(b"x" * 100)
+    linked_out(stray, tmp_path / "elsewhere")
+    (recording,) = io.discover(root)
+    assert [name.rsplit(".", 1)[1] for name in recording.companions] == ["fdt", "vmrk"]
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
 
 
 # ---- the loader, and eegprep alone ------------------------------------------------------------

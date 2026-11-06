@@ -34,9 +34,11 @@ out is refused (``size_unknown``) and never passed.
 from __future__ import annotations
 
 import math
+import os
 import re
 import struct
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -689,6 +691,40 @@ def _set(path: Path, max_values: int) -> Header:
     if eeg is not None and eeg.mclass not in PLAIN_CLASSES:
         raise ValueError("an EEG that is neither one structure nor a plain value is not read")
     return _set_flat(path, listed)
+
+
+# ---- the files beside a recording that its BIDS metadata comes from ---------------------------
+
+
+def _links(directory: Path, *, below: bool) -> Iterator[Path]:
+    """The links in ``directory``, and in the directories below it when ``below``, none followed."""
+    pending = [directory]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    yield Path(entry.path)
+                elif below and entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+
+
+def bids_links(path: Path, root: Path) -> None:
+    """Refuse a recording read through BIDS metadata when a link around it leaves the dataset.
+
+    ``pop_load_frombids`` reads sidecars it does not all name in its report (the JSON of the
+    inheritance chain), reads the channel, electrode and coordinate system files that match the
+    recording by entity, and builds a pybids layout that walks every link to a directory it finds,
+    wherever it leads. A link to a file elsewhere then supplies metadata, and one to a file that never
+    ends (``/dev/zero``) stops the run. The sidecars cannot be known before the load, so the files they
+    can be are looked at: what is at the top of the dataset, and everything in the subject
+    directory the recording is in, where the chain and the matches are. A link anywhere else in the
+    tree is not looked at (docs/unverified.md).
+    """
+    base = root.resolve()
+    subject = root / path.relative_to(root).parts[0]
+    for link in (*_links(root, below=False), *_links(subject, below=True)):
+        if not link.resolve().is_relative_to(base):
+            raise RecordingError(LOAD_FAILED, "load", EXTERNAL_REFERENCE)
 
 
 # ---- the two checks ---------------------------------------------------------------------------

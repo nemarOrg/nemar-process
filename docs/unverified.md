@@ -127,9 +127,12 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, and on EDF and BDF headers written byte by byte.
   It has not run on a set saved by MATLAB's EEGLAB, so its reading of that layout rests on eegprep's loader and on SciPy files shaped like it.
   A header that cannot be read is refused (`unreadable_header`), so a legitimate file that this parser reads differently from eegprep's loader would be refused too; the parser mirrors eegprep 0.5.0's rules and is not run against files from other writers.
-- **A link out of the dataset is checked for the files the recipe knows of.**
-  The recording, the data and marker files of a header and the `.fdt` of a set are checked before eegprep reads anything, and the sidecars eegprep reports having read, and the companions listed as inputs, are checked after it did and before any product is written.
-  A sidecar eegprep reads and does not report (the EEG sidecar JSON, the events table, anything inherited from a higher level of the tree) is not checked, and a link among them that leaves the dataset is followed.
+- **A link out of the dataset is checked where the recipe can know of it.**
+  The recording, the data and marker files of a header and the `.fdt` of a set are checked before eegprep reads anything.
+  A recording read through BIDS metadata is also checked, before the load, for links at the top of the dataset and anywhere in its subject's directory, because eegprep reads the sidecars of the inheritance chain without naming them in its report (the line frequency of a sidecar elsewhere was read through a link in a test) and the pybids layout walks every link to a directory; the sidecars eegprep does report, and the companions listed as inputs, are checked again after the load and before any product is written.
+  A link elsewhere in the tree, in another subject's directory say, is not looked at, although pybids walks a link to a directory anywhere in the tree once per process.
+  Finding one means walking the whole dataset: that is a cost of every recording on a dataset of tens of thousands of files unless the result is kept for the process, which would be state that a test cannot see change, and neither was built.
+  The sizes of the JSON and TSV sidecars that eegprep and pandas read whole are not limited either.
   Whether a dataset staged from the data plane can hold a link at all was not checked here; the rule is a bound for a tree that does.
 - **The all-flat failure listens to a log warning.**
   eegprep's `clean_flatlines` removes nothing, and says so only by a warning on its module's logger, when every channel has a flat portion; the floor fails such a recording (`all_channels_flat`).

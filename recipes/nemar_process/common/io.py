@@ -389,12 +389,15 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
 
     The header is read first (``headers.check``): a recording that names a file other than its own
     companions, or declares or holds more than ``max_channel_samples``, fails before eegprep reads any
-    of it. Making the loaded state safe (``normalize``) is part of the load: a set that eegprep reads
+    of it, and so does one read through BIDS metadata when a link around it leaves the dataset
+    (``headers.bids_links``). Making the loaded state safe (``normalize``) is part of the load: a set that eegprep reads
     back without a sampling rate fails there, and the float64 cast needs a second copy of the samples,
     so running out of memory there is ``out_of_memory`` in this step like anywhere else in it.
     """
     try:
         headers.check(recording.abs_path, max_channel_samples, recording.root)
+        if recording.extension != ".set":  # a set is read by pop_loadset, which reads no sidecar
+            headers.bids_links(recording.abs_path, recording.root)
         eeg, report, function, parameters = _read(recording)
         located = qc.count_located(eeg["chanlocs"])
         inputs = _inputs(recording, report)
