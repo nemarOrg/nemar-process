@@ -364,16 +364,6 @@ def _footprint(path: Path, cap: int) -> int:
     return total
 
 
-def _set_hdf5(path: Path) -> Header:
-    """A set saved as MATLAB v7.3: the samples are in the file and nothing is followed."""
-    with h5py.File(path, "r") as handle:
-        group = handle.get("EEG", handle)
-        data = group.get("data")
-        if isinstance(data, h5py.Dataset) and data.dtype.kind in "iuf":
-            return Header(values=_product(data.shape))
-    return Header()
-
-
 def _set_struct(path: Path) -> Header:
     """A set that keeps its variables in an ``EEG`` structure, which cannot be sized unread."""
     loaded = scipy.io.loadmat(
@@ -417,9 +407,17 @@ def _set(path: Path, max_values: int) -> Header:
     Nothing is loaded before the variables are counted: a set whose variables take more than a
     limit's worth of values (``MAT_VALUE_BYTES`` each, with ``MAT_MARGIN_BYTES`` for the rest) is
     too large whatever it declares, compressed or not.
+
+    A set saved as MATLAB v7.3 is an HDF5 file and is refused (the same ``h5py.is_hdf5`` test as
+    eegprep's, so the two cannot disagree about which files these are). Its reader takes the samples
+    from external raw storage, an external link or a virtual dataset, each of which can lead to a
+    file anywhere, and a walk of the file that finds every one of them has not been written. This is
+    a fail-closed judgment: a large v7.3 set is refused until that walk exists.
     """
     if h5py.is_hdf5(str(path)):
-        return _set_hdf5(path)
+        raise ValueError(
+            "a set saved as MATLAB v7.3 is an HDF5 file, which this check does not read"
+        )
     cap = max_values * MAT_VALUE_BYTES + MAT_MARGIN_BYTES
     footprint = _footprint(path, cap)
     if footprint > cap:

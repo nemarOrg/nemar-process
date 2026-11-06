@@ -124,7 +124,9 @@ Two things are decided from it.
   The total is held to a cap of eight bytes for each value of the limit plus 64 mebibytes (MiB) for what else a set holds, such as events and channel locations.
   A set that inflates past the cap fails as `too_large`, and the count stops at the cap, so a small file that inflates to a great deal costs the check one step of memory and not the whole.
   The file size alone bounds nothing for a compressed set.
-  A file that is not a MAT-file of version 5 or later is refused as `unreadable_header`, and a set saved as version 7.3 is an HDF5 file, which is sized by the shape of its samples and names no file.
+  A file that is not a MAT-file of version 5 or later is refused as `unreadable_header`.
+  So is a set saved as version 7.3, which is an HDF5 file, and it is refused unread: eegprep's reader for it takes the samples from external raw storage, an external link or a virtual dataset, each of which can lead to a file anywhere, and a walk of the file that finds every one of them has not been written.
+  This is a fail-closed judgment, and its cost is that a large version 7.3 set is refused until that walk exists.
   A set under the cap that keeps its variables in an `EEG` structure is then read for its dimensions.
   A header that cannot be read is refused and not passed on: eegprep would follow the files it names on the strength of a parse that this check could not make.
   The recording fails as `load_failed` with the detail `unreadable_header`, or with the class of the error when the file cannot be opened at all (what eegprep would raise), and a recording whose size cannot be worked out fails with `size_unknown`.

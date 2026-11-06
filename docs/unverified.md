@@ -122,8 +122,9 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   It is recorded as "as loaded" and not verified for other sources.
 - **Loaders.**
   The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` were run here.
-  A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and a `.bdf` were read in eegprep's source and not run through the whole floor.
-  The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, on an HDF5 file with the structure the loader reads, and on EDF and BDF headers written byte by byte.
+  A `.set` with a separate `.fdt` and a `.bdf` were read in eegprep's source and not run through the whole floor.
+  A MATLAB v7.3 `.set` is refused by the header check (`unreadable_header`), unread, because eegprep's reader for it follows external storage, links and virtual datasets to files anywhere; a large set saved in that format is refused until an HDF5 walk is written.
+  The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, and on EDF and BDF headers written byte by byte.
   It has not run on a set saved by MATLAB's EEGLAB, so its reading of that layout rests on eegprep's loader and on SciPy files shaped like it.
   A header that cannot be read is refused (`unreadable_header`), so a legitimate file that this parser reads differently from eegprep's loader would be refused too; the parser mirrors eegprep 0.5.0's rules and is not run against files from other writers.
 - **A link out of the dataset is checked for the files the recipe knows of.**

@@ -1,8 +1,8 @@
 """The header check: which files a recording names and how big it declares itself, before any read.
 
 Real files only: EDF and BDF written byte by byte, BrainVision triples, and EEGLAB sets written by
-SciPy in both layouts (variables at the top level, or in an `EEG` structure) and one as HDF5. What is
-checked is what eegprep follows: the tests at the end show that eegprep, left alone, reads the file
+SciPy in both layouts (variables at the top level, or in an `EEG` structure), and sets saved as HDF5
+(which are refused). What is checked is what eegprep follows: the tests at the end show that eegprep, left alone, reads the file
 a header names, wherever it is (docs/upstream.md), which is why the check exists.
 """
 
@@ -18,6 +18,7 @@ from struct import pack, unpack
 import h5py
 import numpy as np
 import pytest
+import scipy.io
 from eegprep import pop_loadbv, pop_loadset
 from nemar_process.common import headers, io
 from nemar_process.common.errors import RecordingError
@@ -758,13 +759,143 @@ def test_a_compressed_set_that_cannot_be_followed_is_refused_and_not_passed_on(t
     assert refusal(path, SMALL_LIMIT) == UNREADABLE
 
 
-def test_a_set_saved_as_hdf5_declares_its_samples_and_names_nothing(tmp_path):
+def hdf5_fields(group, points=2000):
+    """The scalars an EEGLAB set keeps beside its samples, saved the way MATLAB saves them."""
+    for key, value in (
+        ("nbchan", 4.0),
+        ("pnts", float(points)),
+        ("trials", 1.0),
+        ("srate", 250.0),
+        ("xmin", 0.0),
+        ("xmax", (points - 1) / 250.0),
+    ):
+        group.create_dataset(key, data=np.array([[value]]))
+
+
+def hdf5_set(path, where, outside, trick):
+    """A set saved as MATLAB v7.3 whose samples are held the way `trick` says. `outside` is a
+    directory beside the dataset, with the file or files the trick leads to."""
+    outside.mkdir(parents=True, exist_ok=True)
+    raw, other = outside / "secret.raw", outside / "secret.h5"
+    np.full((2000, 4), 42.0, dtype="<f4").tofile(raw)
+    with h5py.File(other, "w") as handle:
+        handle.create_dataset("x", data=np.full((2000, 4), 7.0, dtype="<f4"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as handle:
+        group = handle.create_group("EEG")
+        if trick == "external raw storage":
+            group.create_dataset(
+                "data", shape=(2000, 4), dtype="<f4", external=[(str(raw), 0, 2000 * 4 * 4)]
+            )
+        elif trick == "external link":
+            group["data"] = h5py.ExternalLink(str(other), "/x")
+        elif trick == "virtual dataset":
+            layout = h5py.VirtualLayout(shape=(2000, 4), dtype="<f4")
+            layout[:] = h5py.VirtualSource(str(other), "x", shape=(2000, 4))
+            group.create_virtual_dataset("data", layout, fillvalue=0)
+        else:
+            group.create_dataset("data", data=np.zeros((2000, 4), dtype="<f4"))
+        hdf5_fields(group)
+    return path
+
+
+HDF5_TRICKS = [
+    pytest.param("external raw storage", 42.0, id="external raw storage"),
+    pytest.param("external link", 7.0, id="external link"),
+    pytest.param("virtual dataset", 7.0, id="virtual dataset"),
+    pytest.param("samples in the file", 0.0, id="samples in the file"),
+]
+
+
+@pytest.mark.parametrize(("trick", "value"), HDF5_TRICKS)
+def test_a_set_saved_as_matlab_7_3_is_refused_whatever_holds_its_samples(
+    tmp_path, monkeypatch, trick, value
+):
+    """eegprep's reader for version 7.3 takes the samples from external raw storage, an external
+    link or a virtual dataset, wherever the file is; a walk that finds each of them does not exist,
+    so the check refuses the format and eegprep is never called (a fail-closed judgment)."""
+    root = tmp_path / "dataset"
+    path = hdf5_set(root / "sub-01" / "eeg" / (STEM + ".set"), root, tmp_path / "elsewhere", trick)
+    eegprep_alone = np.asarray(pop_loadset(str(path))["data"])
+    assert np.unique(eegprep_alone).tolist() == [value]  # eegprep alone reads the file it leads to
+    assert refusal(path) == UNREADABLE
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(root)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == UNREADABLE[1:]
+
+
+def test_a_file_that_is_a_mat_file_to_the_count_and_a_v7_3_set_to_eegprep_is_refused(
+    tmp_path, monkeypatch
+):
+    """The userblock of a v7.3 file is 512 bytes that MATLAB fills with text, and a MAT-file (version
+    5) can begin there and call the rest of the file the data of a variable: the count, which does not
+    read data, takes it for a MAT-file. eegprep asks `h5py.is_hdf5`, and so does the check."""
+    from struct import pack
+
+    root = tmp_path / "dataset"
+    path = root / "sub-01" / "eeg" / (STEM + ".set")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    np.full((2000, 4), 42.0, dtype="<f4").tofile(outside / "secret.raw")
+    path.parent.mkdir(parents=True)
+    with h5py.File(path, "w", userblock_size=512) as handle:
+        group = handle.create_group("EEG")
+        group.create_dataset(
+            "data",
+            shape=(2000, 4),
+            dtype="<f4",
+            external=[(str(outside / "secret.raw"), 0, 2000 * 4 * 4)],
+        )
+        hdf5_fields(group)
+    image = bytearray(path.read_bytes())
+
+    def tag(kind, count):
+        return pack("<II", kind, count)
+
+    def number(name, value):
+        body = tag(6, 8) + pack("<II", 6, 0) + tag(5, 8) + pack("<ii", 1, 1)
+        body += tag(1, len(name)) + name.ljust(8, b"\0") + tag(9, 8) + pack("<d", value)
+        return tag(14, len(body)) + body
+
+    head = b"MATLAB 5.0 MAT-file, a test".ljust(124) + b"\x00\x01IM"
+    head += number(b"nbchan", 4.0) + number(b"pnts", 2000.0) + number(b"trials", 1.0)
+
+    def junk(count):
+        """The element of a uint8 row of `count` values named junk, without its data."""
+        body = tag(6, 8) + pack("<II", 9, 0) + tag(5, 8) + pack("<ii", 1, count)
+        body += tag(1, 4) + b"junk" + bytes(4) + tag(2, count)
+        return tag(14, len(body) + count) + body
+
+    start = len(head) + len(junk(0))  # where the data of junk begin
+    assert start <= 512  # inside the userblock
+    image += bytes(-(len(image) - start) % 8)  # the data are padded to eight bytes
+    image[:start] = head + junk(len(image) - start)
+    path.write_bytes(bytes(image))
+    assert h5py.is_hdf5(str(path))  # to eegprep, which reads the samples from the file elsewhere
+    assert [n for n, _, _ in scipy.io.whosmat(str(path))] == ["nbchan", "pnts", "trials", "junk"]
+    assert np.unique(np.asarray(pop_loadset(str(path))["data"])).tolist() == [42.0]
+    assert refusal(path, 8000) == UNREADABLE
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(root)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording, 8000)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == UNREADABLE[1:]
+
+
+def test_a_set_saved_as_matlab_7_3_with_a_large_compressed_variable_is_refused_unread(tmp_path):
+    """Only `data` was sized for such a file, so a variable of 40 MB beside 8,000 samples passed a
+    limit of 8,000 and was loaded whole by eegprep."""
     path = tmp_path / (STEM + ".set")
     with h5py.File(path, "w") as handle:
-        handle.create_group("EEG").create_dataset("data", data=np.zeros((1200, 3), dtype="<f4"))
-    header = headers.read(path, LIMIT)
-    assert (header.values, header.references) == (3 * 1200, ())
-    assert refusal(path, 3 * 1200 - 1)[1] == "too_large"
+        group = handle.create_group("EEG")
+        group.create_dataset("data", data=np.zeros((2000, 4), dtype="<f4"))
+        group.create_dataset(
+            "icaact", shape=(5_000_000,), dtype="<f8", compression="gzip", chunks=(500_000,)
+        )
+        hdf5_fields(group)
+    assert refusal(path, 8000) == UNREADABLE
 
 
 # ---- links that leave the dataset -------------------------------------------------------------
