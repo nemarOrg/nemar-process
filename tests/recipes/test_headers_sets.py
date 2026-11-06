@@ -25,7 +25,8 @@ from eegprep import pop_loadset
 from nemar_process.common import headers, io
 from nemar_process.common.errors import RecordingError
 from recipe_support import write_raw_set
-from scipy.io.matlab import MatlabObject, MatReadWarning
+from scipy.io.matlab import MatlabObject, MatReadError, MatReadWarning
+from scipy.io.matlab._mio5 import MatFile5Reader
 
 LIMIT = 1_000_000_000
 STEM = "sub-01_task-x_eeg"
@@ -240,6 +241,80 @@ def test_an_eeg_that_is_neither_one_structure_nor_a_plain_value_is_refused(
     write_raw_set(path, data=str(outside), extra={"EEG": eeg})
     eegprep_reads(path)
     refused_and_never_loaded(root, path, monkeypatch)
+
+
+# ---- text that is not a row: eegprep joins it into one name ------------------------------------
+
+# The forms of a name that are not a row of characters. SciPy writes a one-dimensional array of
+# single characters as a column (N by 1 in MATLAB) and an array of one string as 1 by 1 by N, and
+# eegprep joins both into one string (`_char_rows`) and reads it as a path, an absolute one included.
+# The shapes are what `loadmat` makes of them, where a row of text is an array of shape (1,).
+TEXT_NOT_IN_A_ROW = [
+    pytest.param(lambda text: np.array(list(text)), lambda n: (n,), id="a column of characters"),
+    pytest.param(
+        lambda text: np.array([[text]]), lambda n: (1, 1), id="characters on a third axis"
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "struct", [False, True], ids=["variables at the top level", "EEG structure"]
+)
+@pytest.mark.parametrize(("form", "shape"), TEXT_NOT_IN_A_ROW)
+def test_a_data_that_is_text_but_not_one_row_is_refused_because_eegprep_joins_it_into_a_name(
+    tmp_path, monkeypatch, form, shape, struct
+):
+    root, path, outside = crafted(tmp_path)
+    write_raw_set(path, data=form(str(outside)), struct=struct)
+    if not struct:  # the premise: the name is not an array of one string, as loadmat holds it
+        loaded = scipy.io.loadmat(str(path), variable_names=["data"], squeeze_me=False)["data"]
+        assert loaded.shape == shape(len(str(outside)))
+    eegprep_reads(path)
+    refused_and_never_loaded(root, path, monkeypatch)
+
+
+def test_data_in_rows_of_text_are_refused_though_eegprep_makes_no_name_of_them(tmp_path):
+    """Two rows of text are not a name to eegprep, and they are not a row to the check either: the
+    one form of text it reads as eegprep does is a row, and any other is refused."""
+    _, path, _ = crafted(tmp_path)
+    write_raw_set(path, data=np.array(["abc.fdt", "def.fdt"]))
+    assert refusal(path) == UNREADABLE
+
+
+def test_a_data_that_is_a_single_row_of_text_is_a_name_whatever_its_length(tmp_path):
+    _, path, _ = crafted(tmp_path)
+    for text in ("x", STEM + ".fdt"):  # one character is a row too
+        write_raw_set(path, data=text)
+        assert headers.read(path, LIMIT).references == (("data", text),)
+
+
+def test_an_empty_text_in_the_place_of_data_names_no_file_and_is_accepted(tmp_path):
+    """Text with nothing in it is not a name, and not a path for eegprep to join."""
+    _, path, _ = crafted(tmp_path)
+    write_raw_set(path, data="")
+    assert headers.read(path, LIMIT).references == ()
+    headers.check(path, LIMIT, EVERYWHERE)
+
+
+def test_the_text_scipy_puts_for_a_variable_it_could_not_read_is_refused(tmp_path, monkeypatch):
+    """When SciPy cannot read a variable it puts `Read error: ...` in its place, and eegprep takes
+    any text for `data` as the name of a file beside the set. No file written here makes SciPy 1.18
+    fail that way, so the failure is injected where SciPy raises it, in front of both readers."""
+    root, path, outside = crafted(tmp_path)
+    write_raw_set(path, data="x.fdt")
+    real = MatFile5Reader.read_var_array
+
+    def unreadable_data(self, header, process=True):
+        if header.name == b"data":
+            raise MatReadError("injected")
+        return real(self, header, process)
+
+    monkeypatch.setattr(MatFile5Reader, "read_var_array", unreadable_data)
+    (path.parent / "Read error: injected").symlink_to(outside)  # the name eegprep makes of it
+    with pytest.warns(Warning, match="Unreadable variable"):
+        eegprep_reads(path)
+    with pytest.warns(Warning, match="Unreadable variable"):
+        refused_and_never_loaded(root, path, monkeypatch)
 
 
 # ---- what a set holds: counted from its element headers, in values -----------------------------

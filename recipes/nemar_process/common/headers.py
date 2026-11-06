@@ -320,9 +320,35 @@ def _datfile_name(datfile: Any) -> str:
     return name
 
 
+def _is_text(value: Any) -> bool:
+    """Whether eegprep takes the value for text: a string, or characters that are not empty."""
+    return isinstance(value, str) or (
+        isinstance(value, np.ndarray) and value.dtype.kind in "US" and value.size > 0
+    )
+
+
+def _data_name(data: Any) -> str:
+    """The file ``data`` names, which eegprep reads when ``data`` is text; samples name none.
+
+    A row of text is a name this check reads as eegprep does. Any other text is joined into one
+    string by eegprep's own rule (``_char_rows``: a column of characters, characters on a third
+    axis) and that string is read as a path, so it is refused: the name it makes is not one this
+    check can see. So is the ``Read error: ...`` string ``loadmat`` puts in the place of a variable
+    it could not read, which eegprep takes for a name too.
+    """
+    name = _row_text(data)
+    if name is None:
+        if _is_text(data):
+            raise ValueError(
+                "a data that is text but not one row names a file this check cannot see"
+            )
+        return ""
+    return name
+
+
 def _set_references(data: Any, datfile: Any) -> tuple[tuple[str, str], ...]:
     """The data file a set names: ``data`` when it is a name, ``datfile`` when it says so."""
-    name = _row_text(data) or ""
+    name = _data_name(data)
     if name == IN_SET_FILE:
         name = _datfile_name(datfile)
     return (("data", name),) if name and name != IN_SET_FILE else ()

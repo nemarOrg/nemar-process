@@ -116,6 +116,8 @@ Two things are decided from it.
   An `EEG` of any other kind (an array of structures, a cell, a MATLAB object) is refused as `unreadable_header`, because eegprep unwraps some of them to a structure and the check does not model that.
   A file that saves a variable name twice is refused, because eegprep keeps the last of them and a read by name keeps the first.
   A `datfile` that is not text is refused when `data` says `in set file`, because eegprep makes a file name of it with `str`, and `1.0` or `['ab' 'cd']` is a name that this check cannot see; a missing or empty `datfile` names no file.
+  A `data` that is text in any form but one row of characters is refused too: eegprep joins a column of characters, or characters on a third axis, into one string and reads it as a path (an absolute one included), and `loadmat` puts the text `Read error: ...` in the place of a variable it could not read, which eegprep also takes for a name.
+  Rows of text, which eegprep does not make a name of, are refused with them rather than modeled.
 - **How much the recording declares and holds.**
   Channels times samples, as the loader would hold them, is compared with `MAX_CHANNEL_SAMPLES` in `common/io.py`, and a recording over it fails as `too_large` at step `load` before any of it is read.
   The number is what the reader consumes, which is not always what the header says.
