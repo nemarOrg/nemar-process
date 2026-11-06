@@ -74,6 +74,35 @@ def test_a_timestamp_is_the_whole_value_and_nothing_around_it(record, stamp):
     assert len(records.timestamp_problems(broken)) == 1
 
 
+def test_every_problem_of_a_record_has_a_fixed_category(record):
+    validator = sj.validator()
+    assert records.problems_of(record, validator) == []
+
+    stamped = copy.deepcopy(record)
+    stamped["pipelineInfo"]["executionDate"] = "yesterday"
+    assert {category for category, _ in records.problems_of(stamped, validator)} == {"timestamp"}
+
+    dangling = copy.deepcopy(record)
+    dangling["processingSteps"][4]["dependsOn"] = ["no-such-step"]
+    assert {category for category, _ in records.problems_of(dangling, validator)} == {"reference"}
+
+    unhashed = copy.deepcopy(record)
+    unhashed["processingSteps"][1]["parameters"] = {}
+    assert {category for category, _ in records.problems_of(unhashed, validator)} == {"plan_hash"}
+
+    unschemed = copy.deepcopy(record)
+    del unschemed["description"]
+    assert "schema" in {category for category, _ in records.problems_of(unschemed, validator)}
+
+
+def test_check_is_the_text_of_the_problems(record):
+    broken = copy.deepcopy(record)
+    broken["pipelineInfo"]["executionDate"] = "yesterday"
+    assert records.check(broken, sj.validator()) == [
+        text for _, text in records.problems_of(broken, sj.validator())
+    ]
+
+
 def test_the_validator_does_not_resolve_references_so_the_recipe_does(record):
     broken = copy.deepcopy(record)
     broken["processingSteps"][3]["inputSources"][0]["outputId"] = "nothing"
@@ -293,10 +322,11 @@ def test_a_record_that_does_not_pass_its_own_checks_is_never_written(monkeypatch
     (recording,) = io.discover(DATASET)
     with pytest.raises(RecordingError) as caught:
         outputs.run_recording(recording, make_context(), tmp_path, loaded=loaded_fixture())
+    # the detail is the kind of problem (schema, timestamp, reference, plan_hash), never its text
     assert (caught.value.code, caught.value.step, caught.value.detail) == (
         "internal_error",
         "record",
-        "invalid_record",
+        "schema",
     )
     assert not list(tmp_path.rglob("*signalJourney.json"))
 

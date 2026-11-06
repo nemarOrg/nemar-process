@@ -249,16 +249,23 @@ def references_problems(record: Mapping[str, Any]) -> list[str]:
     return problems
 
 
-def check(record: Mapping[str, Any], validator: Any) -> list[str]:
-    """Everything wrong with a record: the schema, the timestamps, the references, the plan hash."""
-    problems = [
-        str(problem) for problem in validator.validate(dict(record), raise_exceptions=False)
+def problems_of(record: Mapping[str, Any], validator: Any) -> list[tuple[str, str]]:
+    """Everything wrong with a record, each as (category, text): the schema, the timestamps, the
+    references, the plan hash. The category is a fixed word; the text can quote the record."""
+    found = [
+        ("schema", str(problem))
+        for problem in validator.validate(dict(record), raise_exceptions=False)
     ]
-    problems += timestamp_problems(record)
-    problems += references_problems(record)
+    found += [("timestamp", problem) for problem in timestamp_problems(record)]
+    found += [("reference", problem) for problem in references_problems(record)]
     if record.get("extensions", {}).get("nemar", {}).get("profile") == "recording":
-        problems += plans.verify(dict(record))
-    return problems
+        found += [("plan_hash", problem) for problem in plans.verify(dict(record))]
+    return found
+
+
+def check(record: Mapping[str, Any], validator: Any) -> list[str]:
+    """The text of everything wrong with a record (see ``problems_of``); empty when it is sound."""
+    return [text for _, text in problems_of(record, validator)]
 
 
 # ---- the dataset record -----------------------------------------------------------------------

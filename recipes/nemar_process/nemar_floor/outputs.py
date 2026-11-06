@@ -231,9 +231,10 @@ def write_product(
         summary_metrics=summary_metrics(result),
         context=context,
     )
-    problems = records.check(record, context.validator)
+    problems = records.problems_of(record, context.validator)
     if problems:
-        raise RecordingError(INTERNAL_ERROR, "record", "invalid_record")
+        # the category (schema, timestamp, reference, plan_hash) says what kind; the text is not kept
+        raise RecordingError(INTERNAL_ERROR, "record", problems[0][0])
     record_path = place("signalJourney", "json")
     files.write_json(directory / record_path, record)
     return RecordingProduct(
