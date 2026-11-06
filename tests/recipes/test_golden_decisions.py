@@ -49,6 +49,8 @@ def test_the_decisions_are_the_ones_the_phase_plan_observed_on_the_fixture():
     pinned = json.loads((golden.GOLDEN / "decisions.json").read_text(encoding="utf-8"))
     assert pinned["bad_channels_removed"] == ["O1", "T6"]
     assert pinned["bad_channels_branch"] == "ransac"
+    assert pinned["noise_only_channels"] == ["Pg1", "Pg2"]  # no coordinates, judged on noise alone
+    assert pinned["not_assessed_channels"] == []
     assert pinned["n_bad_segments"] == 40
     assert pinned["flatline_removed"] == []
     assert pinned["line_noise_removed_hz"] == []

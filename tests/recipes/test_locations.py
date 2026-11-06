@@ -10,8 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from nemar_process.common import io
-from nemar_process.nemar_floor import process
-from recipe_support import copy_fixture, loaded_fixture
+from nemar_process.nemar_floor import outputs, process
+from recipe_support import (
+    copy_fixture,
+    correlated_channels,
+    loaded_fixture,
+    sphere_positions,
+    write_set,
+)
 
 
 def bad_channel_step(result):
@@ -92,6 +98,97 @@ def test_fewer_than_half_of_the_signal_channels_located_takes_the_nolocs_branch(
     step = bad_channel_step(result)
     assert step.quality["branch"] == "nolocs"
     assert step.quality["nUsableLocations"] == 10
+
+
+def two_unlocated_channels(tmp_path, srate, *, tone_hz=None):
+    """Ten correlated channels of 70 s, the first eight with positions: Ch9 and Ch10 have none.
+
+    ``tone_hz`` adds a strong sinusoid to Ch10, the kind of high-frequency noise the noise criterion
+    of ``clean_channels`` exists to find (it is outside the band the criterion keeps).
+    """
+    samples = int(srate) * 70
+    data = correlated_channels(np.random.default_rng(21), 10, samples)
+    if tone_hz is not None:
+        data[9] += 30.0 * np.sin(2 * np.pi * tone_hz * np.arange(samples) / srate)
+    names = ["Ch{}".format(i + 1) for i in range(10)]
+    write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set",
+        data,
+        srate=srate,
+        labels=names,
+        locations=sphere_positions(names[:8]),
+    )
+    (recording,) = io.discover(tmp_path)
+    return process(io.load(recording))
+
+
+def channel_cells(result):
+    return {row[0]: row[2:] for row in outputs.channel_rows(result)}
+
+
+def test_channels_without_coordinates_are_judged_on_noise_alone_above_100_hz_and_say_so(tmp_path):
+    result = two_unlocated_channels(tmp_path, 250.0)
+    quality = bad_channel_step(result).quality
+    assert (quality["branch"], quality["nUsableLocations"]) == ("ransac", 8)
+    assert quality["noiseCriterionApplied"] is True
+    assert quality["noiseOnlyChannels"] == ["Ch9", "Ch10"]
+    assert quality["notAssessedChannels"] == []
+    assert quality["removedChannels"] == []
+    cells = channel_cells(result)
+    for name in ("Ch9", "Ch10"):
+        status, description, reason = cells[name]
+        assert (status, reason) == ("good", "noise_only")
+        assert "no coordinates" in description
+    assert cells["Ch1"] == ["good", None, None]
+    counts = result.metrics["channels"]
+    assert (counts["nNoiseOnly"], counts["nNotAssessed"], counts["nGood"]) == (2, 0, 10)
+
+
+def test_a_noisy_channel_without_coordinates_is_bad_for_noise_alone(tmp_path):
+    result = two_unlocated_channels(tmp_path, 250.0, tone_hz=100.0)
+    quality = bad_channel_step(result).quality
+    assert quality["removedChannels"] == ["Ch10"]
+    assert quality["noiseOnlyChannels"] == ["Ch9", "Ch10"]
+    status, description, reason = channel_cells(result)["Ch10"]
+    assert (status, reason) == ("bad", "noise_only")
+    assert "noise" in description
+    counts = result.metrics["channels"]
+    assert (counts["nBad"], counts["nGood"], counts["nNoiseOnly"]) == (1, 9, 2)
+
+
+def test_channels_without_coordinates_are_not_assessed_when_the_noise_criterion_cannot_run(
+    tmp_path,
+):
+    """At 100 Hz or below clean_channels has no noise criterion, so nothing looked at Ch9 and Ch10."""
+    result = two_unlocated_channels(tmp_path, 100.0)
+    quality = bad_channel_step(result).quality
+    assert quality["branch"] == "ransac"
+    assert quality["noiseCriterionApplied"] is False
+    assert quality["noiseOnlyChannels"] == []
+    assert quality["notAssessedChannels"] == ["Ch9", "Ch10"]
+    cells = channel_cells(result)
+    for name in ("Ch9", "Ch10"):
+        status, description, reason = cells[name]
+        assert (status, reason) == (None, "not_assessed")
+        assert "no coordinates" in description
+    assert cells["Ch1"] == ["good", None, None]
+    counts = result.metrics["channels"]
+    assert (counts["nNotAssessed"], counts["nGood"], counts["nBad"]) == (2, 8, 0)
+    # the two it could not judge count against the share, because they are not reported good
+    assert counts["percentGood"] == 80.0
+    assert counts["assessed"] == ["flatline", "bad_channels"]
+
+
+def test_the_nolocs_branch_judges_every_channel_by_correlation(tmp_path):
+    data = correlated_channels(np.random.default_rng(22), 8, 250 * 70)
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    quality = bad_channel_step(result).quality
+    assert quality["branch"] == "nolocs"
+    assert (quality["noiseOnlyChannels"], quality["notAssessedChannels"]) == ([], [])
+    assert not result.noise_only.any()
+    assert not result.not_assessed.any()
 
 
 def test_just_over_half_located_still_takes_ransac():

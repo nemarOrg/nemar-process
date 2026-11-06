@@ -18,6 +18,11 @@
   "flatline_removed": [],
   "line_noise_removed_hz": [],
   "n_bad_segments": 40,
+  "noise_only_channels": [
+    "Pg1",
+    "Pg2"
+  ],
+  "not_assessed_channels": [],
   "plan_hash": "sha256:4f83a35b4dcc3d7a445a85db4f10435230583bab447496503528841d1f72b525",
   "recipe": {
     "id": "nemar-floor",

@@ -145,7 +145,12 @@ All text is UTF-8 with `\n` line ends and a final newline; a missing value is `n
 Floats are rounded with `round(float(x), n)` (percentages 4 decimals, dB 3, uV 4, seconds and rates 6) and written in TSV with fixed decimals so the text is stable.
 
 `_channels.tsv` has the columns `name`, `type`, `status`, `status_description`, `nemar_reason`, and every channel of the file in source order.
-A channel that was not assessed (a non-signal channel, or any signal channel when `bad_channels` was skipped) is `n/a` with the reason `not_assessed`, never `good`.
+A channel is `good` only when a criterion judged it.
+A channel that nothing judged is `n/a` with the reason `not_assessed`, never `good`: a non-signal channel, any signal channel when `bad_channels` was skipped, and a signal channel without coordinates on the RANSAC branch at a sampling rate of 100 Hz or below.
+The reasons are `flatline`, `ransac_correlation_or_noise`, `no_locs_correlation`, `noise_only` and `not_assessed`.
+`clean_channels` correlates only the channels that have coordinates with their RANSAC reconstruction, and its noise criterion runs only above 100 Hz.
+Above 100 Hz a signal channel without coordinates is therefore judged on noise alone: it is `good` or `bad` with the reason `noise_only`, and its description says there were no coordinates.
+The `bad_channels` step names these channels in its metrics (`noiseOnlyChannels` and `notAssessedChannels`).
 `_badsegments.tsv` has `onset`, `duration`, `label`, `nemar_reason`: one row per maximal run of False in the sample mask.
 It is absent when the window step was skipped, because an empty file would claim there are no bad segments.
 `_filters.json` states the drift filter (with the kernel's SHA-256) and the line-noise measurements and the band-stops that were applied with their order, transition and cutoffs.
@@ -177,22 +182,27 @@ Everything is over the signal channels, never the whole file.
 | Quantity | Definition |
 |---|---|
 | `channels.nInput`, `nSignal` | channels in the file; channels typed EEG or untyped |
-| `channels.nFlatline`, `nBad`, `nGood` | removed by flatline; removed by the bad-channel step; `nSignal - nFlatline - nBad`, read from `etc.clean_channel_mask` |
-| `channels.percentGood` | `100 * nGood / nSignal` |
-| `channels.assessed` | `["flatline"]` when the bad-channel step was skipped, else `["flatline","bad_channels"]`, so a flatline-only figure is never read as a full assessment |
+| `channels.nFlatline`, `nBad`, `nNotAssessed`, `nGood` | removed by flatline; removed by the bad-channel step; passed flatline and not judged by the bad-channel step; judged and kept. The four add up to `nSignal`, and the masks they are read from are `etc.clean_channel_mask` and the keep vector the flatline step returned |
+| `channels.nNoiseOnly` | channels without coordinates that only the noise criterion judged, whether they passed or not (they are also in `nBad` or `nGood`) |
+| `channels.percentGood` | `100 * nGood / nSignal`, so a channel nothing judged counts against it |
+| `channels.assessed` | `["flatline"]` when the bad-channel step was skipped, else `["flatline","bad_channels"]` |
 | `samples.*` | counts from the sample mask `clean_windows` returned; the whole key is null when the step was skipped, never 100 |
 | `lineNoise.beforeDb`, `afterDb`, `removedHz` | the excess above, per frequency, null when not measurable |
 | `robustAmplitude` | per signal channel that passed flatline: `1.4826 * median(abs(x - median(x)))` over all samples after the drift filter and any band-stop, in the unit the loader delivers (uV for EDF and BDF) |
 | `spectrum` | for each integer hertz from 1 to 70 (or Nyquist) that has a bin, the median over the remaining channels of the dB at that bin, after the bad channels were removed |
+
+When the bad-channel step was skipped, nothing was judged beyond flatline, so `nBad`, `nGood` and `percentGood` are null in `_qc.json`, in the record's `summaryMetrics` and in the recordings table.
+Null is not zero: zero bad channels would read as an assessment that found none.
 
 The channel mask comes from the working copy; the sample mask is the second return value of `clean_windows`, because the working copy's `etc` never receives it.
 
 ## The recordings table and the dataset record
 
 `desc-nemarfloor_recordings.tsv` has one row per discovered recording in path order, written as each recording ends so a killed job leaves a readable table.
-Its columns are `path`, `datatype`, `status`, `code`, `step`, `n_channels`, `n_signal_channels`, `duration_s`, `srate_hz`, `plan_hash`, `pct_good_channels`, `pct_good_samples`, `line_hz`, `line_db_before`, `line_db_after`, `n_bad_channels`, `n_bad_segments`, `skipped_steps` and `record_content_sha256`.
+Its columns are `path`, `datatype`, `status`, `code`, `step`, `n_channels`, `n_signal_channels`, `duration_s`, `srate_hz`, `plan_hash`, `pct_good_channels`, `pct_good_samples`, `line_hz`, `line_db_before`, `line_db_after`, `n_bad_channels`, `n_not_assessed`, `n_bad_segments`, `skipped_steps` and `record_content_sha256`.
 `line_hz` is the frequency with the larger excess before (a tie goes to 50), and the two dB columns are that frequency's.
-`n_bad_channels` counts the flatline and bad-channel removals together.
+`n_bad_channels` counts the flatline and bad-channel removals together; it and `pct_good_channels` are `n/a` for a recording whose bad-channel step was skipped, and `n_not_assessed` counts the signal channels that passed flatline and that step did not judge.
+A recording without a percentage is left out of the percent-good-channels histogram, whose `n` counts the recordings that have a value.
 `skipped_steps` is `step:reason` joined by commas.
 
 `desc-nemarfloor_signalJourney.json` is a valid signalJourney record whose `processingSteps` are a constant list of the recipe's steps with the recipe-level parameters (never read from a recording), and whose `qualityMetrics` count the recordings that succeeded and the recordings that skipped each step for each reason.

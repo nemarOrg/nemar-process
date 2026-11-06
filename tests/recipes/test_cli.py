@@ -320,6 +320,28 @@ def test_only_the_requested_recordings_are_processed(multi, tmp_path, cli):
     ]
 
 
+def test_the_table_says_what_the_bad_channel_step_assessed(first_run, multi, tmp_path, cli):
+    (assessed,) = table_rows(first_run["out"])
+    assert (assessed["pct_good_channels"], assessed["n_bad_channels"]) == ("90.4762", "2")
+    assert assessed["n_not_assessed"] == "0"
+    code, _, _ = cli(
+        "run",
+        "nemar-floor",
+        "--dataset-dir",
+        multi,
+        "--out",
+        tmp_path / "o",
+        "--recording",
+        "sub-02/eeg/sub-02_task-smoke_eeg.set",
+    )
+    assert code == 0
+    (skipped,) = table_rows(tmp_path / "o")
+    assert "bad_channels:too_short" in skipped["skipped_steps"]
+    # nothing was judged beyond flatline: the cells that would call a channel good or bad are empty
+    assert (skipped["pct_good_channels"], skipped["n_bad_channels"]) == ("n/a", "n/a")
+    assert skipped["n_not_assessed"] == "7"
+
+
 def test_the_dataset_id_is_the_directory_name_only_when_that_is_an_id(multi, tmp_path, cli):
     # the `multi` directory is named on007823
     cli("run", "nemar-floor", "--dataset-dir", multi, "--out", tmp_path / "a")

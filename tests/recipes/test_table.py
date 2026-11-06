@@ -25,6 +25,7 @@ SUCCEEDED = {
     "line_db_before": 7.48,
     "line_db_after": 7.48,
     "n_bad_channels": 2,
+    "n_not_assessed": 0,
     "n_bad_segments": 40,
     "skipped_steps": "line_noise_50:below_threshold",
     "record_content_sha256": "f" * 64,

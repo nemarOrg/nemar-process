@@ -45,6 +45,8 @@ def decisions(record: dict) -> dict:
         "flatline_removed": steps["flatline"]["qualityMetrics"]["removedChannels"],
         "bad_channels_branch": steps["bad_channels"]["qualityMetrics"]["branch"],
         "bad_channels_removed": steps["bad_channels"]["qualityMetrics"]["removedChannels"],
+        "noise_only_channels": steps["bad_channels"]["qualityMetrics"]["noiseOnlyChannels"],
+        "not_assessed_channels": steps["bad_channels"]["qualityMetrics"]["notAssessedChannels"],
         "drift_kernel_length": steps["drift"]["qualityMetrics"]["kernelLength"],
         "line_noise_removed_hz": steps["line_noise_measure"]["qualityMetrics"]["removedHz"],
         "n_bad_segments": steps["bad_windows"]["qualityMetrics"]["nSegments"],

@@ -165,40 +165,95 @@ def test_runs_are_the_maximal_stretches_of_false_with_their_start_and_length():
     assert qc.runs(np.array([], dtype=bool)) == []
 
 
-def test_channel_counts_come_from_the_two_masks():
-    after_flat = np.array([True, True, False, True, True, True])
-    final = np.array([True, False, False, True, True, True])
-    counts = qc.channel_counts(
-        n_input=8,
-        n_signal=6,
-        kept_after_flatline=after_flat,
-        kept_final=final,
-        bad_channels_assessed=True,
+def mask_of(values):
+    return np.array(values, dtype=bool)
+
+
+def counts_of(**overrides):
+    """channel_counts over six signal channels (eight in the file), every channel kept and judged."""
+    arguments = {
+        "n_input": 8,
+        "n_signal": 6,
+        "kept_after_flatline": np.ones(6, dtype=bool),
+        "kept_final": np.ones(6, dtype=bool),
+        "noise_only": np.zeros(6, dtype=bool),
+        "not_assessed": np.zeros(6, dtype=bool),
+        "bad_channels_assessed": True,
+    }
+    arguments.update(overrides)
+    return qc.channel_counts(**arguments)
+
+
+def test_channel_counts_come_from_the_masks():
+    counts = counts_of(
+        kept_after_flatline=np.array([True, True, False, True, True, True]),
+        kept_final=np.array([True, False, False, True, True, True]),
     )
     assert counts == {
         "nInput": 8,
         "nSignal": 6,
         "nFlatline": 1,
         "nBad": 1,
+        "nNoiseOnly": 0,
+        "nNotAssessed": 0,
         "nGood": 4,
         "percentGood": 66.6667,
         "assessed": ["flatline", "bad_channels"],
     }
 
 
-def test_when_bad_channels_were_not_assessed_the_counts_say_only_flatline_was():
+def test_a_channel_judged_on_noise_alone_is_good_or_bad_like_any_other_and_counted_apart():
+    counts = counts_of(
+        kept_final=np.array([True, False, True, True, True, True]),
+        noise_only=np.array([False, True, False, False, True, True]),
+    )
+    assert (counts["nBad"], counts["nGood"], counts["nNoiseOnly"]) == (1, 5, 3)
+    assert counts["percentGood"] == 83.3333
+
+
+def test_a_channel_the_step_did_not_judge_is_never_counted_good():
+    counts = counts_of(not_assessed=np.array([False, False, False, False, True, True]))
+    assert (counts["nGood"], counts["nNotAssessed"], counts["nBad"]) == (4, 2, 0)
+    assert counts["percentGood"] == 66.6667  # of all six: the two it could not judge are not good
+    assert counts["assessed"] == ["flatline", "bad_channels"]
+
+
+def test_when_bad_channels_were_not_assessed_what_would_claim_good_or_bad_is_null():
     mask = np.array([True, True, False, True])
     counts = qc.channel_counts(
         n_input=4,
         n_signal=4,
         kept_after_flatline=mask,
         kept_final=mask,
+        noise_only=np.zeros(4, dtype=bool),
+        not_assessed=mask.copy(),
         bad_channels_assessed=False,
     )
-    assert counts["nBad"] == 0
-    assert counts["nGood"] == 3
-    assert counts["percentGood"] == 75.0
+    assert counts["nFlatline"] == 1
+    assert counts["nNotAssessed"] == 3
+    assert (counts["nBad"], counts["nGood"], counts["percentGood"]) == (None, None, None)
     assert counts["assessed"] == ["flatline"]
+
+
+@pytest.mark.parametrize(
+    ("after_flat", "final", "noise_only", "not_assessed"),
+    [
+        ([1, 1, 1, 1, 1], [1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]),
+        ([1, 1, 0, 1, 1], [1, 0, 0, 1, 1], [0, 1, 0, 0, 1], [0, 0, 0, 0, 1]),
+        ([0, 1, 1, 1, 0], [0, 1, 1, 0, 0], [0, 1, 0, 1, 0], [0, 0, 1, 0, 0]),
+    ],
+)
+def test_every_signal_channel_is_in_exactly_one_of_flat_bad_not_assessed_or_good(
+    after_flat, final, noise_only, not_assessed
+):
+    counts = counts_of(
+        n_signal=5,
+        kept_after_flatline=mask_of(after_flat),
+        kept_final=mask_of(final),
+        noise_only=mask_of(noise_only),
+        not_assessed=mask_of(not_assessed),
+    )
+    assert counts["nFlatline"] + counts["nBad"] + counts["nNotAssessed"] + counts["nGood"] == 5
 
 
 def test_sample_counts_come_from_the_sample_mask_and_are_none_when_there_is_no_mask():
@@ -324,6 +379,8 @@ def assembled(**overrides):
         "signal_names": ["a", "b", "c", "d"],
         "kept_after_flatline": np.array([True, True, True, False]),
         "kept_final": np.array([True, True, False, False]),
+        "noise_only": np.array([False, False, False, False]),
+        "not_assessed": np.array([False, False, False, False]),
         "bad_channels_assessed": True,
         "sample_mask": np.array([True, False, True, True]),
         "robust": np.array([1.23456, 2.0, 3.0]),

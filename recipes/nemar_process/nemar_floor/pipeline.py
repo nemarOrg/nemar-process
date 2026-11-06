@@ -51,6 +51,9 @@ class FloorResult:
 
     ``signal_names`` and the two keep vectors (over the signal channels, True is kept) are carried
     together so a later recipe can record the good-channel set without recomputing it.
+    ``noise_only`` marks the signal channels the bad-channel step judged on its noise criterion
+    alone (no coordinates, so no correlation), ``not_assessed`` those that passed the flatline step
+    and that step did not judge at all; both are over the signal channels.
     """
 
     plan: plans.Plan
@@ -61,6 +64,8 @@ class FloorResult:
     signal_names: list[str]
     kept_after_flatline: np.ndarray
     kept_final: np.ndarray
+    noise_only: np.ndarray
+    not_assessed: np.ndarray
     bad_channels_branch: str | None
     sample_mask: np.ndarray | None
     metrics: dict[str, Any]
@@ -82,12 +87,34 @@ def channel_mask(work: dict[str, Any], n_signal: int, step_id: str) -> np.ndarra
     return mask
 
 
-def names_of(work: dict[str, Any]) -> list[str]:
-    return io.channel_labels(work)
+def judged_by(
+    kept_after_flatline: np.ndarray,
+    branch: str | None,
+    located: tuple[bool, ...],
+    srate: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Which signal channels only the noise criterion judged, and which nothing judged.
+
+    ``located`` is per channel that reached the bad-channel step. Without a step (``branch`` None)
+    nothing judged any of them. The nolocs criterion compares every channel with the others. RANSAC
+    correlates the channels that have coordinates, and its noise criterion looks at every channel
+    when the sampling rate is above ``NOISE_CRITERION_SRATE_HZ``; a channel without coordinates is
+    then judged on noise alone, and below that rate it is not judged at all.
+    """
+    nobody = np.zeros(kept_after_flatline.shape, dtype=bool)
+    if branch is None:
+        return nobody, kept_after_flatline.copy()
+    if branch == "nolocs":
+        return nobody, nobody.copy()
+    unlocated = nobody.copy()
+    unlocated[kept_after_flatline] = ~np.asarray(located, dtype=bool)
+    if srate > steps.NOISE_CRITERION_SRATE_HZ:
+        return unlocated, nobody
+    return nobody, unlocated
 
 
-def removed_names(before: list[str], kept: np.ndarray) -> list[str]:
-    return [name for name, keep in zip(before, kept, strict=True) if not keep]
+def names_where(names: list[str], mask: np.ndarray) -> list[str]:
+    return [name for name, flag in zip(names, mask, strict=True) if flag]
 
 
 def process(loaded: Loaded) -> FloorResult:
@@ -153,7 +180,7 @@ def process(loaded: Loaded) -> FloorResult:
         # every channel has a flat portion: eegprep refused to remove any, and a floor that went on
         # would call them all good. The cost is that a pause every channel shares fails the recording.
         raise RecordingError(ALL_CHANNELS_FLAT, "flatline")
-    flat = removed_names(signal_names, kept_after_flatline)
+    flat = names_where(signal_names, ~kept_after_flatline)
     recipe.add_step(
         "flatline",
         steps.FLATLINE_FUNCTION,
@@ -229,6 +256,8 @@ def process(loaded: Loaded) -> FloorResult:
     short = duration < steps.SHORT_RECORDING_S
     entering = int(work["nbchan"])
     branch: str | None = None
+    located: tuple[bool, ...] = ()
+    n_located = 0
     if short:
         recipe.add_rule("short-recording")
         recipe.add_skip("bad_channels", steps.RANSAC_FUNCTION, "too_short")
@@ -237,7 +266,9 @@ def process(loaded: Loaded) -> FloorResult:
         recipe.add_skip("bad_channels", steps.RANSAC_FUNCTION, "few_channels")
     else:
         guard = qc.location_guard(work["chanlocs"])
-        before_names = names_of(work)
+        located, n_located = guard.located, guard.n_located
+        if len(located) != entering:
+            raise RecordingError(INTERNAL_ERROR, "bad_channels", "channel_mask_inconsistent")
         if guard.usable:
             branch = "ransac"
             recipe.add_rule("locations-usable")
@@ -260,26 +291,29 @@ def process(loaded: Loaded) -> FloorResult:
             function, parameters = steps.NOLOCS_FUNCTION, steps.NOLOCS_CALL
         else:
             recipe.add_skip("bad_channels", steps.NOLOCS_FUNCTION, "sampling_rate_too_low")
-        if branch is not None:
-            kept_final = channel_mask(work, n_signal, "bad_channels")
-            gone = removed_names(before_names, kept_final[kept_after_flatline])
-            quality: dict[str, Any] = {
-                "branch": branch,
-                "nUsableLocations": guard.n_located,
-                "nRemoved": len(gone),
-                "removedChannels": gone,
-            }
-            if branch == "ransac":
-                quality["noiseCriterionApplied"] = srate > steps.NOISE_CRITERION_SRATE_HZ
-            recipe.add_step(
-                "bad_channels",
-                function,
-                parameters,
-                description=steps.DESCRIPTIONS["bad_channels"],
-                quality=quality,
-            )
-    if branch is None:
-        kept_final = kept_after_flatline
+    kept_final = (
+        channel_mask(work, n_signal, "bad_channels") if branch is not None else kept_after_flatline
+    )
+    noise_only, not_assessed = judged_by(kept_after_flatline, branch, located, srate)
+    if branch is not None:
+        gone = names_where(signal_names, kept_after_flatline & ~kept_final)
+        quality: dict[str, Any] = {
+            "branch": branch,
+            "nUsableLocations": n_located,
+            "nRemoved": len(gone),
+            "removedChannels": gone,
+            "noiseOnlyChannels": names_where(signal_names, noise_only),
+            "notAssessedChannels": names_where(signal_names, not_assessed),
+        }
+        if branch == "ransac":
+            quality["noiseCriterionApplied"] = srate > steps.NOISE_CRITERION_SRATE_HZ
+        recipe.add_step(
+            "bad_channels",
+            function,
+            parameters,
+            description=steps.DESCRIPTIONS["bad_channels"],
+            quality=quality,
+        )
 
     # 8 bad windows: keep the sample mask, discard the cleaned copy
     sample_mask: np.ndarray | None = None
@@ -314,6 +348,8 @@ def process(loaded: Loaded) -> FloorResult:
             signal_names=signal_names,
             kept_after_flatline=kept_after_flatline,
             kept_final=kept_final,
+            noise_only=noise_only,
+            not_assessed=not_assessed,
             bad_channels_assessed=branch is not None,
             sample_mask=sample_mask,
             robust=robust,
@@ -366,6 +402,8 @@ def process(loaded: Loaded) -> FloorResult:
         signal_names=signal_names,
         kept_after_flatline=kept_after_flatline,
         kept_final=kept_final,
+        noise_only=noise_only,
+        not_assessed=not_assessed,
         bad_channels_branch=branch,
         sample_mask=sample_mask,
         metrics=metrics,

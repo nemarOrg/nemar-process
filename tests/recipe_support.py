@@ -109,6 +109,21 @@ def write_set(
     return path
 
 
+def correlated_channels(rng, channels, samples):
+    """Channels that share one source and add their own noise: what real scalp channels look like to
+    a criterion that compares channels with each other. Independent noise would be all flagged."""
+    return rng.standard_normal((1, samples)) + 0.3 * rng.standard_normal((channels, samples))
+
+
+def sphere_positions(names, seed=1):
+    """Positions on a sphere of radius 80 mm for these channel names, spread in all three dimensions."""
+    import numpy as np
+
+    points = np.random.default_rng(seed).standard_normal((len(names), 3))
+    points = 80.0 * points / np.sqrt((points**2).sum(axis=1, keepdims=True))
+    return {name: tuple(point) for name, point in zip(names, points, strict=True)}
+
+
 def loaded_fixture():
     """The fixture recording, freshly loaded: a test may change it in memory before the floor."""
     from nemar_process.common import io

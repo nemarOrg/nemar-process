@@ -33,6 +33,7 @@ def succeeded(i, **changes):
         "line_db_before": 7.48,
         "line_db_after": 7.48,
         "n_bad_channels": 2,
+        "n_not_assessed": 0,
         "n_bad_segments": 40,
         "skipped_steps": "line_noise_50:below_threshold,line_noise_60:below_threshold",
         "record_content_sha256": "f" * 64,
@@ -75,7 +76,10 @@ def mixed():
         succeeded(
             2,
             plan_hash="sha256:" + "b" * 64,
+            pct_good_channels=None,
             pct_good_samples=None,
+            n_bad_channels=None,
+            n_not_assessed=21,
             n_bad_segments=None,
             skipped_steps="bad_channels:too_short,bad_windows:too_short",
         ),
@@ -160,11 +164,13 @@ def test_the_distributions_have_fixed_edges_and_count_each_value_once(mixed):
     summary = mixed[0]["summaryMetrics"]
     channels = summary["percentGoodChannels"]
     assert channels["histogram"]["edges"] == list(range(0, 101, 10))
-    assert channels["histogram"]["counts"] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 3]
+    # the recording whose bad-channel step was skipped has no percentage, so it is not in the
+    # histogram: a share of nothing assessed would sit in the top bin and read as a clean recording
+    assert channels["histogram"]["counts"] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 2]
     assert (channels["n"], channels["min"], channels["median"], channels["max"]) == (
-        3,
+        2,
         90.4762,
-        90.4762,
+        95.2381,
         100.0,
     )
     samples = summary["percentGoodSamples"]

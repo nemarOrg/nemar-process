@@ -242,6 +242,8 @@ def test_the_summary_metrics_are_the_scalars_of_the_qc_file(record):
         "nChannelsInput": 22,
         "nSignalChannels": 21,
         "nGoodChannels": 19,
+        "nNoiseOnlyChannels": 2,
+        "nNotAssessedChannels": 0,
         "percentGoodChannels": 90.4762,
         "percentGoodSamples": 49.4043,
         "durationS": 282.0,

@@ -34,6 +34,16 @@ BAD_TEXT = {
     "nolocs": "low correlation with other channels",
 }
 BAD_REASON = {"ransac": "ransac_correlation_or_noise", "nolocs": "no_locs_correlation"}
+# A channel without coordinates cannot be correlated with a RANSAC reconstruction, so only the
+# noise criterion can judge it, and only above the sampling rate that criterion needs.
+NOISE_ONLY_REASON = "noise_only"
+NOISE_ONLY_GOOD_TEXT = "no coordinates: judged on the noise criterion only"
+NOISE_ONLY_BAD_TEXT = "high noise (no coordinates: correlation could not be applied)"
+UNJUDGED_TEXT = (
+    "no coordinates, and the noise criterion needs a sampling rate above {:g} Hz".format(
+        steps.NOISE_CRITERION_SRATE_HZ
+    )
+)
 LABEL = naming.label(steps.RECIPE_ID)
 
 INFO = RecipeInfo(
@@ -62,8 +72,13 @@ def validator() -> Any:
 
 
 def channel_rows(result: FloorResult) -> list[list[Any]]:
-    """Every channel of the file, in file order: nothing is dropped, nothing is invented."""
+    """Every channel of the file, in file order: nothing is dropped, nothing is invented.
+
+    A channel is called good only when a criterion judged it: one that nothing judged is ``n/a``
+    with the reason ``not_assessed``, and one that only the noise criterion judged says so.
+    """
     position = {index: place for place, index in enumerate(result.signal_indices)}
+    branch = result.bad_channels_branch
     rows: list[list[Any]] = []
     for index, name in enumerate(result.all_names):
         kind = result.all_types[index]
@@ -72,10 +87,15 @@ def channel_rows(result: FloorResult) -> list[list[Any]]:
             rows.append([name, kind, None, None, "not_assessed"])
         elif not result.kept_after_flatline[place]:
             rows.append([name, kind, "bad", FLAT_TEXT, "flatline"])
-        elif result.bad_channels_branch is None:
-            rows.append([name, kind, None, None, "not_assessed"])
+        elif branch is None or result.not_assessed[place]:
+            why = None if branch is None else UNJUDGED_TEXT
+            rows.append([name, kind, None, why, "not_assessed"])
+        elif result.noise_only[place]:
+            if result.kept_final[place]:
+                rows.append([name, kind, "good", NOISE_ONLY_GOOD_TEXT, NOISE_ONLY_REASON])
+            else:
+                rows.append([name, kind, "bad", NOISE_ONLY_BAD_TEXT, NOISE_ONLY_REASON])
         elif not result.kept_final[place]:
-            branch = result.bad_channels_branch
             rows.append([name, kind, "bad", BAD_TEXT[branch], BAD_REASON[branch]])
         else:
             rows.append([name, kind, "good", None, None])
@@ -107,6 +127,8 @@ def summary_metrics(result: FloorResult) -> dict[str, Any]:
         "nChannelsInput": channels["nInput"],
         "nSignalChannels": channels["nSignal"],
         "nGoodChannels": channels["nGood"],
+        "nNoiseOnlyChannels": channels["nNoiseOnly"],
+        "nNotAssessedChannels": channels["nNotAssessed"],
         "percentGoodChannels": channels["percentGood"],
         "percentGoodSamples": None if samples is None else samples["percentGood"],
         "durationS": result.metrics["durationS"],
@@ -136,7 +158,10 @@ def table_row(recording: Recording, result: FloorResult, content_sha256: str) ->
         "line_hz": line_hz,
         "line_db_before": None if before is None else round(before, 3),
         "line_db_after": None if after is None else round(after, 3),
-        "n_bad_channels": channels["nFlatline"] + channels["nBad"],
+        "n_bad_channels": None
+        if channels["nBad"] is None
+        else channels["nFlatline"] + channels["nBad"],
+        "n_not_assessed": channels["nNotAssessed"],
         "n_bad_segments": None if samples is None else samples["nBadSegments"],
         "skipped_steps": skipped or None,
         "record_content_sha256": content_sha256,

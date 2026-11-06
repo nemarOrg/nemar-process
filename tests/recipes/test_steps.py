@@ -22,8 +22,15 @@ from eegprep import (
 )
 from nemar_process.common import io
 from nemar_process.common.errors import RecordingError, RecordingSkipped
-from nemar_process.nemar_floor import process
-from recipe_support import DATASET, SMOKE_SET, floor_literals, loaded_fixture, write_set
+from nemar_process.nemar_floor import outputs, process
+from recipe_support import (
+    DATASET,
+    SMOKE_SET,
+    correlated_channels,
+    floor_literals,
+    loaded_fixture,
+    write_set,
+)
 
 ORDER = [
     "load",
@@ -118,6 +125,27 @@ def test_the_fixture_has_no_flat_channel_and_the_masks_say_so(fixture_result):
     assert fixture_result.all_names[-1] == "ECG"
 
 
+def test_the_fixtures_channels_without_coordinates_are_named_and_judged_on_noise_alone(
+    fixture_result,
+):
+    """Pg1 and Pg2 have no coordinates: clean_channels cannot correlate them with a reconstruction,
+    so only its noise criterion looked at them (it runs above 100 Hz and the fixture is at 200)."""
+    quality = fixture_result.plan.step("bad_channels").quality
+    assert quality["noiseCriterionApplied"] is True
+    assert quality["noiseOnlyChannels"] == ["Pg1", "Pg2"]
+    assert quality["notAssessedChannels"] == []
+    channels = fixture_result.metrics["channels"]
+    assert (channels["nNoiseOnly"], channels["nNotAssessed"]) == (2, 0)
+    assert (channels["nFlatline"], channels["nBad"], channels["nGood"]) == (0, 2, 19)
+    rows = {row[0]: row[2:] for row in outputs.channel_rows(fixture_result)}
+    for name in ("Pg1", "Pg2"):
+        status, description, reason = rows[name]
+        assert (status, reason) == ("good", "noise_only")
+        assert "no coordinates" in description
+    assert rows["Fp1"] == ["good", None, None]
+    assert rows["O1"][0] == "bad"
+
+
 def test_the_signal_channels_step_names_what_it_left_out(fixture_result):
     assert fixture_result.plan.step("signal_channels").quality == {
         "nInputChannels": 22,
@@ -196,9 +224,13 @@ def test_a_short_all_eeg_recording_skips_the_signal_channels_and_the_two_window_
     assert plan.step("flatline").quality == {"nRemoved": 1, "removedChannels": ["Ch8"]}
     assert result.sample_mask is None
     assert result.metrics["samples"] is None
-    assert result.metrics["channels"]["assessed"] == ["flatline"]
-    assert result.metrics["channels"]["percentGood"] == 87.5
     assert result.bad_channels_branch is None
+    # the bad-channel step did not run, so no channel was judged beyond flatline: what would claim a
+    # channel is good or bad is null, never zero or a flatline-only percentage
+    channels = result.metrics["channels"]
+    assert channels["assessed"] == ["flatline"]
+    assert (channels["nFlatline"], channels["nNotAssessed"], channels["nNoiseOnly"]) == (1, 7, 0)
+    assert (channels["nBad"], channels["nGood"], channels["percentGood"]) == (None, None, None)
 
 
 def test_a_set_saved_with_an_empty_etc_runs_the_whole_floor(tmp_path):
@@ -261,12 +293,6 @@ def test_a_low_sampling_rate_without_locations_cannot_use_the_nolocs_criterion(t
     }
     assert result.bad_channels_branch is None
     assert result.plan.has_step("bad_windows")
-
-
-def correlated_channels(rng, channels, samples):
-    """Channels that share one source and add their own noise: what real scalp channels look like to
-    a criterion that compares channels with each other. Independent noise would be all flagged."""
-    return rng.standard_normal((1, samples)) + 0.3 * rng.standard_normal((channels, samples))
 
 
 def flat_failure(tmp_path, data):

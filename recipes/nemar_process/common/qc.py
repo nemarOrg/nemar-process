@@ -59,9 +59,13 @@ def count_located(chanlocs: list[dict[str, Any]]) -> int:
 
 @dataclass(frozen=True)
 class LocationGuard:
-    """Whether the channel positions are good enough for the RANSAC criterion, and why not."""
+    """Whether the channel positions are good enough for the RANSAC criterion, and why not.
+
+    ``located`` says for each channel, in order, whether it has finite coordinates.
+    """
 
     usable: bool
+    located: tuple[bool, ...]
     n_located: int
     n_signal: int
     rank: int | None
@@ -77,17 +81,22 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
     here, before the call. It is a rank test, not a decomposition of the data.
     """
     n_signal = len(chanlocs)
-    points = [[float(c["X"]), float(c["Y"]), float(c["Z"])] for c in chanlocs if located(c)]
+    flags = tuple(located(c) for c in chanlocs)
+    points = [
+        [float(c["X"]), float(c["Y"]), float(c["Z"])]
+        for c, flag in zip(chanlocs, flags, strict=True)
+        if flag
+    ]
     n_located = len(points)
     if n_located < MIN_LOCATED_CHANNELS or 2 * n_located < n_signal:
-        return LocationGuard(False, n_located, n_signal, None, "too-few-locations")
+        return LocationGuard(False, flags, n_located, n_signal, None, "too-few-locations")
     matrix = np.asarray(points, dtype=np.float64)
     lengths = np.sqrt((matrix**2).sum(axis=1))
     unit = matrix[lengths > 0] / lengths[lengths > 0][:, None]
     rank = int(np.linalg.matrix_rank(unit)) if len(unit) else 0
     if rank < 3:
-        return LocationGuard(False, n_located, n_signal, rank, "degenerate-geometry")
-    return LocationGuard(True, n_located, n_signal, rank, "locations-usable")
+        return LocationGuard(False, flags, n_located, n_signal, rank, "degenerate-geometry")
+    return LocationGuard(True, flags, n_located, n_signal, rank, "locations-usable")
 
 
 # ---- spectra ----------------------------------------------------------------------------------
@@ -180,21 +189,41 @@ def channel_counts(
     n_signal: int,
     kept_after_flatline: np.ndarray,
     kept_final: np.ndarray,
+    noise_only: np.ndarray,
+    not_assessed: np.ndarray,
     bad_channels_assessed: bool,
 ) -> dict[str, Any]:
-    """Channel counts over the signal channels, from the masks before and after bad channels."""
+    """Channel counts over the signal channels, from the masks the steps returned.
+
+    Every signal channel is in exactly one of four groups: flat (the flatline step removed it), bad
+    (the bad-channel step removed it), not assessed (the bad-channel step did not judge it: it did
+    not run, or the channel has no coordinates and the noise criterion needs a higher sampling rate)
+    or good (judged and kept). ``noise_only`` marks the channels without coordinates that only the
+    noise criterion judged, whether they passed or not; they are in ``nBad`` or ``nGood`` too.
+
+    ``percentGood`` is the share of the signal channels reported good, so a channel nothing judged
+    counts against it. When the bad-channel step did not run no channel was judged beyond flatline,
+    and what would claim a channel is good or bad is None: zero would read as an assessment.
+    """
     flat = int((~kept_after_flatline).sum())
-    bad = int((kept_after_flatline & ~kept_final).sum())
-    good = int(kept_final.sum())
-    return {
+    counts: dict[str, Any] = {
         "nInput": int(n_input),
         "nSignal": int(n_signal),
         "nFlatline": flat,
-        "nBad": bad,
-        "nGood": good,
-        "percentGood": rounded(100.0 * good / n_signal, 4),
-        "assessed": ["flatline", "bad_channels"] if bad_channels_assessed else ["flatline"],
+        "nBad": None,
+        "nNoiseOnly": int(noise_only.sum()),
+        "nNotAssessed": int(not_assessed.sum()),
+        "nGood": None,
+        "percentGood": None,
+        "assessed": ["flatline"],
     }
+    if bad_channels_assessed:
+        good = int((kept_final & ~not_assessed).sum())
+        counts["nBad"] = int((kept_after_flatline & ~kept_final).sum())
+        counts["nGood"] = good
+        counts["percentGood"] = rounded(100.0 * good / n_signal, 4)
+        counts["assessed"] = ["flatline", "bad_channels"]
+    return counts
 
 
 def sample_counts(sample_mask: np.ndarray | None) -> dict[str, Any] | None:
@@ -223,6 +252,8 @@ def floor_metrics(
     signal_names: list[str],
     kept_after_flatline: np.ndarray,
     kept_final: np.ndarray,
+    noise_only: np.ndarray,
+    not_assessed: np.ndarray,
     bad_channels_assessed: bool,
     sample_mask: np.ndarray | None,
     robust: np.ndarray,
@@ -245,6 +276,8 @@ def floor_metrics(
             n_signal=len(signal_names),
             kept_after_flatline=kept_after_flatline,
             kept_final=kept_final,
+            noise_only=noise_only,
+            not_assessed=not_assessed,
             bad_channels_assessed=bad_channels_assessed,
         ),
         "samples": sample_counts(sample_mask),

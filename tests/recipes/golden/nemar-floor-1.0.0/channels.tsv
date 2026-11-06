@@ -18,6 +18,6 @@ T6	EEG	bad	low correlation with RANSAC estimate or high noise	ransac_correlation
 FZ	EEG	good	n/a	n/a
 CZ	EEG	good	n/a	n/a
 PZ	EEG	good	n/a	n/a
-Pg1	EEG	good	n/a	n/a
-Pg2	EEG	good	n/a	n/a
+Pg1	EEG	good	no coordinates: judged on the noise criterion only	noise_only
+Pg2	EEG	good	no coordinates: judged on the noise criterion only	noise_only
 ECG	ECG	n/a	n/a	not_assessed
