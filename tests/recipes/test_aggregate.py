@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
+from recipe_support import correlated_channels, touch_tree, write_set
 
 EXCLUDED_NEMAR = {"run_id"}
 EXCLUDED_REPORT = {"started_utc", "finished_utc"}
@@ -171,3 +173,62 @@ def test_a_run_ends_with_the_same_record_aggregate_would_write_for_it(runs, cli)
     assert stripped(out / "desc-nemarfloor_signalJourney.json") == stripped(
         runs["whole"] / "desc-nemarfloor_signalJourney.json"
     )
+
+
+def split_dataset(root):
+    """A dataset of two subjects; sub-01 has two sessions and a MEG file at each level, sub-02 one."""
+    rng = np.random.default_rng(40)
+    for session in ("ses-1", "ses-2"):
+        name = "sub-01_{}_task-x_eeg.set".format(session)
+        write_set(
+            root / "sub-01" / session / "eeg" / name,
+            correlated_channels(rng, 8, 250 * 20),
+            srate=250,
+        )
+    write_set(
+        root / "sub-02" / "eeg" / "sub-02_task-x_eeg.set", correlated_channels(rng, 8, 250 * 20)
+    )
+    touch_tree(
+        root,
+        [
+            "dataset_description.json",
+            "sub-01/meg/sub-01_task-a_meg.fif",
+            "sub-01/ses-2/meg/sub-01_ses-2_task-a_meg.fif",
+            "sub-02/meg/sub-02_task-a_meg.fif",
+            "sub-02/emg/sub-02_task-a_emg.edf",
+        ],
+    )
+    return root
+
+
+SPLIT_CHUNKS = {
+    "first": ["sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.set"],
+    "second": ["sub-01/ses-2/eeg/sub-01_ses-2_task-x_eeg.set"],
+    "third": ["sub-02/eeg/sub-02_task-x_eeg.set"],
+}
+
+
+def ignored_of(out):
+    record = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text(encoding="utf-8"))
+    return record["extensions"]["nemar"]["ignored_datatypes"]
+
+
+def test_a_file_of_another_datatype_is_counted_once_however_the_runs_split_its_subject(
+    tmp_path, cli
+):
+    """sub-01's recordings are in two runs and each run sees sub-01's MEG files; the sum is exact."""
+    dataset = split_dataset(tmp_path / "on007823")
+    chunks = {}
+    for name, recordings in SPLIT_CHUNKS.items():
+        chunks[name] = run(cli, dataset, tmp_path / name, recordings)
+    whole = run(cli, dataset, tmp_path / "whole")
+    # the run that has sub-01's first recording owns sub-01's files, whichever the sessions
+    assert ignored_of(chunks["first"]) == {"meg": 2}
+    assert ignored_of(chunks["second"]) == {}
+    assert ignored_of(chunks["third"]) == {"emg": 1, "meg": 1}
+    assert ignored_of(whole) == {"emg": 1, "meg": 3}
+
+    out = tmp_path / "merged"
+    code, _, _ = aggregate(cli, chunks, out, "first", "second", "third")
+    assert code == 0
+    assert ignored_of(out) == ignored_of(whole) == {"emg": 1, "meg": 3}

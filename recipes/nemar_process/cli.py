@@ -232,19 +232,27 @@ def process_recording(
 
 def work_items(
     dataset_dir: Path, requested: list[str]
-) -> list[tuple[str, io.Recording | None, RecordingError | None]]:
-    """What the run goes through, by path: recordings, and requested paths that are not usable."""
+) -> tuple[list[tuple[str, io.Recording | None, RecordingError | None]], set[str] | None]:
+    """What the run goes through, by path, and the subjects whose other datatypes it counts.
+
+    The items are recordings and requested paths that are not usable. A run of the whole dataset
+    counts every other datatype (``None``); a run of some recordings counts those of the subjects
+    whose first recording it has (``io.owned_subjects``), so that runs which split a dataset between
+    them, and an ``aggregate`` that adds their counts, count each file once.
+    """
     discovered = io.discover(dataset_dir)
     problems: list[tuple[str, RecordingError]] = []
+    owned: set[str] | None = None
     if requested:
         chosen, problems = io.select(dataset_dir, requested, discovered)
+        owned = io.owned_subjects(discovered, chosen)
     else:
         chosen = discovered
     items: list[tuple[str, io.Recording | None, RecordingError | None]] = [
         (recording.path, recording, None) for recording in chosen
     ]
     items += [(path, None, error) for path, error in problems]
-    return sorted(items, key=lambda item: item[0])
+    return sorted(items, key=lambda item: item[0]), owned
 
 
 def finalize(
@@ -351,8 +359,8 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         context = RunContext(
             dataset_dir, identity, determinism.engine_info(), dict(determinism.SEEDS)
         )
-        items = work_items(dataset_dir, args.recording)
-        ignored = io.ignored_datatypes(dataset_dir)
+        items, owned = work_items(dataset_dir, args.recording)
+        ignored = io.ignored_datatypes(dataset_dir, owned)
         seen: set[str] = set()
         try:
             with table.TableWriter(

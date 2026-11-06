@@ -141,6 +141,43 @@ def test_the_files_of_other_datatypes_are_counted_never_discovered(tmp_path):
     assert io.ignored_datatypes(root) == {"emg": 1, "ieeg": 1, "meg": 3}
 
 
+def test_other_datatypes_are_counted_only_for_the_subjects_asked_for(tmp_path):
+    root = touch_tree(
+        tmp_path,
+        [
+            "sub-01/eeg/sub-01_task-a_eeg.edf",
+            "sub-01/meg/sub-01_task-a_meg.fif",
+            "sub-01/ses-1/ieeg/sub-01_ses-1_task-a_ieeg.edf",
+            "sub-02/eeg/sub-02_task-a_eeg.edf",
+            "sub-02/meg/sub-02_task-a_meg.fif",
+            "sub-02/meg/sub-02_task-b_meg.fif",
+        ],
+    )
+    assert io.ignored_datatypes(root, {"sub-01"}) == {"ieeg": 1, "meg": 1}
+    assert io.ignored_datatypes(root, {"sub-02"}) == {"meg": 2}
+    assert io.ignored_datatypes(root, set()) == {}
+    assert io.ignored_datatypes(root, None) == {"ieeg": 1, "meg": 3}
+
+
+def test_a_subject_belongs_to_the_run_that_has_its_first_recording(tmp_path):
+    """So runs that split a dataset between them count each subject's other datatypes once."""
+    root = touch_tree(
+        tmp_path,
+        [
+            "sub-01/ses-1/eeg/sub-01_ses-1_task-a_eeg.edf",
+            "sub-01/ses-2/eeg/sub-01_ses-2_task-a_eeg.edf",
+            "sub-02/eeg/sub-02_task-a_eeg.edf",
+        ],
+    )
+    found = {recording.path: recording for recording in io.discover(root)}
+    first, second, other = (found[name] for name in sorted(found))
+    assert io.owned_subjects(list(found.values()), [first]) == {"sub-01"}
+    assert io.owned_subjects(list(found.values()), [second]) == set()
+    assert io.owned_subjects(list(found.values()), [second, other]) == {"sub-02"}
+    assert io.owned_subjects(list(found.values()), [first, second, other]) == {"sub-01", "sub-02"}
+    assert io.owned_subjects(list(found.values()), []) == set()
+
+
 def test_a_dataset_with_nothing_else_has_no_ignored_datatypes(tmp_path):
     root = touch_tree(tmp_path, ["sub-01/eeg/sub-01_task-a_eeg.edf"])
     assert io.ignored_datatypes(root) == {}

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import posixpath
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -175,15 +175,31 @@ def discover(dataset_dir: Path) -> list[Recording]:
     return sorted(found, key=lambda recording: recording.path)
 
 
-def ignored_datatypes(dataset_dir: Path) -> dict[str, int]:
+def owned_subjects(discovered: Sequence[Recording], chosen: Collection[Recording]) -> set[str]:
+    """The subjects whose first recording (in path order) is among ``chosen``.
+
+    A run that processes part of a dataset counts the other datatypes of these subjects and of no
+    others, so runs that split a dataset between them count each file once, whichever way they
+    split a subject's recordings.
+    """
+    first: dict[str, Recording] = {}
+    for recording in sorted(discovered, key=lambda found: found.path):
+        first.setdefault(recording.path.split("/", 1)[0], recording)
+    return {subject for subject, recording in first.items() if recording in chosen}
+
+
+def ignored_datatypes(dataset_dir: Path, subjects: Collection[str] | None = None) -> dict[str, int]:
     """For each other recording datatype, how many of its recordings the dataset holds.
 
     A file or a directory (a ``.ds`` folder) named ``*_<datatype>.<ext>``, sidecars excepted, so a
-    reader can see that the recipe left them alone.
+    reader can see that the recipe left them alone. ``subjects`` limits the count to these subject
+    directories (``None`` counts them all).
     """
     root = Path(dataset_dir)
     counts: dict[str, int] = {}
     for base in _bases(root):
+        if subjects is not None and base.relative_to(root).parts[0] not in subjects:
+            continue
         for datatype in IGNORED_DATATYPES:
             directory = base / datatype
             if not directory.is_dir():
