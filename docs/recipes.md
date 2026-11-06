@@ -75,7 +75,7 @@ A link that points at nothing is a recording too: it fails to load and has its r
 Other datatypes (`meg`, `ieeg`, `emg`, `nirs`, `motion`) are not discovered; the dataset record counts them in `extensions.nemar.ignored_datatypes`.
 A run of the whole dataset counts all of them.
 A run limited with `--recording` counts them for the subjects whose first recording (in path order) it has, so that runs which split a dataset between them, even inside one subject's sessions, add up in `aggregate` to what a run of the whole dataset counts, and no file is counted twice.
-A subject with no EEG recording is counted only by a run of the whole dataset.
+A subject with no EEG recording has no first recording, so the run that has the dataset's first recording (in path order) counts it, and a split dataset counts it once.
 Every discovered recording ends in exactly one row of the recordings table:
 
 | Status | Code | Meaning |

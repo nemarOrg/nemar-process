@@ -171,11 +171,37 @@ def test_a_subject_belongs_to_the_run_that_has_its_first_recording(tmp_path):
     )
     found = {recording.path: recording for recording in io.discover(root)}
     first, second, other = (found[name] for name in sorted(found))
-    assert io.owned_subjects(list(found.values()), [first]) == {"sub-01"}
-    assert io.owned_subjects(list(found.values()), [second]) == set()
-    assert io.owned_subjects(list(found.values()), [second, other]) == {"sub-02"}
-    assert io.owned_subjects(list(found.values()), [first, second, other]) == {"sub-01", "sub-02"}
-    assert io.owned_subjects(list(found.values()), []) == set()
+    everything = list(found.values())
+    assert io.owned_subjects(root, everything, [first]) == {"sub-01"}
+    assert io.owned_subjects(root, everything, [second]) == set()
+    assert io.owned_subjects(root, everything, [second, other]) == {"sub-02"}
+    assert io.owned_subjects(root, everything, [first, second, other]) == {"sub-01", "sub-02"}
+    assert io.owned_subjects(root, everything, []) == set()
+
+
+def test_a_subject_with_no_eeg_recording_belongs_to_the_run_that_has_the_first_recording(tmp_path):
+    """Nobody has such a subject's first recording, so one run takes them all: the run that has the
+    first recording of the dataset. A subject with no EEG recording is counted once, not never."""
+    root = touch_tree(
+        tmp_path,
+        [
+            "sub-01/eeg/sub-01_task-a_eeg.edf",
+            "sub-02/meg/sub-02_task-a_meg.fif",
+            "sub-03/eeg/sub-03_task-a_eeg.edf",
+            "sub-04/anat/sub-04_T1w.nii.gz",
+        ],
+    )
+    first, last = found = io.discover(root)
+    assert io.owned_subjects(root, found, [first]) == {"sub-01", "sub-02", "sub-04"}
+    assert io.owned_subjects(root, found, [last]) == {"sub-03"}
+    assert io.owned_subjects(root, found, [first, last]) == {"sub-01", "sub-02", "sub-03", "sub-04"}
+    assert io.owned_subjects(root, found, []) == set()
+
+
+def test_a_dataset_with_no_eeg_recording_at_all_has_no_run_that_owns_its_subjects(tmp_path):
+    """Only a run of the whole dataset counts them (it counts every subject)."""
+    root = touch_tree(tmp_path, ["sub-01/meg/sub-01_task-a_meg.fif"])
+    assert io.owned_subjects(root, [], []) == set()
 
 
 def test_a_dataset_with_nothing_else_has_no_ignored_datatypes(tmp_path):

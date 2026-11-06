@@ -131,11 +131,16 @@ class Loaded:
 # ---- discovery --------------------------------------------------------------------------------
 
 
+def _subjects(root: Path) -> Iterator[Path]:
+    """The subject directories at the top of the dataset, in name order."""
+    for subject in sorted(root.iterdir()):
+        if subject.name.startswith("sub-") and subject.is_dir():
+            yield subject
+
+
 def _bases(root: Path) -> Iterator[Path]:
     """The directories that can hold a datatype directory: each subject's, then its sessions'."""
-    for subject in sorted(root.iterdir()):
-        if not (subject.name.startswith("sub-") and subject.is_dir()):
-            continue
+    for subject in _subjects(root):
         yield subject
         yield from (
             d for d in sorted(subject.iterdir()) if d.name.startswith("ses-") and d.is_dir()
@@ -184,17 +189,26 @@ def discover(dataset_dir: Path) -> list[Recording]:
     return sorted(found, key=lambda recording: recording.path)
 
 
-def owned_subjects(discovered: Sequence[Recording], chosen: Collection[Recording]) -> set[str]:
-    """The subjects whose first recording (in path order) is among ``chosen``.
+def owned_subjects(
+    dataset_dir: Path, discovered: Sequence[Recording], chosen: Collection[Recording]
+) -> set[str]:
+    """The subjects whose other datatypes a run that processes ``chosen`` counts.
 
-    A run that processes part of a dataset counts the other datatypes of these subjects and of no
-    others, so runs that split a dataset between them count each file once, whichever way they
-    split a subject's recordings.
+    The subjects whose first recording (in path order) is among ``chosen``; and, when ``chosen`` has
+    the first recording of the whole dataset, every subject that has no EEG recording, because no
+    run has such a subject's first recording and it would be counted by none. A run that processes
+    part of a dataset counts the other datatypes of these subjects and of no others, so runs that
+    split a dataset between them count each file once, whichever way they split a subject's
+    recordings.
     """
+    ordered = sorted(discovered, key=lambda found: found.path)
     first: dict[str, Recording] = {}
-    for recording in sorted(discovered, key=lambda found: found.path):
+    for recording in ordered:
         first.setdefault(recording.path.split("/", 1)[0], recording)
-    return {subject for subject, recording in first.items() if recording in chosen}
+    owned = {subject for subject, recording in first.items() if recording in chosen}
+    if ordered and ordered[0] in chosen:
+        owned |= {subject.name for subject in _subjects(Path(dataset_dir))} - first.keys()
+    return owned
 
 
 def ignored_datatypes(dataset_dir: Path, subjects: Collection[str] | None = None) -> dict[str, int]:

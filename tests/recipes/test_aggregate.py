@@ -560,3 +560,25 @@ def test_a_file_of_another_datatype_is_counted_once_however_the_runs_split_its_s
     code, _, _ = aggregate(cli, chunks, out, "first", "second", "third")
     assert code == 0
     assert ignored_of(out) == ignored_of(whole) == {"emg": 1, "meg": 3}
+
+
+def test_a_subject_with_no_eeg_recording_is_counted_once_by_the_run_with_the_first_recording(
+    tmp_path, cli
+):
+    """The review's case: a MEG-only subject belonged to no run, so a split dataset lost its files."""
+    dataset = split_dataset(tmp_path / "on007823")
+    touch_tree(
+        dataset,
+        ["sub-03/meg/sub-03_task-a_meg.fif", "sub-04/emg/sub-04_task-a_emg.edf"],
+    )
+    chunks = {name: run(cli, dataset, tmp_path / name, rec) for name, rec in SPLIT_CHUNKS.items()}
+    whole = run(cli, dataset, tmp_path / "whole")
+    assert ignored_of(whole) == {"emg": 2, "meg": 4}
+    # sub-03 and sub-04 have no EEG recording; the run with the dataset's first recording has them
+    assert ignored_of(chunks["first"]) == {"emg": 1, "meg": 3}
+    assert ignored_of(chunks["second"]) == {}
+    assert ignored_of(chunks["third"]) == {"emg": 1, "meg": 1}
+
+    out = tmp_path / "merged"
+    assert aggregate(cli, chunks, out, "first", "second", "third")[0] == 0
+    assert ignored_of(out) == ignored_of(whole)

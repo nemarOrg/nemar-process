@@ -258,15 +258,16 @@ def work_items(
 
     The items are recordings, and requested paths that are not usable (each with its error). A run
     of the whole dataset counts every other datatype (``None``); a run of some recordings counts
-    those of the subjects whose first recording it has (``io.owned_subjects``), so that runs which
-    split a dataset between them, and an ``aggregate`` that adds their counts, count each file once.
+    those of the subjects whose first recording it has, and of the subjects with no EEG recording
+    if it has the dataset's first (``io.owned_subjects``), so that runs which split a dataset
+    between them, and an ``aggregate`` that adds their counts, count each file once.
     """
     discovered = io.discover(dataset_dir)
     problems: list[tuple[str, RecordingError]] = []
     owned: set[str] | None = None
     if requested:
         chosen, problems = io.select(dataset_dir, requested, discovered)
-        owned = io.owned_subjects(discovered, chosen)
+        owned = io.owned_subjects(dataset_dir, discovered, chosen)
     else:
         chosen = discovered
     items: list[tuple[str, io.Recording | RecordingError]] = [
