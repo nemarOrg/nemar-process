@@ -152,6 +152,15 @@ def test_the_report_is_the_process_envelope_and_lists_only_the_failed_and_skippe
     assert report["records_truncated"] == 0
 
 
+def test_the_recipes_dataset_steps_must_be_its_steps_in_their_order(monkeypatch):
+    from nemar_process.nemar_floor import steps
+
+    assert [s.step_id for s in RECIPE.dataset_steps()] == list(steps.STEP_ORDER)
+    monkeypatch.setattr(steps, "STEP_ORDER", steps.STEP_ORDER[:-1])
+    with pytest.raises(ValueError, match="dataset-level steps"):
+        RECIPE.dataset_steps()
+
+
 def test_an_unknown_image_digest_is_written_as_unknown_never_guessed():
     record = build([succeeded(1)], image_digest=None, dataset_id=None, dataset_version=None)
     nemar = record["extensions"]["nemar"]

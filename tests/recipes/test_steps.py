@@ -29,6 +29,7 @@ from recipe_support import (
     correlated_channels,
     floor_literals,
     loaded_fixture,
+    step_of,
     write_set,
 )
 
@@ -107,17 +108,20 @@ def test_the_floor_agrees_with_eegprep_called_with_those_literals(fixture_result
     _, mask = clean_windows(work, max_bad_channels=0.2, zthresholds=(-3.5, 5.0))
 
     plan = fixture_result.plan
-    assert plan.step("drift").quality["kernelSha256"] == kernel_sha
-    assert plan.step("drift").quality["kernelLength"] == 1005
-    assert plan.step("bad_channels").quality["removedChannels"] == gone == ["O1", "T6"]
-    assert plan.step("bad_channels").quality["branch"] == "ransac"
+    assert step_of(plan, "drift").quality["kernelSha256"] == kernel_sha
+    assert step_of(plan, "drift").quality["kernelLength"] == 1005
+    assert step_of(plan, "bad_channels").quality["removedChannels"] == gone == ["O1", "T6"]
+    assert step_of(plan, "bad_channels").quality["branch"] == "ransac"
     assert sha256_of(fixture_result.sample_mask, bool) == sha256_of(mask, bool)
-    assert plan.step("bad_windows").quality["nSegments"] == 40
-    assert plan.step("bad_windows").quality["percentGoodSamples"] == 49.4043
+    assert step_of(plan, "bad_windows").quality["nSegments"] == 40
+    assert step_of(plan, "bad_windows").quality["percentGoodSamples"] == 49.4043
 
 
 def test_the_fixture_has_no_flat_channel_and_the_masks_say_so(fixture_result):
-    assert fixture_result.plan.step("flatline").quality == {"nRemoved": 0, "removedChannels": []}
+    assert step_of(fixture_result.plan, "flatline").quality == {
+        "nRemoved": 0,
+        "removedChannels": [],
+    }
     assert fixture_result.kept_after_flatline.all()
     assert fixture_result.kept_final.sum() == 19
     assert fixture_result.signal_names[-2:] == ["Pg1", "Pg2"]
@@ -130,7 +134,7 @@ def test_the_fixtures_channels_without_coordinates_are_named_and_judged_on_noise
 ):
     """Pg1 and Pg2 have no coordinates: clean_channels cannot correlate them with a reconstruction,
     so only its noise criterion looked at them (it runs above 100 Hz and the fixture is at 200)."""
-    quality = fixture_result.plan.step("bad_channels").quality
+    quality = step_of(fixture_result.plan, "bad_channels").quality
     assert quality["noiseCriterionApplied"] is True
     assert quality["noiseOnlyChannels"] == ["Pg1", "Pg2"]
     assert quality["notAssessedChannels"] == []
@@ -147,7 +151,7 @@ def test_the_fixtures_channels_without_coordinates_are_named_and_judged_on_noise
 
 
 def test_the_signal_channels_step_names_what_it_left_out(fixture_result):
-    assert fixture_result.plan.step("signal_channels").quality == {
+    assert step_of(fixture_result.plan, "signal_channels").quality == {
         "nInputChannels": 22,
         "nSignalChannels": 21,
         "excludedChannels": ["ECG"],
@@ -169,12 +173,12 @@ def test_a_flat_segment_is_found_because_flatline_runs_before_the_drift_filter()
     srate = int(loaded.eeg["srate"])
     loaded.eeg["data"][victim, 20 * srate : 26 * srate] = 5.0
     result = process(loaded)
-    assert result.plan.step("flatline").quality["removedChannels"] == ["C3"]
+    assert step_of(result.plan, "flatline").quality["removedChannels"] == ["C3"]
     # and the masks compose: the flat channel, then the bad channels RANSAC found among the rest
     assert not result.kept_after_flatline[result.signal_names.index("C3")]
     assert result.kept_final.sum() < result.kept_after_flatline.sum()
     assert not result.kept_final[result.signal_names.index("C3")]
-    assert result.plan.step("qc").quality["percentGoodChannels"] == pytest.approx(
+    assert step_of(result.plan, "qc").quality["percentGoodChannels"] == pytest.approx(
         100.0 * result.kept_final.sum() / 21, abs=1e-4
     )
 
@@ -221,7 +225,7 @@ def test_a_short_all_eeg_recording_skips_the_signal_channels_and_the_two_window_
         ("bad_windows", "too_short"),
     }
     assert plan.rules == ["short-recording"]
-    assert plan.step("flatline").quality == {"nRemoved": 1, "removedChannels": ["Ch8"]}
+    assert step_of(plan, "flatline").quality == {"nRemoved": 1, "removedChannels": ["Ch8"]}
     assert result.sample_mask is None
     assert result.metrics["samples"] is None
     assert result.bad_channels_branch is None
@@ -243,10 +247,10 @@ def test_a_set_saved_with_an_empty_etc_runs_the_whole_floor(tmp_path):
     assert loaded.etc_normalized
     result = process(loaded)
     plan = result.plan
-    assert plan.step("flatline").quality["removedChannels"] == ["Ch8"]
-    assert plan.step("bad_channels").function == "eegprep.clean_channels_nolocs"
-    assert plan.step("bad_channels").quality["branch"] == "nolocs"
-    assert plan.step("bad_windows").quality["nSegments"] >= 0
+    assert step_of(plan, "flatline").quality["removedChannels"] == ["Ch8"]
+    assert step_of(plan, "bad_channels").function == "eegprep.clean_channels_nolocs"
+    assert step_of(plan, "bad_channels").quality["branch"] == "nolocs"
+    assert step_of(plan, "bad_windows").quality["nSegments"] >= 0
     assert "locations-usable" not in plan.rules
 
 
@@ -273,7 +277,7 @@ def test_a_flat_channel_can_take_a_recording_below_the_channel_minimum(tmp_path)
     write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
     (recording,) = io.discover(tmp_path)
     result = process(io.load(recording))
-    assert result.plan.step("flatline").quality["removedChannels"] == ["Ch4"]
+    assert step_of(result.plan, "flatline").quality["removedChannels"] == ["Ch4"]
     assert ("bad_channels", "few_channels") in {
         (s["step_id"], s["reason"]) for s in result.plan.skipped
     }
@@ -344,7 +348,7 @@ def test_a_pause_in_some_channels_only_is_still_annotated_not_failed(tmp_path):
     write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
     (recording,) = io.discover(tmp_path)
     result = process(io.load(recording))
-    assert result.plan.step("flatline").quality["removedChannels"] == ["Ch1", "Ch2", "Ch3"]
+    assert step_of(result.plan, "flatline").quality["removedChannels"] == ["Ch1", "Ch2", "Ch3"]
 
 
 def test_channels_that_share_nothing_are_all_flagged_and_the_recording_fails(tmp_path):
@@ -372,7 +376,7 @@ def test_one_channel_that_shares_nothing_is_removed_and_the_others_are_kept(tmp_
     write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
     (recording,) = io.discover(tmp_path)
     result = process(io.load(recording))
-    quality = result.plan.step("bad_channels").quality
+    quality = step_of(result.plan, "bad_channels").quality
     assert quality["branch"] == "nolocs"
     assert quality["removedChannels"] == ["Ch8"]
     assert result.kept_final.tolist() == [True] * 7 + [False]
@@ -414,7 +418,7 @@ def test_the_plan_hash_changes_with_each_rule_constant(
     result = synthetic_floor(tmp_path / "after")
     assert result.plan.hash() != baseline.plan.hash()
     for step_id, keys in recorded_in:
-        value = result.plan.step(step_id).parameters
+        value = step_of(result.plan, step_id).parameters
         for key in keys:
             value = value[key]
         assert value == changed, (step_id, keys)

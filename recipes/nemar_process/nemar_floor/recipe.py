@@ -50,7 +50,7 @@ def dataset_steps() -> list[DatasetStep]:
     from nemar_process.common import io
 
     table = [
-        ("load", io.BIDS_FUNCTION, steps.load_parameters()),
+        ("load", io.BIDS_FUNCTION, io.bids_parameters()),
         ("signal_channels", steps.SELECT_FUNCTION, {"channel_types": steps.SIGNAL_CHANNEL_TYPES}),
         ("flatline", steps.FLATLINE_FUNCTION, steps.FLATLINE_CALL),
         ("drift", steps.DRIFT_FUNCTION, steps.DRIFT_CALL),
@@ -61,7 +61,8 @@ def dataset_steps() -> list[DatasetStep]:
         ("bad_windows", steps.WINDOWS_FUNCTION, steps.windows_parameters()),
         ("qc", steps.QC_FUNCTION, steps.QC_PARAMETERS),
     ]
-    assert tuple(step_id for step_id, _, _ in table) == steps.STEP_ORDER
+    if tuple(step_id for step_id, _, _ in table) != steps.STEP_ORDER:
+        raise ValueError("the dataset-level steps are not the steps of the recipe, in its order")
     return [
         DatasetStep(step_id, function, dict(parameters), steps.DESCRIPTIONS[step_id])
         for step_id, function, parameters in table

@@ -15,9 +15,6 @@ from typing import Any
 
 import numpy as np
 
-# The type tags a parameter table uses.
-TAGS = ("float", "int", "str", "bool", "floats", "ints", "strs", "any")
-
 
 def jsonable(value: Any) -> Any:
     """A signature default or a passed value as plain JSON: lists, floats, ints, strings, null."""

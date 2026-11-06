@@ -290,51 +290,47 @@ def test_the_real_fixture_locations_are_usable():
     signal = io.signal_channel_indices(loaded.eeg)
     guard = qc.location_guard([loaded.eeg["chanlocs"][i] for i in signal])
     assert guard.usable is True
-    assert (guard.n_located, guard.n_signal, guard.rank) == (19, 21, 3)
-    assert guard.reason == "locations-usable"
+    assert guard.n_located == 19
+    assert len(guard.located) == 21
 
 
 def test_a_head_of_points_is_usable_and_the_rank_is_three():
     guard = qc.location_guard(chanlocs_of(head()))
-    assert (guard.usable, guard.rank) == (True, 3)
+    assert guard.usable is True
 
 
 @pytest.mark.parametrize(
-    ("label", "points", "reason"),
+    ("label", "points"),
     [
-        ("one point", [(10.0, 20.0, 30.0)] * 8, "degenerate-geometry"),
-        ("a line", [(10.0 + 5 * i, 0.0, 0.0) for i in range(8)], "degenerate-geometry"),
+        ("one point", [(10.0, 20.0, 30.0)] * 8),
+        ("a line", [(10.0 + 5 * i, 0.0, 0.0) for i in range(8)]),
         (
             "a plane through the origin",
             [(float(x), float(y), 0.0) for x in range(-2, 3) for y in range(-2, 2)],
-            "degenerate-geometry",
         ),
     ],
 )
-def test_degenerate_geometry_is_not_usable(label, points, reason):
+def test_degenerate_geometry_is_not_usable_though_every_channel_is_located(label, points):
     guard = qc.location_guard(chanlocs_of(points))
+    assert guard.n_located == len(points), label  # enough positions, and not enough of a head
     assert guard.usable is False, label
-    assert guard.reason == reason
-    assert guard.rank is not None
-    assert guard.rank < 3
 
 
 def test_fewer_than_half_of_the_channels_located_is_not_usable():
     points = list(head(10)) + [None] * 11
     guard = qc.location_guard(chanlocs_of(points))
-    assert (guard.usable, guard.n_located, guard.n_signal) == (False, 10, 21)
-    assert guard.reason == "too-few-locations"
+    assert (guard.usable, guard.n_located, len(guard.located)) == (False, 10, 21)
     assert qc.location_guard(chanlocs_of(list(head(11)) + [None] * 10)).usable is True
 
 
 def test_fewer_than_four_located_channels_is_not_usable_even_when_they_are_most_of_the_set():
     guard = qc.location_guard(chanlocs_of(list(head(3))))
-    assert (guard.usable, guard.reason) == (False, "too-few-locations")
+    assert (guard.usable, guard.n_located) == (False, 3)
 
 
-def test_no_locations_at_all_is_not_usable_and_has_no_rank():
+def test_no_locations_at_all_is_not_usable():
     guard = qc.location_guard(chanlocs_of([None] * 6))
-    assert (guard.usable, guard.n_located, guard.rank) == (False, 0, None)
+    assert (guard.usable, guard.n_located) == (False, 0)
 
 
 def test_a_channel_at_the_origin_is_dropped_from_the_rank_test_only():

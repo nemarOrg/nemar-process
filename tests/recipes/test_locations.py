@@ -16,12 +16,13 @@ from recipe_support import (
     correlated_channels,
     loaded_fixture,
     sphere_positions,
+    step_of,
     write_set,
 )
 
 
 def bad_channel_step(result):
-    return result.plan.step("bad_channels")
+    return step_of(result.plan, "bad_channels")
 
 
 def test_the_real_fixture_takes_ransac_and_says_why(fixture_result):

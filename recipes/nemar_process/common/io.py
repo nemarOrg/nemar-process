@@ -110,7 +110,6 @@ class Loaded:
     eeg: dict[str, Any]
     function: str
     parameters: dict[str, Any]
-    report: dict[str, Any]
     etc_normalized: bool
     etc_keys_dropped: list[str]
     location_source: str
@@ -304,6 +303,11 @@ def normalize(eeg: dict[str, Any]) -> tuple[dict[str, Any], Notes]:
     return eeg, notes
 
 
+def bids_parameters() -> dict[str, Any]:
+    """The parameters of the BIDS route: what is passed, then what eegprep applies by default."""
+    return {**signature_defaults(pop_load_frombids, BIDS_APPLIED), **jsonable(BIDS_CALL)}
+
+
 def _read(recording: Recording) -> tuple[dict[str, Any], dict[str, Any], str, dict[str, Any]]:
     """The raw load: the dataset, eegprep's report (empty for a set), the function, its parameters."""
     path = str(recording.abs_path)
@@ -312,8 +316,7 @@ def _read(recording: Recording) -> tuple[dict[str, Any], dict[str, Any], str, di
         parameters = {**signature_defaults(pop_loadset, SET_APPLIED), **SET_PASSED}
         return eeg, {}, SET_FUNCTION, parameters
     eeg, report = pop_load_frombids(path, **BIDS_CALL)
-    parameters = {**signature_defaults(pop_load_frombids, BIDS_APPLIED), **jsonable(BIDS_CALL)}
-    return eeg, report, BIDS_FUNCTION, parameters
+    return eeg, report, BIDS_FUNCTION, bids_parameters()
 
 
 def _location_source(report: dict[str, Any], located: int) -> str:
@@ -373,7 +376,6 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
         eeg=eeg,
         function=function,
         parameters=parameters,
-        report=report,
         etc_normalized=notes.etc_normalized,
         etc_keys_dropped=notes.keys_dropped,
         location_source=_location_source(report, located),

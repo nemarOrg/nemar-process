@@ -15,7 +15,7 @@ from eegprep import pop_eegfiltnew, pop_resample
 from nemar_process.common.plan import recorded_band_stop
 from nemar_process.nemar_floor import process
 from nemar_process.nemar_floor.steps import DESCRIPTIONS
-from recipe_support import loaded_fixture
+from recipe_support import loaded_fixture, step_of
 
 
 def contaminated(frequency, amplitude):
@@ -32,7 +32,7 @@ def noisy():
 
 
 def test_a_50_hz_contamination_triggers_the_band_stop_and_the_db_falls(noisy):
-    step = noisy.plan.step("line_noise_50")
+    step = step_of(noisy.plan, "line_noise_50")
     assert step.function == "eegprep.pop_eegfiltnew"
     assert step.parameters == {
         "locutoff": 49.0,
@@ -49,11 +49,11 @@ def test_a_50_hz_contamination_triggers_the_band_stop_and_the_db_falls(noisy):
     assert noisy.line_before[50] >= 10.0
     assert noisy.line_after[50] < noisy.line_before[50] - 20.0
     assert "line-noise-50" in noisy.plan.rules
-    assert noisy.removed_hz == [50]
+    assert noisy.metrics["lineNoise"]["removedHz"] == [50]
 
 
 def test_the_applied_design_is_recorded_and_the_other_frequency_is_left_alone(noisy):
-    step = noisy.plan.step("line_noise_50")
+    step = step_of(noisy.plan, "line_noise_50")
     assert step.quality == {
         "frequencyHz": 50,
         "order": 660,
@@ -67,7 +67,7 @@ def test_the_applied_design_is_recorded_and_the_other_frequency_is_left_alone(no
 
 
 def test_the_measurement_step_carries_before_after_and_whether_it_was_remeasured(noisy):
-    quality = noisy.plan.step("line_noise_measure").quality
+    quality = step_of(noisy.plan, "line_noise_measure").quality
     assert quality["remeasured"] is True
     assert quality["removedHz"] == [50]
     assert quality["afterDb"]["50"] < quality["beforeDb"]["50"] - 20.0
@@ -84,7 +84,7 @@ def test_the_step_description_says_the_filter_is_a_notch_one_hertz_wide_at_minus
         assert "{} Hz".format(frequency) in description
         assert "notch" in description
         assert "1 Hz wide at -6 dB" in description
-    assert noisy.plan.step("line_noise_50").description == DESCRIPTIONS["line_noise_50"]
+    assert step_of(noisy.plan, "line_noise_50").description == DESCRIPTIONS["line_noise_50"]
 
 
 @pytest.mark.parametrize("srate", [128, 200, 250, 256, 500, 1000])
@@ -103,9 +103,9 @@ def test_a_band_stop_leaves_a_notch_below_its_neighbours_so_the_excess_after_is_
 def test_the_uncontaminated_fixture_has_no_band_stop_and_after_equals_before(fixture_result):
     assert not fixture_result.plan.has_step("line_noise_50")
     assert not fixture_result.plan.has_step("line_noise_60")
-    assert fixture_result.removed_hz == []
+    assert fixture_result.metrics["lineNoise"]["removedHz"] == []
     assert fixture_result.line_after == fixture_result.line_before
-    assert fixture_result.plan.step("line_noise_measure").quality["remeasured"] is False
+    assert step_of(fixture_result.plan, "line_noise_measure").quality["remeasured"] is False
     assert fixture_result.line_before[60] == pytest.approx(7.4801, abs=1e-3)
     assert fixture_result.line_before[50] == pytest.approx(0.0717, abs=1e-3)
 
@@ -115,7 +115,7 @@ def test_the_threshold_is_ten_db_and_both_frequencies_can_be_removed_in_ascendin
     t = np.arange(loaded.eeg["pnts"]) / loaded.eeg["srate"]
     loaded.eeg["data"] = loaded.eeg["data"] + 20.0 * np.sin(2 * np.pi * 60.0 * t)
     result = process(loaded)
-    assert result.removed_hz == [50, 60]
+    assert result.metrics["lineNoise"]["removedHz"] == [50, 60]
     ids = [s.step_id for s in result.plan.steps]
     assert ids.index("line_noise_50") < ids.index("line_noise_60") < ids.index("bad_channels")
     assert result.plan.rules[1:3] == ["line-noise-50", "line-noise-60"]

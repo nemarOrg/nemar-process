@@ -250,13 +250,13 @@ def process_recording(
 
 def work_items(
     dataset_dir: Path, requested: list[str]
-) -> tuple[list[tuple[str, io.Recording | None, RecordingError | None]], set[str] | None]:
+) -> tuple[list[tuple[str, io.Recording | RecordingError]], set[str] | None]:
     """What the run goes through, by path, and the subjects whose other datatypes it counts.
 
-    The items are recordings and requested paths that are not usable. A run of the whole dataset
-    counts every other datatype (``None``); a run of some recordings counts those of the subjects
-    whose first recording it has (``io.owned_subjects``), so that runs which split a dataset between
-    them, and an ``aggregate`` that adds their counts, count each file once.
+    The items are recordings, and requested paths that are not usable (each with its error). A run
+    of the whole dataset counts every other datatype (``None``); a run of some recordings counts
+    those of the subjects whose first recording it has (``io.owned_subjects``), so that runs which
+    split a dataset between them, and an ``aggregate`` that adds their counts, count each file once.
     """
     discovered = io.discover(dataset_dir)
     problems: list[tuple[str, RecordingError]] = []
@@ -266,10 +266,10 @@ def work_items(
         owned = io.owned_subjects(discovered, chosen)
     else:
         chosen = discovered
-    items: list[tuple[str, io.Recording | None, RecordingError | None]] = [
-        (recording.path, recording, None) for recording in chosen
+    items: list[tuple[str, io.Recording | RecordingError]] = [
+        (recording.path, recording) for recording in chosen
     ]
-    items += [(path, None, error) for path, error in problems]
+    items += problems
     return sorted(items, key=lambda item: item[0]), owned
 
 
@@ -400,8 +400,8 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
             with table.TableWriter(
                 out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
             ) as writer:
-                for counter, (path, recording, problem) in enumerate(items):
-                    row = run_one(recipe, recording, problem, path, context, out, counter, seen)
+                for counter, (path, target) in enumerate(items):
+                    row = run_one(recipe, target, path, context, out, counter, seen)
                     writer.append(row)
                     report(path, row)
         except OSError as error:
@@ -424,24 +424,22 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
 
 def run_one(
     recipe: Recipe,
-    recording: io.Recording | None,
-    problem: RecordingError | None,
+    target: io.Recording | RecordingError,
     path: str,
     context: RunContext,
     out: Path,
     counter: int,
     seen: set[str],
 ) -> dict[str, Any]:
-    if recording is None:
-        problem = problem or RecordingError(INTERNAL_ERROR)
-        return row_for(path, problem.status, problem.code)
-    if not recording.supported:
+    if isinstance(target, RecordingError):
+        return row_for(path, target.status, target.code)
+    if not target.supported:
         return row_for(path, "skipped", UNSUPPORTED_FORMAT)
-    key = naming.product_path(recording.path, recipe.label, "signalJourney", "json")
+    key = naming.product_path(target.path, recipe.label, "signalJourney", "json")
     if key in seen:
         return row_for(path, "skipped", DUPLICATE_RECORDING)
     seen.add(key)
-    return process_recording(recipe, recording, context, out, counter)
+    return process_recording(recipe, target, context, out, counter)
 
 
 # ---- aggregate --------------------------------------------------------------------------------

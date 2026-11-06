@@ -59,17 +59,17 @@ def count_located(chanlocs: list[dict[str, Any]]) -> int:
 
 @dataclass(frozen=True)
 class LocationGuard:
-    """Whether the channel positions are good enough for the RANSAC criterion, and why not.
+    """Whether the channel positions are good enough for the RANSAC criterion.
 
     ``located`` says for each channel, in order, whether it has finite coordinates.
     """
 
     usable: bool
     located: tuple[bool, ...]
-    n_located: int
-    n_signal: int
-    rank: int | None
-    reason: str
+
+    @property
+    def n_located(self) -> int:
+        return sum(self.located)
 
 
 def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
@@ -80,7 +80,6 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
     the origin and silently removes a large part of the channels (sccn/eegprep#539), so the rank is tested
     here, before the call. It is a rank test, not a decomposition of the data.
     """
-    n_signal = len(chanlocs)
     flags = tuple(located(c) for c in chanlocs)
     points = [
         [float(c["X"]), float(c["Y"]), float(c["Z"])]
@@ -88,15 +87,13 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
         if flag
     ]
     n_located = len(points)
-    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located < n_signal:
-        return LocationGuard(False, flags, n_located, n_signal, None, "too-few-locations")
+    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located < len(chanlocs):
+        return LocationGuard(False, flags)
     matrix = np.asarray(points, dtype=np.float64)
     lengths = np.sqrt((matrix**2).sum(axis=1))
     unit = matrix[lengths > 0] / lengths[lengths > 0][:, None]
     rank = int(np.linalg.matrix_rank(unit)) if len(unit) else 0
-    if rank < 3:
-        return LocationGuard(False, flags, n_located, n_signal, rank, "degenerate-geometry")
-    return LocationGuard(True, flags, n_located, n_signal, rank, "locations-usable")
+    return LocationGuard(rank >= 3, flags)
 
 
 # ---- spectra ----------------------------------------------------------------------------------

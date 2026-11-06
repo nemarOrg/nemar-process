@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from eegprep import clean_flatlines, clean_windows, pop_load_frombids
+from eegprep import clean_flatlines, clean_windows
 
-from nemar_process.common import io, qc
+from nemar_process.common import qc
 from nemar_process.common.determinism import SEEDS
-from nemar_process.common.params import jsonable, signature_defaults
+from nemar_process.common.params import signature_defaults
 
 RECIPE_ID = "nemar-floor"
 RECIPE_VERSION = "1.0.0"
@@ -159,12 +159,4 @@ def windows_parameters() -> dict[str, Any]:
         **signature_defaults(clean_windows, WINDOWS_APPLIED),
         **WINDOWS_CALL,
         "rules": {"short_recording_s": SHORT_RECORDING_S},
-    }
-
-
-def load_parameters() -> dict[str, Any]:
-    """The nominal parameters of the load step (the BIDS route), for the recipe-level record."""
-    return {
-        **signature_defaults(pop_load_frombids, io.BIDS_APPLIED),
-        **jsonable(io.BIDS_CALL),
     }

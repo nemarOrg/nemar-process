@@ -48,7 +48,7 @@ BAD_CHANNEL_RULES = {
     "min_nolocs_srate_hz": "float",
 }
 
-# function path -> parameter -> type tag (see params.TAGS), or the tags of a nested mapping
+# function path -> parameter -> type tag (see params.cast), or the tags of a nested mapping
 PARAMETER_TYPES: dict[str, dict[str, Any]] = {
     "eegprep.pop_load_frombids": {
         "dtype": "str",
@@ -229,12 +229,6 @@ class Plan:
 
     def has_step(self, step_id: str) -> bool:
         return any(step.step_id == step_id for step in self.steps)
-
-    def step(self, step_id: str) -> PlanStep:
-        for step in self.steps:
-            if step.step_id == step_id:
-                return step
-        raise KeyError(step_id)
 
     def hash(self) -> str:
         return plan_hash(

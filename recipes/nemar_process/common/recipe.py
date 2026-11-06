@@ -14,7 +14,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
+
+if TYPE_CHECKING:
+    from nemar_process.common.io import Loaded, Recording
 
 # The kinds of table column. `text` is always a string and a missing value stays the word `n/a`;
 # `str` is a string or None; `int` and `float` are numbers or None.
@@ -108,6 +111,23 @@ class RecipeInfo:
     pipeline_type: str = "quality-control"
 
 
+class RunRecording(Protocol):
+    """The function that processes one recording into a private directory.
+
+    ``loaded`` is for tests, which hand in a recording they changed in memory; the command passes
+    nothing and the function loads the recording itself.
+    """
+
+    def __call__(
+        self,
+        recording: Recording,
+        context: RunContext,
+        directory: Path,
+        *,
+        loaded: Loaded | None = None,
+    ) -> RecordingProduct: ...
+
+
 @dataclass(frozen=True)
 class Recipe:
     """A registered recipe: its identity, its table, and the function that processes a recording."""
@@ -116,7 +136,7 @@ class Recipe:
     columns: tuple[Column, ...]
     distributions: tuple[Distribution, ...]
     dataset_steps: Callable[[], list[DatasetStep]]
-    run_recording: Callable[..., RecordingProduct]
+    run_recording: RunRecording
 
     @property
     def id(self) -> str:

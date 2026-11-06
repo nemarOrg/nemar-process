@@ -303,6 +303,11 @@ def write_fdt(path: Path, *, channels: int = 4, points: int = 2000, fill: float 
     return path
 
 
+def step_of(plan, step_id):
+    """The executed step of a plan with this id; a test that asks for a step that did not run fails."""
+    return next(step for step in plan.steps if step.step_id == step_id)
+
+
 def loaded_fixture():
     """The fixture recording, freshly loaded: a test may change it in memory before the floor."""
     from nemar_process.common import io

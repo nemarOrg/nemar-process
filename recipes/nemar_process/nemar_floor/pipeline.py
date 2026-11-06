@@ -14,8 +14,8 @@ steps differ: sccn/eegprep#541).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import numpy as np
 from eegprep import (
@@ -44,6 +44,8 @@ from nemar_process.common.errors import (
 from nemar_process.common.io import Loaded
 from nemar_process.nemar_floor import steps
 
+Branch = Literal["ransac", "nolocs"]
+
 
 @dataclass
 class FloorResult:
@@ -66,16 +68,15 @@ class FloorResult:
     kept_final: np.ndarray
     noise_only: np.ndarray
     not_assessed: np.ndarray
-    bad_channels_branch: str | None
+    bad_channels_branch: Branch | None
     sample_mask: np.ndarray | None
     metrics: dict[str, Any]
     filters: dict[str, Any]
     duration_s: float
     srate_hz: float
     n_input: int
-    line_before: dict[int, float | None] = field(default_factory=dict)
-    line_after: dict[int, float | None] = field(default_factory=dict)
-    removed_hz: list[int] = field(default_factory=list)
+    line_before: dict[int, float | None]
+    line_after: dict[int, float | None]
 
 
 def channel_mask(work: dict[str, Any], n_signal: int, step_id: str) -> np.ndarray:
@@ -89,7 +90,7 @@ def channel_mask(work: dict[str, Any], n_signal: int, step_id: str) -> np.ndarra
 
 def judged_by(
     kept_after_flatline: np.ndarray,
-    branch: str | None,
+    branch: Branch | None,
     located: tuple[bool, ...],
     srate: float,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -262,7 +263,7 @@ def process(loaded: Loaded) -> FloorResult:
     if short:
         recipe.add_rule("short-recording")
     entering = int(work["nbchan"])
-    branch: str | None = None
+    branch: Branch | None = None
     located: tuple[bool, ...] = ()
     if short:
         recipe.add_skip("bad_channels", steps.RANSAC_FUNCTION, "too_short")
@@ -424,5 +425,4 @@ def process(loaded: Loaded) -> FloorResult:
         n_input=n_input,
         line_before=line_before,
         line_after=line_after,
-        removed_hz=removed_hz,
     )
