@@ -273,14 +273,66 @@ def test_no_recording_at_all_is_exit_three_and_the_record_is_still_written(tmp_p
     assert json.loads(out.strip().splitlines()[-1])["result"] == "no_recordings"
 
 
-def test_recordings_found_and_none_succeeded_is_exit_four_with_the_record_written(tmp_path, cli):
+def test_recordings_all_in_formats_the_recipe_does_not_load_are_exit_seven_with_the_record_written(
+    tmp_path, cli
+):
+    dataset = tmp_path / "dataset"
+    touch_tree(
+        dataset,
+        [
+            "sub-01/eeg/sub-01_task-a_eeg.cnt",
+            "sub-02/eeg/sub-02_task-a_eeg.fif",
+            "dataset_description.json",
+        ],
+    )
+    code, out, _ = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", tmp_path / "o")
+    assert code == 7
+    assert json.loads(out.strip().splitlines()[-1])["result"] == "no_compatible_recording"
+    assert [(r["status"], r["code"]) for r in table_rows(tmp_path / "o")] == [
+        ("skipped", "unsupported_format")
+    ] * 2
+    record = json.loads(
+        (tmp_path / "o" / "desc-nemarfloor_signalJourney.json").read_text(encoding="utf-8")
+    )
+    counts = {"discovered": 2, "succeeded": 0, "failed": 0, "skipped": 2}
+    assert record["extensions"]["nemar"]["counts"] == counts
+
+
+def test_unsupported_recordings_beside_a_compatible_one_that_failed_are_exit_four(tmp_path, cli):
+    """A recording the recipe could try, and could not, is what exit four says."""
     dataset = tmp_path / "dataset"
     touch_tree(dataset, ["sub-01/eeg/sub-01_task-a_eeg.cnt", "dataset_description.json"])
+    garbage = dataset / "sub-02" / "eeg" / "sub-02_task-a_eeg.edf"
+    garbage.parent.mkdir(parents=True)
+    garbage.write_bytes(b"this is not an EDF file" * 50)
     code, out, _ = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", tmp_path / "o")
     assert code == 4
     assert json.loads(out.strip().splitlines()[-1])["result"] == "no_recording_succeeded"
-    assert table_rows(tmp_path / "o")[0]["code"] == "unsupported_format"
+    assert [(r["status"], r["code"]) for r in table_rows(tmp_path / "o")] == [
+        ("skipped", "unsupported_format"),
+        ("failed", "load_failed"),
+    ]
     assert (tmp_path / "o" / "desc-nemarfloor_signalJourney.json").is_file()
+
+
+def test_unsupported_recordings_beside_a_compatible_one_that_was_skipped_are_exit_four(
+    tmp_path, cli
+):
+    """A recording in a format the recipe loads is one it tried, whatever came of it."""
+    dataset = tmp_path / "dataset"
+    touch_tree(dataset, ["sub-01/eeg/sub-01_task-a_eeg.cnt", "dataset_description.json"])
+    write_set(
+        dataset / "sub-02" / "eeg" / "sub-02_task-a_eeg.set",
+        np.random.default_rng(1).standard_normal((3, 250 * 5)),
+        types=["ECG", "ECG", "EOG"],
+    )
+    code, out, _ = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", tmp_path / "o")
+    assert code == 4
+    assert json.loads(out.strip().splitlines()[-1])["result"] == "no_recording_succeeded"
+    assert [(r["status"], r["code"]) for r in table_rows(tmp_path / "o")] == [
+        ("skipped", "unsupported_format"),
+        ("skipped", "no_signal_channels"),
+    ]
 
 
 def test_a_recording_whose_channels_are_all_flat_is_one_failed_row_at_flatline(tmp_path, cli):

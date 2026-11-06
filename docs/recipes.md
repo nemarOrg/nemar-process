@@ -60,11 +60,14 @@ nemar-recipe version
 | 1 | `internal_error` | an uncaught error in the program itself, a signalJourney validator that cannot be built (it is built once, before anything is written) included; the class name goes to standard error, never a traceback |
 | 2 | usage | argument errors, no output directory |
 | 3 | `no_recordings` | no EEG recording was found (the dataset record is still written, with zero counts) |
-| 4 | `no_recording_succeeded` | recordings were found and none succeeded (the record is written) |
+| 4 | `no_recording_succeeded` | recordings were found, at least one was not skipped for its format (it failed, or was skipped for another reason), and none succeeded (the record is written) |
 | 5 | `output_unusable` | `--out` cannot be created or written, or already holds product files, or the dataset record cannot be written |
 | 6 | `dataset_unreadable` | `--dataset-dir`, or an `--in`, is missing, not a directory, or cannot be listed |
+| 7 | `no_compatible_recording` | recordings were found, every one was skipped for its format (`unsupported_format`: the recipe does not load it), and none succeeded (the record is written) |
 
 The launcher records any non-zero exit as `runtime_error` with the detail `entry_failed`; its own numbers 10 to 16 are not used here.
+Exit 7 tells an input with nothing the recipe could try from a run that tried and found nothing it could use: a recording that failed, or that was skipped for any other reason than its format (such as `no_signal_channels`), makes the run exit 4, and a single success makes it exit 0.
+`aggregate` decides its exit code the same way, from the rows it merges.
 Whether a run with some failed recordings is a job success is decision O3 below.
 
 ### Discovery and what happens to each recording
@@ -340,7 +343,7 @@ The driver adopted the plan's recommendations pending the owner; each is reversi
 |---|---|
 | O1 | Flatline runs before the drift filter (the evidence above), against the design's order. |
 | O2 | A `.set` goes to `pop_loadset`, which ignores BIDS `electrodes.tsv`, so a set with stripped locations but an `electrodes.tsv` takes the nolocs branch. `locationSource` is recorded per recording so the effect is visible. Revisit as 1.1.0 once sccn/eegprep#533 is fixed. |
-| O3 | A run with failed recordings exits 0 with the counts in the record; exit 4 only when none succeeded. |
+| O3 | A run with failed recordings exits 0 with the counts in the record; exit 4 only when none succeeded and a recording not skipped for its format was among them, and exit 7 when none succeeded and every recording was skipped for its format (the owner's decision). |
 | O4 | The 60 s minimum for the bad-channel and bad-window steps and the 4-channel minimum are constants in `nemar_floor/steps.py`; a change is a recipe version bump. |
 | O5 | The line-noise statistic is the legacy mean over channels. A median over channels would be robust to one or two bad channels; consider it for 1.1.0 once the pilot shows how often it flips a decision. |
 | O6 | The decisions on the fixture are pinned (`test_golden_decisions.py`), generated on the reference machine (macOS arm64); CI reproduced them on Linux x86-64, and a difference on another host is a finding to record. |

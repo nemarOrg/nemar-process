@@ -141,6 +141,6 @@ def test_a_recording_requested_that_is_not_an_eeg_recording_is_skipped_as_unsupp
         "--recording",
         "sub-CUCOV076/sub-CUCOV076_scans.tsv",
     )
-    assert code == 4
+    assert code == 7  # the one recording is not in a format the recipe loads
     row = rows_of(tmp_path / "o")["sub-CUCOV076/sub-CUCOV076_scans.tsv"]
     assert (row["status"], row["code"]) == ("skipped", "unsupported_format")

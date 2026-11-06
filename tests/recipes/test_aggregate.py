@@ -604,3 +604,54 @@ def test_a_subject_with_no_eeg_recording_is_counted_once_by_the_run_with_the_fir
     out = tmp_path / "merged"
     assert aggregate(cli, chunks, out, "first", "second", "third")[0] == 0
     assert ignored_of(out) == ignored_of(whole)
+
+
+# ---- why nothing succeeded: the exit code of a merge is the one of a run ------------------------
+
+
+def unsupported_chunk(cli, tmp_path, name, subject):
+    """A run whose one recording is in a format the recipe does not load: exit seven."""
+    recording = f"sub-{subject}/eeg/sub-{subject}_task-a_eeg.cnt"
+    dataset = touch_tree(tmp_path / ("data-" + name), [recording])
+    out = tmp_path / name
+    code, _, _ = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", out, *IDENTITY)
+    assert code == 7
+    return out
+
+
+def test_the_aggregate_of_runs_that_found_only_unsupported_recordings_is_exit_seven(cli, tmp_path):
+    first = unsupported_chunk(cli, tmp_path, "first", "01")
+    second = unsupported_chunk(cli, tmp_path, "second", "02")
+    merged = tmp_path / "merged"
+    code, stdout, _ = cli(
+        "aggregate", "nemar-floor", "--out", merged, *IDENTITY, "--in", first, "--in", second
+    )
+    assert code == 7
+    last = json.loads(stdout.strip().splitlines()[-1])
+    assert (last["result"], last["counts"]["skipped"]) == ("no_compatible_recording", 2)
+    assert (merged / RECORD).is_file()
+
+
+def test_the_aggregate_of_unsupported_recordings_and_a_failed_one_is_exit_four(cli, tmp_path):
+    unsupported = unsupported_chunk(cli, tmp_path, "unsupported", "01")
+    garbage = tmp_path / "data-failed" / "sub-02" / "eeg" / "sub-02_task-a_eeg.edf"
+    garbage.parent.mkdir(parents=True)
+    garbage.write_bytes(b"this is not an EDF file" * 50)
+    failed = tmp_path / "failed"
+    code, _, _ = cli(
+        "run", "nemar-floor", "--dataset-dir", garbage.parents[2], "--out", failed, *IDENTITY
+    )
+    assert code == 4
+    code, stdout, _ = cli(
+        "aggregate",
+        "nemar-floor",
+        "--out",
+        tmp_path / "merged",
+        *IDENTITY,
+        "--in",
+        unsupported,
+        "--in",
+        failed,
+    )
+    assert code == 4
+    assert json.loads(stdout.strip().splitlines()[-1])["result"] == "no_recording_succeeded"

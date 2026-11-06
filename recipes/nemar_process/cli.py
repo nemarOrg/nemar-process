@@ -19,11 +19,15 @@ numbers 10 to 16 are not used here):
     1  internal_error: an uncaught error in the program itself (the class name only)
     2  usage
     3  no_recordings: no EEG recording was found (the dataset record is still written)
-    4  no_recording_succeeded: recordings were found and none succeeded (the record is written)
+    4  no_recording_succeeded: recordings were found, at least one was not skipped for its format
+       (it failed, or was skipped for another reason), and none succeeded (the record is written)
     5  output_unusable: ``--out`` cannot be created or written, or already holds product files, or
        the dataset record cannot be written
     6  dataset_unreadable: ``--dataset-dir`` (or an ``--in``) is missing, not a directory, or cannot
        be listed
+    7  no_compatible_recording: recordings were found, every one was skipped for its format
+       (``unsupported_format``: the recipe does not load it), and none succeeded (the record is
+       written)
 
 Each recording runs inside one failure boundary: its files are written into a private directory
 under ``--out`` and moved into place only when every file and the record exist, so a failed
@@ -74,6 +78,7 @@ EXIT_NO_RECORDINGS = 3
 EXIT_NONE_SUCCEEDED = 4
 EXIT_OUTPUT_UNUSABLE = 5
 EXIT_DATASET_UNREADABLE = 6
+EXIT_NO_COMPATIBLE = 7
 
 PARTIAL = ".partial"
 # Matched whole with ``fullmatch``: a ``$`` would accept a trailing newline.
@@ -283,8 +288,12 @@ def finalize(
     context: RunContext,
     ignored: dict[str, int],
     started_utc: str,
-) -> dict[str, Any]:
-    """Build and write the dataset record from the table in ``out``; return it."""
+) -> tuple[dict[str, Any], int]:
+    """Build and write the dataset record from the table in ``out``.
+
+    Returns the record, and how many of the recordings in the table were skipped for their format,
+    which with the counts in the record tell the exit code apart (``exit_for``).
+    """
     label = recipe.label
     table_path = out / naming.dataset_path(label, "recordings", "tsv")
     rows = table.read_rows(table_path, recipe.columns)
@@ -302,7 +311,7 @@ def finalize(
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
-    return record
+    return record, sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT)
 
 
 def result_line(recipe: Recipe, record: dict[str, Any], word: str) -> None:
@@ -316,10 +325,19 @@ def result_line(recipe: Recipe, record: dict[str, Any], word: str) -> None:
     print(json.dumps(summary, sort_keys=True), flush=True)
 
 
-def exit_for(counts: dict[str, int]) -> tuple[int, str]:
+def exit_for(counts: dict[str, int], unsupported: int) -> tuple[int, str]:
+    """The exit code and its word for a run, or a merge, that wrote its record.
+
+    ``unsupported`` is how many of the recordings found were skipped for their format. When none
+    succeeded and that is all of them, the recipe had nothing it could try (exit 7); one recording
+    that was not skipped for its format, whatever came of it, makes the run an ordinary failure
+    (exit 4).
+    """
     if counts["discovered"] == 0:
         return EXIT_NO_RECORDINGS, "no_recordings"
     if counts["succeeded"] == 0:
+        if unsupported == counts["discovered"]:
+            return EXIT_NO_COMPATIBLE, "no_compatible_recording"
         return EXIT_NONE_SUCCEEDED, "no_recording_succeeded"
     return EXIT_OK, "ok"
 
@@ -414,14 +432,14 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         finally:
             shutil.rmtree(out / PARTIAL, ignore_errors=True)
         try:
-            record = finalize(recipe, out, context, ignored, started)
+            record, unsupported = finalize(recipe, out, context, ignored, started)
         except OSError as error:
             print(
                 "the dataset record cannot be written: {}".format(type(error).__name__),
                 file=sys.stderr,
             )
             return EXIT_OUTPUT_UNUSABLE
-    code, word = exit_for(record["extensions"]["nemar"]["counts"])
+    code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported)
     result_line(recipe, record, word)
     return code
 
@@ -639,7 +657,9 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
             with table.TableWriter(staging / table_name, recipe.columns) as writer:
                 for path in sorted(merged):
                     writer.append(merged[path])
-            record = finalize(recipe, staging, context, dict(sorted(ignored.items())), started)
+            record, unsupported = finalize(
+                recipe, staging, context, dict(sorted(ignored.items())), started
+            )
             files.move_into_place(staging, out, [*sorted(targets), table_name, record_name])
     except InputUnusable as error:
         print(error, file=sys.stderr)
@@ -649,7 +669,7 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         return EXIT_OUTPUT_UNUSABLE
     finally:
         shutil.rmtree(out / PARTIAL, ignore_errors=True)
-    code, word = exit_for(record["extensions"]["nemar"]["counts"])
+    code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported)
     result_line(recipe, record, word)
     return code
 
