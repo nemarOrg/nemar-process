@@ -360,7 +360,11 @@ def _declared_power_line(eeg: dict[str, Any]) -> float | int | None:
 
 
 def _inputs(recording: Recording, report: dict[str, Any]) -> list[dict[str, Any]]:
-    """The recording, its data companions and the sidecars eegprep says it read, with their bytes."""
+    """The recording, its data companions and the sidecars eegprep says it read, with their bytes.
+
+    A file that leads, links followed, outside the dataset is refused: the record would list a file
+    that is not the dataset's. Sidecars are known only from eegprep's report, after it read them.
+    """
     wanted = [(recording.path, "recording")]
     wanted += [(name, "companion") for name in recording.companions]
     for key, role in SIDECAR_KEYS:
@@ -372,6 +376,8 @@ def _inputs(recording: Recording, report: dict[str, Any]) -> list[dict[str, Any]
         path = recording.root / name
         if name in seen or posixpath.isabs(name) or ".." in name.split("/") or not path.is_file():
             continue
+        if not headers.inside(path, recording.root):
+            raise RecordingError(LOAD_FAILED, "load", headers.EXTERNAL_REFERENCE)
         seen.add(name)
         size, digest = files.size_and_sha256(path)
         items.append({"path": name, "role": role, "size": size, "sha256": digest})
@@ -388,7 +394,7 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
     so running out of memory there is ``out_of_memory`` in this step like anywhere else in it.
     """
     try:
-        headers.check(recording.abs_path, max_channel_samples)
+        headers.check(recording.abs_path, max_channel_samples, recording.root)
         eeg, report, function, parameters = _read(recording)
         located = qc.count_located(eeg["chanlocs"])
         inputs = _inputs(recording, report)

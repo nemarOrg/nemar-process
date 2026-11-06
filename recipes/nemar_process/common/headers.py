@@ -9,7 +9,9 @@ Two checks run before ``io.load`` hands a recording to eegprep, because eegprep 
   file names.
   Anything else fails as ``load_failed`` with the detail ``external_reference``: the file named
   would be read as samples and summarised in the product, and the record's inputs would list the
-  companions and not the file that was read.
+  companions and not the file that was read. The files the reader opens must also lead, every link
+  followed, to a place within the dataset directory (``check`` takes it as ``root``), and so must
+  the recording.
 * **Size.** The number of channel samples a recording declares or holds is compared with a limit
   before anything is read, so a recording too large for one process fails as ``too_large`` and does
   not take the process, and every recording after it, with it.
@@ -98,11 +100,21 @@ class Header:
     """What a header says: the files it names, as written, and the values it declares.
 
     ``values`` is channels times samples as the loader would hold them, or None when the header does
-    not say. ``references`` pairs the kind of file (``data`` or ``markers``) with the name.
+    not say. ``references`` pairs the kind of file (``data`` or ``markers``) with the name. ``files``
+    are the files beside the recording that the reader will open, found as it finds them.
     """
 
     references: tuple[tuple[str, str], ...] = ()
     values: int | None = None
+    files: tuple[Path, ...] = ()
+
+
+def inside(path: Path, root: Path) -> bool:
+    """Whether ``path`` leads, every link followed, to a place within the directory ``root``.
+
+    A link that points at nothing is judged by where it would lead.
+    """
+    return path.resolve().is_relative_to(root.resolve())
 
 
 # ---- EDF and BDF ------------------------------------------------------------------------------
@@ -196,7 +208,13 @@ def _vhdr(path: Path) -> Header:
     if any(name not in own[kind] for kind, name in references):
         # ``check`` refuses the reference before a size is used, so no other file is looked at
         return Header(references)
-    return Header(references, _vhdr_values(path, common, sections.get("binary infos", {})))
+    data = _vhdr_data_files(path, common.get("datafile", []))
+    markers = _case_folded(path.with_suffix(OWN_COMPANIONS[".vhdr"]["markers"][0]))
+    return Header(
+        references,
+        _vhdr_values(data, common, sections.get("binary infos", {})),
+        (*data, *markers),
+    )
 
 
 def _case_folded(candidate: Path) -> list[Path]:
@@ -230,12 +248,10 @@ def _vhdr_data_files(path: Path, named: list[str]) -> list[Path]:
 
 
 def _vhdr_values(
-    path: Path, common: dict[str, list[str]], binary: dict[str, list[str]]
+    data: list[Path], common: dict[str, list[str]], binary: dict[str, list[str]]
 ) -> int | None:
     """Channels times samples from the size of the data file eegprep opens, when the header allows."""
-    sizes = [
-        e.stat().st_size for e in _vhdr_data_files(path, common.get("datafile", [])) if e.is_file()
-    ]
+    sizes = [e.stat().st_size for e in data if e.is_file()]
     if not sizes:
         return None
     if common.get("dataformat", [""])[0].upper() == "ASCII":
@@ -285,13 +301,14 @@ def _with_sidecar(
     header, so a large ``.fdt`` under a small declaration is loaded before it is found out. Only the
     set's own ``.fdt`` is sized: any other name is refused by ``check`` before the size is used.
     """
-    held = None
+    held, opened = None, []
     for kind, name in references:
         sidecar = path.parent / name
         if kind == "data" and name in own_names(path)["data"] and sidecar.is_file():
             held = sidecar.stat().st_size // SET_ITEM_BYTES
+            opened.append(sidecar)
     known = [size for size in (declared, held) if size is not None]
-    return Header(references, max(known) if known else None)
+    return Header(references, max(known) if known else None, tuple(opened))
 
 
 def _inflated(handle: BinaryIO, nbytes: int, cap: int) -> int:
@@ -442,17 +459,25 @@ def read(path: Path, max_values: int) -> Header:
     return Header()
 
 
-def check(path: Path, max_values: int) -> None:
+def check(path: Path, max_values: int, root: Path) -> None:
     """Refuse a recording that names a file other than its own companions, or that is too large.
+
+    The recording and the files the reader will open must lead, links followed, to places within
+    ``root``, the dataset directory: a link out of it makes a file elsewhere the recording's data,
+    whatever the header says. Nothing is read before the recording itself is known to be inside.
 
     A recording whose size cannot be worked out is refused too (``size_unknown``): a limit that is
     compared with nothing is no limit.
     """
+    if not inside(path, root):
+        raise RecordingError(LOAD_FAILED, "load", EXTERNAL_REFERENCE)
     header = read(path, max_values)
     own = own_names(path)
     for kind, name in header.references:
         if name not in own.get(kind, ()):
             raise RecordingError(LOAD_FAILED, "load", EXTERNAL_REFERENCE)
+    if not all(inside(opened, root) for opened in header.files):
+        raise RecordingError(LOAD_FAILED, "load", EXTERNAL_REFERENCE)
     if header.values is None:
         raise RecordingError(LOAD_FAILED, "load", SIZE_UNKNOWN)
     if header.values > max_values:

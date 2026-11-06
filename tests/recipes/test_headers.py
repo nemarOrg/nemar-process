@@ -12,6 +12,7 @@ import json
 import tracemalloc
 import warnings
 import zlib
+from pathlib import Path
 from struct import pack, unpack
 
 import h5py
@@ -35,9 +36,17 @@ BOTH_LAYOUTS = pytest.mark.parametrize(
 )
 
 
-def refusal(path, limit=LIMIT):
+EVERYWHERE = Path("/")
+
+
+def check(path, limit=LIMIT, root=EVERYWHERE):
+    """The check, in a dataset whose directory is the root of the file system unless a test says."""
+    headers.check(path, limit, root)
+
+
+def refusal(path, limit=LIMIT, root=EVERYWHERE):
     with pytest.raises(RecordingError) as caught:
-        headers.check(path, limit)
+        check(path, limit, root)
     error = caught.value
     return error.status, error.code, error.step, error.detail
 
@@ -178,7 +187,7 @@ def test_a_record_count_that_is_too_small_does_not_get_a_recording_past_the_limi
     target = edf_with_a_wrong_record_count(tmp_path, declared=1, held=2)
     # the header alone says 2 signals * 1 record * 100 values, a limit it would have met
     assert refusal(target, 2 * 1 * 100) == ("failed", "too_large", "load", None)
-    headers.check(target, 2 * 2 * 100)  # the size of the file is the boundary
+    check(target, 2 * 2 * 100)  # the size of the file is the boundary
     assert refusal(target, 2 * 2 * 100 - 1)[1] == "too_large"
 
 
@@ -219,7 +228,7 @@ def test_eegprep_reads_the_whole_fdt_before_it_compares_it_with_the_header(tmp_p
 def test_a_set_is_sized_by_the_fdt_it_names_and_not_by_what_its_header_declares(tmp_path):
     path = set_with_a_large_fdt(tmp_path)
     assert headers.read(path, LIMIT).values == 4 * 50_000
-    headers.check(path, 4 * 50_000)
+    check(path, 4 * 50_000)
     assert refusal(path, 4 * 50_000 - 1) == ("failed", "too_large", "load", None)
     assert refusal(path, 2 * 500)[1] == "too_large"  # the declared 2000 values would have passed
 
@@ -261,7 +270,7 @@ def test_a_header_that_names_its_own_dat_is_accepted_and_sized_by_it(tmp_path):
     path = write_brainvision(tmp_path, STEM, channels=4, samples=2000, data=STEM + ".dat")
     path.with_suffix(".eeg").rename(path.with_suffix(".dat"))
     assert pop_loadbv(str(path))["data"].shape == (4, 2000)
-    headers.check(path, 4 * 2000)
+    check(path, 4 * 2000)
     assert refusal(path, 4 * 2000 - 1)[1] == "too_large"
 
 
@@ -359,7 +368,7 @@ def test_a_recording_is_accepted_at_the_limit_and_refused_one_value_over_it(tmp_
     path = tmp_path / (STEM + ".edf")
     path.write_bytes(edf_bytes(4, 100, 50, with_data=False))
     values = 4 * 100 * 50
-    headers.check(path, values)
+    check(path, values)
     assert refusal(path, values - 1) == ("failed", "too_large", "load", None)
 
 
@@ -484,13 +493,13 @@ def test_a_brainvision_header_may_name_only_its_own_companions(tmp_path, data, m
 
 
 def test_a_brainvision_header_that_names_its_own_companions_is_accepted(tmp_path):
-    headers.check(write_brainvision(tmp_path, STEM), LIMIT)
+    check(write_brainvision(tmp_path, STEM), LIMIT)
 
 
 def test_a_header_without_a_marker_file_is_accepted(tmp_path):
     path = write_brainvision(tmp_path, STEM, marker="")
     assert headers.read(path, LIMIT).references == (("data", STEM + ".eeg"),)
-    headers.check(path, LIMIT)
+    check(path, LIMIT)
 
 
 # ---- EEGLAB sets ------------------------------------------------------------------------------
@@ -509,7 +518,7 @@ def test_a_set_that_names_its_data_file_declares_channels_times_points(tmp_path,
     path = write_raw_set(tmp_path / (STEM + ".set"), data=STEM + ".fdt", struct=struct)
     header = headers.read(path, LIMIT)
     assert (header.values, header.references) == (4 * 2000, (("data", STEM + ".fdt"),))
-    headers.check(path, LIMIT)
+    check(path, LIMIT)
 
 
 @BOTH_LAYOUTS
@@ -530,7 +539,7 @@ def test_a_stale_datfile_beside_samples_that_are_in_the_set_is_not_followed(tmp_
         struct=struct,
     )
     assert headers.read(path, LIMIT).references == ()
-    headers.check(path, LIMIT)
+    check(path, LIMIT)
 
 
 def a_structure_array_of_two():
@@ -579,7 +588,7 @@ def test_a_set_with_a_stray_top_level_eeg_that_is_not_a_structure_and_its_own_da
     tmp_path,
 ):
     path = write_raw_set(tmp_path / (STEM + ".set"), data=STEM + ".fdt", extra={"EEG": 0.0})
-    headers.check(path, LIMIT)
+    check(path, LIMIT)
 
 
 @BOTH_LAYOUTS
@@ -607,7 +616,7 @@ def test_the_variables_at_the_top_level_of_a_set_give_its_size_exactly(tmp_path)
     path = write_raw_set(
         tmp_path / (STEM + ".set"), data=np.zeros((4, 1000), dtype=np.float32), points=1000
     )
-    headers.check(path, 4 * 1000)
+    check(path, 4 * 1000)
     assert refusal(path, 4 * 1000 - 1)[1] == "too_large"
 
 
@@ -706,7 +715,7 @@ def test_a_real_set_that_holds_more_than_the_cap_is_refused_whichever_way_it_is_
         compress=compress,
     )
     assert refusal(path, SMALL_LIMIT) == TOO_LARGE
-    headers.check(path, 9_000_000)  # within a limit that allows it, the same file is read
+    check(path, 9_000_000)  # within a limit that allows it, the same file is read
 
 
 @BOTH_LAYOUTS
@@ -756,6 +765,121 @@ def test_a_set_saved_as_hdf5_declares_its_samples_and_names_nothing(tmp_path):
     header = headers.read(path, LIMIT)
     assert (header.values, header.references) == (3 * 1200, ())
     assert refusal(path, 3 * 1200 - 1)[1] == "too_large"
+
+
+# ---- links that leave the dataset -------------------------------------------------------------
+
+
+def linked_out(path, directory):
+    """Move the file at `path` to `directory`, outside the dataset, and leave a link in its place."""
+    directory.mkdir(parents=True, exist_ok=True)
+    moved = directory / path.name
+    path.rename(moved)
+    path.symlink_to(moved)
+    return moved
+
+
+def tree_for(kind, root):
+    """A real recording of `kind` in a BIDS tree under `root`; returns (header path, its parts)."""
+    eeg_dir = bids_directory(root)
+    if kind == "edf":
+        eeg_dir.mkdir(parents=True)
+        path = eeg_dir / (STEM + ".edf")
+        path.write_bytes(edf_bytes(4, 10, 50))
+        return path, {"recording": path}
+    if kind == "brainvision":
+        header = write_brainvision(eeg_dir, STEM)
+        return header, {
+            "recording": header,
+            "data": header.with_suffix(".eeg"),
+            "markers": header.with_suffix(".vmrk"),
+        }
+    path = write_raw_set(eeg_dir / (STEM + ".set"), data=STEM + ".fdt", points=500)
+    fdt = write_fdt(path.with_suffix(".fdt"), points=500)
+    return path, {"recording": path, "data": fdt}
+
+
+LINKED = [
+    pytest.param("edf", "recording", id="an EDF recording"),
+    pytest.param("brainvision", "recording", id="a BrainVision header"),
+    pytest.param("brainvision", "data", id="a BrainVision data file"),
+    pytest.param("brainvision", "markers", id="a BrainVision marker file"),
+    pytest.param("set", "recording", id="a set"),
+    pytest.param("set", "data", id="a set's data file"),
+]
+
+
+@pytest.mark.parametrize(("kind", "which"), LINKED)
+def test_a_link_that_leaves_the_dataset_is_refused_and_nothing_reaches_eegprep(
+    tmp_path, monkeypatch, kind, which
+):
+    """The names are checked, and so is where the files are: a link to a file elsewhere makes
+    its content a recording's, whatever the header says, with nothing in the record that says so."""
+    root = tmp_path / "dataset"
+    _, parts = tree_for(kind, root)
+    linked_out(parts[which], tmp_path / "elsewhere")
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(root)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "load_failed",
+        "load",
+        "external_reference",
+    )
+
+
+@pytest.mark.parametrize(("kind", "which"), LINKED)
+def test_the_same_link_inside_the_dataset_is_followed(tmp_path, kind, which):
+    """Annexed content is a link into the dataset's own annex: where it points is what matters."""
+    root = tmp_path / "dataset"
+    _, parts = tree_for(kind, root)
+    linked_out(parts[which], root / ".git" / "annex")
+    (recording,) = io.discover(root)
+    loaded = io.load(recording)
+    assert loaded.eeg["data"].shape[1] > 0
+
+
+def test_a_link_to_a_place_that_is_not_there_is_judged_by_where_it_would_lead(tmp_path):
+    root = tmp_path / "dataset"
+    header, parts = tree_for("brainvision", root)
+    parts["data"].unlink()
+    parts["data"].symlink_to(tmp_path / "nowhere.eeg")
+    assert refusal(header, root=root.resolve()) == (
+        "failed",
+        "load_failed",
+        "load",
+        "external_reference",
+    )
+    parts["data"].unlink()
+    parts["data"].symlink_to(root / "nowhere.eeg")
+    assert refusal(header, root=root.resolve())[3] == "size_unknown"  # inside, and cannot be sized
+
+
+def test_eegprep_alone_reads_a_file_through_a_link_that_leaves_the_dataset(tmp_path):
+    root = tmp_path / "dataset"
+    header, parts = tree_for("brainvision", root)
+    linked_out(parts["data"], tmp_path / "elsewhere")
+    assert pop_loadbv(str(header))["data"].shape == (4, 2000)
+
+
+def test_a_sidecar_that_is_a_link_out_of_the_dataset_is_refused_after_it_was_read(tmp_path):
+    """Which sidecars eegprep read is known only from what it reports, so these are refused after
+    the load, and still before a record or a file of the product exists."""
+    from recipe_support import copy_fixture
+
+    root = copy_fixture(tmp_path / "dataset")
+    sidecar = next(root.rglob("*_electrodes.tsv"))
+    linked_out(sidecar, tmp_path / "elsewhere")
+    (recording,) = io.discover(root)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "load_failed",
+        "load",
+        "external_reference",
+    )
 
 
 # ---- the loader, and eegprep alone ------------------------------------------------------------

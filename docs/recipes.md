@@ -106,6 +106,9 @@ Two things are decided from it.
   The file would be read as samples and summarised in the product, and the record's inputs would list the companions and not the file that was read.
   A recording may name only its own companions as bare file names: `<stem>.eeg` (or `<stem>.dat`) and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
   Anything else fails as `load_failed` with the detail `external_reference`, including a bare name that is not the recording's own and a name in another case.
+  The recording and the files its reader opens (the data file and the marker file of a header, the `.fdt` of a set) must also lead, every link followed, to a place within the dataset directory, or the recording fails the same way, before anything is read: a link out of the dataset makes a file elsewhere the recording's data, with nothing in the record that says so.
+  A link into the dataset's own annex is inside, and is followed.
+  The sidecars that eegprep reports having read (channels, electrodes, coordinate system) are held to the same rule after the load and before anything is written, and so are the companions the record lists as inputs.
   A set that holds its samples names no file, so a stale `datfile` beside them is not followed and not checked.
   A set is read as `pop_loadset` reads it: the `EEG` variable counts only when it is a single 1 by 1 structure, and otherwise the variables at the top level of the file are the dataset and the names they hold are followed, so they are checked, whatever `EEG` is (a number, text, an array of structures).
   An `EEG` that is a cell is refused, because eegprep unwraps a cell that holds a structure and the check does not model it.
