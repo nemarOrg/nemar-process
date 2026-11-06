@@ -47,6 +47,9 @@ runtime = [
     "pamica==0.4.0",
     "numpy",
     "scipy",
+    # The recipes pin the BLAS thread pools to one and record what they found (docs/recipes.md).
+    # It is already in the lock as a dependency of MNE-Python; declaring it keeps that true.
+    "threadpoolctl",
     { include-group = "signaljourney" },
 ]
 
@@ -104,10 +107,18 @@ extra-paths = ["launcher", "observer", "recipes", "scripts", "tests/standin", "t
 [tool.ty.src]
 include = ["images", "launcher", "observer", "recipes", "scripts", "tests"]
 
-# The runtime image's packages (eegprep, NumPy, torch) are installed in the runtime environment, not
-# in the development one, so the two files that run only there import them unresolved on purpose.
+# The runtime image's packages (eegprep, NumPy, torch, threadpoolctl) are installed in the runtime
+# environment, not in the development one, so the files that run only there import them unresolved
+# on purpose: the smoke test, the fixture scripts, the recipes package and its tests.
 [[tool.ty.overrides]]
-include = ["images/nemar-python/smoke.py", "scripts/make_smoke_fixture.py"]
+include = [
+    "images/nemar-python/smoke.py",
+    "scripts/make_smoke_fixture.py",
+    "recipes/nemar_process/**",
+    "tests/recipes/**",
+    "tests/recipe_plugin.py",
+    "tests/recipe_support.py",
+]
 
 [tool.ty.overrides.rules]
 import-not-found = "ignore"

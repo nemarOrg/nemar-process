@@ -1124,6 +1124,7 @@ runtime = [
     { name = "pamica" },
     { name = "scipy" },
     { name = "signaljourney-validator" },
+    { name = "threadpoolctl" },
 ]
 signaljourney = [
     { name = "signaljourney-validator" },
@@ -1152,6 +1153,7 @@ runtime = [
     { name = "pamica", specifier = "==0.4.0" },
     { name = "scipy" },
     { name = "signaljourney-validator", git = "https://github.com/signalJourney/signalJourney?rev=169c3261d044039c359bab7e121e78157a4f5af9" },
+    { name = "threadpoolctl" },
 ]
 signaljourney = [{ name = "signaljourney-validator", git = "https://github.com/signalJourney/signalJourney?rev=169c3261d044039c359bab7e121e78157a4f5af9" }]
 

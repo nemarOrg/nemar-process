@@ -1,0 +1,53 @@
+{
+  "Name": "A COVID-19 survivors and close contacts EEG dataset",
+  "BIDSVersion": "1.6.0",
+  "DatasetType": "raw",
+  "Authors": [
+    "Ana Calzada-Reyes",
+    "Eduardo Aubert-Vázquez",
+    "Lidice Galán-García",
+    "Maria Luisa Bringas-Vega",
+    "Trinidad Virués-Alba",
+    "Lidia Charroó-Ruiz",
+    "Yanely Acosta-Imás",
+    "Mitchell Valdés-Sosa",
+    "Laura Perez-Mayo",
+    "Joel Gutiérrez-Gil",
+    "Antonio Caballero-Moreno",
+    "Miguel Angel Alvarez",
+    "Norge Santiesteban",
+    "Javier Vicente Sánchez-Lopez",
+    "Annette Valdés-Virués",
+    "Elba Elvira Varona-Galindo",
+    "Elizabeth Méndez-Parra",
+    "Joviana Castro-Valiente",
+    "Leyanis Ramos-Hernández",
+    "Mabel Whilby-Santiesteban",
+    "Thelma Luz Carrillo-Alfonso",
+    "Shahwar Yasir",
+    "Yu Kin",
+    "Peng Ren",
+    "Dezhong Yao",
+    "Luo Cheng",
+    "Roberto Rodriguez-Labrada",
+    "Pedro Valdés-Sosa"
+  ],
+  "License": "CC0",
+  "DatasetDOI": "10.82901/nemar.on007823",
+  "EthicsApprovals": [
+    "Ethical permission was obtained from the Ethics Committee of the Cuban Neuroscience Center which also complied with the Ethical Principles for Medical Research Involving Human Subjects outlined in the Helsinki Declaration."
+  ],
+  "Acknowledgements": "The authors want to thank to all EEG technicians from the Clinical Services and psychologists of the Cuban Center for Neurosciences, and the specialists in Psychiatry and Neurology from the Cuban Neurological and Neurosurgical Institute and other hospitals from Havana for their contribution to the assessment to the patients. We would also like to thank to the Clinical Neurophysiology Department of the Hermanos Amejeiras Hospital and the Mental Health Center in Playa municipality for their support in this research",
+  "Funding": [
+    "This work was supported by National Key R&D Program of China, (2024YFE0215100), and Chengdu Science and Technology Bureau Program of China under Grant (2022-GH02-00042-HZ)"
+  ],
+  "ReferencesAndLinks": [
+    "Calzada-Reyes A., Galán-García L., Virués-Alba T., Charroó-Ruiz L., Perez-Mayo L., Bringas-Vega M.L., Bosch-Bayard J., Acosta-Ymas Y., Aubert-.Vázquez E., Vega-Hernández M., Gutiérrez-Gil J., Caballero-Moreno A., Valdés-Virués A., Valdés-Sosa M., Peng Ren , Dezhong Yao, Luo Cheng, Rodriguez-Labrada R., Valdés-Sosa P.  EEG Signatures of COVID-19 Survival compared to close contacts and the Cuban EEG normative database. Clinical Neurophysiology Practice. 2026; 11, 174-186; https://doi.org/10.1016/j.cnp.2026.02.007"
+  ],
+  "SourceDatasets": [
+    {
+      "DOI": "doi:10.18112/openneuro.ds007823.v1.0.1"
+    }
+  ],
+  "Version": "1.0.0"
+}

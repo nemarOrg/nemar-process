@@ -309,3 +309,34 @@ def test_the_signing_identity_refuses_everything_else(subject):
 def test_the_documented_signing_identity_is_the_workflows():
     docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
     assert "IDENTITY='" + signing_identity() + "'" in docs
+
+
+def test_the_test_job_runs_the_floor_through_the_launcher_in_the_sif_it_just_built():
+    job = workflow()["jobs"]["test"]
+    names = [s.get("name", "") for s in job["steps"]]
+    (position,) = [
+        i for i, n in enumerate(names) if n.startswith("Run the floor through the launcher")
+    ]
+    assert position > names.index(next(n for n in names if n.startswith("Build a SIF")))
+    assert position > names.index(next(n for n in names if n.startswith("Smoke test the SIF")))
+    step = job["steps"][position]
+    assert "pytest tests/e2e -m apptainer" in step["run"]
+    assert "--group runtime --extra cpu" in step["run"]
+    assert step["env"]["NEMAR_RECIPE_SIF"].endswith("/nemar-python.sif")
+    # nothing may be skipped unnoticed: no Apptainer, no SIF and no runtime environment are failures
+    for name in ("NEMAR_REQUIRE_APPTAINER", "NEMAR_REQUIRE_RECIPE_SIF", "NEMAR_REQUIRE_RUNTIME"):
+        assert step["env"][name] == "1", name
+
+
+def test_the_pull_request_paths_include_what_the_launch_test_runs_on():
+    paths = triggers(workflow())["pull_request"]["paths"]
+    for needed in ("recipes/**", "launcher/**", "tests/e2e/**", "tests/fixtures/eeg/**"):
+        assert needed in paths, needed
+
+
+def test_only_the_unprivileged_test_job_runs_repository_test_code_against_the_sif():
+    """The signing job holds the OIDC token and package write access: it runs no test from here."""
+    jobs = workflow()["jobs"]
+    for name, job in jobs.items():
+        runs_tests = "pytest" in step_commands(job)
+        assert runs_tests == (name == "test"), name

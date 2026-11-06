@@ -8,7 +8,10 @@ standard error), and exits non-zero, with a reason on standard error, when somet
 * one real eegprep step runs on the smoke fixture: load the ``.set`` file, ``pop_eegfiltnew``, then
   ``clean_flatlines`` (the fixture's last channel is flat, so it must be removed);
 * a hand-written signalJourney record validates with ``nemar_process.sj.validator()``, and the same
-  record without ``pipelineInfo`` is rejected.
+  record without ``pipelineInfo`` is rejected;
+* the recipe command runs: ``nemar-recipe version`` when the script is on the path (it is in the
+  image, and ``scripts/check_smoke_pins.py --image`` requires that), else ``python -m
+  nemar_process version``, and what it prints names the pinned eegprep.
 
 It runs the same way in the lock's environment, in the container image and in the SIF under
 Apptainer (``--containall --cleanenv --no-home``).
@@ -27,6 +30,8 @@ import json
 import os
 import platform
 import re
+import shutil
+import subprocess
 import sys
 
 DEFAULT_FIXTURE = "/opt/smoke-fixture/smoke.set"
@@ -178,6 +183,20 @@ def validate_record(eegprep_version: str, parameters: dict) -> dict:
     }
 
 
+def recipe_command() -> dict:
+    """Run ``nemar-recipe version`` (or the module, when the script is not on the path) and say how."""
+    script = shutil.which("nemar-recipe")
+    command = [script] if script else [sys.executable, "-m", "nemar_process"]
+    done = subprocess.run([*command, "version"], capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        fail("the recipe command failed: {}".format(done.stderr.strip()[-500:]))
+    try:
+        version = json.loads(done.stdout)
+    except ValueError:
+        fail("the recipe command did not print one JSON line: {!r}".format(done.stdout[:200]))
+    return {"via": "nemar-recipe" if script else "python -m nemar_process", "version": version}
+
+
 def collect(fixture: str) -> dict:
     import torch
 
@@ -197,6 +216,7 @@ def collect(fixture: str) -> dict:
         "environment": {key: os.environ.get(key) for key in ENVIRONMENT},
         "eegprep": report,
         "signaljourney": validate_record(distributions["eegprep"], parameters),
+        "recipe_command": recipe_command(),
     }
 
 

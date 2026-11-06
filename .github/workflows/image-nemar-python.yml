@@ -26,6 +26,11 @@ on:
       - ".github/workflows/image-nemar-python.yml"
       - "images/nemar-python/**"
       - "recipes/**"
+      - "launcher/**"
+      - "tests/e2e/**"
+      - "tests/harness.py"
+      - "tests/standin/**"
+      - "tests/fixtures/eeg/**"
       - "scripts/check_smoke_pins.py"
       - "scripts/check_tag_absent.py"
       - "scripts/make_image_digests.py"
@@ -124,6 +129,22 @@ jobs:
           set -euo pipefail
           apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
           python3 scripts/check_smoke_pins.py --image smoke-sif.json
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # The launch end to end (docs/recipes.md): the real launcher stages the fixture from a stand-in
+      # data plane, runs `nemar-recipe run nemar-floor` in this SIF as it runs a job, and uploads to
+      # stand-in outputs routes. The test needs the runtime environment to compare the result with a
+      # direct run of the same fixture.
+      - name: Run the floor through the launcher, in the SIF
+        env:
+          NEMAR_REQUIRE_APPTAINER: "1"
+          NEMAR_REQUIRE_RECIPE_SIF: "1"
+          NEMAR_REQUIRE_RUNTIME: "1"
+          NEMAR_RECIPE_SIF: ${{ github.workspace }}/nemar-python.sif
+        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m apptainer -v
 
   publish:
     name: push the image to GHCR

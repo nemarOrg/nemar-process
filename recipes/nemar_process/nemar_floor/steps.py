@@ -1,0 +1,173 @@
+"""The floor's step table: every value a step passes, in one place.
+
+Each call below is the call ``process`` makes, and, through ``jsonable``, the parameters the record
+states: the two cannot drift apart. Values eegprep applies without being asked (the defaults of the
+function) are read from its signature at run time by ``plan.py``'s helpers, never copied here.
+
+The values are the issue's and the plan's (docs/recipes.md has the table with the reasons).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from eegprep import clean_flatlines, clean_windows
+
+from nemar_process.common import qc
+from nemar_process.common.determinism import SEEDS
+from nemar_process.common.params import signature_defaults
+
+RECIPE_ID = "nemar-floor"
+RECIPE_VERSION = "1.0.0"
+
+# The order of the steps (docs/recipes.md). Flatline runs on the unfiltered copy, before the drift
+# filter: after it, a flat stretch is no longer constant to within 20 machine epsilons, and none
+# shorter than the whole recording is found (decision O1, evidence in docs/recipes.md).
+STEP_ORDER = (
+    "load",
+    "signal_channels",
+    "flatline",
+    "drift",
+    "line_noise_measure",
+    "line_noise_50",
+    "line_noise_60",
+    "bad_channels",
+    "bad_windows",
+    "qc",
+)
+
+DESCRIPTIONS = {
+    "load": "Load recording",
+    "signal_channels": "Select the channels typed EEG",
+    "flatline": "Detect flat-line channels",
+    "drift": "Remove slow drifts",
+    "line_noise_measure": "Measure line noise",
+    "line_noise_50": "Remove 50 Hz line noise with a notch filter about 1 Hz wide at -6 dB",
+    "line_noise_60": "Remove 60 Hz line noise with a notch filter about 1 Hz wide at -6 dB",
+    "bad_channels": "Detect bad channels",
+    "bad_windows": "Detect bad windows",
+    "qc": "Quality metrics",
+}
+
+# Rules (decision O4): a change to any of these is a recipe version bump.
+SHORT_RECORDING_S = 60.0
+FEW_CHANNELS = 4
+MIN_NOLOCS_SRATE_HZ = 110.0  # clean_channels_nolocs raises below this
+NOISE_CRITERION_SRATE_HZ = 100.0  # clean_channels applies its noise criterion above this
+
+SIGNAL_CHANNEL_TYPES = ["EEG", "untyped"]
+
+FLATLINE_FUNCTION = "eegprep.clean_flatlines"
+FLATLINE_CALL: dict[str, Any] = {"max_flatline_duration": 5.0, "max_allowed_jitter": 20.0}
+# eegprep removes nothing, and only logs a warning on this logger, when every channel has a flat
+# portion (sccn/eegprep#535); the floor listens to it for the length of the call and fails.
+FLATLINE_LOGGER = clean_flatlines.__module__
+
+DRIFT_FUNCTION = "eegprep.clean_drifts"
+DRIFT_CALL: dict[str, Any] = {"transition": (0.25, 0.75), "attenuation": 80.0, "method": "fft"}
+
+# A fixed band-stop: eegprep has no adaptive line-noise removal (sccn/eegprep#534 asks for ZapLine).
+BAND_STOP_FUNCTION = "eegprep.pop_eegfiltnew"
+# What pop_eegfiltnew applies when not asked (read from its source: it takes keyword options, so
+# there is no signature to read). tests/recipes/test_line_noise.py shows that passing these
+# explicitly changes nothing.
+BAND_STOP_APPLIED: dict[str, Any] = {
+    "filtorder": None,
+    "minphase": False,
+    "usefftfilt": False,
+    "channels": None,
+    "chantype": None,
+    "plotfreqz": False,
+}
+
+# What a criterion measured is not returned, only the mask (sccn/eegprep#535); the RANSAC seed is fixed
+# inside eegprep (sccn/eegprep#540).
+RANSAC_FUNCTION = "eegprep.clean_channels"
+RANSAC_CALL: dict[str, Any] = {
+    "corr_threshold": 0.8,
+    "noise_threshold": 4.0,
+    "window_len": 5.0,
+    "max_broken_time": 0.4,
+    "num_samples": 50,
+    "subset_size": 0.25,
+}
+NOLOCS_FUNCTION = "eegprep.clean_channels_nolocs"
+NOLOCS_CALL: dict[str, Any] = {
+    "min_corr": 0.45,
+    "ignored_quantile": 0.1,
+    "window_len": 2.0,
+    "max_broken_time": 0.5,
+    "linenoise_aware": True,
+}
+
+WINDOWS_FUNCTION = "eegprep.clean_windows"
+WINDOWS_CALL: dict[str, Any] = {"max_bad_channels": 0.2, "zthresholds": (-3.5, 5.0)}
+WINDOWS_APPLIED = (
+    "window_len",
+    "window_overlap",
+    "max_dropout_fraction",
+    "min_clean_fraction",
+    "truncate_quant",
+    "step_sizes",
+    "shape_range",
+)
+
+QC_FUNCTION = "nemar_process.qc.floor_metrics"
+
+MEASURE_FUNCTION = qc.SPECTRA_FUNCTION
+SELECT_FUNCTION = "eegprep.pop_select"
+
+
+def qc_parameters() -> dict[str, Any]:
+    """The qc step's parameters, read from the constants the measurement applies.
+
+    The plan hash is taken over what is recorded, so what is recorded is what ``qc.py`` uses and
+    not a second copy of it: a change to the spectrum range or the scale changes the plan.
+    """
+    return {
+        "spectrum_hz": list(qc.SPECTRUM_RANGE_HZ),
+        "robust_amplitude": "{}*MAD".format(qc.MAD_SCALE),
+    }
+
+
+def band_stop_call(frequency: int) -> dict[str, Any]:
+    """The arguments of the band-stop for one line frequency: ``f-1`` and ``f+1`` Hz, notch mode.
+
+    The arguments are 2 Hz apart, but the notch eegprep designs from them is about 1 Hz wide at
+    -6 dB (cutoffs at ``f-0.5`` and ``f+0.5``); the step's metrics record the design applied.
+    """
+    return {"locutoff": frequency - 1.0, "hicutoff": frequency + 1.0, "revfilt": True, "gui": False}
+
+
+def band_stop_parameters(frequency: int) -> dict[str, Any]:
+    return {**BAND_STOP_APPLIED, **band_stop_call(frequency)}
+
+
+def bad_channel_rules() -> dict[str, Any]:
+    """The constants that decide whether the bad-channel step runs and which branch it takes."""
+    return {
+        "short_recording_s": SHORT_RECORDING_S,
+        "few_channels": FEW_CHANNELS,
+        "min_located_channels": qc.MIN_LOCATED_CHANNELS,
+        "min_nolocs_srate_hz": MIN_NOLOCS_SRATE_HZ,
+    }
+
+
+def ransac_parameters() -> dict[str, Any]:
+    """The RANSAC branch's parameters: the call, the seed eegprep fixes inside (no argument) and
+    the rules that decided to run it."""
+    return {**RANSAC_CALL, "rng_seed": SEEDS["clean_channels.ransac"], "rules": bad_channel_rules()}
+
+
+def nolocs_parameters() -> dict[str, Any]:
+    """The no-locations branch's parameters: the call and the rules that decided to run it."""
+    return {**NOLOCS_CALL, "rules": bad_channel_rules()}
+
+
+def windows_parameters() -> dict[str, Any]:
+    """The window step's parameters: the call, what eegprep applies, and the rule that gates it."""
+    return {
+        **signature_defaults(clean_windows, WINDOWS_APPLIED),
+        **WINDOWS_CALL,
+        "rules": {"short_recording_s": SHORT_RECORDING_S},
+    }

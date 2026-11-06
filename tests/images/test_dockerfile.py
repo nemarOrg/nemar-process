@@ -6,10 +6,15 @@ the CI job builds the image and runs the smoke test in it, which is the test tha
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
+import subprocess
 
 import yaml
-from repo_paths import CI_WORKFLOW, DOCKERFILE, IMAGE_WORKFLOW, PYPROJECT, ROOT
+from image_support import clean_env
+from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
+from repo_paths import CI_WORKFLOW, DOCKERFILE, IMAGE_WORKFLOW, PYPROJECT, RECIPES, ROOT
 
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 
@@ -148,9 +153,58 @@ def test_the_smoke_test_and_its_fixture_are_inside_the_image():
     assert "tests/fixtures/smoke" in copies
 
 
-def test_the_recipes_package_is_a_placeholder_for_the_later_phase():
+def test_the_recipes_package_is_copied_into_the_image():
     copies = " ".join(rest for keyword, rest in instructions() if keyword == "COPY")
     assert "recipes/nemar_process" in copies
+
+
+def recipe_command_lines() -> list[str]:
+    """The lines of the script the Dockerfile writes as /opt/venv/bin/nemar-recipe (printf's arguments)."""
+    runs = [rest for keyword, rest in instructions() if keyword == "RUN"]
+    (writing,) = [r for r in runs if "/opt/venv/bin/nemar-recipe" in r and "printf" in r]
+    printf = writing.split("&&")[0].strip()
+    words = shlex.split(printf)
+    assert words[:2] == ["printf", "%s\\n"], words[:3]
+    redirect = words.index(">")
+    assert words[redirect + 1] == "/opt/venv/bin/nemar-recipe"
+    return words[2:redirect]
+
+
+def test_the_dockerfile_writes_the_recipe_command_as_an_executable_script_in_the_venv():
+    assert recipe_command_lines() == [
+        "#!/opt/venv/bin/python",
+        "from nemar_process.cli import main",
+        "raise SystemExit(main())",
+    ]
+    runs = " ".join(rest for keyword, rest in instructions() if keyword == "RUN")
+    assert "chmod 755 /opt/venv/bin/nemar-recipe" in runs
+    # in the builder stage, so the final stage copies it with the environment
+    builder = [rest for keyword, rest in instructions() if keyword == "RUN"]
+    assert any("nemar-recipe" in r for r in builder)
+    first_final = min(i for i, (k, r) in enumerate(instructions()) if k == "FROM" and "final" in r)
+    written_at = min(
+        i for i, (k, r) in enumerate(instructions()) if k == "RUN" and "nemar-recipe" in r
+    )
+    assert written_at < first_final
+
+
+def test_the_script_the_dockerfile_writes_runs_the_command(runtime_python, tmp_path):
+    """Write the script as the Dockerfile does, pointed at this environment's interpreter."""
+    lines = recipe_command_lines()
+    script = tmp_path / "nemar-recipe"
+    script.write_text("\n".join(["#!" + str(runtime_python), *lines[1:]]) + "\n", encoding="utf-8")
+    script.chmod(0o755)
+    done = subprocess.run(
+        [str(script), "version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=clean_env(PYTHONPATH=str(RECIPES)),
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    document = json.loads(done.stdout)
+    assert document["eegprep"] == PINNED_EEGPREP_VERSION
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
 
 
 def test_the_build_context_is_an_allow_list_that_names_what_the_build_copies():

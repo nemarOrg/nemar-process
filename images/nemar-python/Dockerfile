@@ -44,12 +44,19 @@ RUN if [ "$LOCK_SHA256" != "unverified" ]; then echo "$LOCK_SHA256  uv.lock" | s
 
 RUN uv sync --frozen --no-dev --group runtime --extra cpu
 
-# The recipes package arrives with phase 4; this phase installs the placeholder (nemar_process.sj and
-# the vendored signalJourney schema) so the smoke test can validate a record.
+# The recipes package: the signalJourney validator wrapper with the vendored schema, the common layer
+# and the recipes themselves (nemar_process.nemar_floor). Every signal-processing call in it is an
+# eegprep function from the environment above.
 COPY recipes/nemar_process /tmp/nemar_process
 RUN site="$(/opt/venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
     && cp -R /tmp/nemar_process "$site/nemar_process" \
     && /opt/venv/bin/python -m compileall -q "$site/nemar_process"
+
+# The recipe command, so that a launch specification can say ["nemar-recipe", "run", "nemar-floor", ...]
+# as an argument vector (the container has /opt/venv/bin first on PATH, also under --cleanenv). It is
+# `python -m nemar_process` with a name; tests/images/test_dockerfile.py runs the script written here.
+RUN printf '%s\n' '#!/opt/venv/bin/python' 'from nemar_process.cli import main' 'raise SystemExit(main())' > /opt/venv/bin/nemar-recipe \
+    && chmod 755 /opt/venv/bin/nemar-recipe
 
 # ---- final: the runtime image -----------------------------------------------------------------
 FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS final

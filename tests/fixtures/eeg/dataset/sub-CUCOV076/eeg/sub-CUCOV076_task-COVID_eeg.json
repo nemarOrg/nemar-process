@@ -1,0 +1,17 @@
+{
+  "TaskName": "COVID",
+  "TaskDescription": "Protocol used for COVID-19 EEG",
+  "SamplingFrequency": 200,
+  "EEGChannelCount": 21,
+  "EOGChannelCount": 0,
+  "ECGChannelCount": 1,
+  "EMGChannelCount": 0,
+  "MiscChannelCount":  0,
+  "TriggerChannelCount":  0,
+  "EEGPlacementScheme": "10-10",
+  "EEGReference": "common",
+  "PowerLineFrequency": 60,
+  "SoftwareFilters": "n/a",
+  "RecordingDuration": 286.245,
+  "RecordingType": "continuous"
+}

@@ -81,6 +81,8 @@ uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images   # the l
 uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher   # the launcher on its floor
 uv run python scripts/build_launcher_zip.py --check
 uv lock --check && uv run pytest tests/images --cov=recipes --cov=scripts   # the runtime image's declaration, lock, fixture, Dockerfile, workflows
+uv run --frozen --group runtime --extra cpu pytest tests/recipes --cov=recipes --cov-fail-under=85   # the recipes; the development environment has no eegprep
+uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer"   # the launch end to end with the stand-in runtime; the SIF run is in the image workflow
 uv run python scripts/derive_tapis_schemas.py --check   # the Tapis schemas are what the vendored OpenAPI files derive
 uv run python scripts/build_observer_zip.py --check
 uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85   # the Tapis definitions, register.py and the observer
@@ -101,10 +103,10 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 |---|---|
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
 | `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
-| `recipes/nemar_process/` | the recipes package; for now the placeholder `sj.py` and the vendored signalJourney schema in `_vendor/` |
-| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `gen_wire_cases.ts` (bun; the table of wire cases, from nemar-cli's contract), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
-| `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `launcher/fixtures/wire_cases.json` (the table of wire cases), `contract/` pins |
-| `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
+| `recipes/nemar_process/` | the recipes package: `sj.py` (the validator) with the vendored signalJourney schema in `_vendor/`, `common/` (loader, naming, the resolved plan, measurements, records, files), `nemar_floor/` (the first recipe), and the `nemar-recipe` command (`cli.py`, `recipes.py`) |
+| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `gen_wire_cases.ts` (bun; the table of wire cases, from nemar-cli's contract), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image and the recipes: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `make_eeg_fixture_manifest.py` (`--check`), `vendor_signaljourney.py` |
+| `tests/` | `launcher/`, `images/`, `deploy/`, `observer/`, `recipes/` (the recipe tests; they need the `runtime` environment) and `e2e/` (the launch end to end) tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`, `eeg/` the real recording), `launcher/fixtures/wire_cases.json` (the table of wire cases), `contract/` pins |
+| `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `recipes.md` (the recipes and `nemar-recipe`: steps, files, records, exit codes), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
 | `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
 | `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, `released-versions.json` (the ledger of released zip digests), the vendored Tapis OpenAPI files and the schemas derived from them |
 | `observer/` | `observe.py` (stdlib, Python 3.9) and its entry script |

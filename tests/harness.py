@@ -166,7 +166,9 @@ class Launch:
 
 
 class Rig:
-    def __init__(self, tmp: Path, container: str = "standin") -> None:
+    def __init__(
+        self, tmp: Path, container: str = "standin", plane: DataPlane | None = None
+    ) -> None:
         self.tmp = tmp
         self.container = container
         self.out = tmp / "out"
@@ -177,7 +179,7 @@ class Rig:
         for d in (self.out, self.scratch, self.sif_root, self.bin_dir):
             d.mkdir(parents=True)
         self.runtime_record = tmp / "runtime-record.jsonl"
-        self.plane = DataPlane()
+        self.plane = plane if plane is not None else DataPlane()
         self.callbacks = Callbacks(JOB_ID, TOKEN)
         self.server = StandinServer(self.plane, self.callbacks).start()
         if container == "standin":

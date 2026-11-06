@@ -52,6 +52,10 @@ None of this has been observed on the node's runtime, which may be a commercial 
 - **The local dataset root layout and its protection.** The launcher binds `<NEMAR_LOCAL_DATASETS_ROOT>/<id>/<version>/` (a real directory, with `<version>` the data-plane tag: `latest` or `vN.N.N`) when every selected file there matches the manifest.
   Whether NEMAR's copy on the node is laid out that way, and holds plain files and not symlinks into an annex object store, is unconfirmed; a symlink never matches, so a git-annex checkout would always fall back to download.
   The root must be immutable and not writable by the shared account that runs the jobs: bind mode verifies the selected files by checksum and then mounts the whole `<id>/<version>` directory read-only, so the unselected files in it are visible to the job and are not verified (documented; an owner decision).
+- **The spelling of the checksum algorithm in a live manifest.**
+  The manifest of the mirrored dataset `on007823` at `v1.0.0` (read on 2026-11-04) spells it lowercase `sha256` for its 170 annexed files and `git` for the other 1,363, while the shared contract names annex backend names such as `SHA256E`.
+  `net.Checker` knows `SHA256`, `SHA256E`, `SHA512`, `SHA512E` and `git`, so an entry spelled `sha256` is checked by size only and is never bound from a local copy.
+  Unconfirmed: which spelling the Worker emits for other datasets, and whether the launcher should accept the lowercase one; the fixture's committed `manifest.json` and the stand-in data plane use `SHA256E`, as the contract and the stand-in do.
 - **Dataset version forms.** The data plane accepts only `latest` and `vN.N.N`. The launch specification carries that tag and the launcher uses it verbatim; the Worker resolves the user's spelling. The stand-in data plane enforces the same two forms; the real one has not been called by the launcher.
 - **Presigned multipart upload to the results bucket.** A single PUT per file is the only upload the launcher does, so a single result file is limited to 5 GB until multipart upload through presigned addresses is verified on Cloudflare R2 object storage.
 - **What the presigned addresses require.** The launcher PUTs with `Content-Type: application/octet-stream`, a `Content-Length`, and no token; if the Worker signs other headers, the PUT fails with a 403 and the address is re-requested (up to 2 times for each file).
@@ -91,6 +95,84 @@ None of these is in place; each needs a repository setting, not a code change.
 - **Protect publication.** The workflow refuses a commit that is not reachable from `main`, but that check lives in a file the tagged commit supplies. A tag ruleset on `image-nemar-python-v*`, branch protection or a ruleset on `main`, or an environment with required reviewers on the `publish` and `sign` jobs (which the workflow does not name today) would stop a person with write access who edits the file and pushes a tag. Until one exists, a signature that passes the documented check does not mean the commit was reviewed.
 - **GHCR.** Confirm that publishing is enabled for the repository and set `nemar-python` and `nemar-python-sif` public so a node can pull without credentials.
 - **The SIF package.** `apptainer push` creates `nemar-python-sif`, and it cannot set `org.opencontainers.image.source`, so GHCR does not link the package to this repository by itself. The first release creates it with the workflow's token; link the package to the repository and give the workflow write access before the first release. The second release is the likely point of failure; [images.md](images.md) says what to do when a run fails after the image was pushed (re-run only the failed jobs, never use an unsigned tag, publish a new version if the SIF tag already exists).
+
+## The recipes (`nemar-floor`)
+
+[recipes.md](recipes.md) says what the recipe does.
+These are the facts nothing has confirmed yet, and what continuous integration (CI) has observed since.
+
+Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), microvolt (uV), Secure Hash Algorithm 256 (SHA-256), megabyte (MB, 10^6 bytes), mebibyte (MiB, 1,048,576 bytes), gigabyte (GB, 10^9 bytes), Basic Linear Algebra Subprograms (BLAS), Singularity Image Format (SIF), kill signal (SIGKILL).
+
+- **Equality across hosts.**
+  The decisions pinned in `tests/recipes/test_golden_decisions.py` were generated on one machine (macOS arm64, NumPy on Apple's Accelerate) and reproduced by CI on a hosted Linux runner (ubuntu-24.04, x86-64, NumPy on OpenBLAS) on 2026-11-05.
+  That is one recording and two hosts, and it compares decisions only: no float of `_qc.json` was compared across hosts, and no other architecture or BLAS was run.
+  A difference on another host is a finding to record, not to hide.
+- **The thread pin.**
+  `threadpoolctl` detects no pool on the macOS machine, so there the recorded inventory is empty and the test that every pool reports one thread skips with a stated reason.
+  On the Linux runner it found the pools, and the test ran and passed.
+  Whether an unpinned run would give different answers was not measured; the recipe pins the count, and a run with the thread variables set to 4 in its environment wrote the same files.
+- **The launch end to end in the SIF.**
+  There is no container runtime on the development machine.
+  The test ran with the stand-in runtime locally and in CI (`ci.yml`, job `recipes`).
+  Its container half runs in the image workflow's pull-request job, and this document does not say that job passed.
+  Comparing the container's state files with a direct run on the same host is the first time equality between the container and the host is asserted.
+- **Units.**
+  `robustAmplitude` is in the unit the loader delivers: microvolts (uV) for EDF and BDF files, as read.
+  A source in another unit would be wrong by a constant factor.
+  It is recorded as "as loaded" and not verified for other sources.
+- **Loaders.**
+  The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` were run here.
+  A `.set` with a separate `.fdt` and a `.bdf` were read in eegprep's source and not run through the whole floor.
+  A MATLAB v7.3 `.set` is refused by the header check (`unreadable_header`), unread, because eegprep's reader for it follows external storage, links and virtual datasets to files anywhere; a large set saved in that format is refused until an HDF5 walk is written.
+  The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, and on EDF and BDF headers written byte by byte.
+  It ran on sets written byte by byte as MATLAB writes an empty field (a matrix of no bytes, which SciPy never writes), and its walk of the element headers agrees with SciPy's on eighteen of the files written by MATLAB versions 5.3 to 8 that SciPy ships in its test data.
+  It also read, once and without keeping them, the five sets saved by MATLAB's EEGLAB that were on the development machine (saved on macOS and Linux between 2013 and 2025: EEGLAB's sample data and test set, a plugin's test set, and an example set from another project), and accepted all five with the sizes it gave before the walk was written.
+  Those five are not in the repository, because it was not established that they may be copied into it, so a future change is tested against the byte-built sets and not against them.
+  Nothing else saved by MATLAB's EEGLAB was run, so the reading of that layout still rests on eegprep's loader, on five files and on files shaped like them.
+  The refusal of the `Read error: ...` string covers a text `data` only, the one variable the check loads by name to read a name from it. SciPy 1.18 cannot return that string for a numeric top-level `data`: in its Python source `MatReadError` is raised only in `_get_matfile_version`, which fails a whole file, and no file made it substitute the string for a variable. A SciPy upgrade must re-check this.
+  A header that cannot be read is refused (`unreadable_header`), so a legitimate file that this parser reads differently from eegprep's loader would be refused too; the parser mirrors eegprep 0.5.0's rules and is not run against files from other writers.
+- **A link out of the dataset is checked where the recipe can know of it.**
+  The recording, the data and marker files of a header and the `.fdt` of a set are checked before eegprep reads anything.
+  A recording read through BIDS metadata is also checked, before the load, for links at the top of the dataset and anywhere in its subject's directory, and in every directory that a link to a directory there leads to inside the dataset (one hop was not enough: a link to a directory in the dataset, whose contents held a link out of it, passed), because eegprep reads the sidecars of the inheritance chain without naming them in its report (the line frequency of a sidecar elsewhere was read through a link in a test) and the pybids layout walks every link to a directory; the sidecars eegprep does report, and the companions listed as inputs, are checked again after the load and before any product is written.
+  A link in a directory that no link there leads to, in another subject's directory say, is not looked at, although pybids walks a link to a directory anywhere in the tree once per process.
+  Finding one means walking the whole dataset: that is a cost of every recording on a dataset of tens of thousands of files unless the result is kept for the process, which would be state that a test cannot see change, and neither was built.
+  The same holds for the channel, electrode and coordinate system files: eegprep matches them across the whole layout by entity, so a file in a directory such as `sub-01.bak` or `extra` can be the one it opens, and the check cannot know which; the list of inputs refuses such a file only after it was read, and a link there to a file that never ends would stop the run.
+  A link that leads to a large directory (the top of the dataset, a directory of annexed content) makes the walk read all of it once.
+  The sizes of the JSON and TSV sidecars that eegprep and pandas read whole are not limited either; limiting them is a follow-up and not part of this phase.
+  Whether a dataset staged from the data plane can hold a link at all was not checked here; the rule is a bound for a tree that does.
+- **The all-flat failure listens to a log warning.**
+  eegprep's `clean_flatlines` removes nothing, and says so only by a warning on its module's logger, when every channel has a flat portion; the floor fails such a recording (`all_channels_flat`).
+  The detection depends on that logger name and level, taken from the function's module at run time and not from a message text.
+  Two tests (a constant recording and a pause shared by all channels) fail if eegprep changes either, but a release of eegprep that does so would be noticed only when they run.
+  A pause every channel shares fails the whole recording: that cost is stated in [recipes.md](recipes.md).
+- **A truncated EDF** loads with fewer samples and only a reader warning.
+  The launcher's size and checksum checks, and the SHA-256 the recipe records for each input, are what catch a damaged copy; the recipe adds no check of its own.
+- **Memory.**
+  A run holds about three float64 copies of the longest recording at its peak.
+  For a recording of an hour at 1 kHz with 128 channels that is about 11 GB; nothing was measured at that size.
+  A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
+- **The text-file limit and the ASCII width are provisional.**
+  A BrainVision header or marker file larger than 1 MiB (`MAX_TEXT_BYTES`) is refused as `too_large` before it is read, because eegprep reads both whole; 1 MiB is a starting value, and a long recording with a marker for every stimulus can have a larger marker file, which this refuses.
+  ASCII data are counted at ten values to the byte of text (`ASCII_VALUES_PER_BYTE`), the cost of the worst case that was measured: eegprep peaked at 80 bytes to a byte of text for values of one digit, one to a line (CPython 3.12, `tracemalloc`), and at 8 to 26 bytes for the longer or wider rows that were tried.
+  A file of longer values is therefore counted at up to ten times what it holds and is refused sooner than it need be; the default limit lets through 100 MB of ASCII text.
+  The measure is of the interpreter and the version of eegprep used here, and was not repeated on another.
+  Neither this nor the text limit was set from the headers or the ASCII files of real datasets.
+- **The size limit is provisional.**
+  A recording that declares or holds more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
+  The number is arithmetic and not a measurement.
+  The check reads the fields of a set that keeps its variables in an `EEG` structure by loading that structure, once the count has shown that it holds no more than the cap, so a set just under the cap (about 8 GB at the provisional limit) costs the check as much memory as the loader needs for its first copy; the check frees it before eegprep reads the file, and nothing was measured at that size.
+  Counting a set that keeps its variables in an `EEG` structure inflates the structure once more before the loader inflates it again (a flat set is read only as far as the headers), so the check costs time as well as a step of memory; that time was not measured at the size of the limit.
+  The count follows at most 5,000,000 elements (`MAT_ELEMENT_LIMIT`) and 32 levels of nesting (`MAT_DEPTH_LIMIT`), so that its own work is bounded; both numbers are estimates, and nothing was measured on how many elements a real set holds or how deep one nests.
+  The element limit is acceptable only because every element is charged against the cap (24 values, `MAT_ELEMENT_VALUES`, and 44 more for an element of a structure array, `MAT_STRUCT_VALUES`): the limit alone let 500,000 empty cells, a file of 81,687 bytes, make `loadmat` hold 92 MiB.
+  The charges were measured on CPython 3.12 with the NumPy and SciPy of the lock: about 190 bytes for an empty cell member, and 144 to 336 bytes for an element of a structure array of no fields, depending on what the process had loaded before (the same call measured 144 alone and 336 after another test had run; the cause was not found, and the larger is charged).
+  A structure element with fields costs that and each field's member besides, and a measure in another interpreter could differ.
+  Pre-registered follow-ups, to be settled by the scale measurement and not before: (1) measure the peak memory and the time of the floor at 100 million, 500 million and one billion values and set the limit from them; (2) run each recording in a child process, so that one that exhausts memory or is killed by the kernel fails alone, with a row in the table and the other recordings' products intact, instead of ending the run without a dataset record.
+  Neither is built.
+- **Staging cost.**
+  The phase plan read in eegprep's source that pybids indexes the whole staged tree once per process; the cost for a job that stages tens of thousands of files was not measured.
+  Job authors include `dataset_description.json` and the recording's `channels.tsv`, `electrodes.tsv`, `coordsystem.json` and `eeg.json` and nothing else they can avoid.
+- **The dataset record's size cap** keeps about 300 rows in the record: 312 of 5,000 rows fit in a test with session-level paths, at about 420 bytes a row as indented JSON.
+  The rest are in the table file, which is complete and hashed, and the counts, the distributions and the plan variants cover every recording.
 
 ## The Tapis definitions and the observer
 

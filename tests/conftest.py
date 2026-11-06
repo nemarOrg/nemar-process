@@ -15,6 +15,10 @@ from pathlib import Path
 import pytest
 from harness import SIF_NAME, Rig
 
+# The recipe tests' gate and fixtures (tests/recipe_plugin.py). A plugin and not a second conftest.py,
+# because a second one would take the name `conftest` that the launcher tests import from.
+pytest_plugins = ["recipe_plugin"]
+
 REQUIRE = os.environ.get("NEMAR_REQUIRE_APPTAINER") == "1"
 BINARY = shutil.which("apptainer") or shutil.which("singularity")
 # The small public image the container tests run, pinned by digest (an OCI index). It is pulled
