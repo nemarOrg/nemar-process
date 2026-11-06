@@ -16,6 +16,7 @@ import sys
 import check_smoke_pins as pins
 import pytest
 from image_support import clean_env
+from recipe_support import PINNED_COMMON_VERSION, PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
 from repo_paths import LOCK, PYPROJECT, RECIPES, ROOT, SMOKE
 
 IMAGE_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "PYTHONHASHSEED": "0"}
@@ -34,9 +35,9 @@ def expected_document() -> dict:
         "recipe_command": {
             "via": "nemar-recipe",
             "version": {
-                "recipes": {"nemar-floor": "1.0.0"},
-                "common": "1.0.0",
-                "eegprep": "0.5.0",
+                "recipes": {"nemar-floor": PINNED_RECIPE_VERSION},
+                "common": PINNED_COMMON_VERSION,
+                "eegprep": PINNED_EEGPREP_VERSION,
                 "python": "3.12.16",
                 "numpy": "2.5.4",
             },
@@ -46,7 +47,7 @@ def expected_document() -> dict:
 
 def test_the_expectation_names_every_package_the_issue_pins():
     expected = pins.expected_versions(PYPROJECT, LOCK)
-    assert expected["eegprep"] == {"0.5.0"}
+    assert expected["eegprep"] == {PINNED_EEGPREP_VERSION}
     assert expected["mne"] == {"1.13.2"}
     assert expected["pamica"] == {"0.4.0"}
     for name in ("numpy", "scipy", "torch", "signaljourney-validator", "python-picard", "pybids"):
@@ -168,14 +169,16 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
     assert done.returncode == 0, done.stderr[-3000:]
     document = json.loads(done.stdout)  # stdout is the JSON document and nothing else
     assert pins.check(document, PYPROJECT, LOCK) == []
-    assert document["distributions"]["eegprep"] == "0.5.0"
+    assert document["distributions"]["eegprep"] == PINNED_EEGPREP_VERSION
     assert document["distributions"]["mne"] == "1.13.2"
     assert document["distributions"]["pamica"] == "0.4.0"
     assert document["torch"]["cuda"] is None
     # the recipe command ran; the lock's environment has no script on its path, so it was the module
     assert document["recipe_command"]["via"] == "python -m nemar_process"
-    assert document["recipe_command"]["version"]["eegprep"] == "0.5.0"
-    assert document["recipe_command"]["version"]["recipes"] == {"nemar-floor": "1.0.0"}
+    assert document["recipe_command"]["version"]["eegprep"] == PINNED_EEGPREP_VERSION
+    assert document["recipe_command"]["version"]["recipes"] == {
+        "nemar-floor": PINNED_RECIPE_VERSION
+    }
     # every pinned package was imported, not only installed
     for module in ("eegprep", "mne", "pamica", "numpy", "scipy", "torch", "picard", "bids"):
         assert document["imports"][module], module

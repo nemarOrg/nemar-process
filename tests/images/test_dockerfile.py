@@ -13,6 +13,7 @@ import subprocess
 
 import yaml
 from image_support import clean_env
+from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
 from repo_paths import CI_WORKFLOW, DOCKERFILE, IMAGE_WORKFLOW, PYPROJECT, RECIPES, ROOT
 
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
@@ -202,8 +203,8 @@ def test_the_script_the_dockerfile_writes_runs_the_command(runtime_python, tmp_p
     )
     assert done.returncode == 0, done.stderr[-2000:]
     document = json.loads(done.stdout)
-    assert document["eegprep"] == "0.5.0"
-    assert document["recipes"] == {"nemar-floor": "1.0.0"}
+    assert document["eegprep"] == PINNED_EEGPREP_VERSION
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
 
 
 def test_the_build_context_is_an_allow_list_that_names_what_the_build_copies():

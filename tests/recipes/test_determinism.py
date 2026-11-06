@@ -12,6 +12,7 @@ import os
 
 import pytest
 from nemar_process.common import COMMON_VERSION, determinism
+from recipe_support import PINNED_COMMON_VERSION
 from threadpoolctl import threadpool_info
 
 
@@ -66,7 +67,7 @@ def test_engine_info_says_what_ran():
 
 
 def test_the_common_layer_has_a_version():
-    assert COMMON_VERSION == "1.0.0"
+    assert COMMON_VERSION == PINNED_COMMON_VERSION
 
 
 def test_canonical_json_is_sorted_compact_ascii_and_refuses_nan():

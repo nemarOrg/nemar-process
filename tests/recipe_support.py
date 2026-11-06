@@ -33,6 +33,11 @@ SMOKE_SET = ROOT / "tests" / "fixtures" / "smoke" / "smoke.set"
 RECORDING = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
 DATASET_ID = "on007823"
 DATASET_VERSION = "v1.0.0"
+# The versions the tests pin. A bump of the recipe, of the common layer or of eegprep is an edit of
+# these lines (and of the places that declare them), not a search through the tests.
+PINNED_RECIPE_VERSION = "1.0.0"
+PINNED_COMMON_VERSION = "1.0.0"
+PINNED_EEGPREP_VERSION = "0.5.0"
 
 
 def require_runtime() -> None:
