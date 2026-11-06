@@ -11,17 +11,22 @@ from __future__ import annotations
 import posixpath
 import re
 
-_RECORDING = re.compile(r"^(?P<stem>[^/]+)_eeg\.(?P<extension>[^/]+)$")
-_DESC = re.compile(r"^desc-(?P<value>[^_]*)$")
+_RECORDING = re.compile(r"(?P<stem>[^/]+)_eeg\.(?P<extension>[^/]+)")
+_DESC = re.compile(r"desc-(?P<value>[^_]*)")
 
 
 def label(recipe_id: str) -> str:
     return recipe_id.replace("-", "")
 
 
+def match_recording(name: str) -> re.Match[str] | None:
+    """The ``stem`` (without ``_eeg``) and ``extension`` of a file name that is a recording's."""
+    return _RECORDING.fullmatch(name)
+
+
 def _split(relative_path: str) -> tuple[str, str]:
     directory, name = posixpath.split(relative_path)
-    match = _RECORDING.match(name)
+    match = match_recording(name)
     if match is None:
         raise ValueError("not a recording (no _eeg suffix): {!r}".format(relative_path))
     return directory, match.group("stem")
@@ -38,7 +43,7 @@ def product_stem(relative_path: str, recipe_label: str) -> str:
     _, stem = _split(relative_path)
     parts = stem.split("_")
     for position, part in enumerate(parts):
-        found = _DESC.match(part)
+        found = _DESC.fullmatch(part)
         if found:
             parts[position] = "desc-{}{}".format(found.group("value"), recipe_label)
             return "_".join(parts)

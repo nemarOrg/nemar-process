@@ -13,8 +13,9 @@ dict, no stale cleaning state, float64, finite samples).
 
 from __future__ import annotations
 
+import math
 import posixpath
-import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,8 +48,6 @@ IGNORED_DATATYPES = ("meg", "ieeg", "emg", "nirs", "motion")
 # Cleaning state an earlier run left in a set's `etc`; it would corrupt the mask bookkeeping.
 STALE_ETC_KEYS = ("clean_channel_mask", "clean_sample_mask", "clean_drifts_kernel")
 UNTYPED = ("", "N/A", "NONE")
-
-_RECORDING_NAME = re.compile(r"^(?P<stem>[^/]+_eeg)\.(?P<extension>[^/]+)$")
 
 DTYPE = np.float64
 BIDS_FUNCTION = "eegprep.pop_load_frombids"
@@ -131,37 +130,43 @@ class Loaded:
 # ---- discovery --------------------------------------------------------------------------------
 
 
-def _eeg_directories(root: Path):
-    """The ``eeg`` directories of every subject and session directly under the dataset root."""
+def _bases(root: Path) -> Iterator[Path]:
+    """The directories that can hold a datatype directory: each subject's, then its sessions'."""
     for subject in sorted(root.iterdir()):
         if not (subject.name.startswith("sub-") and subject.is_dir()):
             continue
-        sessions = [
+        yield subject
+        yield from (
             d for d in sorted(subject.iterdir()) if d.name.startswith("ses-") and d.is_dir()
-        ]
-        for base in [subject, *sessions]:
-            if (base / "eeg").is_dir():
-                yield base / "eeg"
+        )
 
 
 def discover(dataset_dir: Path) -> list[Recording]:
-    """Every EEG recording of the dataset, sorted by path, supported or not."""
+    """Every EEG recording of the dataset, sorted by path, supported or not.
+
+    A link counts when it points at nothing: the recording then fails to load and has its row,
+    where ``is_file`` alone would have dropped it without a word.
+    """
     root = Path(dataset_dir)
     found = []
-    for directory in _eeg_directories(root):
+    for base in _bases(root):
+        directory = base / "eeg"
+        if not directory.is_dir():
+            continue
         for entry in sorted(directory.iterdir()):
-            match = _RECORDING_NAME.match(entry.name)
-            if match is None or not entry.is_file():
+            match = naming.match_recording(entry.name)
+            if match is None or not (entry.is_file() or entry.is_symlink()):
                 continue
             extension = "." + match.group("extension").lower()
             if extension in COMPANION_EXTENSIONS:
                 continue
             relative = entry.relative_to(root).as_posix()
+            stem = match.group("stem") + "_eeg"
             companions = tuple(
                 sorted(
                     sibling.relative_to(root).as_posix()
                     for suffix in DATA_COMPANIONS
-                    if (sibling := entry.with_name(match.group("stem") + suffix)).is_file()
+                    if (sibling := entry.with_name(stem + suffix)).is_file()
                 )
             )
             found.append(
@@ -178,21 +183,15 @@ def ignored_datatypes(dataset_dir: Path) -> dict[str, int]:
     """
     root = Path(dataset_dir)
     counts: dict[str, int] = {}
-    for subject in sorted(root.iterdir()):
-        if not (subject.name.startswith("sub-") and subject.is_dir()):
-            continue
-        sessions = [
-            d for d in sorted(subject.iterdir()) if d.name.startswith("ses-") and d.is_dir()
-        ]
-        for base in [subject, *sessions]:
-            for datatype in IGNORED_DATATYPES:
-                directory = base / datatype
-                if not directory.is_dir():
-                    continue
-                for entry in directory.iterdir():
-                    stem, _, extension = entry.name.partition(".")
-                    if stem.endswith("_" + datatype) and extension not in ("json", "tsv"):
-                        counts[datatype] = counts.get(datatype, 0) + 1
+    for base in _bases(root):
+        for datatype in IGNORED_DATATYPES:
+            directory = base / datatype
+            if not directory.is_dir():
+                continue
+            for entry in directory.iterdir():
+                stem, _, extension = entry.name.partition(".")
+                if stem.endswith("_" + datatype) and extension not in ("json", "tsv"):
+                    counts[datatype] = counts.get(datatype, 0) + 1
     return dict(sorted(counts.items()))
 
 
@@ -270,6 +269,11 @@ def normalize(eeg: dict[str, Any]) -> tuple[dict[str, Any], Notes]:
     data = np.asarray(eeg["data"], dtype=DTYPE)
     if data.ndim != 2 or int(eeg.get("trials") or 1) != 1:
         raise RecordingError(LOAD_FAILED, "load", "epoched_data")
+    rate = float(eeg["srate"])
+    if not (math.isfinite(rate) and rate > 0):
+        raise RecordingError(LOAD_FAILED, "load", "invalid_sampling_rate")
+    if data.shape[1] == 0:
+        raise RecordingError(LOAD_FAILED, "load", "no_samples")
     if not np.isfinite(data).all():
         raise RecordingError(NON_FINITE_SAMPLES, "load")
     eeg["data"] = data
@@ -341,6 +345,7 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
         headers.check(recording.abs_path, max_channel_samples)
         eeg, report, function, parameters = _read(recording)
         located = qc.count_located(eeg["chanlocs"])
+        inputs = _inputs(recording, report)
     except RecordingError:
         raise
     except MemoryError as error:
@@ -358,5 +363,5 @@ def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -
         location_source=_location_source(report, located),
         n_channels_with_locations=located,
         power_line_hz_declared=_declared_power_line(eeg),
-        inputs=_inputs(recording, report),
+        inputs=inputs,
     )

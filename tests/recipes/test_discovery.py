@@ -105,6 +105,18 @@ def test_a_directory_named_like_a_recording_is_not_one(tmp_path):
     assert io.discover(tmp_path) == []
 
 
+def test_a_dangling_link_is_a_recording_that_fails_and_not_one_that_vanishes(tmp_path):
+    """`is_file` is false for a link to nothing, which used to drop the recording without a row."""
+    link = tmp_path / "sub-01" / "eeg" / "sub-01_task-a_eeg.edf"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path / "nowhere.edf")
+    (recording,) = io.discover(tmp_path)
+    assert recording.path == "sub-01/eeg/sub-01_task-a_eeg.edf"
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step) == ("load_failed", "load")
+
+
 def test_the_entities_of_a_recording_are_read_from_its_name(tmp_path):
     root = touch_tree(tmp_path, ["sub-01/ses-pre/eeg/sub-01_ses-pre_task-a_run-2_eeg.edf"])
     (recording,) = io.discover(root)

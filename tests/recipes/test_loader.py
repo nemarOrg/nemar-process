@@ -8,13 +8,14 @@ eegprep reads back as an array and then every cleaning step fails on).
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 
 import numpy as np
 import pytest
 from nemar_process.common import io
 from nemar_process.common.errors import RecordingError
-from recipe_support import DATASET, RECORDING, write_set
+from recipe_support import DATASET, RECORDING, copy_fixture, write_set
 
 BIDS_PARAMETERS = {
     "bidschanloc": True,
@@ -153,7 +154,7 @@ def test_a_file_that_is_not_an_edf_fails_to_load_with_only_the_error_class(tmp_p
     assert caught.value.detail == "ValueError"
 
 
-def eeg_of(data, types=None):
+def eeg_of(data, types=None, srate=250.0):
     chanlocs = [
         {"labels": "Ch{}".format(i)} | ({} if types is None else {"type": types[i]})
         for i in range(data.shape[0])
@@ -164,6 +165,7 @@ def eeg_of(data, types=None):
         "nbchan": data.shape[0],
         "pnts": data.shape[1],
         "trials": 1,
+        "srate": srate,
         "etc": {},
     }
 
@@ -175,6 +177,55 @@ def test_data_that_are_not_finite_are_refused_with_their_own_word(bad):
     with pytest.raises(RecordingError) as caught:
         io.normalize(eeg_of(data))
     assert (caught.value.code, caught.value.step) == ("non_finite_samples", "load")
+
+
+@pytest.mark.parametrize("srate", [0.0, -250.0, float("nan"), float("inf")])
+def test_a_recording_without_a_usable_sampling_rate_is_refused(srate):
+    """Every duration and every spectrum divides by it: zero, negative or not finite is no recording."""
+    with pytest.raises(RecordingError) as caught:
+        io.normalize(eeg_of(np.ones((3, 100)), srate=srate))
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "load_failed",
+        "load",
+        "invalid_sampling_rate",
+    )
+
+
+def test_a_recording_without_samples_is_refused():
+    with pytest.raises(RecordingError) as caught:
+        io.normalize(eeg_of(np.ones((3, 0))))
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "load_failed",
+        "load",
+        "no_samples",
+    )
+
+
+def test_a_recording_with_one_sample_is_a_recording():
+    normalized, _ = io.normalize(eeg_of(np.ones((3, 1))))
+    assert normalized["data"].shape == (3, 1)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its mode")
+def test_an_input_that_cannot_be_read_is_a_load_failure_and_not_a_disk_error(tmp_path):
+    """The companions are read for their checksums after eegprep read the recording; a file that
+    cannot be read is a problem with the input, and `disk_error` is for writing the product."""
+    tree = copy_fixture(tmp_path / "dataset")
+    companion = tree / "sub-CUCOV076" / "eeg" / "sub-CUCOV076_task-COVID_eeg.fdt"
+    companion.write_bytes(b"stray companion")
+    companion.chmod(0)
+    try:
+        (recording,) = io.discover(tree)
+        assert recording.companions == ("sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.fdt",)
+        with pytest.raises(RecordingError) as caught:
+            io.load(recording)
+    finally:
+        companion.chmod(0o644)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "load_failed",
+        "load",
+        "PermissionError",
+    )
 
 
 def test_epoched_data_is_not_a_continuous_recording():

@@ -61,6 +61,7 @@ Whether a run with some failed recordings is a job success is decision O3 below.
 
 A recording is a file `sub-*/[ses-*/]eeg/*_eeg.<ext>` at the top of the dataset directory.
 `.edf`, `.bdf`, `.vhdr` and `.set` are loaded; the companions `.eeg`, `.vmrk`, `.fdt`, `.json` and `.tsv` are not recordings; any other extension is skipped and never converted by another engine.
+A link that points at nothing is a recording too: it fails to load and has its row, where it would otherwise vanish.
 Other datatypes (`meg`, `ieeg`, `emg`, `nirs`, `motion`) are not discovered; the dataset record counts them in `extensions.nemar.ignored_datatypes`.
 Every discovered recording ends in exactly one row of the recordings table:
 
@@ -71,14 +72,14 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `skipped` | `no_signal_channels` | no channel is typed EEG or untyped |
 | `skipped` | `duplicate_recording` | the product stem collides with an earlier recording (an `.edf` and a `.set` of one recording) |
 | `failed` | `file_not_found` | a `--recording` path is not a file |
-| `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or the data are epoched, or the header names a file other than the recording's own companions (the detail is `external_reference`, below) |
+| `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or a file it was loaded with cannot be read (the detail is the exception's class name), or the data are epoched (`epoched_data`), or the sampling rate is not a positive finite number (`invalid_sampling_rate`), or there are no samples (`no_samples`), or the header names a file other than the recording's own companions (`external_reference`, below) |
 | `failed` | `too_large` | the header declares more channels times samples than the provisional limit of 1,000,000,000 values (step `load`; below) |
 | `failed` | `non_finite_samples` | the loaded data contain NaN or infinity |
 | `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
 | `failed` | `all_channels_flagged` | the no-locations criterion flags every channel, so eegprep removes none and the recording cannot be annotated honestly (step `bad_channels`); on the RANSAC branch eegprep itself raises when more than 75 percent are flagged, which is `step_failed` |
 | `failed` | `step_failed` | an eegprep step raised; the `step` column names it; only the exception's class name is kept |
 | `failed` | `out_of_memory` | `MemoryError` (a SIGKILL by the kernel ends the job and the launcher records it) |
-| `failed` | `disk_error` | writing or moving the recording's files failed |
+| `failed` | `disk_error` | writing or moving the recording's files failed (reading an input that cannot be read is `load_failed`) |
 | `failed` | `internal_error` | anything else the recipe's own code raised, and a record that fails its own checks |
 
 ### What is checked before eegprep reads a recording
