@@ -346,8 +346,7 @@ def decode_wire(value: object) -> bytes:
     ``bad_length``). Then:
 
     6. every decoded byte is printable ASCII, 0x20 to 0x7e (no control byte, not DEL, nothing from
-       0x80 up; the Worker writes every other character as a ``\\uXXXX`` escape), else
-       ``not_printable``;
+       0x80 up: the Worker writes all of those as JSON escapes), else ``not_printable``;
     7. the value is CANONICAL, else ``not_base64url``: encoding the decoded text again gives the
        value back, so the unused trailing bits of its last character are zero and there is one
        value per text.
