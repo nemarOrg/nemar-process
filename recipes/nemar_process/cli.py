@@ -27,7 +27,9 @@ numbers 10 to 16 are not used here):
        be listed
     7  no_compatible_recording: recordings were found, every one was skipped for its format
        (``unsupported_format``: the recipe does not load it), and none succeeded (the record is
-       written)
+       written); a requested file that is not an EEG recording (a ``scans.tsv``, an ``.edf``
+       outside ``eeg/``) is skipped that way too, while a requested path that is not a file is
+       ``file_not_found`` and exits 4
 
 Each recording runs inside one failure boundary: its files are written into a private directory
 under ``--out`` and moved into place only when every file and the record exist, so a failed

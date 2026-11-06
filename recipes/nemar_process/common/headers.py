@@ -757,8 +757,10 @@ def bids_links(path: Path, root: Path) -> None:
     in any other directory, one that none of these links leads to, is not looked at
     (docs/unverified.md).
 
-    Two links to each other cannot be resolved, and the ``RuntimeError`` that says so fails the
-    recording (``load_failed``, the class of the error as the detail).
+    On Python 3.12, the image's interpreter, two links to each other cannot be resolved, and the
+    ``RuntimeError`` that says so fails the recording (``load_failed``, the class of the error as
+    the detail). On 3.13 ``resolve()`` returns without raising and the recording is accepted, which
+    is safe: each directory is read once.
     """
     base = root.resolve()
     subject = root / path.relative_to(root).parts[0]
