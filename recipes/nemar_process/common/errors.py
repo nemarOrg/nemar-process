@@ -8,28 +8,46 @@ not. Only an exception's class name is ever kept, never its message, which can h
 from __future__ import annotations
 
 import contextlib
+from typing import Final, Literal
 
-LOAD_FAILED = "load_failed"
-NON_FINITE_SAMPLES = "non_finite_samples"
-STEP_FAILED = "step_failed"
-OUT_OF_MEMORY = "out_of_memory"
-DISK_ERROR = "disk_error"
-INTERNAL_ERROR = "internal_error"
-FILE_NOT_FOUND = "file_not_found"
-UNSUPPORTED_FORMAT = "unsupported_format"
-NO_SIGNAL_CHANNELS = "no_signal_channels"
-DUPLICATE_RECORDING = "duplicate_recording"
-ALL_CHANNELS_FLAT = "all_channels_flat"
-ALL_CHANNELS_FLAGGED = "all_channels_flagged"
-TOO_LARGE = "too_large"
+Status = Literal["failed", "skipped"]
+Code = Literal[
+    "load_failed",
+    "non_finite_samples",
+    "step_failed",
+    "out_of_memory",
+    "disk_error",
+    "internal_error",
+    "file_not_found",
+    "unsupported_format",
+    "no_signal_channels",
+    "duplicate_recording",
+    "all_channels_flat",
+    "all_channels_flagged",
+    "too_large",
+]
+
+LOAD_FAILED: Final = "load_failed"
+NON_FINITE_SAMPLES: Final = "non_finite_samples"
+STEP_FAILED: Final = "step_failed"
+OUT_OF_MEMORY: Final = "out_of_memory"
+DISK_ERROR: Final = "disk_error"
+INTERNAL_ERROR: Final = "internal_error"
+FILE_NOT_FOUND: Final = "file_not_found"
+UNSUPPORTED_FORMAT: Final = "unsupported_format"
+NO_SIGNAL_CHANNELS: Final = "no_signal_channels"
+DUPLICATE_RECORDING: Final = "duplicate_recording"
+ALL_CHANNELS_FLAT: Final = "all_channels_flat"
+ALL_CHANNELS_FLAGGED: Final = "all_channels_flagged"
+TOO_LARGE: Final = "too_large"
 
 
 class RecordingError(Exception):
     """A recording that could not be processed: ``code`` is the word, ``step`` the step id."""
 
-    status = "failed"
+    status: Status = "failed"
 
-    def __init__(self, code: str, step: str | None = None, detail: str | None = None) -> None:
+    def __init__(self, code: Code, step: str | None = None, detail: str | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.step = step
@@ -47,7 +65,7 @@ class RecordingError(Exception):
 class RecordingSkipped(RecordingError):
     """A recording the recipe does not process, with the word that says why."""
 
-    status = "skipped"
+    status: Status = "skipped"
 
 
 @contextlib.contextmanager

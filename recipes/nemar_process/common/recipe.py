@@ -14,11 +14,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 # The kinds of table column. `text` is always a string and a missing value stays the word `n/a`;
 # `str` is a string or None; `int` and `float` are numbers or None.
-KINDS = ("text", "str", "int", "float")
+Kind = Literal["text", "str", "int", "float"]
+KINDS: tuple[Kind, ...] = get_args(Kind)
 
 
 @dataclass(frozen=True)
@@ -26,8 +27,16 @@ class Column:
     """One column of the recordings table: its name, its kind, and the decimals of a float."""
 
     name: str
-    kind: str
+    kind: Kind
     decimals: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in KINDS:
+            raise ValueError("the kind of column {!r} is one of {}".format(self.name, KINDS))
+        if (self.kind == "float") != (self.decimals is not None):
+            raise ValueError(
+                "column {!r}: a float has decimals and nothing else does".format(self.name)
+            )
 
 
 @dataclass(frozen=True)

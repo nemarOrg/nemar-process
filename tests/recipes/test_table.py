@@ -14,6 +14,7 @@ SUCCEEDED = {
     "status": "succeeded",
     "code": None,
     "step": None,
+    "detail": None,
     "n_channels": 22,
     "n_signal_channels": 21,
     "duration_s": 282.0,
@@ -36,6 +37,7 @@ FAILED = {
     "status": "failed",
     "code": "load_failed",
     "step": "load",
+    "detail": "ValueError",
 }
 
 
@@ -65,9 +67,10 @@ def test_rows_read_back_as_the_typed_values_they_were_written_from(tmp_path):
         writer.append(SUCCEEDED)
         writer.append(FAILED)
     first, second = table.read_rows(path, COLUMNS)
-    assert first == {**SUCCEEDED, "code": "n/a", "step": "n/a"}
+    assert first == {**SUCCEEDED, "code": "n/a", "step": "n/a", "detail": "n/a"}
     assert second["code"] == "load_failed"
     assert second["step"] == "load"
+    assert second["detail"] == "ValueError"
     assert second["n_channels"] is None
     assert second["plan_hash"] is None
     assert second["pct_good_samples"] is None
@@ -87,6 +90,26 @@ def test_floats_are_written_with_the_fixed_decimals_of_their_column(tmp_path):
     assert by_name["line_db_before"] == "7.480"
     assert by_name["code"] == "n/a"
     assert by_name["n_channels"] == "22"
+
+
+def test_a_row_with_a_key_that_is_not_a_column_is_refused_and_writes_nothing(tmp_path):
+    """A misspelt key would otherwise be a column of `n/a` that nobody notices."""
+    row = {**FAILED, "status_code": "oops"}
+    with pytest.raises(ValueError, match="status_code"):
+        table.row_text(COLUMNS, row)
+    path = tmp_path / "t.tsv"
+    with table.TableWriter(path, COLUMNS) as writer:
+        writer.append(FAILED)
+        with pytest.raises(ValueError, match="status_code"):
+            writer.append(row)
+    assert len(table.read_rows(path, COLUMNS)) == 1
+
+
+def test_a_row_may_leave_columns_out_and_they_are_missing_values():
+    text = table.row_text(COLUMNS, {"path": "p", "status": "skipped"})
+    cells = dict(zip((c.name for c in COLUMNS), text.rstrip("\n").split("\t"), strict=True))
+    assert (cells["path"], cells["status"]) == ("p", "skipped")
+    assert {v for name, v in cells.items() if name not in ("path", "status")} == {"n/a"}
 
 
 def test_a_table_of_other_columns_is_refused(tmp_path):

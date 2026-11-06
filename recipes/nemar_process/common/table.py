@@ -24,12 +24,12 @@ def header(columns: Sequence[Column]) -> str:
 
 
 def row_text(columns: Sequence[Column], row: Mapping[str, Any]) -> str:
-    cells = []
-    for column in columns:
-        value = row.get(column.name)
-        if column.kind == "text" and value is None:
-            value = files.MISSING
-        cells.append(files.tsv_cell(value, column.decimals))
+    """One row as a line. A column the row leaves out is a missing value; a key that is not a column
+    is refused, because a misspelt one would be a column of ``n/a`` that nobody notices."""
+    unknown = sorted(set(row) - {column.name for column in columns})
+    if unknown:
+        raise ValueError("not a column of the table: {}".format(", ".join(unknown)))
+    cells = [files.tsv_cell(row.get(column.name), column.decimals) for column in columns]
     return "\t".join(cells) + "\n"
 
 

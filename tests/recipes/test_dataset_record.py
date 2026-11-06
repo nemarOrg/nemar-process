@@ -22,6 +22,7 @@ def succeeded(i, **changes):
         "status": "succeeded",
         "code": "n/a",
         "step": "n/a",
+        "detail": "n/a",
         "n_channels": 22,
         "n_signal_channels": 21,
         "duration_s": 282.0,
@@ -42,7 +43,7 @@ def succeeded(i, **changes):
     return row
 
 
-def other(i, status, code, step="n/a"):
+def other(i, status, code, step="n/a", detail="n/a"):
     row = dict.fromkeys(succeeded(i))
     row.update(
         path="sub-{:04d}/eeg/sub-{:04d}_task-a_eeg.fif".format(i, i),
@@ -50,6 +51,7 @@ def other(i, status, code, step="n/a"):
         status=status,
         code=code,
         step=step,
+        detail=detail,
     )
     return row
 
@@ -85,7 +87,7 @@ def mixed():
         ),
         succeeded(3, line_db_before=-12.0, line_db_after=45.0, pct_good_channels=100.0),
         other(4, "skipped", "unsupported_format"),
-        other(5, "failed", "load_failed", "load"),
+        other(5, "failed", "load_failed", "load", "ValueError"),
     ]
     return build(rows), rows
 
@@ -134,6 +136,7 @@ def test_the_report_is_the_process_envelope_and_lists_only_the_failed_and_skippe
             "path": "sub-0004/eeg/sub-0004_task-a_eeg.fif",
             "status": "skipped",
             "code": "unsupported_format",
+            "step": "n/a",
             "reason": "n/a",
             "attempts": 1,
         },
@@ -141,7 +144,8 @@ def test_the_report_is_the_process_envelope_and_lists_only_the_failed_and_skippe
             "path": "sub-0005/eeg/sub-0005_task-a_eeg.fif",
             "status": "failed",
             "code": "load_failed",
-            "reason": "load",
+            "step": "load",
+            "reason": "ValueError",
             "attempts": 1,
         },
     ]

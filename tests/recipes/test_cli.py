@@ -679,11 +679,15 @@ def test_a_recording_leaves_nothing_in_its_private_directory_whatever_its_outcom
     recipe = REGISTRY["nemar-floor"]
     context = make_context()
     (recording,) = io.discover(DATASET)
-    row, detail = command.process_recording(recipe, recording, context, tmp_path, 0)
-    assert (row["status"], detail) == ("succeeded", None)
+    row = command.process_recording(recipe, recording, context, tmp_path, 0)
+    assert (row["status"], row["detail"]) == ("succeeded", None)
     assert not (tmp_path / ".partial" / "0").exists()
     assert (tmp_path / "sub-CUCOV076" / "eeg").is_dir()
     broken = io.Recording(DATASET, "sub-99/eeg/sub-99_task-a_eeg.edf", ".edf", {}, ())
-    row, detail = command.process_recording(recipe, broken, context, tmp_path, 1)
-    assert (row["status"], row["code"], detail) == ("failed", "load_failed", "FileNotFoundError")
+    row = command.process_recording(recipe, broken, context, tmp_path, 1)
+    assert (row["status"], row["code"], row["detail"]) == (
+        "failed",
+        "load_failed",
+        "FileNotFoundError",
+    )
     assert not (tmp_path / ".partial" / "1").exists()

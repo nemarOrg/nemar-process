@@ -60,7 +60,9 @@ from nemar_process.common.errors import (
     INTERNAL_ERROR,
     OUT_OF_MEMORY,
     UNSUPPORTED_FORMAT,
+    Code,
     RecordingError,
+    Status,
 )
 from nemar_process.common.recipe import Identity, Recipe, RunContext
 from nemar_process.recipes import REGISTRY
@@ -157,7 +159,7 @@ def identity_of(args: argparse.Namespace, dataset_dir: Path | None) -> Identity:
 # ---- outcomes ---------------------------------------------------------------------------------
 
 
-def outcome_of(error: BaseException) -> tuple[str, str, str | None, str | None]:
+def outcome_of(error: BaseException) -> tuple[Status, Code, str | None, str | None]:
     """(status, code, step, class name) for an exception a recording ended with.
 
     Only a class name is ever kept: a message can hold a path.
@@ -171,16 +173,26 @@ def outcome_of(error: BaseException) -> tuple[str, str, str | None, str | None]:
     return "failed", INTERNAL_ERROR, None, type(error).__name__
 
 
-def row_for(path: str, status: str, code: str, step: str | None = None) -> dict[str, Any]:
-    return {"path": path, "datatype": "eeg", "status": status, "code": code, "step": step}
+def row_for(
+    path: str, status: Status, code: Code, step: str | None = None, detail: str | None = None
+) -> dict[str, Any]:
+    """The table row of a recording that did not succeed: only a class name or a fixed word as detail."""
+    return {
+        "path": path,
+        "datatype": "eeg",
+        "status": status,
+        "code": code,
+        "step": step,
+        "detail": detail,
+    }
 
 
-def report(path: str, row: dict[str, Any], detail: str | None = None) -> None:
+def report(path: str, row: dict[str, Any]) -> None:
     line = "recording={} status={} code={}".format(path, row["status"], row["code"] or "n/a")
     if row.get("step"):
         line += " step={}".format(row["step"])
-    if detail:
-        line += " error={}".format(detail)
+    if row.get("detail"):
+        line += " error={}".format(row["detail"])
     print(line, file=sys.stderr, flush=True)
 
 
@@ -220,8 +232,8 @@ def process_recording(
     context: RunContext,
     out: Path,
     counter: int,
-) -> tuple[dict[str, Any], str | None]:
-    """Run one recording inside its failure boundary: (its table row, an error class name or None)."""
+) -> dict[str, Any]:
+    """Run one recording inside its failure boundary and return its table row, whatever happened."""
     private = out / PARTIAL / str(counter)
     try:
         private.mkdir(parents=True)
@@ -229,10 +241,9 @@ def process_recording(
         # a row the table refuses is this recording's failure, found while nothing is moved yet
         table.row_text(recipe.columns, product.row)
         files.move_into_place(private, out, product.files)
-        return product.row, None
+        return product.row
     except Exception as error:  # noqa: BLE001  one recording's failure (a MemoryError too) never ends the run
-        status, code, step, detail = outcome_of(error)
-        return row_for(recording.path, status, code, step), detail
+        return row_for(recording.path, *outcome_of(error))
     finally:
         shutil.rmtree(private, ignore_errors=True)
 
@@ -390,11 +401,9 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
                 out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
             ) as writer:
                 for counter, (path, recording, problem) in enumerate(items):
-                    row, detail = run_one(
-                        recipe, recording, problem, path, context, out, counter, seen
-                    )
+                    row = run_one(recipe, recording, problem, path, context, out, counter, seen)
                     writer.append(row)
-                    report(path, row, detail)
+                    report(path, row)
         except OSError as error:
             print("the table cannot be written: {}".format(type(error).__name__), file=sys.stderr)
             return EXIT_OUTPUT_UNUSABLE
@@ -422,15 +431,15 @@ def run_one(
     out: Path,
     counter: int,
     seen: set[str],
-) -> tuple[dict[str, Any], str | None]:
+) -> dict[str, Any]:
     if recording is None:
-        assert problem is not None
-        return row_for(path, problem.status, problem.code), None
+        problem = problem or RecordingError(INTERNAL_ERROR)
+        return row_for(path, problem.status, problem.code)
     if not recording.supported:
-        return row_for(path, "skipped", UNSUPPORTED_FORMAT), None
+        return row_for(path, "skipped", UNSUPPORTED_FORMAT)
     key = naming.product_path(recording.path, recipe.label, "signalJourney", "json")
     if key in seen:
-        return row_for(path, "skipped", DUPLICATE_RECORDING), None
+        return row_for(path, "skipped", DUPLICATE_RECORDING)
     seen.add(key)
     return process_recording(recipe, recording, context, out, counter)
 

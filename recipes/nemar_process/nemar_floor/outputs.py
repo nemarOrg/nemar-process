@@ -141,6 +141,7 @@ def table_row(recording: Recording, result: FloorResult, content_sha256: str) ->
         "status": "succeeded",
         "code": None,
         "step": None,
+        "detail": None,
         "n_channels": channels["nInput"],
         "n_signal_channels": channels["nSignal"],
         "duration_s": result.metrics["durationS"],

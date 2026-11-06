@@ -424,7 +424,8 @@ def build_dataset_record(
                 "path": row["path"],
                 "status": row["status"],
                 "code": row["code"],
-                "reason": row.get("step") or files.MISSING,
+                "step": row.get("step") or files.MISSING,
+                "reason": row.get("detail") or files.MISSING,
                 "attempts": 1,
             }
             for row in listed

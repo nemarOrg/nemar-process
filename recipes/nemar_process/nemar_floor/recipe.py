@@ -15,6 +15,7 @@ COLUMNS = (
     Column("status", "text"),
     Column("code", "text"),
     Column("step", "text"),
+    Column("detail", "text"),
     Column("n_channels", "int"),
     Column("n_signal_channels", "int"),
     Column("duration_s", "float", 6),
