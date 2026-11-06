@@ -703,14 +703,17 @@ def test_a_job_can_still_be_named_from_a_text_that_fails_the_schema():
     assert spec_mod.recover_job_id(b"[]") == spec_mod.PLACEHOLDER_JOB_ID
 
 
-def test_the_worker_escapes_delete_so_a_text_never_holds_a_raw_one():
-    # nemar-cli writes every character from U+007F up as an escape, DEL included; json.dumps leaves
-    # DEL alone, so the test model of the Worker does it too (and a raw DEL is refused above).
-    text = spec_text(dict(base(), args=["a\x7fb"]))
+def test_the_model_of_the_worker_writes_delete_and_the_controls_as_escapes():
+    # nemar-cli writes every character outside 0x20 to 0x7e as an escape, DEL included, and so does
+    # the standard library's ensure_ascii, which is what the tests build a text with. A raw DEL in a
+    # text is refused above, and the Worker never writes one.
+    text = spec_text(dict(base(), args=["a\x7fb", "c\x01d\x1f", "e\nf\tg"]))
     assert b"\x7f" not in text
     assert b"\\u007f" in text
+    assert b"\\u0001" in text
+    assert b"\\n" in text
     assert all(0x20 <= byte <= 0x7E for byte in text)
-    assert spec_mod.parse(wire_encode(text)).args == ["a\x7fb"]
+    assert spec_mod.parse(wire_encode(text)).args == ["a\x7fb", "c\x01d\x1f", "e\nf\tg"]
 
 
 # ---- through the entry point ------------------------------------------------------------------
