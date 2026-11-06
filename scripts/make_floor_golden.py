@@ -65,13 +65,17 @@ def golden_files(product: Path, record: dict) -> dict[str, str]:
 
 def produce() -> dict[str, str]:
     """Run the floor on the fixture and return the golden files."""
-    from nemar_process.common import io
+    from nemar_process import sj
+    from nemar_process.common import determinism, io
     from nemar_process.common.recipe import Identity, RunContext
     from nemar_process.nemar_floor import RECIPE
 
     (recording,) = io.discover(DATASET)
-    with tempfile.TemporaryDirectory() as scratch:
-        context = RunContext(DATASET, Identity(None, None, None, None, "golden"), {}, {})
+    # one thread, as the command runs: the decisions are meant to be equal wherever they are made
+    with determinism.pinned_threads(), tempfile.TemporaryDirectory() as scratch:
+        context = RunContext(
+            DATASET, Identity(None, None, None, None, "golden"), {}, {}, sj.validator()
+        )
         product = RECIPE.run_recording(recording, context, Path(scratch))
         return golden_files(Path(scratch), product.record)
 

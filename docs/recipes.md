@@ -49,12 +49,12 @@ nemar-recipe version
 | Exit | Word | When |
 |---|---|---|
 | 0 | none | the run completed and the dataset record was written, whatever the mix of succeeded, failed and skipped |
-| 1 | `internal_error` | an uncaught error in the program itself; the class name goes to standard error, never a traceback |
+| 1 | `internal_error` | an uncaught error in the program itself, a signalJourney validator that cannot be built (it is built once, before anything is written) included; the class name goes to standard error, never a traceback |
 | 2 | usage | argument errors, no output directory |
 | 3 | `no_recordings` | no EEG recording was found (the dataset record is still written, with zero counts) |
 | 4 | `no_recording_succeeded` | recordings were found and none succeeded (the record is written) |
-| 5 | `output_unusable` | `--out` cannot be created or written, or already holds product files |
-| 6 | `dataset_unreadable` | `--dataset-dir`, or an `--in`, is missing or not a directory |
+| 5 | `output_unusable` | `--out` cannot be created or written, or already holds product files, or the dataset record cannot be written |
+| 6 | `dataset_unreadable` | `--dataset-dir`, or an `--in`, is missing, not a directory, or cannot be listed |
 
 The launcher records any non-zero exit as `runtime_error` with the detail `entry_failed`; its own numbers 10 to 16 are not used here.
 Whether a run with some failed recordings is a job success is decision O3 below.

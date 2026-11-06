@@ -20,8 +20,10 @@ numbers 10 to 16 are not used here):
     2  usage
     3  no_recordings: no EEG recording was found (the dataset record is still written)
     4  no_recording_succeeded: recordings were found and none succeeded (the record is written)
-    5  output_unusable: ``--out`` cannot be created or written, or already holds product files
-    6  dataset_unreadable: ``--dataset-dir`` (or an ``--in``) is missing or not a directory
+    5  output_unusable: ``--out`` cannot be created or written, or already holds product files, or
+       the dataset record cannot be written
+    6  dataset_unreadable: ``--dataset-dir`` (or an ``--in``) is missing, not a directory, or cannot
+       be listed
 
 Each recording runs inside one failure boundary: its files are written into a private directory
 under ``--out`` and moved into place only when every file and the record exist, so a failed
@@ -221,6 +223,8 @@ def process_recording(
     try:
         private.mkdir(parents=True)
         product = recipe.run_recording(recording, context, private)
+        # a row the table refuses is this recording's failure, found while nothing is moved yet
+        table.row_text(recipe.columns, product.row)
         files.move_into_place(private, out, product.files)
         return product.row, None
     except Exception as error:  # noqa: BLE001  one recording's failure (a MemoryError too) never ends the run
@@ -276,7 +280,7 @@ def finalize(
         started_utc=started_utc,
         finished_utc=determinism.utc_now(),
     )
-    problems = records.check(record, sj.validator())
+    problems = records.check(record, context.validator)
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
@@ -330,7 +334,13 @@ def terminated_as_exit() -> Generator[None]:
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        signal.signal(signal.SIGTERM, restorable(previous))
+
+
+def restorable(previous: Any) -> Any:
+    """What ``signal.signal`` can be given to put a handler back: it returns None for a handler that
+    was installed in C before Python started, and refuses None, so that one comes back as the default."""
+    return signal.SIG_DFL if previous is None else previous
 
 
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -349,6 +359,9 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         identity = identity_of(args, dataset_dir)
     except ValueError as error:
         parser.error(str(error))
+    validator = (
+        sj.validator()
+    )  # built once, before anything is written: it ends the run if it fails
     try:
         prepare_out(out, recipe.label)
     except OutputUnusable as error:
@@ -357,10 +370,17 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
     started = determinism.utc_now()
     with determinism.pinned_threads(), quiet(), terminated_as_exit():
         context = RunContext(
-            dataset_dir, identity, determinism.engine_info(), dict(determinism.SEEDS)
+            dataset_dir, identity, determinism.engine_info(), dict(determinism.SEEDS), validator
         )
-        items, owned = work_items(dataset_dir, args.recording)
-        ignored = io.ignored_datatypes(dataset_dir, owned)
+        try:
+            items, owned = work_items(dataset_dir, args.recording)
+            ignored = io.ignored_datatypes(dataset_dir, owned)
+        except OSError as error:
+            print(
+                "the dataset directory cannot be read: {}".format(type(error).__name__),
+                file=sys.stderr,
+            )
+            return EXIT_DATASET_UNREADABLE
         seen: set[str] = set()
         try:
             with table.TableWriter(
@@ -377,7 +397,14 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
             return EXIT_OUTPUT_UNUSABLE
         finally:
             shutil.rmtree(out / PARTIAL, ignore_errors=True)
-        record = finalize(recipe, out, context, ignored, started)
+        try:
+            record = finalize(recipe, out, context, ignored, started)
+        except OSError as error:
+            print(
+                "the dataset record cannot be written: {}".format(type(error).__name__),
+                file=sys.stderr,
+            )
+            return EXIT_OUTPUT_UNUSABLE
     code, word = exit_for(record["extensions"]["nemar"]["counts"])
     result_line(recipe, record, word)
     return code
@@ -459,7 +486,7 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
             shutil.copyfile(path, target)
     with determinism.pinned_threads():
         context = RunContext(
-            Path("."), identity, determinism.engine_info(), dict(determinism.SEEDS)
+            Path("."), identity, determinism.engine_info(), dict(determinism.SEEDS), sj.validator()
         )
         with table.TableWriter(out / table_name, recipe.columns) as writer:
             for path in sorted(merged):

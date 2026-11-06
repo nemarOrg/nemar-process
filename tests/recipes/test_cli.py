@@ -22,6 +22,7 @@ from recipe_support import (
     copy_fixture,
     edf_bytes,
     floor_literals,
+    make_context,
     touch_tree,
     tree_digest,
     write_brainvision,
@@ -469,7 +470,7 @@ def test_a_read_only_dataset_is_read_and_never_written(tmp_path, cli):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
-def test_an_error_outside_any_recording_is_exit_one_with_only_the_class_name(tmp_path, cli):
+def test_a_dataset_that_cannot_be_listed_is_exit_six_with_only_the_class_name(tmp_path, cli):
     dataset = tmp_path / "dataset"
     locked = dataset / "sub-01"
     touch_tree(dataset, ["sub-01/eeg/sub-01_task-a_eeg.edf"])
@@ -478,10 +479,99 @@ def test_an_error_outside_any_recording_is_exit_one_with_only_the_class_name(tmp
         code, _, err = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", tmp_path / "o")
     finally:
         locked.chmod(stat.S_IRWXU)
-    assert code == 1
-    assert err.strip().splitlines()[-1] == "internal_error: PermissionError"
+    assert code == 6
+    assert err.strip().splitlines()[-1] == "the dataset directory cannot be read: PermissionError"
     assert "Traceback" not in err
     assert str(tmp_path) not in err
+
+
+def test_a_validator_that_cannot_be_built_ends_the_run_before_it_writes_anything(
+    tmp_path, cli, monkeypatch
+):
+    """An error outside any recording is exit 1 with only the class name, and the run does not
+    start: a validator that fails once would fail every record."""
+    from nemar_process import sj
+
+    monkeypatch.setattr(sj, "SCHEMA_DIR", tmp_path / "no-schema")
+    out = tmp_path / "o"
+    code, _, err = cli("run", "nemar-floor", "--dataset-dir", DATASET, "--out", out)
+    assert code == 1
+    assert err.strip().splitlines()[-1] == "internal_error: FileNotFoundError"
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+def test_a_dataset_record_that_cannot_be_written_is_exit_five(tmp_path, cli):
+    """The recordings were all processed; the record is the one file that was not written."""
+    out = tmp_path / "o"
+    (out / "desc-nemarfloor_signalJourney.json").mkdir(
+        parents=True
+    )  # not a file, so --out is usable
+    code, stdout, err = cli(
+        "run",
+        "nemar-floor",
+        "--dataset-dir",
+        DATASET,
+        "--out",
+        out,
+        "--recording",
+        RECORDING,
+    )
+    assert code == 5
+    assert err.strip().splitlines()[-1].startswith("the dataset record cannot be written: ")
+    assert "Traceback" not in err
+    assert str(tmp_path) not in err
+    assert stdout == ""
+
+
+def test_a_row_that_cannot_be_written_fails_its_recording_before_anything_is_moved(
+    multi, tmp_path, cli, monkeypatch
+):
+    """A value the table refuses (here not finite) is that recording's failure, found while its files
+    are still in the private directory; it must not be the end of the run, nor leave files behind."""
+    from nemar_process.nemar_floor import outputs
+
+    real = outputs.table_row
+    monkeypatch.setattr(
+        outputs, "table_row", lambda *a, **k: {**real(*a, **k), "duration_s": float("nan")}
+    )
+    out = tmp_path / "o"
+    code, _, err = cli(
+        "run",
+        "nemar-floor",
+        "--dataset-dir",
+        multi,
+        "--out",
+        out,
+        "--recording",
+        "sub-02/eeg/sub-02_task-smoke_eeg.set",
+        "--recording",
+        "sub-03/eeg/sub-03_task-smoke_eeg.set",
+    )
+    assert code == 4
+    assert err.count("status=failed code=internal_error") == 2
+    assert [r["code"] for r in table_rows(out)] == ["internal_error", "internal_error"]
+    assert not [name for name in product_files(out) if name.startswith("sub-")]
+
+
+def test_a_handler_python_did_not_install_is_put_back_as_the_default():
+    """`signal.signal` returns None for a handler that was installed in C before Python started
+    (a runtime that embeds it), and None cannot be passed back: it is a TypeError."""
+    import signal
+
+    assert command.restorable(None) == signal.SIG_DFL
+    assert command.restorable(signal.SIG_IGN) == signal.SIG_IGN
+    handler = signal.getsignal(signal.SIGINT)
+    assert command.restorable(handler) is handler
+
+
+def test_the_handler_is_put_back_when_the_run_ends():
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    with command.terminated_as_exit():
+        assert signal.getsignal(signal.SIGTERM) != before
+    assert signal.getsignal(signal.SIGTERM) == before
 
 
 def test_outcomes_map_exceptions_to_a_status_a_code_a_step_and_a_class_name():
@@ -583,18 +673,11 @@ def test_a_run_that_is_given_a_sigterm_keeps_what_it_finished(multi, tmp_path):
 
 def test_a_recording_leaves_nothing_in_its_private_directory_whatever_its_outcome(tmp_path):
     """The directory is removed as soon as the recording ends, not when the whole run does."""
-    from nemar_process.common import determinism, io
-    from nemar_process.common.recipe import Identity, RunContext
+    from nemar_process.common import io
     from nemar_process.recipes import REGISTRY
 
     recipe = REGISTRY["nemar-floor"]
-    with determinism.pinned_threads():
-        context = RunContext(
-            DATASET,
-            Identity(None, None, None, None, "run-under-test"),
-            determinism.engine_info(),
-            dict(determinism.SEEDS),
-        )
+    context = make_context()
     (recording,) = io.discover(DATASET)
     row, detail = command.process_recording(recipe, recording, context, tmp_path, 0)
     assert (row["status"], detail) == ("succeeded", None)

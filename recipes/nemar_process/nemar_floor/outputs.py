@@ -12,11 +12,9 @@ private directory, and return the product; it moves nothing into place and appen
 
 from __future__ import annotations
 
-import functools
 from pathlib import Path
 from typing import Any
 
-from nemar_process import sj
 from nemar_process.common import files, io, naming, qc, records
 from nemar_process.common.errors import INTERNAL_ERROR, RecordingError
 from nemar_process.common.io import Loaded, Recording
@@ -64,11 +62,6 @@ INFO = RecipeInfo(
         "(aggregates and per-recording summary table)."
     ),
 )
-
-
-@functools.cache
-def validator() -> Any:
-    return sj.validator()
 
 
 def channel_rows(result: FloorResult) -> list[list[Any]]:
@@ -237,7 +230,7 @@ def write_product(
         summary_metrics=summary_metrics(result),
         context=context,
     )
-    problems = records.check(record, validator())
+    problems = records.check(record, context.validator)
     if problems:
         raise RecordingError(INTERNAL_ERROR, "record", "invalid_record")
     record_path = place("signalJourney", "json")

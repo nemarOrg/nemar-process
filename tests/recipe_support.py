@@ -323,6 +323,7 @@ def copy_fixture(destination: Path, *, without: tuple[str, ...] = ()) -> Path:
 
 def make_context(**identity):
     """A run context for the fixture dataset, with a fixed identity and the real engine stamp."""
+    from nemar_process import sj
     from nemar_process.common import determinism
     from nemar_process.common.recipe import Identity, RunContext
 
@@ -336,7 +337,7 @@ def make_context(**identity):
     values.update(identity)
     with determinism.pinned_threads():
         engine = determinism.engine_info()
-    return RunContext(DATASET, Identity(**values), engine, dict(determinism.SEEDS))
+    return RunContext(DATASET, Identity(**values), engine, dict(determinism.SEEDS), sj.validator())
 
 
 def multi_dataset(destination: Path) -> Path:

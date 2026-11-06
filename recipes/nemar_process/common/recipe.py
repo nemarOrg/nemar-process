@@ -62,12 +62,17 @@ class Identity:
 
 @dataclass(frozen=True)
 class RunContext:
-    """Everything ``run_recording`` needs besides the recording."""
+    """Everything ``run_recording`` needs besides the recording.
+
+    ``validator`` is the signalJourney validator, built once by the command: a validator that cannot
+    be built ends the run before it starts and is not a failure of each recording.
+    """
 
     dataset_dir: Path
     identity: Identity
     engine: dict[str, Any]
     seeds: dict[str, int]
+    validator: Any
 
 
 @dataclass
