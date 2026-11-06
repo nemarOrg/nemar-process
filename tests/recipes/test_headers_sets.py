@@ -3,11 +3,16 @@
 `pop_loadset` loads every variable of the file with `loadmat` and unwraps `EEG`, and a check that
 reads fewer variables, or reads them another way, sees another dataset than the one eegprep loads.
 Each crafted file below is one on which that happens: two variables of one name, an `EEG` that is a
-MATLAB object, a `datfile` that is not text. The tests show that eegprep alone reads the file outside
-the dataset (the premise), and then that the check refuses the file and the loader is never called.
+MATLAB object, a `datfile` or a `data` that is text in a form the check does not read as eegprep
+does. The tests show that eegprep alone reads the file outside the dataset (the premise), and then
+that the check refuses the file and the loader is never called.
+
+The rest of the file is about what a set holds: its variables are counted from their element headers
+(in values, with a charge for each element), a set as MATLAB writes it is followed, and what cannot
+be followed is refused.
 
 Real files only: sets written by SciPy, and joined or edited at the byte level where the format has
-to be broken to make the case.
+to be broken to make the case or to write what SciPy never writes.
 """
 
 from __future__ import annotations

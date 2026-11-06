@@ -86,8 +86,8 @@ MAT_MARGIN_BYTES = 64 * 2**20
 MAT_ELEMENT_LIMIT = 5_000_000
 MAT_DEPTH_LIMIT = 32
 # What an element costs beyond its values, in values of eight bytes. ``loadmat`` holds about 190
-# bytes for an empty one (an array object and its slot): 500,000 empty cells, an 81 KB file, peaked
-# at 92 MiB. An element of a structure array is an object of its own and is charged to the
+# bytes for an empty one (an array object and its slot): 500,000 empty cells, a file of 81,687 bytes,
+# peaked at 92 MiB. An element of a structure array is an object of its own and is charged to the
 # structure: it held 144 bytes in one process and 336 in another that had loaded other structures
 # first, so the larger is charged, with a margin. Measured on CPython 3.12 (docs/unverified.md).
 MAT_ELEMENT_VALUES = 24
@@ -754,7 +754,7 @@ def bids_links(path: Path, root: Path) -> None:
     can be are looked at: what is at the top of the dataset, and everything in the subject
     directory the recording is in, where the chain and the matches are, and everything that a link to
     a directory in either leads to inside the dataset (it is the same layout, another path). A link
-    anywhere else in the tree, which only a link to a file can lead to, is not looked at
+    in any other directory, one that none of these links leads to, is not looked at
     (docs/unverified.md).
 
     Two links to each other cannot be resolved, and the ``RuntimeError`` that says so fails the
