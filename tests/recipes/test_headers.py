@@ -11,6 +11,7 @@ what a set holds, are in test_headers_sets.py.
 from __future__ import annotations
 
 import json
+import tracemalloc
 import warnings
 from pathlib import Path
 
@@ -420,18 +421,62 @@ def test_the_brainvision_value_width_follows_the_binary_format(tmp_path):
     )
     assert headers.read(floats, LIMIT).values == 4 * 500
     ascii_text = write_brainvision(tmp_path / "a", STEM, channels=4, samples=10, fmt="ASCII")
-    # a text value is counted at about five bytes, a number and its separator
+    # ASCII data are counted by the byte of text, at ten values to the byte
     size = ascii_text.with_suffix(".eeg").stat().st_size
-    assert headers.read(ascii_text, LIMIT).values == size // 5
+    assert headers.read(ascii_text, LIMIT).values == size * 10
 
 
-def test_an_ascii_value_is_counted_at_five_bytes(tmp_path):
+def test_ascii_data_are_counted_at_ten_values_to_the_byte_of_text(tmp_path):
     path = write_brainvision(tmp_path, STEM, fmt="ASCII")
     data = path.with_suffix(".eeg")
-    data.write_bytes(b"0" * (5 * 1000))
+    data.write_bytes(b"0" * 100)
     check(path, 1000)  # a thousand values, on the limit
-    data.write_bytes(b"0" * (5 * 1000 + 5))
+    data.write_bytes(b"0" * 101)
     assert refusal(path, 1000)[1] == "too_large"
+
+
+def test_5_megabytes_of_ascii_data_are_counted_as_the_50_million_values_they_cost(tmp_path):
+    """Two bytes to a value would have been 2.5 million, and five bytes to a value (a width the
+    count used for a while) 1 million, while eegprep peaked at 383 MiB, which is 50 million values
+    of eight bytes."""
+    path = write_brainvision(tmp_path, STEM, channels=1, samples=10, fmt="ASCII")
+    path.with_suffix(".eeg").write_bytes(b"0\n" * 2_500_000)
+    assert headers.read(path, LIMIT).values == 50_000_000
+    check(path, 50_000_000)
+    assert refusal(path, 49_999_999) == TOO_LARGE
+
+
+def test_the_default_limit_lets_through_100_megabytes_of_ascii_data_and_no_more(tmp_path):
+    """Counted by the byte, the limit of a billion values is 100,000,000 bytes of text, and what
+    eegprep would hold for them at the shortest values, 8 GB, is what the limit means. The files are
+    sparse: the check sizes a data file and does not read it."""
+    path = write_brainvision(tmp_path, STEM, channels=1, samples=10, fmt="ASCII")
+    data = path.with_suffix(".eeg")
+    for size, expected in ((100_000_000, None), (100_000_001, TOO_LARGE)):
+        with data.open("wb") as handle:
+            handle.truncate(size)
+        if expected is None:
+            check(path, io.MAX_CHANNEL_SAMPLES)
+        else:
+            assert refusal(path, io.MAX_CHANNEL_SAMPLES) == expected
+
+
+def test_the_count_of_ascii_data_is_what_eegprep_holds_to_read_them(tmp_path):
+    """The shortest values, one to a line, are the most expensive: eegprep keeps the text, every
+    line, and a float for each value, about 80 bytes to a byte of text, which is the count (ten
+    values of eight bytes). Longer values cost less and are counted at the same rate."""
+    path = write_brainvision(tmp_path, STEM, channels=1, samples=10, fmt="ASCII")
+    path.with_suffix(".eeg").write_bytes(b"0\n" * 200_000)
+    counted = headers.read(path, LIMIT).values
+    assert counted is not None
+    tracemalloc.start()
+    try:
+        pop_loadbv(str(path))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert 8 * counted * 1.05 >= peak  # the cap does not count less than eegprep holds
+    assert peak * 1.5 >= 8 * counted  # and does not count a different thing altogether
 
 
 # The text files eegprep reads whole are held to a megabyte (1 MiB), written out here so that a

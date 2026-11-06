@@ -150,8 +150,10 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
 - **The text-file limit and the ASCII width are provisional.**
   A BrainVision header or marker file larger than 1 MiB (`MAX_TEXT_BYTES`) is refused as `too_large` before it is read, because eegprep reads both whole; 1 MiB is a starting value, and a long recording with a marker for every stimulus can have a larger marker file, which this refuses.
-  An ASCII data value is counted at about five bytes, so a file of shorter values holds more than it is counted for.
-  Neither was set from the headers or the ASCII files of real datasets.
+  ASCII data are counted at ten values to the byte of text (`ASCII_VALUES_PER_BYTE`), the cost of the worst case that was measured: eegprep peaked at 80 bytes to a byte of text for values of one digit, one to a line (CPython 3.12, `tracemalloc`), and at 8 to 26 bytes for the longer or wider rows that were tried.
+  A file of longer values is therefore counted at up to ten times what it holds and is refused sooner than it need be; the default limit lets through 100 MB of ASCII text.
+  The measure is of the interpreter and the version of eegprep used here, and was not repeated on another.
+  Neither this nor the text limit was set from the headers or the ASCII files of real datasets.
 - **The size limit is provisional.**
   A recording that declares or holds more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
   The number is arithmetic and not a measurement.

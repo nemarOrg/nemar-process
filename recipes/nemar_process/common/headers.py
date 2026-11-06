@@ -64,9 +64,12 @@ OWN_COMPANIONS = {
 BRAINVISION_PREFIX = "Brain Vision Data Exchange Header File"
 # BrainVision binary formats eegprep reads, in bytes per value.
 BRAINVISION_ITEM_BYTES = {"INT_16": 2, "UINT_16": 2, "IEEE_FLOAT_32": 4}
-# A value of a BrainVision ASCII data file is counted at about this many bytes: a number and its
-# separator. A file of shorter values holds more.
-ASCII_VALUE_BYTES = 5
+# BrainVision ASCII data are counted by the byte of text, at this many values to the byte. eegprep
+# reads the whole file as text, keeps every line, and makes a Python float of each value, and the
+# most that costs is about 80 bytes to a byte of text: values of one digit, one to a line. That is
+# ten values of eight bytes (measured, CPython 3.12, docs/unverified.md). A file of longer values
+# costs a third of that or less, and is counted at the same rate.
+ASCII_VALUES_PER_BYTE = 10
 # eegprep reads a BrainVision header and marker file whole, and a text file larger than this is
 # refused unread. PROVISIONAL, a starting value of 1 MiB (docs/unverified.md): a long recording
 # with a marker for every stimulus can have a marker file larger than this.
@@ -287,7 +290,7 @@ def _vhdr_values(
     if not sizes:
         return None
     if common.get("dataformat", [""])[0].upper() == "ASCII":
-        return max(sizes) // ASCII_VALUE_BYTES
+        return max(sizes) * ASCII_VALUES_PER_BYTE
     width = BRAINVISION_ITEM_BYTES.get(binary.get("binaryformat", [""])[0].upper())
     return None if width is None else max(sizes) // width
 
