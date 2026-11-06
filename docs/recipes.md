@@ -37,7 +37,8 @@ nemar-recipe version
 - `run` refuses an `--out` that already holds product files (exit 5), writes one recording at a time into a private directory under `--out`, and moves its files into place only when every file and the record exist.
   A failed recording leaves no partial file.
   A SIGTERM ends the run through a normal exit (143), so what was finished stays and the private directory goes.
-  The signal can arrive between two moves of one recording's files, and the move then removes the files it had placed and the directories it had made, so a recording is whole or absent.
+  The signal can arrive anywhere in the move of one recording's files, between a rename and the line that notes it too, so each file is noted before it is renamed and each directory before it is made.
+  The move then removes the files it had placed and the directories it had made, the last file included, so a recording is whole or absent.
   Every file is written under a temporary name beside its target and renamed over it, so a reader never sees half of the dataset record, and an interrupted write leaves the old file and no temporary one.
 - `aggregate` rebuilds the recordings table and the dataset record from product directories.
   It reads every input first and refuses the whole merge, writing nothing, when an input is missing, holds no recordings table or no dataset record (a run that did not end), holds a table or record it cannot read, or disagrees with another about the dataset id, the dataset version, the source commit or the image digest (exit 6).

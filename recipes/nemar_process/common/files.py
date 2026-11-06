@@ -99,15 +99,19 @@ def size_and_sha256(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def _make_directories(directory: Path, stop: Path) -> list[Path]:
-    """Create ``directory`` and the missing directories above it, up to ``stop``; return the ones made."""
+def _make_directories(directory: Path, stop: Path, made: list[Path]) -> None:
+    """Create ``directory`` and the missing directories above it, up to ``stop``.
+
+    Each one is added to ``made`` before it is created, so that an interrupt that arrives right
+    after a directory exists finds it in the list.
+    """
     missing = []
     while not directory.exists() and directory != stop:
         missing.append(directory)
         directory = directory.parent
-    for made in reversed(missing):
-        made.mkdir()
-    return list(reversed(missing))
+    for path in reversed(missing):
+        made.append(path)
+        path.mkdir()
 
 
 def move_into_place(source: Path, destination: Path, relative_paths: Sequence[str]) -> None:
@@ -117,6 +121,11 @@ def move_into_place(source: Path, destination: Path, relative_paths: Sequence[st
     or the run is interrupted between two moves (a SIGTERM raises ``SystemExit`` wherever the
     program is), what was already moved is removed again and so are the directories made for it, so
     the caller sees all of the files or none.
+
+    Everything is noted before it is done: a file is added to ``moved`` before it is renamed, and a
+    directory to ``made`` before it is created. The signal can arrive between any two lines, and
+    a file or a directory that exists and was not noted is one the undo does not know about. The
+    undo goes on past one that was noted and never made, or that cannot be removed.
     """
     pairs = [(source / name, destination / name) for name in relative_paths]
     for _, target in pairs:
@@ -126,12 +135,13 @@ def move_into_place(source: Path, destination: Path, relative_paths: Sequence[st
     made: list[Path] = []
     try:
         for origin, target in pairs:
-            made += _make_directories(target.parent, destination)
-            os.replace(origin, target)
+            _make_directories(target.parent, destination, made)
             moved.append(target)
+            os.replace(origin, target)
     except BaseException:
         for target in moved:
-            target.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                target.unlink()
         for directory in reversed(made):
             with contextlib.suppress(OSError):
                 directory.rmdir()

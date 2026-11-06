@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import threading
+from pathlib import Path
 
 import pytest
 from nemar_process.common import files
@@ -211,6 +212,76 @@ def test_an_interrupt_between_two_moves_leaves_neither_the_files_nor_the_directo
         files.move_into_place(source, destination, names)
     assert len(calls) == 3  # two files were moved when the third was interrupted
     assert list(destination.rglob("*")) == []  # not a file, not the directories made for them
+
+
+def two_subjects(source, destination):
+    """Three files in two new directories; the dataset record moves last."""
+    (source / "sub-01" / "eeg").mkdir(parents=True)
+    (source / "sub-01" / "eeg" / "a.tsv").write_text("a\n", encoding="utf-8")
+    (source / "sub-02" / "eeg").mkdir(parents=True)
+    (source / "sub-02" / "eeg" / "c.tsv").write_text("c\n", encoding="utf-8")
+    (source / "record.json").write_text("{}\n", encoding="utf-8")
+    destination.mkdir()
+    return ["sub-01/eeg/a.tsv", "sub-02/eeg/c.tsv", "record.json"]
+
+
+@pytest.mark.parametrize("interrupt", [SystemExit(143), KeyboardInterrupt()])
+def test_an_interrupt_right_after_the_last_move_leaves_neither_the_record_nor_any_file(
+    tmp_path, monkeypatch, interrupt
+):
+    """The signal can arrive after the last rename and before the line that notes it. The record
+    is then in place and was not noted, and the undo would leave it with nothing it describes."""
+    source, destination = tmp_path / "work", tmp_path / "product"
+    names = two_subjects(source, destination)
+    real_replace = os.replace
+
+    def replace(origin, target):
+        real_replace(origin, target)
+        if Path(target).name == "record.json":
+            raise interrupt
+
+    monkeypatch.setattr(files.os, "replace", replace)
+    with pytest.raises(type(interrupt)):
+        files.move_into_place(source, destination, names)
+    assert list(destination.rglob("*")) == []  # no record, no file, no directory
+
+
+@pytest.mark.parametrize("interrupt", [SystemExit(143), KeyboardInterrupt()])
+def test_an_interrupt_right_after_a_directory_is_made_leaves_no_directory(
+    tmp_path, monkeypatch, interrupt
+):
+    """The same gap in making the directories: made, and not yet noted as made."""
+    source, destination = tmp_path / "work", tmp_path / "product"
+    names = two_subjects(source, destination)
+    real_mkdir = Path.mkdir
+    made = []
+
+    def mkdir(self, *arguments, **keywords):
+        real_mkdir(self, *arguments, **keywords)
+        made.append(self)
+        if len(made) == 1:
+            raise interrupt
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(type(interrupt)):
+        files.move_into_place(source, destination, names)
+    assert len(made) == 1  # the first directory of the first file existed when it came
+    assert list(destination.rglob("*")) == []
+
+
+def test_the_undo_goes_on_past_a_file_that_was_noted_and_never_moved(tmp_path):
+    """The file that could not move is noted before the move. Removing it fails, because what is
+    in the way is a file and not a directory, and the directories made for the others still go."""
+    source, destination = tmp_path / "work", tmp_path / "product"
+    (source / "sub-01").mkdir(parents=True)
+    (source / "sub-01" / "a.tsv").write_text("a\n", encoding="utf-8")
+    (source / "z").mkdir()
+    (source / "z" / "b.tsv").write_text("b\n", encoding="utf-8")
+    destination.mkdir()
+    (destination / "z").write_text("in the way\n", encoding="utf-8")
+    with pytest.raises(NotADirectoryError):  # the move's own failure, not the undo's
+        files.move_into_place(source, destination, ["sub-01/a.tsv", "z/b.tsv"])
+    assert sorted(p.name for p in destination.iterdir()) == ["z"]
 
 
 def test_a_directory_that_was_already_there_is_kept_when_a_move_is_undone(tmp_path):
