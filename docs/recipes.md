@@ -110,7 +110,9 @@ Two things are decided from it.
   A link into the dataset's own annex is inside, and is followed.
   The sidecars that eegprep reports having read (channels, electrodes, coordinate system) are held to the same rule after the load and before anything is written, and so are the companions the record lists as inputs.
   A recording read through BIDS metadata (every format but a set) is also refused before anything is read when a link at the top of the dataset, or anywhere in the directory of its subject, leads out of the dataset (`bids_links`): eegprep reads the sidecars of the inheritance chain without naming them in its report, and the pybids layout it builds walks every link to a directory.
-  A link elsewhere in the tree is not looked at (`docs/unverified.md`).
+  A link to a directory that stays inside the dataset is followed, wherever it leads (a stash at the top, another subject's folder), and the links in that directory are looked at in turn, because the layout reaches the same files by that path; each directory is read once, which ends a link that leads back to one already read.
+  Two links to each other cannot be resolved, and the recording fails as `load_failed` with the detail `RuntimeError`.
+  A link in a directory that no link there leads to is not looked at (`docs/unverified.md`).
   A set that holds its samples names no file, so a stale `datfile` beside them is not followed and not checked.
   A set is read as `pop_loadset` reads it: the `EEG` variable counts only when it is a single 1 by 1 structure, and otherwise, when `EEG` is a number, text or a logical array, the variables at the top level of the file are the dataset and the names they hold are followed, so they are checked.
   An `EEG` of any other kind (an array of structures, a cell, a MATLAB object) is refused as `unreadable_header`, because eegprep unwraps some of them to a structure and the check does not model that.

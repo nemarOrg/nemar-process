@@ -38,7 +38,6 @@ import os
 import re
 import struct
 import zlib
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -735,18 +734,6 @@ def _set(path: Path, max_values: int) -> Header:
 # ---- the files beside a recording that its BIDS metadata comes from ---------------------------
 
 
-def _links(directory: Path, *, below: bool) -> Iterator[Path]:
-    """The links in ``directory``, and in the directories below it when ``below``, none followed."""
-    pending = [directory]
-    while pending:
-        with os.scandir(pending.pop()) as entries:
-            for entry in entries:
-                if entry.is_symlink():
-                    yield Path(entry.path)
-                elif below and entry.is_dir(follow_symlinks=False):
-                    pending.append(Path(entry.path))
-
-
 def bids_links(path: Path, root: Path) -> None:
     """Refuse a recording read through BIDS metadata when a link around it leaves the dataset.
 
@@ -756,14 +743,34 @@ def bids_links(path: Path, root: Path) -> None:
     wherever it leads. A link to a file elsewhere then supplies metadata, and one to a file that never
     ends (``/dev/zero``) stops the run. The sidecars cannot be known before the load, so the files they
     can be are looked at: what is at the top of the dataset, and everything in the subject
-    directory the recording is in, where the chain and the matches are. A link anywhere else in the
-    tree is not looked at (docs/unverified.md).
+    directory the recording is in, where the chain and the matches are, and everything that a link to
+    a directory in either leads to inside the dataset (it is the same layout, another path). A link
+    anywhere else in the tree, which only a link to a file can lead to, is not looked at
+    (docs/unverified.md).
+
+    Two links to each other cannot be resolved, and the ``RuntimeError`` that says so fails the
+    recording (``load_failed``, the class of the error as the detail).
     """
     base = root.resolve()
     subject = root / path.relative_to(root).parts[0]
-    for link in (*_links(root, below=False), *_links(subject, below=True)):
-        if not link.resolve().is_relative_to(base):
-            raise RecordingError(LOAD_FAILED, "load", EXTERNAL_REFERENCE)
+    done: set[tuple[Path, bool]] = set()
+    pending = [(root, False), (subject, True)]
+    while pending:
+        directory, below = pending.pop()
+        real = directory.resolve()
+        if (real, True) in done or (real, below) in done:
+            continue  # a directory is read once, and a deep read includes the shallow one
+        done.add((real, below))
+        with os.scandir(real) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    target = Path(entry.path).resolve()
+                    if not target.is_relative_to(base):
+                        raise RecordingError(LOAD_FAILED, "load", EXTERNAL_REFERENCE)
+                    if target.is_dir():
+                        pending.append((target, True))
+                elif below and entry.is_dir(follow_symlinks=False):
+                    pending.append((Path(entry.path), True))
 
 
 # ---- the two checks ---------------------------------------------------------------------------

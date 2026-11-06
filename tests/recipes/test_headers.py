@@ -11,6 +11,7 @@ what a set holds, are in test_headers_sets.py.
 from __future__ import annotations
 
 import json
+import os
 import tracemalloc
 import warnings
 from pathlib import Path
@@ -1052,6 +1053,104 @@ def test_any_link_out_of_the_dataset_at_the_root_or_in_the_subject_is_refused(
     with pytest.raises(RecordingError) as caught:
         io.load(recording)
     assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
+
+
+def moved_behind_a_link(root, eeg_dir):
+    """Move the recording's directory to `stash` at the top of the dataset and leave a link to it."""
+    stash = root / "stash"
+    eeg_dir.rename(stash)
+    eeg_dir.symlink_to(Path("..") / "stash", target_is_directory=True)
+    return stash
+
+
+def test_a_link_to_a_directory_inside_the_dataset_is_followed_and_the_links_in_it_are_looked_at(
+    tmp_path, monkeypatch
+):
+    """One hop more than before: `sub/eeg` is a link to `stash`, which is inside the dataset, and
+    the sidecar in `stash` is the link that leaves it. Reading the directory link and going no
+    further let the sidecar through: the line frequency of the file outside was read."""
+    root, eeg_dir = fixture_tree(tmp_path)
+    stash = moved_behind_a_link(root, eeg_dir)
+    linked_out(stash / SIDECAR, tmp_path / "elsewhere")
+    (tmp_path / "elsewhere" / SIDECAR).write_text('{"PowerLineFrequency": 123}', encoding="utf-8")
+    (recording,) = io.discover(root)
+    eeg, _ = pop_load_frombids(str(recording.abs_path), **io.BIDS_CALL)
+    assert eeg["etc"]["BIDS"]["PowerLineFrequency"] == 123  # eegprep alone reads it, two links away
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
+
+
+def test_a_link_to_a_directory_inside_the_dataset_that_holds_clean_files_is_loaded(tmp_path):
+    root, eeg_dir = fixture_tree(tmp_path)
+    moved_behind_a_link(root, eeg_dir)
+    (recording,) = io.discover(root)
+    assert io.load(recording).power_line_hz_declared == 60
+
+
+@pytest.mark.parametrize("escape", [False, True], ids=["clean", "a link out of the dataset"])
+def test_a_link_into_another_subjects_folder_is_followed_and_what_is_in_it_is_looked_at(
+    tmp_path, monkeypatch, escape
+):
+    """The folder is looked at as a folder of the subject would be: it is not refused for being
+    another subject's, and it is refused for a link out of the dataset that it holds."""
+    root, eeg_dir = fixture_tree(tmp_path)
+    other = root / "sub-OTHER" / "eeg"
+    other.mkdir(parents=True)
+    (other / "sub-OTHER_task-COVID_events.tsv").write_text("onset\tduration\n", encoding="utf-8")
+    (eeg_dir.parent / "extra").symlink_to(Path("..") / "sub-OTHER", target_is_directory=True)
+    if escape:
+        linked_out(other / "sub-OTHER_task-COVID_events.tsv", tmp_path / "elsewhere")
+    (recording,) = io.discover(root)
+    if not escape:
+        assert io.load(recording).power_line_hz_declared == 60
+        return
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == EXTERNAL[1:]
+
+
+def test_links_that_lead_round_to_a_folder_already_looked_at_are_not_followed_again(
+    tmp_path, monkeypatch
+):
+    """Each folder is read once, however many links lead to it: a link to its own folder and a link
+    to the folder above both end the walk instead of running it for ever (the spy fails after a
+    hundred reads, where a walk without a record of the folders it has read would not stop)."""
+    root, eeg_dir = fixture_tree(tmp_path)
+    (eeg_dir / "self").symlink_to(".", target_is_directory=True)
+    (eeg_dir / "up").symlink_to("..", target_is_directory=True)
+    (eeg_dir.parent / "top").symlink_to(root, target_is_directory=True)
+    real, reads = os.scandir, []
+
+    def counted(directory):
+        reads.append(directory)
+        if len(reads) > 100:
+            pytest.fail("the walk reads the same folders again and again")
+        return real(directory)
+
+    monkeypatch.setattr(os, "scandir", counted)
+    (recording,) = io.discover(root)
+    headers.bids_links(recording.abs_path, recording.root)
+    assert len(reads) < 100
+
+
+def test_a_loop_of_links_that_cannot_be_followed_is_refused(tmp_path, monkeypatch):
+    """Two links to each other lead nowhere: the path cannot be resolved, so the recording fails
+    as it did before directory links were followed (the detail is the class of the error)."""
+    root, eeg_dir = fixture_tree(tmp_path)
+    (eeg_dir / "a").symlink_to("b")
+    (eeg_dir / "b").symlink_to("a")
+    (recording,) = io.discover(root)
+    monkeypatch.setattr(io, "pop_load_frombids", never_called)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "load_failed",
+        "load",
+        "RuntimeError",
+    )
 
 
 def test_a_sidecar_that_is_a_link_into_the_dataset_is_followed(tmp_path):
