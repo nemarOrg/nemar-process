@@ -62,6 +62,13 @@ OWN_COMPANIONS = {
 BRAINVISION_PREFIX = "Brain Vision Data Exchange Header File"
 # BrainVision binary formats eegprep reads, in bytes per value.
 BRAINVISION_ITEM_BYTES = {"INT_16": 2, "UINT_16": 2, "IEEE_FLOAT_32": 4}
+# A value of a BrainVision ASCII data file is counted at about this many bytes: a number and its
+# separator. A file of shorter values holds more.
+ASCII_VALUE_BYTES = 5
+# eegprep reads a BrainVision header and marker file whole, and a text file larger than this is
+# refused unread. PROVISIONAL, a starting value of 1 MiB (docs/unverified.md): a long recording
+# with a marker for every stimulus can have a marker file larger than this.
+MAX_TEXT_BYTES = 1 * 2**20
 # ``read_fdt`` reads a sample as a 4-byte float.
 SET_ITEM_BYTES = 4
 # What a set may hold, counted in values against the limit of channel samples. A value is taken at
@@ -205,6 +212,8 @@ def _sections(text: str) -> dict[str, dict[str, list[str]]]:
 
 
 def _vhdr(path: Path) -> Header:
+    if path.stat().st_size > MAX_TEXT_BYTES:
+        raise RecordingError(TOO_LARGE, "load")
     text = _decoded(path.read_bytes())
     if text is None:
         raise ValueError("a BrainVision header is UTF-8 or Windows-1252 text")
@@ -227,6 +236,10 @@ def _vhdr(path: Path) -> Header:
         return Header(references)
     data = _vhdr_data_files(path, common.get("datafile", []))
     markers = _case_folded(path.with_suffix(OWN_COMPANIONS[".vhdr"]["markers"][0]))
+    if any(common.get("markerfile", [])) and any(
+        found.is_file() and found.stat().st_size > MAX_TEXT_BYTES for found in markers
+    ):
+        raise RecordingError(TOO_LARGE, "load")  # eegprep reads a marker file it is told of whole
     return Header(
         references,
         _vhdr_values(data, common, sections.get("binary infos", {})),
@@ -272,7 +285,7 @@ def _vhdr_values(
     if not sizes:
         return None
     if common.get("dataformat", [""])[0].upper() == "ASCII":
-        return max(sizes) // 2  # a value is a digit and a separator at the least
+        return max(sizes) // ASCII_VALUE_BYTES
     width = BRAINVISION_ITEM_BYTES.get(binary.get("binaryformat", [""])[0].upper())
     return None if width is None else max(sizes) // width
 

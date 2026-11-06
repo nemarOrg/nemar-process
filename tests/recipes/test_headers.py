@@ -419,9 +419,59 @@ def test_the_brainvision_value_width_follows_the_binary_format(tmp_path):
     )
     assert headers.read(floats, LIMIT).values == 4 * 500
     ascii_text = write_brainvision(tmp_path / "a", STEM, channels=4, samples=10, fmt="ASCII")
-    # a text value takes a digit and a separator at the least, so the bytes bound the number
+    # a text value is counted at about five bytes, a number and its separator
     size = ascii_text.with_suffix(".eeg").stat().st_size
-    assert headers.read(ascii_text, LIMIT).values == size // 2
+    assert headers.read(ascii_text, LIMIT).values == size // 5
+
+
+def test_an_ascii_value_is_counted_at_five_bytes(tmp_path):
+    path = write_brainvision(tmp_path, STEM, fmt="ASCII")
+    data = path.with_suffix(".eeg")
+    data.write_bytes(b"0" * (5 * 1000))
+    check(path, 1000)  # a thousand values, on the limit
+    data.write_bytes(b"0" * (5 * 1000 + 5))
+    assert refusal(path, 1000)[1] == "too_large"
+
+
+# The text files eegprep reads whole are held to a megabyte (1 MiB), written out here so that a
+# boundary is not built from the constant it tests.
+TEXT_LIMIT = 1_048_576
+TEXT_TOO_LARGE = ("failed", "too_large", "load", None)
+
+
+def padded_to(path, size):
+    """The text file at `path` made exactly `size` bytes with one comment line, which is skipped."""
+    text = path.read_text(encoding="utf-8")
+    missing = size - len(text.encode("utf-8"))
+    path.write_text(text + ";" + "x" * (missing - 2) + "\n", encoding="utf-8")
+    assert path.stat().st_size == size
+
+
+def test_a_brainvision_header_over_a_megabyte_is_refused_before_it_is_read(tmp_path):
+    path = write_brainvision(tmp_path, STEM)
+    path.write_bytes(b"\xff" * (TEXT_LIMIT + 1))  # read, it would fail to decode and be unreadable
+    assert refusal(path) == TEXT_TOO_LARGE
+
+
+def test_a_brainvision_header_of_exactly_a_megabyte_is_read(tmp_path):
+    path = write_brainvision(tmp_path, STEM)
+    padded_to(path, TEXT_LIMIT)
+    check(path)
+
+
+def test_a_marker_file_over_a_megabyte_is_refused_when_the_header_names_it(tmp_path):
+    path = write_brainvision(tmp_path, STEM)
+    markers = path.with_suffix(".vmrk")
+    padded_to(markers, TEXT_LIMIT)
+    check(path)  # eegprep reads a marker file whole, and this one is the size it may be
+    markers.write_bytes(b"\xff" * (TEXT_LIMIT + 1))
+    assert refusal(path) == TEXT_TOO_LARGE
+
+
+def test_a_marker_file_the_header_does_not_name_is_not_read_and_not_sized(tmp_path):
+    path = write_brainvision(tmp_path, STEM, marker="")
+    path.with_suffix(".vmrk").write_bytes(b"\xff" * (TEXT_LIMIT + 1))
+    check(path)
 
 
 def test_the_section_and_key_rules_are_eegpreps_case_folded_and_comments_skipped(tmp_path):

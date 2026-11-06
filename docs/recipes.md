@@ -119,7 +119,8 @@ Two things are decided from it.
   The number is what the reader consumes, which is not always what the header says.
   For EDF and BDF it is signals times records times the highest rate, with the larger of two record counts: the one in the header and the one the size of the file gives, because MNE ignores a header count that disagrees with the file (`_read_edf_header`).
   A value is two bytes in an EDF file and three in a BDF file.
-  For BrainVision it is the size of the data file divided by the width of a value, and the data file is the one eegprep opens (`_referenced_file`): the file `DataFile` names, else `<stem>.eeg`, else `<stem>.dat`, each looked for in another case too.
+  For BrainVision it is the size of the data file divided by the width of a value (about five bytes for an ASCII file, a number and its separator), and the data file is the one eegprep opens (`_referenced_file`): the file `DataFile` names, else `<stem>.eeg`, else `<stem>.dat`, each looked for in another case too.
+  A BrainVision header, and a marker file that the header names, are read whole by eegprep, so one larger than 1 MiB (`MAX_TEXT_BYTES`, a starting value) fails as `too_large` unread.
   Several files that differ only in case are all counted and the largest decides, and a header whose data file is not there fails with the class `FileNotFoundError`, which is what eegprep raises.
   For a set it is the larger of the dimensions or the shape of the samples the set declares and the number of four-byte values in the `.fdt` it names, because eegprep reads the whole `.fdt` with `np.fromfile` before it compares its count with the header.
   A set saved as a MAT-file is counted before anything of it is loaded (`walk` in `common/headers.py`): the dimensions in the header of every variable, and of every member of a cell or a structure, are read, and their product is the number of values the variable holds (twice that for a complex array).
