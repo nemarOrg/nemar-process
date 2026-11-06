@@ -11,6 +11,13 @@ once, in ``tests/contract/nemar-cli-pin.json``, and bumped deliberately.
   workflow checks out exactly the pinned commit and sets ``NEMAR_REQUIRE_DRIFT=1``, which turns the
   skip into a failure, so the comparison can never be skipped there unnoticed.
 
+``test_the_committed_wire_cases_are_what_nemar_clis_contract_writes`` is the heavier one: it runs
+``scripts/gen_wire_cases.ts`` with bun against the checkout named by ``NEMAR_CLI_DIR`` (which must be
+AT the pinned commit, with its production dependencies installed) and requires the committed table
+``tests/launcher/fixtures/wire_cases.json`` byte for byte. Without ``NEMAR_CLI_DIR`` it skips, and
+under ``NEMAR_REQUIRE_DRIFT=1`` a missing checkout, a checkout at another commit, no bun or no
+dependencies fail it.
+
 Because the comparison is against a pinned commit and not a moving branch, CI is never red because
 nemar-cli moved. A separate advisory CI job reports, without failing, when nemar-cli's ``dev`` has a
 newer schema than the pin.
@@ -22,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import NoReturn
@@ -256,3 +264,68 @@ def test_the_golden_vectors_are_nemar_clis():
     assert ts_string(source, "URLSAFE_SHA256") == golden.URLSAFE_SHA256
     assert ts_string(source, "URLSAFE_ENV") == golden.URLSAFE_ENV
     assert ts_string(source, "URLSAFE_ENV_SHA256") == golden.URLSAFE_ENV_SHA256
+
+
+GENERATOR = ROOT / "scripts" / "gen_wire_cases.ts"
+WIRE_CASES = ROOT / "tests" / "launcher" / "fixtures" / "wire_cases.json"
+DEPENDENCIES_MISSING = 3  # the generator's exit status when the checkout has no node_modules
+
+
+def row_differences(generated: bytes, committed: bytes) -> str:
+    """Which rows differ, by id, so a failure says what moved and not only that something did."""
+    try:
+        new, old = json.loads(generated), json.loads(committed)
+    except ValueError:
+        return "one of the two is not JSON"
+    lines = []
+    for key in sorted(set(new["provenance"]) | set(old["provenance"])):
+        if new["provenance"].get(key) != old["provenance"].get(key):
+            lines.append("provenance." + key + " differs")
+    now = {case["id"]: case for case in new["cases"]}
+    then = {case["id"]: case for case in old["cases"]}
+    lines += ["row only in the generated table: " + i for i in sorted(now.keys() - then.keys())]
+    lines += ["row only in the committed table: " + i for i in sorted(then.keys() - now.keys())]
+    lines += ["row differs: " + i for i in sorted(now.keys() & then.keys()) if now[i] != then[i]]
+    return "\n".join(lines[:20]) or "the rows are equal and the bytes are not (formatting)"
+
+
+def test_the_committed_wire_cases_are_what_nemar_clis_contract_writes():
+    given = os.environ.get("NEMAR_CLI_DIR")
+    checkout = Path(given) if given else None
+    if checkout is None or not (checkout / ".git").exists():
+        not_run(
+            "DRIFT CHECK NOT RUN: NEMAR_CLI_DIR names no nemar-cli checkout, and the wire cases are "
+            "regenerated from one at commit {} (bun install --frozen-lockfile --ignore-scripts "
+            "--production in it first).".format(PIN["ref"][:12])
+        )
+    assert checkout is not None
+    head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    if head != PIN["ref"]:
+        not_run(
+            "DRIFT CHECK NOT RUN: {} is at {}, not at the pinned commit {}; the table is written from "
+            "the working tree, so check the pinned commit out (detached).".format(
+                checkout.name, head[:12] or "no commit", PIN["ref"][:12]
+            )
+        )
+    bun = shutil.which("bun")
+    if bun is None:
+        not_run("DRIFT CHECK NOT RUN: bun is not on PATH (the generator is a bun script).")
+    assert bun is not None
+    done = subprocess.run(
+        [bun, "run", "--no-install", str(GENERATOR), str(checkout)],
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300,
+    )
+    if done.returncode == DEPENDENCIES_MISSING:
+        not_run("DRIFT CHECK NOT RUN: " + done.stderr.decode("utf-8", "replace").strip())
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")[-2000:]
+    committed = WIRE_CASES.read_bytes()
+    assert done.stdout == committed, (
+        "tests/launcher/fixtures/wire_cases.json is not what nemar-cli's contract writes at "
+        "{}; regenerate it (scripts/gen_wire_cases.ts) and read the diff:\n{}".format(
+            PIN["ref"][:12], row_differences(done.stdout, committed)
+        )
+    )

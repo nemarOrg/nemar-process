@@ -61,7 +61,7 @@ A `$`, a backtick or a backslash in a user's string is expanded, runs a command 
 The encoded value holds no character a shell treats as special, so it reaches the launcher unchanged whether or not the scheduler quotes it.
 `tests/launcher/test_shell_quoting.py` implements that quoting rule, sources the launch file with each of `sh`, `dash` and `bash`, and shows both halves: the raw JSON form breaks (and runs a command a user put in a string), and the encoded form comes back exactly and runs nothing.
 
-The decoder (`spec.decode_wire`) mirrors nemar-cli's `decodeLaunchSpecEnv` rule for rule.
+The decoder (`spec.decode_wire`) mirrors nemar-cli's `decodeLaunchSpecEnv` rule for rule, and a table of about five hundred values, each with the answer nemar-cli's own decoder gives, is replayed through it (`tests/launcher/test_wire_cases.py`; [contracts.md](contracts.md)).
 It is strict and bounded, uses only the standard library, and checks the length before it reads a byte.
 Every refusal is `runtime_error` with detail `invalid_spec`: there is no new failure code, and no older form is accepted, because nothing was ever registered with a tenant on one.
 When a wire rule fires, the log names it as one fixed word, and never any part of the value, which holds the job token once decoded.

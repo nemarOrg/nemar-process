@@ -361,8 +361,8 @@ VALUE_ROWS = {
     "a comma": (b"ab,cd", "not_base64url"),
     "a colon": (b"ab:cd", "not_base64url"),
     "a byte above 0x7f": (VALID[:40] + b"\xe9" + VALID[41:], "not_base64url"),
-    "a utf-8 character inside": (VALID[:40] + "é".encode() + VALID[41:], "not_base64url"),
-    "a utf-8 character in a short value": ("abéd".encode(), "not_base64url"),
+    "a utf-8 character inside": (VALID[:40] + "\u00e9".encode() + VALID[41:], "not_base64url"),
+    "a utf-8 character in a short value": ("ab\u00e9d".encode(), "not_base64url"),
     "a NUL byte": (VALID[:40] + b"\x00" + VALID[41:], "not_base64url"),
     "a NUL byte after a canonical value": (b"abcd\x00", "not_base64url"),
     # a raw JSON value, the old form: there is no legacy format
@@ -385,7 +385,10 @@ VALUE_ROWS = {
     # more than the cap, judged by the length alone and BEFORE anything else is read
     "more than the cap by one character": (a_run_of(MAX + 1), "too_long"),
     "more than the cap, a multiple of four": (a_run_of(MAX + 2), "too_long"),
-    "more than the cap by three": (a_run_of(MAX + 3), "too_long"),
+    "more than the cap outranks the length rule (87,385 is 1 modulo 4)": (
+        a_run_of(MAX + 3),
+        "too_long",
+    ),
     "more than the cap, a very long value": (a_run_of(1_000_000), "too_long"),
     "more than the cap, the encoding of 64 KiB and a byte": (
         wire_encode(b" " * (CAP + 1)),
@@ -395,7 +398,6 @@ VALUE_ROWS = {
     "more than the cap outranks the alphabet": (a_run_of(MAX + 1) + b" ", "too_long"),
     "more than the cap outranks the alphabet, a raw document": (b"{" * (MAX + 1), "too_long"),
     "more than the cap outranks the alphabet, a long raw document": (b"{" * 100_000, "too_long"),
-    "more than the cap outranks the length rule": (a_run_of(MAX + 4), "too_long"),
     # the rules in order: alphabet before length
     "the alphabet outranks the length rule": (b"AAA!A", "not_base64url"),
     "the alphabet outranks the length rule, four braces": (b"A{{{{", "not_base64url"),
@@ -413,7 +415,7 @@ TEXT_ROWS = {
         wire_encode(bytes([0x41, 0xFF, 0x42])),
         "not_printable",
     ),
-    "non-ASCII after decoding, utf-8": (wire_encode('{"a":"é"}'.encode()), "not_printable"),
+    "non-ASCII after decoding, utf-8": (wire_encode('{"a":"\u00e9"}'.encode()), "not_printable"),
     "non-ASCII after decoding, latin-1": (wire_encode(b'{"a":"caf\xe9"}'), "not_printable"),
     "a NUL at the end of a document": (wire_encode(b'{"a":1}\x00'), "not_printable"),
     "a NUL inside a string": (wire_encode(b'{"a":"b\x00c"}'), "not_printable"),
@@ -548,7 +550,7 @@ def test_a_value_of_the_right_length_is_decoded_without_error_for_every_length()
 ORDER_ROWS = {
     "empty is empty, not a bad value": (b"", "empty"),
     "over the bound and not in the alphabet": (b"{" * (MAX + 1), "too_long"),
-    "over the bound and 1 modulo 4 long": (a_run_of(MAX + 4), "too_long"),
+    "over the bound and 1 modulo 4 long": (a_run_of(MAX + 3), "too_long"),
     "not in the alphabet and 1 modulo 4 long": (b"A{{{{", "not_base64url"),
     "1 modulo 4 long": (b"AAAAA", "bad_length"),
     "not printable and not canonical": (b"AB", "not_printable"),
@@ -574,11 +576,11 @@ NON_ASCII_LENGTHS = {
     "over in code units, not in code points (an astral character)": b"A" * (MAX - 1)
     + "\U0001f600".encode(),
     "not over in code units, over in bytes (an e with an acute accent)": b"A" * (MAX - 1)
-    + "é".encode(),
-    "over in every unit, with one accented character": b"A" * MAX + "é".encode(),
-    "over in every unit, all non-ASCII": "é".encode() * (MAX + 1),
+    + "\u00e9".encode(),
+    "over in every unit, with one accented character": b"A" * MAX + "\u00e9".encode(),
+    "over in every unit, all non-ASCII": "\u00e9".encode() * (MAX + 1),
     "all astral characters": "\U0001f600".encode() * MAX,
-    "a non-ASCII character first": "é".encode() + b"A" * MAX,
+    "a non-ASCII character first": "\u00e9".encode() + b"A" * MAX,
 }
 
 
@@ -593,8 +595,8 @@ def test_an_over_length_value_with_a_non_ascii_character_is_refused_with_either_
 
 
 def test_a_non_ascii_value_within_the_bound_in_every_unit_can_only_be_not_base64url():
-    assert outcome(b"QQ" + "é".encode()) == "not_base64url"
-    assert outcome("é".encode() * 1000) == "not_base64url"
+    assert outcome(b"QQ" + "\u00e9".encode()) == "not_base64url"
+    assert outcome("\u00e9".encode() * 1000) == "not_base64url"
 
 
 # ---- the closed list of words, each reached ---------------------------------------------------

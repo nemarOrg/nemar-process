@@ -70,6 +70,7 @@ Worker secrets, Tapis registrations and cloud buckets are the owner's.
 - Python is managed by **uv** only: never `pip`, `conda` or `virtualenv`.
 - **ruff** for lint and format and **ty** for types: never flake8, black, isort, pylint or mypy.
 - **pytest** with **coverage**.
+- **bun** is used for one script, `scripts/gen_wire_cases.ts`, which imports nemar-cli's TypeScript contract to write `tests/launcher/fixtures/wire_cases.json`: never npm or npx, **Biome** (nemar-cli's configuration) for its lint and format, and `--ignore-scripts` on every install (`docs/contracts.md`).
 - The launcher and the observer target **Python 3.9** and the standard library only; the rest of the repository targets 3.12.
 
 ```bash
@@ -101,8 +102,8 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
 | `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
 | `recipes/nemar_process/` | the recipes package; for now the placeholder `sj.py` and the vendored signalJourney schema in `_vendor/` |
-| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
-| `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `contract/` pins |
+| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `gen_wire_cases.ts` (bun; the table of wire cases, from nemar-cli's contract), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
+| `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `launcher/fixtures/wire_cases.json` (the table of wire cases), `contract/` pins |
 | `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
 | `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
 | `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, `released-versions.json` (the ledger of released zip digests), the vendored Tapis OpenAPI files and the schemas derived from them |

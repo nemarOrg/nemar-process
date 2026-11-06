@@ -16,6 +16,9 @@ env:
   TEST_IMAGE: "docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
   TEST_IMAGE_KEY: "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
   UV_VERSION: "0.13.4"
+  # The bun the wire-case table is regenerated with (tests/launcher/test_drift.py): nemar-cli's own
+  # packageManager. Bump it when the pin moves to a nemar-cli that names another.
+  BUN_VERSION: "1.4.3"
   # The workflow linter the image tests run (tests/images/test_workflow.py); bump version and hash together.
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
@@ -55,7 +58,7 @@ jobs:
         id: pin
         run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
 
-      - name: Check out nemar-cli at the pinned commit (the drift test compares against it)
+      - name: Check out nemar-cli at the pinned commit (the drift tests compare against it)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: nemarOrg/nemar-cli
@@ -64,8 +67,20 @@ jobs:
           sparse-checkout: |
             /shared/
             /test/compute-contract.unit.test.ts
+            /package.json
+            /bun.lock
           sparse-checkout-cone-mode: false
           fetch-depth: 1
+
+      # The wire-case table is regenerated from nemar-cli's contract, which imports zod: bun, then the
+      # lockfile's production dependencies and no lifecycle script (the checkout's husky among them).
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install the contract's dependencies in the nemar-cli checkout
+        working-directory: .nemar-cli
+        run: bun install --frozen-lockfile --ignore-scripts --production
 
       - name: Install Apptainer
         run: |
