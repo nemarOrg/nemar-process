@@ -117,7 +117,8 @@ def _make_directories(directory: Path, stop: Path, made: list[Path]) -> None:
 def move_into_place(source: Path, destination: Path, relative_paths: Sequence[str]) -> None:
     """Move each file from ``source`` to the same relative path under ``destination``.
 
-    Refuses, before moving anything, a destination that already exists. If a move fails part way,
+    Refuses, before moving anything, a destination that already exists (a link that points at
+    nothing is something there). If a move fails part way,
     or the run is interrupted between two moves (a SIGTERM raises ``SystemExit`` wherever the
     program is), what was already moved is removed again and so are the directories made for it, so
     the caller sees all of the files or none.
@@ -129,7 +130,7 @@ def move_into_place(source: Path, destination: Path, relative_paths: Sequence[st
     """
     pairs = [(source / name, destination / name) for name in relative_paths]
     for _, target in pairs:
-        if target.exists():
+        if os.path.lexists(target):  # a link that points at nothing is something there, and is kept
             raise FileExistsError(str(target.relative_to(destination)))
     moved: list[Path] = []
     made: list[Path] = []

@@ -170,6 +170,22 @@ def test_a_destination_that_exists_stops_the_move_before_any_file_moves(tmp_path
     assert (destination / "b.tsv").read_text(encoding="utf-8") == "old\n"
 
 
+def test_a_dangling_link_at_a_target_stops_the_move_as_a_file_there_does(tmp_path):
+    """`exists` follows a link and is false for one that points at nothing, so the rename would
+    have replaced the link: what is at the target is judged without following it."""
+    source, destination = tmp_path / "work", tmp_path / "product"
+    source.mkdir()
+    destination.mkdir()
+    (source / "a.tsv").write_text("new\n", encoding="utf-8")
+    (source / "b.tsv").write_text("new\n", encoding="utf-8")
+    (destination / "b.tsv").symlink_to(tmp_path / "nowhere")
+    with pytest.raises(FileExistsError):
+        files.move_into_place(source, destination, ["a.tsv", "b.tsv"])
+    assert not (destination / "a.tsv").exists()
+    assert (destination / "b.tsv").is_symlink()
+    assert sorted(entry.name for entry in source.iterdir()) == ["a.tsv", "b.tsv"]  # none moved
+
+
 def test_a_failure_part_way_removes_what_was_already_moved(tmp_path):
     source, destination = tmp_path / "work", tmp_path / "product"
     source.mkdir()
