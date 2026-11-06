@@ -85,6 +85,13 @@ MAT_MARGIN_BYTES = 64 * 2**20
 # of the count is bounded as the memory is.
 MAT_ELEMENT_LIMIT = 5_000_000
 MAT_DEPTH_LIMIT = 32
+# What an element costs beyond its values, in values of eight bytes. ``loadmat`` holds about 190
+# bytes for an empty one (an array object and its slot): 500,000 empty cells, an 81 KB file, peaked
+# at 92 MiB. An element of a structure array is an object of its own and is charged to the
+# structure: it held 144 bytes in one process and 336 in another that had loaded other structures
+# first, so the larger is charged, with a margin. Measured on CPython 3.12 (docs/unverified.md).
+MAT_ELEMENT_VALUES = 24
+MAT_STRUCT_VALUES = 44
 MAT_DIMENSIONS_LIMIT = 32
 MAT_NAME_LIMIT = 1024
 MAT_HEADER_BYTES = 128
@@ -489,9 +496,11 @@ class _Counts:
         self.elements = 0
 
     def element(self) -> None:
+        """Count one more element, and charge it what an element costs whatever it holds."""
         self.elements += 1
         if self.elements > MAT_ELEMENT_LIMIT:
             raise TooManyValues(self.cap + 1)
+        self.add(MAT_ELEMENT_VALUES)
 
     def add(self, values: int) -> None:
         self.values += values
@@ -588,7 +597,7 @@ def _matrix(stream: _Stream, order: str, counts: _Counts, depth: int) -> Variabl
         for _ in range(numel):
             _matrix(stream, order, counts, depth + 1)
     elif mclass == MX_STRUCT:
-        counts.add(numel)
+        counts.add(numel * MAT_STRUCT_VALUES)
         kind, count, inline = _tag(stream, order)
         if kind != MAT_INT32 or count != 4:
             raise ValueError("no field name length")

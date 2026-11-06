@@ -327,7 +327,13 @@ def test_the_text_scipy_puts_for_a_variable_it_could_not_read_is_refused(tmp_pat
 SMALL = 8000  # a limit that 4 x 2000 samples sit on
 CAP_VALUES = SMALL + 64 * 2**20 // 8
 TOO_LARGE = ("failed", "too_large", "load", None)
-BASE_VALUES = 4 * 2000 + 3  # the samples, and nbchan, pnts and trials
+# What each element is charged beyond its values, and each element of a structure array (written
+# out, and not taken from the module, so that a change shows; the measure is at the end of the file).
+ELEMENT = 24
+STRUCT_ELEMENT = 44
+BASE_VALUES = (
+    4 * 2000 + 3 + 4 * ELEMENT
+)  # the samples, nbchan, pnts and trials, and their four elements
 MI_INT8, MI_INT32, MI_UINT32, MI_MATRIX, MI_COMPRESSED = 1, 5, 6, 14, 15
 STORED_AS = {"int8": 1, "uint8": 2, "uint16": 4, "double": 9}
 MX_CELL, MX_STRUCT, MX_CHAR, MX_SPARSE, MX_DOUBLE, MX_UINT8 = 1, 2, 4, 5, 6, 9
@@ -417,7 +423,7 @@ def test_a_variable_is_counted_by_its_dimensions_and_not_by_the_bytes_it_is_stor
 
 @pytest.mark.parametrize("order", ["<", ">"])
 def test_a_set_is_refused_the_value_after_the_cap_and_not_before(tmp_path, order):
-    room = CAP_VALUES - BASE_VALUES
+    room = CAP_VALUES - BASE_VALUES - ELEMENT  # the variable is an element too
     for count, expected in ((room, None), (room + 1, TOO_LARGE)):
         variables = [*base_variables(order), whole_numbers(b"junk", count, order)]
         path = mat_file(tmp_path / f"{count}.set", variables, compress=True, order=order)
@@ -439,7 +445,9 @@ def test_the_variables_of_a_set_are_counted_together_and_not_one_at_a_time(tmp_p
 
 def test_a_complex_value_is_counted_twice(tmp_path):
     """In a cell: a complex variable at the top level is refused outright (below)."""
-    room = CAP_VALUES - BASE_VALUES - 1  # the cell that holds it is one value
+    room = (
+        CAP_VALUES - BASE_VALUES - 2 * ELEMENT - 1
+    )  # the cell and the member, and the cell's slot
     real = whole_numbers(b"", room)
     complex_ = whole_numbers(b"", room, flags=COMPLEX, parts=2)
 
@@ -568,7 +576,8 @@ def test_a_compressed_set_is_inflated_a_step_at_a_time_and_never_held(tmp_path):
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert values == 1 + 4 + count + 3 + 3  # the structure, then the members in order
+    # the structure, then the members in order: seven elements and the values they hold
+    assert values == STRUCT_ELEMENT + 7 * ELEMENT + 4 + count + 3 + 3
     assert peak < 8 * 2**20
 
 
@@ -584,7 +593,7 @@ def test_the_data_of_a_top_level_variable_are_not_inflated(tmp_path):
     path.write_bytes(HEADERS["<"] + pack("<II", MI_COMPRESSED, len(stream)) + stream)
     variables, values = headers.walk(path, CAP_VALUES)
     assert [(v.name, v.mclass, v.dims) for v in variables] == [("junk", MX_DOUBLE, (1, payload))]
-    assert values == payload
+    assert values == ELEMENT + payload
 
 
 def test_a_set_over_the_cap_never_reaches_the_loader(tmp_path, monkeypatch):
@@ -692,9 +701,10 @@ def test_the_count_is_of_what_a_realistic_set_holds_and_a_small_set_loads(tmp_pa
     }
     path = tmp_path / "nested.mat"
     scipy.io.savemat(str(path), {"EEG": eeg})
-    # EEG is one structure (1), a is 12 values, b is one structure (1) with 5 values and 2
-    # characters, and e is a cell of two (2) holding 2 and 3 values
-    assert headers.walk(path, 10**6)[1] == 1 + 12 + 1 + 5 + 2 + 2 + 2 + 3
+    # eight elements (EEG, a, b, c, d, e and the two it holds), of which EEG and b are structures
+    # of one element each; and the values: a is 12, c is 5, d is 2 characters, e is a cell of two
+    # slots (2) holding 2 and 3 values
+    assert headers.walk(path, 10**6)[1] == 8 * ELEMENT + 2 * STRUCT_ELEMENT + 12 + 5 + 2 + 2 + 2 + 3
     small = write_raw_set(
         tmp_path / (STEM + ".set"), data=np.zeros((4, 2000), dtype=np.float32), struct=True
     )
@@ -825,3 +835,89 @@ def test_the_walk_finds_what_scipy_finds_in_a_file_matlab_wrote(name):
 def test_a_complex_variable_that_matlab_wrote_is_refused_at_the_top_level(name):
     with pytest.raises(ValueError, match="complex variable at the top level"):
         headers.walk(MATLAB_FILES / name, 10**9)
+
+
+# ---- an element is not free: loadmat holds a few hundred bytes for an empty one -----------------
+#
+# 500,000 empty cells are a file of 81 KB and hold no values, and `loadmat` held 92 MiB for them,
+# about 190 bytes each, where the count had charged one value (eight bytes) for the cell's slot.
+# Every element is charged ELEMENT values, an element of a structure array STRUCT_ELEMENT more.
+# The numbers are written out here, and not taken from the module, so that a change shows.
+
+EMPTY_ARRAY = matrix(b"", MX_DOUBLE, (0, 0), stored="double")  # an empty matrix as SciPy writes it
+
+
+def empty_cells(count, member=EMPTY_MEMBER):
+    return matrix(b"c", MX_CELL, (1, count), parts=0, members=member * count)
+
+
+def loadmat_peak(path):
+    """The most memory `loadmat` holds while it reads the file, as eegprep calls it."""
+    tracemalloc.start()
+    try:
+        scipy.io.loadmat(
+            str(path), struct_as_record=False, squeeze_me=False, appendmat=False, mat_dtype=True
+        )
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        pytest.param(EMPTY_MEMBER, id="no bytes, as MATLAB writes `[]`"),
+        pytest.param(EMPTY_ARRAY, id="an empty array, as SciPy writes it"),
+    ],
+)
+def test_500000_empty_cells_are_refused_though_they_hold_no_values(tmp_path, member):
+    path = mat_file(
+        tmp_path / (STEM + ".set"),
+        [*base_variables(), empty_cells(500_000, member)],
+        compress=True,
+    )
+    assert path.stat().st_size < 300_000  # the file is small, and what it makes loadmat hold is not
+    assert refusal(path, SMALL) == TOO_LARGE
+
+
+def test_an_element_is_charged_and_so_is_each_element_of_a_structure_array(tmp_path):
+    count = 1000
+    cells = mat_file(tmp_path / "cells.mat", [empty_cells(count)])
+    # the cell and each of its members are elements, and each slot of the cell is a value
+    assert headers.walk(cells, 10**9)[1] == ELEMENT * (1 + count) + count
+    structures = mat_file(tmp_path / "structures.mat", [structure(b"s", (1, count), [], [])])
+    # a structure array of no fields holds objects, which are charged to the structure
+    assert headers.walk(structures, 10**9)[1] == ELEMENT + STRUCT_ELEMENT * count
+
+
+def test_500000_structures_of_no_fields_are_refused_though_they_hold_no_values(tmp_path):
+    path = mat_file(
+        tmp_path / (STEM + ".set"),
+        [*base_variables(), structure(b"s", (1, 500_000), [], [])],
+        compress=True,
+    )
+    assert path.stat().st_size < 1000
+    assert refusal(path, SMALL) == TOO_LARGE
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        pytest.param(empty_cells(100_000), id="cells"),
+        pytest.param(structure(b"s", (1, 100_000), [], []), id="structures"),
+    ],
+)
+def test_the_charge_for_an_element_covers_what_loadmat_holds_for_one(tmp_path, variable):
+    """Measured: the count, at eight bytes a value, is not less than what `loadmat` holds (to
+    5%). A structure element held 144 bytes in a process that had loaded nothing and 336 in one that
+    had run another test first, so the charge is the larger and is not tested from above."""
+    path = mat_file(tmp_path / "empties.mat", [variable], compress=True)
+    counted = headers.walk(path, 10**12)[1]
+    assert 8 * counted * 1.05 >= loadmat_peak(path)
+
+
+def test_the_charge_for_a_cell_member_is_near_what_loadmat_holds_for_one(tmp_path):
+    """A cell member, unlike a structure element, costs the same in any process (194 bytes)."""
+    path = mat_file(tmp_path / "cells.mat", [empty_cells(100_000)], compress=True)
+    counted = headers.walk(path, 10**12)[1]
+    assert counted * 8 <= loadmat_peak(path) * 1.5

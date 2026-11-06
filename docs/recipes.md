@@ -133,6 +133,8 @@ Two things are decided from it.
   For a set it is the larger of the dimensions or the shape of the samples the set declares and the number of four-byte values in the `.fdt` it names, because eegprep reads the whole `.fdt` with `np.fromfile` before it compares its count with the header.
   A set saved as a MAT-file is counted before anything of it is loaded (`walk` in `common/headers.py`): the dimensions in the header of every variable, and of every member of a cell or a structure, are read, and their product is the number of values the variable holds (twice that for a complex array).
   The unit is values and not stored bytes, because `loadmat` holds a number as its class says, a double in eight bytes, however few bytes the file stores it in: MATLAB stores a double that is a whole number in one byte, so a file of 17 MB can be 134 MB in memory.
+  Each element is also charged 24 values (`MAT_ELEMENT_VALUES`), because `loadmat` makes an array object of it and holds about 190 bytes even when it is empty: 500,000 empty cells, a file of 81 KB, made it hold 92 MiB.
+  Each element of a structure array is charged 44 more (`MAT_STRUCT_VALUES`), the larger of two measured costs of its object (144 bytes in one process and 336 in another), so that a structure array of no fields and 500,000 elements is refused too.
   The total over every variable is held to the limit plus 8,388,608 values (64 mebibytes (MiB) at eight bytes a value) for what else a set holds, such as events and channel locations.
   A set that holds more fails as `too_large`, and the count stops at the header that passes the cap, so the data of a variable are not read to find out.
   A compressed top-level variable is read only as far as its header, and the data of a member of a cell or a structure are inflated a step at a time and dropped, so the count holds a step of memory and not the file; the file size alone bounds nothing for a compressed set.
@@ -141,7 +143,7 @@ Two things are decided from it.
   A member of a structure or a cell may be a matrix of no bytes, a tag and nothing after it, which is how MATLAB writes `[]` in a field or a cell; SciPy reads it as an empty array and the count follows it as an empty member.
   A variable cannot be empty so, and a top-level matrix of no bytes is refused.
   The count refuses what it cannot follow, as `unreadable_header`: a sparse matrix, a function handle or an object (eegprep loads every variable, and the size of these is not known), data with more bytes than the dimensions can hold, and matrices nested deeper than 32 levels.
-  It follows at most 5,000,000 elements, the bound on its own work, and a set with more fails as `too_large`.
+  It follows at most 5,000,000 elements, the bound on its own work, and a set with more fails as `too_large`; the elements count against the cap as well, so that bound is met long before a cap of a billion values.
   The data of a top-level variable are not inflated, so a damaged stream there is found by eegprep and not by the check; the cap still bounds what it can hold.
   A file that is not a MAT-file of version 5 or later is refused as `unreadable_header`.
   So is a set saved as version 7.3, which is an HDF5 file, and it is refused unread: eegprep's reader for it takes the samples from external raw storage, an external link or a virtual dataset, each of which can lead to a file anywhere, and a walk of the file that finds every one of them has not been written.
