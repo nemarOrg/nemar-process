@@ -20,7 +20,7 @@ from eegprep import (
     clean_windows,
     pop_select,
 )
-from nemar_process.common import io, qc
+from nemar_process.common import io, plan, qc
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from nemar_process.nemar_floor import outputs, process, steps
 from recipe_support import (
@@ -418,6 +418,15 @@ def test_the_plan_hash_changes_with_each_rule_constant(
         for key in keys:
             value = value[key]
         assert value == changed, (step_id, keys)
+
+
+def test_a_failure_in_the_bookkeeping_of_a_step_is_that_steps_failure(tmp_path, monkeypatch):
+    """The parameter table is complete by test; a row missing would say which step it broke."""
+    monkeypatch.delitem(plan.PARAMETER_TYPES, "eegprep.clean_drifts")
+    with pytest.raises(RecordingError) as caught:
+        process(smoke_loaded(tmp_path))
+    error = caught.value
+    assert (error.code, error.step, error.detail) == ("step_failed", "drift", "KeyError")
 
 
 def test_a_recording_with_no_eeg_channel_is_skipped_not_failed(tmp_path):

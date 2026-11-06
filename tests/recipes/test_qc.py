@@ -256,7 +256,7 @@ def test_every_signal_channel_is_in_exactly_one_of_flat_bad_not_assessed_or_good
     assert counts["nFlatline"] + counts["nBad"] + counts["nNotAssessed"] + counts["nGood"] == 5
 
 
-def test_sample_counts_come_from_the_sample_mask_and_are_none_when_there_is_no_mask():
+def test_sample_counts_come_from_the_sample_mask():
     mask = np.array([True, False, False, True, True, False, True, True, True, True])
     assert qc.sample_counts(mask) == {
         "nTotal": 10,
@@ -265,7 +265,6 @@ def test_sample_counts_come_from_the_sample_mask_and_are_none_when_there_is_no_m
         "percentGood": 70.0,
         "nBadSegments": 2,
     }
-    assert qc.sample_counts(None) is None
 
 
 # ---- the location guard -----------------------------------------------------------------------

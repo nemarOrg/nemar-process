@@ -226,10 +226,8 @@ def channel_counts(
     return counts
 
 
-def sample_counts(sample_mask: np.ndarray | None) -> dict[str, Any] | None:
-    """Sample counts from the mask ``clean_windows`` returned; None when it was not run."""
-    if sample_mask is None:
-        return None
+def sample_counts(sample_mask: np.ndarray) -> dict[str, Any]:
+    """Sample counts from the mask ``clean_windows`` returned."""
     mask = np.asarray(sample_mask, dtype=bool)
     good = int(mask.sum())
     return {
@@ -280,7 +278,7 @@ def floor_metrics(
             not_assessed=not_assessed,
             bad_channels_assessed=bad_channels_assessed,
         ),
-        "samples": sample_counts(sample_mask),
+        "samples": None if sample_mask is None else sample_counts(sample_mask),
         "lineNoise": {
             "beforeDb": _by_frequency(line_before),
             "afterDb": _by_frequency(line_after),
