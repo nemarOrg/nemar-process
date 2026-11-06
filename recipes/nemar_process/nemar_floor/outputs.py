@@ -12,8 +12,12 @@ private directory, and return the product; it moves nothing into place and appen
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from nemar_process.common import files, io, naming, qc, records
 from nemar_process.common.errors import INTERNAL_ERROR, RecordingError
@@ -95,13 +99,11 @@ def channel_rows(result: FloorResult) -> list[list[Any]]:
     return rows
 
 
-def segment_rows(result: FloorResult) -> list[list[Any]]:
+def segment_rows(sample_mask: np.ndarray, srate_hz: float) -> list[list[Any]]:
     """One row per maximal run of False in the sample mask, in time order."""
-    assert result.sample_mask is not None
-    rate = result.srate_hz
     return [
-        [start / rate, length / rate, "bad_window", "clean_windows"]
-        for start, length in qc.runs(result.sample_mask)
+        [start / srate_hz, length / srate_hz, "bad_window", "clean_windows"]
+        for start, length in qc.runs(sample_mask)
     ]
 
 
@@ -162,6 +164,17 @@ def table_row(recording: Recording, result: FloorResult, content_sha256: str) ->
     }
 
 
+@dataclass(frozen=True)
+class Product:
+    """One file of a recording's product: its name, the step that made it and how to write it."""
+
+    suffix: str
+    extension: str
+    step_id: str
+    description: str
+    write: Callable[[Path], None]
+
+
 def write_product(
     recording: Recording,
     context: RunContext,
@@ -174,52 +187,56 @@ def write_product(
     def place(suffix: str, extension: str) -> str:
         return naming.product_path(recording.path, LABEL, suffix, extension)
 
-    written: list[tuple[str, str, records.FileTarget]] = []  # location, role, target
-    channels_at = "bad_channels" if result.plan.has_step("bad_channels") else "flatline"
+    stamp = {"recipe": steps.RECIPE_ID, "recipeVersion": steps.RECIPE_VERSION}
+    # the files in the order they are listed: what each is, the step that produced it, how it is written
     jobs = [
-        (
+        Product(
             "channels",
             "tsv",
-            "channels.tsv",
-            channels_at,
-            "TSV",
+            "bad_channels" if result.plan.has_step("bad_channels") else "flatline",
             "BIDS channels table with status of every channel",
-        ),
-        (
-            "filters",
-            "json",
-            "filters.json",
-            "line_noise_measure",
-            "JSON",
-            "Drift and line-noise filter record",
-        ),
-        ("qc", "json", "qc.json", "qc", "JSON", "Quality control metrics"),
+            lambda path: files.write_tsv(path, CHANNEL_COLUMNS, channel_rows(result)),
+        )
     ]
     if result.sample_mask is not None:
-        jobs.insert(
-            1,
-            (
+        mask = result.sample_mask
+        jobs.append(
+            Product(
                 "badsegments",
                 "tsv",
-                "badsegments.tsv",
                 "bad_windows",
-                "TSV",
                 "Bad segments found by clean_windows",
-            ),
+                lambda path: files.write_tsv(
+                    path,
+                    SEGMENT_COLUMNS,
+                    segment_rows(mask, result.srate_hz),
+                    SEGMENT_DECIMALS,
+                ),
+            )
         )
-    stamp = {"recipe": steps.RECIPE_ID, "recipeVersion": steps.RECIPE_VERSION}
-    for suffix, extension, role, step_id, kind, description in jobs:
-        location = place(suffix, extension)
-        path = directory / location
-        if suffix == "channels":
-            files.write_tsv(path, CHANNEL_COLUMNS, channel_rows(result))
-        elif suffix == "badsegments":
-            files.write_tsv(path, SEGMENT_COLUMNS, segment_rows(result), SEGMENT_DECIMALS)
-        elif suffix == "filters":
-            files.write_json(path, {**stamp, **result.filters})
-        else:
-            files.write_json(path, {**stamp, **result.metrics})
-        written.append((location, role, records.FileTarget(step_id, location, kind, description)))
+    jobs += [
+        Product(
+            "filters",
+            "json",
+            "line_noise_measure",
+            "Drift and line-noise filter record",
+            lambda path: files.write_json(path, {**stamp, **result.filters}),
+        ),
+        Product(
+            "qc",
+            "json",
+            "qc",
+            "Quality control metrics",
+            lambda path: files.write_json(path, {**stamp, **result.metrics}),
+        ),
+    ]
+    written: list[tuple[str, str, records.FileTarget]] = []  # location, role, target
+    for job in jobs:
+        location = place(job.suffix, job.extension)
+        job.write(directory / location)
+        role = "{}.{}".format(job.suffix, job.extension)
+        target = records.FileTarget(job.step_id, location, job.extension.upper(), job.description)
+        written.append((location, role, target))
 
     record = records.build_recording_record(
         INFO,
