@@ -145,8 +145,9 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
 - **The size limit is provisional.**
   A recording that declares or holds more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
   The number is arithmetic and not a measurement.
-  The check reads the dimensions of a set that keeps its variables in an `EEG` structure by loading that structure, so a set just under the cap (about 8 GB at the provisional limit) costs the check as much memory as the loader needs for its first copy; the check frees it before eegprep reads the file, and nothing was measured at that size.
-  Counting a compressed set inflates it once more before the loader inflates it again, so the check costs time as well as a step of memory; that time was not measured at the size of the limit.
+  The check reads the fields of a set that keeps its variables in an `EEG` structure by loading that structure, once the count has shown that it holds no more than the cap, so a set just under the cap (about 8 GB at the provisional limit) costs the check as much memory as the loader needs for its first copy; the check frees it before eegprep reads the file, and nothing was measured at that size.
+  Counting a set that keeps its variables in an `EEG` structure inflates the structure once more before the loader inflates it again (a flat set is read only as far as the headers), so the check costs time as well as a step of memory; that time was not measured at the size of the limit.
+  The count follows at most 5,000,000 elements (`MAT_ELEMENT_LIMIT`), so that its own work is bounded; the number is a guess, and nothing was measured on how many elements a real set holds.
   Pre-registered follow-ups, to be settled by the scale measurement and not before: (1) measure the peak memory and the time of the floor at 100 million, 500 million and one billion values and set the limit from them; (2) run each recording in a child process, so that one that exhausts memory or is killed by the kernel fails alone, with a row in the table and the other recordings' products intact, instead of ending the run without a dataset record.
   Neither is built.
 - **Staging cost.**

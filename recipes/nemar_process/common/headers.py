@@ -33,6 +33,7 @@ out is refused (``size_unknown``) and never passed.
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 import zlib
@@ -63,23 +64,33 @@ BRAINVISION_PREFIX = "Brain Vision Data Exchange Header File"
 BRAINVISION_ITEM_BYTES = {"INT_16": 2, "UINT_16": 2, "IEEE_FLOAT_32": 4}
 # ``read_fdt`` reads a sample as a 4-byte float.
 SET_ITEM_BYTES = 4
-# The most a value takes among the variables of a set (a double), and room for everything else they
-# hold (events, channel locations, history): a set larger than this is not a set of the declared size.
+# What a set may hold, counted in values against the limit of channel samples. A value is taken at
+# the most it can take in memory, eight bytes (a double), because ``loadmat`` holds a number as its
+# class says and not in the bytes the file stores it in (MATLAB stores a whole-number double in one);
+# the margin is room for everything else a set holds (events, channel locations, history).
 MAT_VALUE_BYTES = 8
 MAT_MARGIN_BYTES = 64 * 2**20
+# The most elements, nested ones included, that the count will follow, and how deep, so that the work
+# of the count is bounded as the memory is.
+MAT_ELEMENT_LIMIT = 5_000_000
+MAT_DEPTH_LIMIT = 32
+MAT_DIMENSIONS_LIMIT = 32
+MAT_NAME_LIMIT = 1024
 MAT_HEADER_BYTES = 128
 MAT_PREFIX = b"MATLAB 5.0 MAT-file"
 MAT_ENDIANNESS = {b"IM": "<", b"MI": ">"}
-MAT_MATRIX, MAT_COMPRESSED = 14, 15
+# MAT-file format v5: data types, the classes in the array flags, and the flag of a complex array.
+MAT_INT8, MAT_INT32, MAT_UINT32, MAT_MATRIX, MAT_COMPRESSED = 1, 5, 6, 14, 15
+MAT_DATA_TYPES = frozenset({1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 16, 17, 18})
+MX_CELL, MX_STRUCT, MX_CHAR = 1, 2, 4
+MX_NUMERIC = frozenset(range(6, 16))  # double and single, then int8 to uint64
+MX_COMPLEX = 0x0800
 # The bytes a compressed element is read and inflated in at a time.
 INFLATE_STEP = 1 << 20
 IN_SET_FILE = "in set file"
-# The MATLAB classes (as scipy names them) that eegprep does not unwrap when ``EEG`` is one of them:
-# it takes the top level of the file instead. ``EEG`` as any other class is refused.
-PLAIN_KINDS = frozenset(
-    {"double", "single", "char", "logical"}
-    | {f"{sign}int{bits}" for sign in ("", "u") for bits in (8, 16, 32, 64)}
-)
+# The classes that eegprep does not unwrap when ``EEG`` is one of them: it takes the top level of the
+# file instead. ``EEG`` as any other class is refused.
+PLAIN_CLASSES = MX_NUMERIC | {MX_CHAR}
 # What reading a header can raise when the file is not what its extension says.
 UNPARSABLE = (
     EOFError,
@@ -341,45 +352,230 @@ def _with_sidecar(
     return Header(references, max(known) if known else None, tuple(opened))
 
 
-def _inflated(handle: BinaryIO, nbytes: int, cap: int) -> int:
-    """The bytes ``nbytes`` of a compressed element inflate to, counted and then thrown away.
+class TooManyValues(Exception):
+    """A set holds more than the cap; ``values`` is the count at which the walk stopped."""
 
-    Inflated a step at a time and stopped once the count passes ``cap``, so a small file that
-    inflates to a great deal is never held: ``zlib.decompress`` would hold all of it.
-    """
-    inflater = zlib.decompressobj()
-    total, unread = 0, nbytes
-    while not inflater.eof:
+    def __init__(self, values: int) -> None:
+        super().__init__(values)
+        self.values = values
+
+
+@dataclass(frozen=True)
+class Variable:
+    """A variable of a MAT-file as its element header says: its name, class and dimensions."""
+
+    name: str
+    mclass: int
+    dims: tuple[int, ...]
+
+    @property
+    def numel(self) -> int:
+        return math.prod(self.dims)
+
+
+class _Stream:
+    """The bytes of one top-level element, read forward only: as stored, or inflated as they are read."""
+
+    def __init__(self, handle: BinaryIO, nbytes: int, compressed: bool) -> None:
+        self.handle = handle
+        self.unread = nbytes  # bytes of the element still in the file
+        self.inflater = zlib.decompressobj() if compressed else None
+        self.buffer, self.offset = b"", 0  # inflated, and how much of it has been given out
+        self.position = 0
+
+    def _inflate(self) -> None:
+        """Inflate one more step into the buffer."""
+        inflater = self.inflater
+        if inflater is None or inflater.eof:
+            raise EOFError("an element ends too soon")
         chunk = inflater.unconsumed_tail
-        if not chunk and unread:
-            chunk = handle.read(min(INFLATE_STEP, unread))
+        if not chunk and self.unread:
+            chunk = self.handle.read(min(INFLATE_STEP, self.unread))
             if not chunk:
                 raise EOFError("a compressed element is cut off")
-            unread -= len(chunk)
+            self.unread -= len(chunk)
         produced = inflater.decompress(chunk, INFLATE_STEP)
-        total += len(produced)
-        if total > cap:
-            break
-        if not (produced or inflater.unconsumed_tail or unread or inflater.eof):
+        if not (produced or inflater.unconsumed_tail or self.unread or inflater.eof):
             raise EOFError("a compressed element ends before its stream does")
-    return total
+        self.buffer = self.buffer[self.offset :] + produced
+        self.offset = 0
+
+    def take(self, count: int) -> bytes:
+        """The next ``count`` bytes, which are few: a tag, a header, a name."""
+        if self.inflater is None:
+            if count > self.unread:
+                raise EOFError("an element is cut off")
+            data = self.handle.read(count)
+            if len(data) != count:
+                raise EOFError("an element is cut off")
+            self.unread -= count
+        else:
+            while len(self.buffer) - self.offset < count:
+                self._inflate()
+            data = self.buffer[self.offset : self.offset + count]
+            self.offset += count
+        self.position += count
+        return data
+
+    def skip(self, count: int) -> None:
+        """Pass ``count`` bytes without holding them: a seek, or inflated a step at a time."""
+        if self.inflater is None:
+            if count > self.unread:
+                raise EOFError("an element is cut off")
+            self.handle.seek(count, 1)
+            self.unread -= count
+        else:
+            remaining = count
+            while remaining:
+                available = len(self.buffer) - self.offset
+                if not available:
+                    self._inflate()
+                    continue
+                step = min(available, remaining)
+                self.offset += step
+                remaining -= step
+        self.position += count
 
 
-def _footprint(path: Path, cap: int) -> int:
-    """The bytes the variables of a MAT-file take once read: as stored, or inflated when compressed.
+class _Counts:
+    """The values and elements found so far, and the cap on them."""
 
-    ``loadmat`` inflates every variable it is not told to skip, and so does ``pop_loadset``. The
-    top-level elements are followed by their tags and counted without reading their contents, and
-    the count stops once it passes ``cap``. A file whose elements cannot be followed raises.
+    def __init__(self, cap_values: int) -> None:
+        self.cap = cap_values
+        self.values = 0
+        self.elements = 0
+
+    def element(self) -> None:
+        self.elements += 1
+        if self.elements > MAT_ELEMENT_LIMIT:
+            raise TooManyValues(self.cap + 1)
+
+    def add(self, values: int) -> None:
+        self.values += values
+        if self.values > self.cap:
+            raise TooManyValues(self.values)
+
+
+def _tag(stream: _Stream, order: str) -> tuple[int, int, bytes | None]:
+    """A data element's tag: its type and byte count, and its data when the small format holds it.
+
+    The small format puts the byte count (at most four) in the upper two bytes of the first four
+    and the data in the second four, so there is nothing after the tag.
+    """
+    raw = stream.take(8)
+    first, second = struct.unpack(order + "II", raw)
+    if first >> 16:
+        count = first >> 16
+        if count > 4:
+            raise ValueError("a small data element of more than four bytes")
+        return first & 0xFFFF, count, raw[4 : 4 + count]
+    return first, second, None
+
+
+def _pass(stream: _Stream, count: int, inline: bytes | None) -> None:
+    """Pass the data of an element whose tag has been read: its bytes and the padding to eight."""
+    if inline is None:
+        stream.skip(count + -count % 8)
+
+
+def _matrix(stream: _Stream, order: str, counts: _Counts, depth: int) -> Variable:
+    """Walk the matrix element at the stream's position, adding its values and its members' to the count.
+
+    A number or a character array is counted from its dimensions and its data are passed unread;
+    a cell or a structure is counted and its members are walked. A top-level number or character
+    array is not read past its data tag, because the next variable is found from the tag around this
+    one and the data of a compressed variable would otherwise be inflated to get past them.
+    Anything else is refused: eegprep loads every variable of the file, and a kind that is not
+    followed is a size that is not known.
+    """
+    if depth > MAT_DEPTH_LIMIT:
+        raise ValueError("matrices nested deeper than the limit")
+    counts.element()
+    kind, nbytes, inline = _tag(stream, order)
+    if kind != MAT_MATRIX or inline is not None:
+        raise ValueError("not a matrix")
+    end = stream.position + nbytes
+    kind, count, inline = _tag(stream, order)
+    if (kind, count, inline) != (MAT_UINT32, 8, None):
+        raise ValueError("no array flags")
+    flags = struct.unpack(order + "II", stream.take(8))[0]
+    mclass = flags & 0xFF
+    kind, count, inline = _tag(stream, order)
+    if (
+        kind != MAT_INT32
+        or inline is not None
+        or count % 4
+        or not 8 <= count <= 4 * MAT_DIMENSIONS_LIMIT
+    ):
+        raise ValueError("no dimensions")
+    dims = struct.unpack(order + f"{count // 4}i", stream.take(count))
+    stream.skip(-count % 8)
+    if min(dims) < 0:
+        raise ValueError("a negative dimension")
+    kind, count, inline = _tag(stream, order)
+    if kind != MAT_INT8 or count > MAT_NAME_LIMIT:
+        raise ValueError("no name")
+    name = inline if inline is not None else stream.take(count)
+    if inline is None:
+        stream.skip(-count % 8)
+    numel = math.prod(dims)
+    variable = Variable(name.decode("latin1"), mclass, dims)
+    if mclass in MX_NUMERIC or mclass == MX_CHAR:
+        parts = 2 if mclass != MX_CHAR and flags & MX_COMPLEX else 1
+        counts.add(numel * parts)
+        for _ in range(parts):
+            kind, count, inline = _tag(stream, order)
+            if kind not in MAT_DATA_TYPES or count > MAT_VALUE_BYTES * numel:
+                raise ValueError("data that the dimensions do not hold")
+            if depth == 0:
+                return variable
+            _pass(stream, count, inline)
+    elif mclass == MX_CELL:
+        counts.add(numel)
+        for _ in range(numel):
+            _matrix(stream, order, counts, depth + 1)
+    elif mclass == MX_STRUCT:
+        counts.add(numel)
+        kind, count, inline = _tag(stream, order)
+        if kind != MAT_INT32 or count != 4:
+            raise ValueError("no field name length")
+        length = struct.unpack(order + "i", inline if inline is not None else stream.take(4))[0]
+        if inline is None:
+            stream.skip(4)
+        kind, count, inline = _tag(stream, order)
+        if kind != MAT_INT8 or length <= 0 or count % length:
+            raise ValueError("no field names")
+        _pass(stream, count, inline)
+        for _ in range(numel * (count // length)):
+            _matrix(stream, order, counts, depth + 1)
+    else:
+        raise ValueError("a kind of variable that this check does not follow")
+    if stream.position != end:
+        raise ValueError("an element does not end where it says")
+    return variable
+
+
+def walk(path: Path, cap_values: int) -> tuple[list[Variable], int]:
+    """The variables of the MAT-file (version 5) at ``path`` and the values they hold.
+
+    ``loadmat`` holds every variable of the file as its class says, so the values are counted from
+    the dimensions in the element headers (``prod(dims)``, twice for a complex array, members of a
+    cell or a structure included) and not from the bytes the file stores them in. Nothing is held:
+    a compressed element is inflated only as far as its headers need and the bytes of a member
+    are passed in steps. ``TooManyValues`` is raised the moment the count passes ``cap_values``.
+    A file whose elements cannot be followed, or that holds a kind of variable that is not followed
+    (sparse, a function handle, an object), raises ``ValueError`` or ``EOFError``.
     """
     size = path.stat().st_size
+    counts = _Counts(cap_values)
+    variables = []
     with path.open("rb") as handle:
         prefix = handle.read(MAT_HEADER_BYTES)
         if len(prefix) < MAT_HEADER_BYTES or not prefix.startswith(MAT_PREFIX):
             raise ValueError("not a MAT-file of version 5 or later")
         order = MAT_ENDIANNESS[prefix[126:128]]
-        total, position = 0, MAT_HEADER_BYTES
-        while position < size and total <= cap:
+        position = MAT_HEADER_BYTES
+        while position < size:
             handle.seek(position)
             tag = handle.read(8)
             if len(tag) < 8:
@@ -389,9 +585,14 @@ def _footprint(path: Path, cap: int) -> int:
                 raise ValueError("not a variable")
             if position + 8 + nbytes > size:
                 raise EOFError("an element is cut off")
-            total += _inflated(handle, nbytes, cap - total) if kind == MAT_COMPRESSED else nbytes
+            if kind == MAT_COMPRESSED:
+                stream = _Stream(handle, nbytes, compressed=True)
+            else:
+                handle.seek(position)  # the matrix reads its own tag
+                stream = _Stream(handle, 8 + nbytes, compressed=False)
+            variables.append(_matrix(stream, order, counts, 0))
             position += 8 + nbytes
-    return total
+    return variables, counts.values
 
 
 def _set_struct(path: Path) -> Header:
@@ -404,8 +605,9 @@ def _set_struct(path: Path) -> Header:
         for name in ("data", "datfile", "nbchan", "pnts", "trials")
     }
     data = fields["data"]
-    inline = isinstance(data, np.ndarray) and data.dtype.kind in "iuf"
-    declared = _product(data.shape) if inline else _dimensions(fields)
+    # sized by its shape whatever its kind, text excepted: text is a name and not samples
+    samples = isinstance(data, np.ndarray) and data.dtype.kind != "U"
+    declared = int(data.size) if samples else _dimensions(fields)
     return _with_sidecar(path, _set_references(data, fields["datfile"]), declared)
 
 
@@ -416,17 +618,18 @@ def _load(path: Path, name: str) -> Any:
     ]
 
 
-def _set_flat(path: Path, listed: dict[str, tuple[Any, str]]) -> Header:
+def _set_flat(path: Path, listed: dict[str, Variable]) -> Header:
     """A set that keeps its variables at the top level of the file."""
     data = datfile = None
-    if listed.get("data", ((), ""))[1] == "char":
+    samples = listed.get("data")
+    if samples is not None and samples.mclass == MX_CHAR:
         data = _load(path, "data")
     if _row_text(data) == IN_SET_FILE and "datfile" in listed:
         datfile = _load(path, "datfile")
     references = _set_references(data, datfile)
-    shape, kind = listed.get("data", ((), ""))
-    if kind in ("double", "single") or kind.startswith(("int", "uint")):
-        return _with_sidecar(path, references, _product(shape))
+    if samples is not None and samples.mclass != MX_CHAR:
+        # sized by its shape whatever its kind (a logical array is not nbchan times pnts)
+        return _with_sidecar(path, references, samples.numel)
     names = [name for name in ("nbchan", "pnts", "trials") if name in listed]
     dimensions = scipy.io.loadmat(
         str(path), variable_names=names, squeeze_me=False, appendmat=False
@@ -443,9 +646,9 @@ def _set(path: Path, max_values: int) -> Header:
     array of structures, a cell that may hold a structure, a MATLAB object that is unwrapped to one)
     is refused rather than modeled, and so is a file that saves a variable name twice.
 
-    Nothing is loaded before the variables are counted: a set whose variables take more than a
-    limit's worth of values (``MAT_VALUE_BYTES`` each, with ``MAT_MARGIN_BYTES`` for the rest) is
-    too large whatever it declares, compressed or not.
+    Nothing is loaded before the variables are counted (``walk``): a set that holds more values than
+    the limit and the room beside it (``MAT_MARGIN_BYTES`` at ``MAT_VALUE_BYTES`` a value) is too
+    large whatever it declares, compressed or not, and the structure is loaded only after that.
 
     A set saved as MATLAB v7.3 is an HDF5 file and is refused (the same ``h5py.is_hdf5`` test as
     eegprep's, so the two cannot disagree about which files these are). Its reader takes the samples
@@ -457,21 +660,20 @@ def _set(path: Path, max_values: int) -> Header:
         raise ValueError(
             "a set saved as MATLAB v7.3 is an HDF5 file, which this check does not read"
         )
-    cap = max_values * MAT_VALUE_BYTES + MAT_MARGIN_BYTES
-    footprint = _footprint(path, cap)
-    if footprint > cap:
-        return Header(values=footprint // MAT_VALUE_BYTES)
-    variables = scipy.io.whosmat(str(path))
-    names = [name for name, _, _ in variables]
+    try:
+        variables, _ = walk(path, max_values + MAT_MARGIN_BYTES // MAT_VALUE_BYTES)
+    except TooManyValues as many:
+        return Header(values=many.values)
+    names = [variable.name for variable in variables]
     if len(set(names)) != len(names):
         # loadmat of the whole file keeps the last of two variables of a name, as eegprep does, and
         # loadmat by name stops at the first: the two would read different datasets
         raise ValueError("a variable of the set is saved twice")
-    listed = {name: (shape, kind) for name, shape, kind in variables}
-    shape, kind = listed.get("EEG", ((), ""))
-    if kind == "struct" and tuple(shape) == (1, 1):
+    listed = {variable.name: variable for variable in variables}
+    eeg = listed.get("EEG")
+    if eeg is not None and eeg.mclass == MX_STRUCT and eeg.dims == (1, 1):
         return _set_struct(path)
-    if "EEG" in listed and kind not in PLAIN_KINDS:
+    if eeg is not None and eeg.mclass not in PLAIN_CLASSES:
         raise ValueError("an EEG that is neither one structure nor a plain value is not read")
     return _set_flat(path, listed)
 

@@ -122,10 +122,15 @@ Two things are decided from it.
   For BrainVision it is the size of the data file divided by the width of a value, and the data file is the one eegprep opens (`_referenced_file`): the file `DataFile` names, else `<stem>.eeg`, else `<stem>.dat`, each looked for in another case too.
   Several files that differ only in case are all counted and the largest decides, and a header whose data file is not there fails with the class `FileNotFoundError`, which is what eegprep raises.
   For a set it is the larger of the dimensions or the shape of the samples the set declares and the number of four-byte values in the `.fdt` it names, because eegprep reads the whole `.fdt` with `np.fromfile` before it compares its count with the header.
-  A set saved as a MAT-file is counted before anything of it is loaded (`_footprint`): its top-level elements are followed by their tags, and a compressed one is inflated a step at a time and thrown away, because `loadmat` inflates every variable it is not told to skip, and so does `pop_loadset`.
-  The total is held to a cap of eight bytes for each value of the limit plus 64 mebibytes (MiB) for what else a set holds, such as events and channel locations.
-  A set that inflates past the cap fails as `too_large`, and the count stops at the cap, so a small file that inflates to a great deal costs the check one step of memory and not the whole.
-  The file size alone bounds nothing for a compressed set.
+  A set saved as a MAT-file is counted before anything of it is loaded (`walk` in `common/headers.py`): the dimensions in the header of every variable, and of every member of a cell or a structure, are read, and their product is the number of values the variable holds (twice that for a complex array).
+  The unit is values and not stored bytes, because `loadmat` holds a number as its class says, a double in eight bytes, however few bytes the file stores it in: MATLAB stores a double that is a whole number in one byte, so a file of 17 MB can be 134 MB in memory.
+  The total over every variable is held to the limit plus 8,388,608 values (64 mebibytes (MiB) at eight bytes a value) for what else a set holds, such as events and channel locations.
+  A set that holds more fails as `too_large`, and the count stops at the header that passes the cap, so the data of a variable are not read to find out.
+  A compressed top-level variable is read only as far as its header, and the data of a member of a cell or a structure are inflated a step at a time and dropped, so the count holds a step of memory and not the file; the file size alone bounds nothing for a compressed set.
+  Samples are sized by their shape whatever their kind, text excepted, so logical samples are not `nbchan` times `pnts`.
+  The count refuses what it cannot follow, as `unreadable_header`: a sparse matrix, a function handle or an object (eegprep loads every variable, and the size of these is not known), data with more bytes than the dimensions can hold, and matrices nested deeper than 32 levels.
+  It follows at most 5,000,000 elements, the bound on its own work, and a set with more fails as `too_large`.
+  The data of a top-level variable are not inflated, so a damaged stream there is found by eegprep and not by the check; the cap still bounds what it can hold.
   A file that is not a MAT-file of version 5 or later is refused as `unreadable_header`.
   So is a set saved as version 7.3, which is an HDF5 file, and it is refused unread: eegprep's reader for it takes the samples from external raw storage, an external link or a virtual dataset, each of which can lead to a file anywhere, and a walk of the file that finds every one of them has not been written.
   This is a fail-closed judgment, and its cost is that a large version 7.3 set is refused until that walk exists.
