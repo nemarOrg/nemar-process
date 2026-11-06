@@ -7,6 +7,7 @@ eegprep reads back as an array and then every cleaning step fails on).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import shutil
@@ -168,6 +169,93 @@ def test_a_failure_of_the_reader_itself_keeps_only_its_error_class(tmp_path):
         io.load(recording)
     assert (caught.value.code, caught.value.step) == ("load_failed", "load")
     assert caught.value.detail == "AssertionError"
+
+
+def set_in_tree(root, variables):
+    """A set written from `variables` alone, so that a test can leave out what eegprep expects."""
+    import scipy.io
+
+    target = root / "sub-01" / "eeg" / "sub-01_task-x_eeg.set"
+    target.parent.mkdir(parents=True)
+    scipy.io.savemat(str(target), variables)
+    (recording,) = io.discover(root)
+    return recording
+
+
+def test_a_set_that_lacks_what_the_safety_checks_read_fails_to_load_and_is_not_an_internal_error(
+    tmp_path,
+):
+    """eegprep reads a set with no sampling rate back without raising, and the first check after the
+    load does: that is the file's failure, at the step `load`, and not the program's."""
+    recording = set_in_tree(
+        tmp_path,
+        {
+            "nbchan": 4.0,
+            "trials": 1.0,
+            "pnts": 2000.0,
+            "data": np.zeros((4, 2000), dtype=np.float32),
+            "xmin": 0.0,
+            "chanlocs": np.array([]),
+            "event": np.array([]),
+            "etc": np.array([]),
+        },
+    )
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.status, caught.value.code, caught.value.step) == (
+        "failed",
+        "load_failed",
+        "load",
+    )
+    assert caught.value.detail == "TypeError"
+
+
+class FailsToCast:
+    """Samples that raise `error` when they are converted, as a conversion does that cannot be held."""
+
+    def __init__(self, error):
+        self.error = error
+
+    def __array__(self, dtype=None, copy=None):
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "detail"),
+    [
+        pytest.param(MemoryError(), "out_of_memory", "MemoryError", id="memory runs out"),
+        pytest.param(ValueError("cannot"), "load_failed", "ValueError", id="not numbers"),
+    ],
+)
+def test_the_float64_cast_is_inside_the_load_and_keeps_the_step_of_its_failure(
+    tmp_path, monkeypatch, error, code, detail
+):
+    """A set near the limit needs a second copy for the cast; running out of memory there is a
+    failure of the step `load`, as it is a few lines earlier."""
+    from recipe_support import write_raw_set
+
+    write_raw_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set",
+        data=np.zeros((4, 2000), dtype=np.float32),
+    )
+    (recording,) = io.discover(tmp_path)
+    real_loadset = io.pop_loadset
+
+    @functools.wraps(real_loadset)  # the loader records the parameters of the function it calls
+    def loads_and_then_cannot_hold_the_samples(*arguments, **keywords):
+        eeg = real_loadset(*arguments, **keywords)
+        eeg["data"] = FailsToCast(error)
+        return eeg
+
+    monkeypatch.setattr(io, "pop_loadset", loads_and_then_cannot_hold_the_samples)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.status, caught.value.code, caught.value.step, caught.value.detail) == (
+        "failed",
+        code,
+        "load",
+        detail,
+    )
 
 
 def eeg_of(data, types=None, srate=250.0):
