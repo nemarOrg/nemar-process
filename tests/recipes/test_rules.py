@@ -16,7 +16,7 @@ from nemar_process.nemar_floor import process, steps
 from recipe_support import correlated_channels, sphere_positions, step_of, write_set
 
 RATE = 250.0
-MINUTE = int(RATE * steps.SHORT_RECORDING_S)
+MINUTE = 15_000  # 60 s at 250 Hz, written out so that it does not move with the constant it tests
 
 
 def floor_of(tmp_path, data, rate=RATE, **options):
