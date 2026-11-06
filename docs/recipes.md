@@ -132,6 +132,7 @@ Two things are decided from it.
   The total over every variable is held to the limit plus 8,388,608 values (64 mebibytes (MiB) at eight bytes a value) for what else a set holds, such as events and channel locations.
   A set that holds more fails as `too_large`, and the count stops at the header that passes the cap, so the data of a variable are not read to find out.
   A compressed top-level variable is read only as far as its header, and the data of a member of a cell or a structure are inflated a step at a time and dropped, so the count holds a step of memory and not the file; the file size alone bounds nothing for a compressed set.
+  A complex array at the top level of a set is refused as `unreadable_header`: the data of a top-level variable are not read, so the tag of its imaginary part would never be met and could declare any size, and a 1 by 1 complex number declaring 256 MiB there made `loadmat` hold 654 MiB under a limit of 8,000 values; inside a structure or a cell a complex array is counted twice, and both of its data tags are checked.
   Samples are sized by their shape whatever their kind, text excepted, so logical samples are not `nbchan` times `pnts`.
   A member of a structure or a cell may be a matrix of no bytes, a tag and nothing after it, which is how MATLAB writes `[]` in a field or a cell; SciPy reads it as an empty array and the count follows it as an empty member.
   A variable cannot be empty so, and a top-level matrix of no bytes is refused.

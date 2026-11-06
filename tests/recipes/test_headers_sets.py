@@ -438,11 +438,17 @@ def test_the_variables_of_a_set_are_counted_together_and_not_one_at_a_time(tmp_p
 
 
 def test_a_complex_value_is_counted_twice(tmp_path):
-    room = CAP_VALUES - BASE_VALUES
-    real = whole_numbers(b"junk", room)
-    complex_ = whole_numbers(b"junk", room, flags=COMPLEX, parts=2)
-    headers.check(mat_file(tmp_path / "real.set", [*base_variables(), real]), SMALL, EVERYWHERE)
-    path = mat_file(tmp_path / "complex.set", [*base_variables(), complex_])
+    """In a cell: a complex variable at the top level is refused outright (below)."""
+    room = CAP_VALUES - BASE_VALUES - 1  # the cell that holds it is one value
+    real = whole_numbers(b"", room)
+    complex_ = whole_numbers(b"", room, flags=COMPLEX, parts=2)
+
+    def held_in_a_cell(member):
+        return matrix(b"junk", MX_CELL, (1, 1), parts=0, members=member)
+
+    path = mat_file(tmp_path / "real.set", [*base_variables(), held_in_a_cell(real)])
+    headers.check(path, SMALL, EVERYWHERE)
+    path = mat_file(tmp_path / "complex.set", [*base_variables(), held_in_a_cell(complex_)])
     assert refusal(path, SMALL) == TOO_LARGE
 
 
@@ -466,9 +472,13 @@ def test_a_member_of_the_eeg_structure_is_counted_before_the_structure_is_loaded
 
 
 @pytest.mark.parametrize(
-    "struct", [False, True], ids=["variables at the top level", "EEG structure"]
+    ("struct", "kind"),
+    [
+        pytest.param(False, bool, id="logical, variables at the top level"),
+        pytest.param(True, bool, id="logical, EEG structure"),
+        pytest.param(True, np.complex64, id="complex, EEG structure"),
+    ],
 )
-@pytest.mark.parametrize("kind", [bool, np.complex64], ids=["logical", "complex"])
 def test_samples_of_any_kind_are_sized_by_their_shape_and_not_by_nbchan_times_pnts(
     tmp_path, struct, kind
 ):
@@ -482,6 +492,52 @@ def test_samples_of_any_kind_are_sized_by_their_shape_and_not_by_nbchan_times_pn
     )
     assert refusal(path, SMALL) == TOO_LARGE
     headers.check(path, 4 * 400_000, EVERYWHERE)
+
+
+def a_complex_number_with_an_imaginary_part_of(declared):
+    """A top-level complex 1 by 1 double, compressed, whose imaginary part declares `declared` bytes
+    and holds them as zeros (they compress to about a quarter of a megabyte): its real part is one number
+    and is all a walk of the first data tag meets."""
+    element = matrix(
+        b"z", MX_DOUBLE, (1, 1), stored="double", payload=pack("<d", 1.0), flags=COMPLEX
+    )
+    body = element[8:] + pack("<II", STORED_AS["double"], declared)
+    deflater = zlib.compressobj(9)
+    packed = deflater.compress(pack("<II", MI_MATRIX, len(body) + declared) + body)
+    for _ in range(declared // 2**20):
+        packed += deflater.compress(bytes(2**20))
+    packed += deflater.flush()
+    return pack("<II", MI_COMPRESSED, len(packed)) + packed
+
+
+def test_a_complex_variable_at_the_top_level_is_refused_because_its_imaginary_part_is_never_read(
+    tmp_path, monkeypatch
+):
+    """The data of a top-level variable are not inflated, so the walk stops after the first data tag
+    and never meets the tag of an imaginary part: a complex 1 by 1 number whose imaginary part
+    declares 256 MiB passed a limit of 8,000 values, and `loadmat` holds the 256 MiB (it peaked at
+    654 MiB). Such a variable is refused for what it is, and nothing is loaded."""
+    root, path, _ = crafted(tmp_path)
+    write_raw_set(path, data=np.zeros((4, 2000)), compress=True)
+    path.write_bytes(path.read_bytes() + a_complex_number_with_an_imaginary_part_of(256 * 2**20))
+    assert path.stat().st_size < 2**20  # the file is small; what it declares is not
+    monkeypatch.setattr(scipy.io, "loadmat", never_called)
+    assert refusal(path, SMALL) == UNREADABLE
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(root)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording, SMALL)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == UNREADABLE[1:]
+
+
+def test_a_complex_variable_at_the_top_level_is_refused_however_small(tmp_path):
+    path = write_raw_set(
+        tmp_path / (STEM + ".set"),
+        data=np.zeros((4, 2000)),
+        extra={"z": np.array([1 + 2j])},
+        compress=True,
+    )
+    assert refusal(path, SMALL) == UNREADABLE
 
 
 def test_a_variable_with_more_bytes_than_its_dimensions_hold_is_refused(tmp_path):
@@ -737,7 +793,6 @@ WRITTEN_BY_MATLAB = [
     "testcell_7.4_GLNX86.mat",
     "testcellnest_6.5.1_GLNX86.mat",
     "testcellnest_7.1_GLNX86.mat",
-    "testcomplex_7.4_GLNX86.mat",
     "testdouble_6.5.1_GLNX86.mat",
     "testemptycell_5.3_SOL2.mat",
     "testemptycell_7.4_GLNX86.mat",
@@ -764,3 +819,9 @@ def test_the_walk_finds_what_scipy_finds_in_a_file_matlab_wrote(name):
     ]
     # a row of text is its characters, so SciPy reports the dimensions without the last
     assert found == [(name, shape) for name, shape, _ in scipy.io.whosmat(str(path))]
+
+
+@pytest.mark.parametrize("name", ["testcomplex_6.5.1_GLNX86.mat", "testcomplex_7.4_GLNX86.mat"])
+def test_a_complex_variable_that_matlab_wrote_is_refused_at_the_top_level(name):
+    with pytest.raises(ValueError, match="complex variable at the top level"):
+        headers.walk(MATLAB_FILES / name, 10**9)

@@ -525,7 +525,8 @@ def _matrix(stream: _Stream, order: str, counts: _Counts, depth: int) -> Variabl
     A number or a character array is counted from its dimensions and its data are passed unread;
     a cell or a structure is counted and its members are walked. A top-level number or character
     array is not read past its data tag, because the next variable is found from the tag around this
-    one and the data of a compressed variable would otherwise be inflated to get past them.
+    one and the data of a compressed variable would otherwise be inflated to get past them; for
+    that reason a top-level complex array, whose second data tag would be passed unread, is refused.
     Anything else is refused: eegprep loads every variable of the file, and a kind that is not
     followed is a size that is not known.
     """
@@ -566,7 +567,12 @@ def _matrix(stream: _Stream, order: str, counts: _Counts, depth: int) -> Variabl
     numel = math.prod(dims)
     variable = Variable(name.decode("latin1"), mclass, dims)
     if mclass in MX_NUMERIC or mclass == MX_CHAR:
-        parts = 2 if mclass != MX_CHAR and flags & MX_COMPLEX else 1
+        complex_ = mclass != MX_CHAR and bool(flags & MX_COMPLEX)
+        if complex_ and depth == 0:
+            # the data of a top-level variable are passed unread (below), so the tag of an imaginary
+            # part would never be met and could declare any size
+            raise ValueError("a complex variable at the top level is not followed")
+        parts = 2 if complex_ else 1
         counts.add(numel * parts)
         for _ in range(parts):
             kind, count, inline = _tag(stream, order)
