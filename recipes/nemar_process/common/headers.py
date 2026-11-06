@@ -24,17 +24,19 @@ would follow the files it names on the strength of a parse this check could not 
 The size is what the reader consumes, which is not always what the header says. MNE ignores the
 record count of an EDF header that disagrees with the size of the file; ``read_fdt`` reads a whole
 ``.fdt`` before it compares the count with the header; ``pop_loadbv`` takes the data file it finds
-(a different case, or ``.dat``), not the one the header names. Each of these is counted here, and a
-size that cannot be worked out is refused (``size_unknown``) and never passed.
+(a different case, or ``.dat``), not the one the header names; and ``scipy.io.loadmat`` inflates
+every variable of a compressed set. Each of these is counted here, and a size that cannot be worked
+out is refused (``size_unknown``) and never passed.
 """
 
 from __future__ import annotations
 
 import re
+import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import h5py
 import numpy as np
@@ -59,6 +61,16 @@ BRAINVISION_PREFIX = "Brain Vision Data Exchange Header File"
 BRAINVISION_ITEM_BYTES = {"INT_16": 2, "UINT_16": 2, "IEEE_FLOAT_32": 4}
 # ``read_fdt`` reads a sample as a 4-byte float.
 SET_ITEM_BYTES = 4
+# The most a value takes among the variables of a set (a double), and room for everything else they
+# hold (events, channel locations, history): a set larger than this is not a set of the declared size.
+MAT_VALUE_BYTES = 8
+MAT_MARGIN_BYTES = 64 * 2**20
+MAT_HEADER_BYTES = 128
+MAT_PREFIX = b"MATLAB 5.0 MAT-file"
+MAT_ENDIANNESS = {b"IM": "<", b"MI": ">"}
+MAT_MATRIX, MAT_COMPRESSED = 14, 15
+# The bytes a compressed element is read and inflated in at a time.
+INFLATE_STEP = 1 << 20
 IN_SET_FILE = "in set file"
 # What reading a header can raise when the file is not what its extension says.
 UNPARSABLE = (
@@ -282,6 +294,59 @@ def _with_sidecar(
     return Header(references, max(known) if known else None)
 
 
+def _inflated(handle: BinaryIO, nbytes: int, cap: int) -> int:
+    """The bytes ``nbytes`` of a compressed element inflate to, counted and then thrown away.
+
+    Inflated a step at a time and stopped once the count passes ``cap``, so a small file that
+    inflates to a great deal is never held: ``zlib.decompress`` would hold all of it.
+    """
+    inflater = zlib.decompressobj()
+    total, unread = 0, nbytes
+    while not inflater.eof:
+        chunk = inflater.unconsumed_tail
+        if not chunk and unread:
+            chunk = handle.read(min(INFLATE_STEP, unread))
+            if not chunk:
+                raise EOFError("a compressed element is cut off")
+            unread -= len(chunk)
+        produced = inflater.decompress(chunk, INFLATE_STEP)
+        total += len(produced)
+        if total > cap:
+            break
+        if not (produced or inflater.unconsumed_tail or unread or inflater.eof):
+            raise EOFError("a compressed element ends before its stream does")
+    return total
+
+
+def _footprint(path: Path, cap: int) -> int:
+    """The bytes the variables of a MAT-file take once read: as stored, or inflated when compressed.
+
+    ``loadmat`` inflates every variable it is not told to skip, and so does ``pop_loadset``. The
+    top-level elements are followed by their tags and counted without reading their contents, and
+    the count stops once it passes ``cap``. A file whose elements cannot be followed raises.
+    """
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        prefix = handle.read(MAT_HEADER_BYTES)
+        if len(prefix) < MAT_HEADER_BYTES or not prefix.startswith(MAT_PREFIX):
+            raise ValueError("not a MAT-file of version 5 or later")
+        order = MAT_ENDIANNESS[prefix[126:128]]
+        total, position = 0, MAT_HEADER_BYTES
+        while position < size and total <= cap:
+            handle.seek(position)
+            tag = handle.read(8)
+            if len(tag) < 8:
+                raise EOFError("an element is cut off")
+            kind, nbytes = struct.unpack(order + "II", tag)
+            if kind not in (MAT_MATRIX, MAT_COMPRESSED) or nbytes == 0:
+                raise ValueError("not a variable")
+            if position + 8 + nbytes > size:
+                raise EOFError("an element is cut off")
+            total += _inflated(handle, nbytes, cap - total) if kind == MAT_COMPRESSED else nbytes
+            position += 8 + nbytes
+    return total
+
+
 def _set_hdf5(path: Path) -> Header:
     """A set saved as MATLAB v7.3: the samples are in the file and nothing is followed."""
     with h5py.File(path, "r") as handle:
@@ -292,11 +357,8 @@ def _set_hdf5(path: Path) -> Header:
     return Header()
 
 
-def _set_struct(path: Path, max_values: int) -> Header:
+def _set_struct(path: Path) -> Header:
     """A set that keeps its variables in an ``EEG`` structure, which cannot be sized unread."""
-    if path.stat().st_size // SET_ITEM_BYTES > max_values:
-        # the file holds more values than the limit, in it or beside it: it is not read to find out
-        return Header(values=path.stat().st_size // SET_ITEM_BYTES)
     loaded = scipy.io.loadmat(
         str(path), variable_names=["EEG"], squeeze_me=True, struct_as_record=False, appendmat=False
     )["EEG"]
@@ -335,15 +397,22 @@ def _set(path: Path, max_values: int) -> Header:
     1 by 1 ``struct``; a number, text or an array of structures is no dataset, and a 1 by 1 ``cell``
     that holds a structure is unwrapped to one, which is not modelled here and is refused.
 
+    Nothing is loaded before the variables are counted: a set whose variables take more than a
+    limit's worth of values (``MAT_VALUE_BYTES`` each, with ``MAT_MARGIN_BYTES`` for the rest) is
+    too large whatever it declares, compressed or not.
     """
     if h5py.is_hdf5(str(path)):
         return _set_hdf5(path)
+    cap = max_values * MAT_VALUE_BYTES + MAT_MARGIN_BYTES
+    footprint = _footprint(path, cap)
+    if footprint > cap:
+        return Header(values=footprint // MAT_VALUE_BYTES)
     listed = {name: (shape, kind) for name, shape, kind in scipy.io.whosmat(str(path))}
     shape, kind = listed.get("EEG", ((), ""))
     if kind == "cell":
         raise ValueError("an EEG variable that is a cell is not one this check reads")
     if kind == "struct" and tuple(shape) == (1, 1):
-        return _set_struct(path, max_values)
+        return _set_struct(path)
     return _set_flat(path, listed)
 
 

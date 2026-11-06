@@ -9,7 +9,10 @@ a header names, wherever it is (docs/upstream.md), which is why the check exists
 from __future__ import annotations
 
 import json
+import tracemalloc
 import warnings
+import zlib
+from struct import pack, unpack
 
 import h5py
 import numpy as np
@@ -608,19 +611,142 @@ def test_the_variables_at_the_top_level_of_a_set_give_its_size_exactly(tmp_path)
     assert refusal(path, 4 * 1000 - 1)[1] == "too_large"
 
 
-def test_a_set_in_an_eeg_structure_larger_than_the_limit_allows_is_refused_unread(tmp_path):
-    """Its variables cannot be sized without reading all of them, so the file size decides: a value
-    takes four bytes, and a file holding more values than the limit is not read to find out."""
+# What a set may inflate to, spelled out: eight bytes a value (a double), and 64 MiB (mebibytes) for
+# what else a set holds, events and channel locations among it.
+SMALL_LIMIT = 1000
+CAP = SMALL_LIMIT * 8 + 64 * 2**20
+BYTE_ORDERS = {"little": ("<", b"\x00\x01IM"), "big": (">", b"\x01\x00MI")}
+
+
+def mat_file(path, inflated, order="little", damaged=()):
+    """A MAT-file written by hand: one compressed element for each size in `inflated`, whose
+    contents are zeros and not a matrix. The count of what a file inflates to is made before
+    anything is parsed, so a file that passes it is one that then fails to parse. An element whose
+    index is in `damaged` goes bad right after its zeros, in the middle of its stream."""
+    prefix, marker = BYTE_ORDERS[order]
+    pieces = [b"MATLAB 5.0 MAT-file, written by a test".ljust(124, b" ") + marker]
+    block = bytes(2**20)
+    for index, size in enumerate(inflated):
+        deflater = zlib.compressobj(1)
+        stream = [deflater.compress(block) for _ in range(size // 2**20)]
+        stream += [deflater.compress(block[: size % 2**20])]
+        if index in damaged:
+            stream += [deflater.flush(zlib.Z_SYNC_FLUSH), b"\xff" * 64]
+        else:
+            stream += [deflater.flush()]
+        packed = b"".join(stream)
+        pieces += [pack(prefix + "II", 15, len(packed)), packed]
+    path.write_bytes(b"".join(pieces))
+    return path
+
+
+TOO_LARGE = ("failed", "too_large", "load", None)
+
+
+@pytest.mark.parametrize("order", ["little", "big"])
+def test_a_compressed_set_is_refused_the_byte_after_the_cap_and_not_before(tmp_path, order):
+    over = mat_file(tmp_path / "over.set", [CAP + 1], order)
+    assert refusal(over, SMALL_LIMIT) == TOO_LARGE
+    at = mat_file(tmp_path / "at.set", [CAP], order)
+    assert refusal(at, SMALL_LIMIT) == UNREADABLE  # the count passes it; zeros are no matrix
+
+
+def test_the_elements_of_a_set_are_counted_together_and_not_one_at_a_time(tmp_path):
+    half = CAP // 2 + 2**20
+    alone = mat_file(tmp_path / "alone.set", [half])
+    assert refusal(alone, SMALL_LIMIT) == UNREADABLE
+    together = mat_file(tmp_path / "together.set", [half, half])
+    assert refusal(together, SMALL_LIMIT) == TOO_LARGE
+
+
+def test_a_compressed_set_is_inflated_a_step_at_a_time_and_never_held(tmp_path):
+    """`zlib.decompress` would hold all of what the file inflates to; this holds a step."""
+    path = mat_file(tmp_path / (STEM + ".set"), [CAP + 8 * 2**20])
+    tracemalloc.start()
+    try:
+        outcome = refusal(path, SMALL_LIMIT)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert outcome == TOO_LARGE
+    assert peak < 16 * 2**20  # the cap is 64 MiB and the file inflates to 72
+
+
+def test_the_count_stops_at_the_cap_and_does_not_read_on(tmp_path):
+    """An element that goes bad after the cap is refused for its size: what comes after the cap is
+    not inflated. The same damage inside the cap is reached, and is the damage."""
+    beyond = mat_file(tmp_path / "beyond.set", [CAP + 2**21], damaged={0})
+    assert refusal(beyond, SMALL_LIMIT) == TOO_LARGE
+    within = mat_file(tmp_path / "within.set", [CAP - 2**21], damaged={0})
+    assert refusal(within, SMALL_LIMIT) == UNREADABLE
+
+
+def test_a_set_that_inflates_past_the_cap_never_reaches_the_loader(tmp_path, monkeypatch):
+    eeg_dir = bids_directory(tmp_path / "dataset")
+    eeg_dir.mkdir(parents=True)
+    mat_file(eeg_dir / (STEM + ".set"), [CAP + 1])
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(tmp_path / "dataset")
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording, SMALL_LIMIT)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == TOO_LARGE[1:]
+
+
+@BOTH_LAYOUTS
+@pytest.mark.parametrize("compress", [False, True], ids=["stored", "compressed"])
+def test_a_real_set_that_holds_more_than_the_cap_is_refused_whichever_way_it_is_stored(
+    tmp_path, struct, compress
+):
+    path = write_raw_set(
+        tmp_path / (STEM + ".set"),
+        data=np.zeros((1, 9_000_000)),  # 72 million bytes, against a cap of 67 million
+        channels=1,
+        points=9_000_000,
+        struct=struct,
+        compress=compress,
+    )
+    assert refusal(path, SMALL_LIMIT) == TOO_LARGE
+    headers.check(path, 9_000_000)  # within a limit that allows it, the same file is read
+
+
+@BOTH_LAYOUTS
+def test_a_real_compressed_set_within_the_cap_is_read_and_sized_as_before(tmp_path, struct):
     path = write_raw_set(
         tmp_path / (STEM + ".set"),
         data=np.zeros((4, 1000), dtype=np.float32),
         points=1000,
-        struct=True,
+        struct=struct,
+        compress=True,
     )
-    bound = path.stat().st_size // 4
-    assert headers.read(path, bound).values == 4 * 1000  # within the limit, it is read
-    assert headers.read(path, bound - 1).values == bound  # over it, it is sized by its bytes
-    assert refusal(path, bound - 1)[1] == "too_large"
+    assert pop_loadset(str(path))["data"].shape == (4, 1000)
+    assert headers.read(path, LIMIT).values == 4 * 1000
+    assert refusal(path, 4 * 1000 - 1)[1] == "too_large"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "a stream that ends early",
+        "a stream of garbage",
+        "a file cut off in an element",
+        "an element that claims more than the file holds",
+    ],
+)
+def test_a_compressed_set_that_cannot_be_followed_is_refused_and_not_passed_on(tmp_path, damage):
+    whole = mat_file(tmp_path / "whole.set", [2**20]).read_bytes()
+    count = unpack("<I", whole[132:136])[0]
+    if damage == "a stream that ends early":
+        content = whole[:132] + pack("<I", count - 8) + whole[136 : 136 + count - 8]
+    elif damage == "a stream of garbage":
+        content = whole[:136] + bytes(range(256)) * (count // 256 + 1)
+        content = content[:132] + pack("<I", count) + content[136 : 136 + count]
+    elif damage == "a file cut off in an element":
+        content = whole[: len(whole) - 8]
+    else:  # an element of a stored kind (14) whose tag claims more than the cap
+        content = whole[:128] + pack("<II", 14, CAP + 1) + bytes(16)
+    path = tmp_path / (STEM + ".set")
+    path.write_bytes(content)
+    assert refusal(path, SMALL_LIMIT) == UNREADABLE
 
 
 def test_a_set_saved_as_hdf5_declares_its_samples_and_names_nothing(tmp_path):

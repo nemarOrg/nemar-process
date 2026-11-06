@@ -113,7 +113,12 @@ Two things are decided from it.
   For BrainVision it is the size of the data file divided by the width of a value, and the data file is the one eegprep opens (`_referenced_file`): the file `DataFile` names, else `<stem>.eeg`, else `<stem>.dat`, each looked for in another case too.
   Several files that differ only in case are all counted and the largest decides, and a header whose data file is not there fails with the class `FileNotFoundError`, which is what eegprep raises.
   For a set it is the larger of the dimensions or the shape of the samples the set declares and the number of four-byte values in the `.fdt` it names, because eegprep reads the whole `.fdt` with `np.fromfile` before it compares its count with the header.
-  A set that keeps its variables in an `EEG` structure cannot be sized without reading it, so one whose file holds more four-byte values than the limit is sized by its file size and refused unread, and a smaller one is read.
+  A set saved as a MAT-file is counted before anything of it is loaded (`_footprint`): its top-level elements are followed by their tags, and a compressed one is inflated a step at a time and thrown away, because `loadmat` inflates every variable it is not told to skip, and so does `pop_loadset`.
+  The total is held to a cap of eight bytes for each value of the limit plus 64 mebibytes (MiB) for what else a set holds, such as events and channel locations.
+  A set that inflates past the cap fails as `too_large`, and the count stops at the cap, so a small file that inflates to a great deal costs the check one step of memory and not the whole.
+  The file size alone bounds nothing for a compressed set.
+  A file that is not a MAT-file of version 5 or later is refused as `unreadable_header`, and a set saved as version 7.3 is an HDF5 file, which is sized by the shape of its samples and names no file.
+  A set under the cap that keeps its variables in an `EEG` structure is then read for its dimensions.
   A header that cannot be read is refused and not passed on: eegprep would follow the files it names on the strength of a parse that this check could not make.
   The recording fails as `load_failed` with the detail `unreadable_header`, or with the class of the error when the file cannot be opened at all (what eegprep would raise), and a recording whose size cannot be worked out fails with `size_unknown`.
 
