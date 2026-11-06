@@ -64,6 +64,16 @@ def test_the_validator_does_not_check_timestamps_so_the_recipe_does(record):
     assert len(records.check(broken, sj.validator())) >= 2
 
 
+@pytest.mark.parametrize(
+    "stamp", ["2026-11-05T01:02:03Z\n", "2026-11-05T01:02:03Z ", "\u0662026-11-05T01:02:03Z"]
+)
+def test_a_timestamp_is_the_whole_value_and_nothing_around_it(record, stamp):
+    """A pattern closed with `$` accepts a trailing newline; Arabic-Indic digits are digits too."""
+    broken = copy.deepcopy(record)
+    broken["pipelineInfo"]["executionDate"] = stamp
+    assert len(records.timestamp_problems(broken)) == 1
+
+
 def test_the_validator_does_not_resolve_references_so_the_recipe_does(record):
     broken = copy.deepcopy(record)
     broken["processingSteps"][3]["inputSources"][0]["outputId"] = "nothing"

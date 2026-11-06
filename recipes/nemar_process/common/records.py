@@ -35,7 +35,7 @@ SCHEMA_VERSION = "0.1.0"
 IN_MEMORY_FORMAT = "EEGLAB EEG dict (float64)"
 
 # The date-time format the vendored validator does not check (signalJourney/signalJourney#9).
-TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 # The dataset record is at most 256 KB; rows are added while it stays at or under the budget, and
 # the rest live only in the table file. Both caps are deterministic.
@@ -221,7 +221,7 @@ def timestamp_problems(record: Mapping[str, Any]) -> list[str]:
     return [
         "{} is not a UTC timestamp: {!r}".format(where, value)
         for where, value in found
-        if not (isinstance(value, str) and TIMESTAMP.match(value))
+        if not (isinstance(value, str) and TIMESTAMP.fullmatch(value))
     ]
 
 

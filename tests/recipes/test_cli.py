@@ -173,16 +173,25 @@ def test_with_neither_out_nor_nemar_out_the_exit_code_is_two(monkeypatch, cli):
     assert caught.value.code == 2
 
 
+RUN = ["run", "nemar-floor", "--dataset-dir", "x", "--out", "y"]
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["run", "no-such-recipe", "--dataset-dir", "x"],
-        ["run", "nemar-floor"],
-        ["run", "nemar-floor", "--dataset-dir", "x", "--image-digest", "sha256:abc"],
-        ["run", "nemar-floor", "--dataset-dir", "x", "--dataset-id", "ds000001"],
-        ["run", "nemar-floor", "--dataset-dir", "x", "--dataset-version", "1.0.0"],
-        ["run", "nemar-floor", "--dataset-dir", "x", "--source-commit", "abc"],
-        ["run", "nemar-floor", "--dataset-dir", "x", "--run-id", "has spaces"],
+        ["run", "no-such-recipe", "--dataset-dir", "x", "--out", "y"],
+        ["run", "nemar-floor", "--out", "y"],
+        [*RUN, "--image-digest", "sha256:abc"],
+        [*RUN, "--dataset-id", "ds000001"],
+        [*RUN, "--dataset-version", "1.0.0"],
+        [*RUN, "--source-commit", "abc"],
+        [*RUN, "--run-id", "has spaces"],
+        # a pattern that is anchored with `$` and matched with `match` accepts a trailing newline
+        [*RUN, "--dataset-id", "nm000001\n"],
+        [*RUN, "--dataset-version", "v1.0.0\n"],
+        [*RUN, "--source-commit", "a" * 40 + "\n"],
+        [*RUN, "--image-digest", "sha256:" + "a" * 64 + "\n"],
+        [*RUN, "--run-id", "abc\n"],
         ["aggregate", "nemar-floor", "--out", "y"],
         [],
     ],

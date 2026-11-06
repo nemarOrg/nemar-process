@@ -69,11 +69,12 @@ EXIT_OUTPUT_UNUSABLE = 5
 EXIT_DATASET_UNREADABLE = 6
 
 PARTIAL = ".partial"
-DATASET_ID = re.compile(r"^(nm|on|xx)[0-9]{6}$")
-DATASET_VERSION = re.compile(r"^(latest|v[0-9]+\.[0-9]+\.[0-9]+)$")
-SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
-IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-RUN_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# Matched whole with ``fullmatch``: a ``$`` would accept a trailing newline.
+DATASET_ID = re.compile(r"(nm|on|xx)[0-9]{6}")
+DATASET_VERSION = re.compile(r"latest|v[0-9]+\.[0-9]+\.[0-9]+")
+SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}")
+IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 # ---- arguments --------------------------------------------------------------------------------
@@ -81,7 +82,7 @@ RUN_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 def matching(pattern: re.Pattern[str], what: str):
     def parse(value: str) -> str:
-        if not pattern.match(value):
+        if not pattern.fullmatch(value):
             raise argparse.ArgumentTypeError("not a valid {}".format(what))
         return value
 
@@ -134,10 +135,10 @@ def build_parser() -> argparse.ArgumentParser:
 def identity_of(args: argparse.Namespace, dataset_dir: Path | None) -> Identity:
     """Nothing is guessed: the dataset id is the directory's name only when that is an id."""
     dataset_id = args.dataset_id
-    if dataset_id is None and dataset_dir is not None and DATASET_ID.match(dataset_dir.name):
+    if dataset_id is None and dataset_dir is not None and DATASET_ID.fullmatch(dataset_dir.name):
         dataset_id = dataset_dir.name
     digest = args.image_digest or os.environ.get("NEMAR_IMAGE_DIGEST") or None
-    if digest is not None and not IMAGE_DIGEST.match(digest):
+    if digest is not None and not IMAGE_DIGEST.fullmatch(digest):
         raise ValueError("NEMAR_IMAGE_DIGEST is not an image digest")
     return Identity(
         dataset_id=dataset_id,
