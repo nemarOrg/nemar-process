@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from callbacks import PRESIGN_SIGNATURE
-from harness import JOB_ID, TOKEN
+from harness import JOB_ID, TOKEN, wire_encode
 from jsonschema import Draft202012Validator
 from nemar_launch import spec as spec_mod
 
@@ -245,7 +245,7 @@ def test_the_outputs_route_retries_a_503(rig):
 
 
 def test_an_invalid_specification_makes_no_upload_attempt(rig):
-    launch = rig.launch(spec_bytes=b"{}")
+    launch = rig.launch(spec_bytes=wire_encode(b"{}"))  # decodes, and is not a specification
     assert launch.exit == 13
     assert rig.server.requests == []
     assert (launch.out / "launcher" / "result.json").is_file()

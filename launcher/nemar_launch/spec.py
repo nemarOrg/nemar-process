@@ -1,9 +1,20 @@
-"""The launch specification `nemar.launch-spec.v1`: read, size-check, hash, parse and validate.
+"""The launch specification `nemar.launch-spec.v1`: read, decode, size-check, hash, parse, validate.
 
-The document is the JSON in the environment variable ``NEMAR_LAUNCH_SPEC``, written by NEMAR's
-Worker as ASCII-only JSON of at most 64 KiB. It is validated against the JSON Schema this launcher
-ships (``launcher/schema/launch-spec.v1.json``, copied byte for byte from nemar-cli), by a small
-validator below, because the launcher may use only the standard library.
+The document is the JSON text written by NEMAR's Worker: compact, printable ASCII only (every byte
+0x20 to 0x7e), at most 64 KiB. It travels as ONE scheduler environment value, ``NEMAR_LAUNCH_SPEC``,
+which the scheduler writes into a launch file that a shell sources, quoting a value only
+conditionally. Compact JSON is not inert there (a value without a space loses its quotes, and a
+``$``, a backtick or a backslash in a user's string is expanded or breaks the quoting), so the value
+is the base64url encoding (RFC 4648 section 5, no padding, no line break) of the JSON text: only
+``A-Za-z0-9-_``, which no shell treats as special whether or not the scheduler quotes it. Up to
+87,382 characters.
+
+``decode_wire`` is the strict decoder (stdlib only, bounded, silent about the value) and mirrors
+nemar-cli's ``decodeLaunchSpecEnv`` rule for rule; ``parse`` decodes and then validates the text
+against the JSON Schema this launcher ships (``launcher/schema/launch-spec.v1.json``, copied byte
+for byte from nemar-cli), by a small validator below, because the launcher may use only the standard
+library. There is no legacy form: a raw JSON value is refused like any other value that is not
+base64url.
 
 The validator is deliberately strict in three places:
 
@@ -13,12 +24,14 @@ The validator is deliberately strict in three places:
 * an error names the path and the keyword and never the value, because the document holds the job
   token.
 
-``launch_spec_digest`` is the SHA-256 of the RAW bytes of the environment value, taken before the
-text is parsed (it is not the job row's ``spec_digest``).
+``launch_spec_digest`` is the SHA-256 of the JSON TEXT, the bytes the value decodes to, taken before
+the text is parsed (it is not the job row's ``spec_digest``, and it is never taken over the encoded
+value). A value that does not decode to a text has none, and its digest is that of no bytes.
 """
 
 from __future__ import annotations
 
+import binascii
 import functools
 import hashlib
 import json
@@ -28,18 +41,37 @@ from typing import Any
 
 from .net import url_allowed
 
-MAX_SPEC_BYTES = 64 * 1024
+MAX_SPEC_BYTES = 64 * 1024  # the JSON text, once decoded
+# The environment value: base64url without padding spends ceil(n * 4 / 3) characters on n bytes, so
+# the longest value is the encoding of the longest text, and it decodes to exactly 64 KiB.
+WIRE_MAX_CHARS = (MAX_SPEC_BYTES * 4 + 2) // 3
+# The 64 characters of RFC 4648 section 5 and nothing else: none is special to a shell, a glob or a
+# quoting rule. nemar-cli pins the same string (SHELL_INERT_ENV_ALPHABET).
+WIRE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+# Why a value was refused: a fixed word for the log, never a part of the value. nemar-cli's five
+# (`LAUNCH_SPEC_ENV_REFUSALS`), in its order.
+WIRE_REASONS = ("empty", "too_long", "not_base64url", "bad_length", "not_printable")
+_ALPHABET_BYTES = WIRE_ALPHABET.encode("ascii")
+_PRINTABLE_BYTES = bytes(range(0x20, 0x7F))  # space to tilde: the only bytes a text may hold
+_TO_STANDARD = bytes.maketrans(b"-_", b"+/")
+_TO_URLSAFE = bytes.maketrans(b"+/", b"-_")
 SCHEMA_FILE = "launch-spec.v1.json"
 PLACEHOLDER_JOB_ID = "job_" + "0" * 24
 _JOB_ID = re.compile(r"^job_[0-9a-f]{24}$")
 
 
 class SpecError(Exception):
-    """The launch specification is not one this launcher will run. ``detail`` is a fixed word."""
+    """The launch specification is not one this launcher will run. ``detail`` is a fixed word.
 
-    def __init__(self, detail: str) -> None:
+    ``reason`` is a second fixed word, one of ``WIRE_REASONS``, set only when the VALUE of the
+    environment variable was refused (before there was a text to read); it is for the log, and it
+    is never a part of the value.
+    """
+
+    def __init__(self, detail: str, reason: str | None = None) -> None:
         super().__init__(detail)
         self.detail = detail
+        self.reason = reason
 
 
 class SchemaError(Exception):
@@ -267,18 +299,83 @@ def schema_def(name: str) -> dict[str, Any]:
     return load_schema()["$defs"][name]
 
 
+# ---- the wire format: the environment value ----------------------------------------------------
+
+
+def b64url_decode(value: object) -> bytes:
+    """The bytes a base64url value (RFC 4648 section 5) encodes: bounded, silent, and LENIENT about
+    the trailing bits and about what the bytes are. ``decode_wire`` is the strict decoder; this is
+    the part of it that turns characters into bytes, rules 1 to 5 below, and it is not for use on
+    its own.
+
+    Refused as ``invalid_spec``, with the rule that fired as ``reason``, in this order:
+
+    1. the value is not ``bytes`` (an unset variable is ``None``): ``not_base64url``;
+    2. it is empty: ``empty``;
+    3. it is longer than ``WIRE_MAX_CHARS`` characters: ``too_long``, judged by the length alone,
+       before a byte is read, so a huge value costs nothing;
+    4. any byte outside ``A-Za-z0-9-_``: ``not_base64url``, which is padding, the standard
+       alphabet's ``+`` and ``/``, whitespace, a line break, a quote and everything a raw JSON
+       document holds;
+    5. a length of 1 modulo 4, which no byte string encodes to: ``bad_length``.
+
+    The ``=`` padding is then restored (two signs for a length of 2 modulo 4, one for 3, none for 0)
+    and the value decoded. After those checks the standard library's decoder cannot fail, so it is
+    not wrapped. Nothing here names the value, and nothing is chained to the error.
+    """
+    if not isinstance(value, bytes):
+        raise SpecError("invalid_spec", "not_base64url")
+    size = len(value)
+    if size == 0:
+        raise SpecError("invalid_spec", "empty")
+    if size > WIRE_MAX_CHARS:
+        raise SpecError("invalid_spec", "too_long")
+    if value.translate(None, _ALPHABET_BYTES):  # a byte is left once the alphabet is deleted
+        raise SpecError("invalid_spec", "not_base64url")
+    if size % 4 == 1:
+        raise SpecError("invalid_spec", "bad_length")
+    return binascii.a2b_base64(value.translate(_TO_STANDARD) + b"=" * (-size % 4))
+
+
+def decode_wire(value: object) -> bytes:
+    """The JSON text a ``NEMAR_LAUNCH_SPEC`` value carries, or ``SpecError`` (``invalid_spec``).
+
+    STRICT, and one answer for every value: the checks run in this order and the first to fail names
+    the word, the same seven as nemar-cli's ``decodeLaunchSpecEnv``. Rules 1 to 5 are
+    ``b64url_decode``'s (``not_base64url``, ``empty``, ``too_long``, ``not_base64url``,
+    ``bad_length``). Then:
+
+    6. every decoded byte is printable ASCII, 0x20 to 0x7e (no control byte, not DEL, nothing from
+       0x80 up: the Worker writes all of those as JSON escapes), else ``not_printable``;
+    7. the value is CANONICAL, else ``not_base64url``: encoding the decoded text again gives the
+       value back, so the unused trailing bits of its last character are zero and there is one
+       value per text.
+
+    A value with a character outside ASCII can never be accepted, and languages count a length in
+    different units, so for such a value ``too_long`` and ``not_base64url`` are both conforming
+    answers; this decoder counts bytes. Whether the text is JSON, and the schema's, is for
+    ``decode`` and ``parse_text``.
+    """
+    text = b64url_decode(value)
+    if text.translate(None, _PRINTABLE_BYTES):  # a byte is left once the printable ones are deleted
+        raise SpecError("invalid_spec", "not_printable")
+    if binascii.b2a_base64(text, newline=False).translate(_TO_URLSAFE).rstrip(b"=") != value:
+        raise SpecError("invalid_spec", "not_base64url")
+    return text
+
+
 # ---- reading and parsing the specification ---------------------------------------------------------
 
 
-def digest_of(raw: bytes) -> str:
-    """``launch_spec_digest``: the SHA-256 (lowercase hex) of the raw bytes, however they parse."""
-    return hashlib.sha256(raw).hexdigest()
+def digest_of(text: bytes) -> str:
+    """``launch_spec_digest``: the SHA-256 (lowercase hex) of the JSON text, however it parses."""
+    return hashlib.sha256(text).hexdigest()
 
 
-def recover_job_id(raw: bytes) -> str:
-    """The job id of a document that is otherwise unusable, so its result can still name the job."""
+def recover_job_id(text: bytes) -> str:
+    """The job id of a text that is otherwise unusable, so its result can still name the job."""
     try:
-        document = json.loads(raw.decode("ascii"))
+        document = json.loads(text.decode("ascii"))
     except (ValueError, RecursionError):
         return PLACEHOLDER_JOB_ID
     if isinstance(document, dict):
@@ -316,22 +413,22 @@ class Spec:
     __str__ = __repr__
 
 
-def decode(raw: bytes) -> dict[str, Any]:
-    """The launcher's reading of the raw bytes, before any validation against the schema.
+def decode(text: bytes) -> dict[str, Any]:
+    """The launcher's reading of the JSON text, before any validation against the schema.
 
     Refused as ``invalid_spec``: more than 64 KiB, a byte above 0x7F (the document is ASCII-only),
     a duplicate key, NaN or an infinity, a float (the Worker writes none), nesting too deep to
     read, or anything that is not one JSON object.
     """
-    if len(raw) > MAX_SPEC_BYTES:
+    if len(text) > MAX_SPEC_BYTES:
         raise SpecError("invalid_spec")
     try:
-        text = raw.decode("ascii")
+        document_text = text.decode("ascii")
     except UnicodeDecodeError:
         raise SpecError("invalid_spec") from None
     try:
         document = json.loads(
-            text,
+            document_text,
             object_pairs_hook=_no_duplicates,
             parse_constant=_refuse_constant,
             parse_float=_refuse_float,
@@ -343,8 +440,8 @@ def decode(raw: bytes) -> dict[str, Any]:
     return document
 
 
-def parse(raw: bytes) -> Spec:
-    """Validate the raw bytes of ``NEMAR_LAUNCH_SPEC`` and return the specification.
+def parse_text(text: bytes) -> Spec:
+    """Validate the JSON text of a launch specification and return the specification.
 
     Order of refusal: ``decode``, an unsupported runtime, the schema, then the rules the schema
     does not state: a dataset id once; ``api_base`` is https (plain http only on loopback, for the
@@ -352,7 +449,7 @@ def parse(raw: bytes) -> Spec:
     ``NEMAR_SIF_ROOT``) and the image reference ends with that digest. The schema itself says that
     a dataset version is the data-plane tag (``latest`` or ``vN.N.N``), used verbatim.
     """
-    document = decode(raw)
+    document = decode(text)
     schema = load_schema()
     runtimes = schema["properties"]["runtime"]["enum"]
     if "runtime" in document and not any(_equal(document["runtime"], r) for r in runtimes):
@@ -369,4 +466,10 @@ def parse(raw: bytes) -> Spec:
         raise SpecError("invalid_spec")
     if not image["uri"].endswith(image["digest"]):
         raise SpecError("invalid_spec")
-    return Spec(document, digest_of(raw))
+    return Spec(document, digest_of(text))
+
+
+def parse(value: object) -> Spec:
+    """Decode the value of ``NEMAR_LAUNCH_SPEC`` (``decode_wire``) and validate the text it carries
+    (``parse_text``). The digest of the result is the text's, never the value's."""
+    return parse_text(decode_wire(value))

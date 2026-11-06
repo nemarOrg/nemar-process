@@ -41,7 +41,15 @@ Container tests need a real Apptainer or Singularity binary; they skip with a st
 Tapis archives `tapisjob.env`, which holds the job token, unless `jobAttributes.parameterSet.archiveFilter.includeLaunchFiles` is `false`.
 A job request's own value wins whenever it is set and the application's is only the fallback, so NEMAR's client, which sets it on every job, is the control, and a test pins that the two agree; the same holds for variables, since a request may add any variable an application does not declare and only the client's closed one-variable schema stops it.
 Every host, account, path and credential is a placeholder or an environment variable, and `scripts/register.py` refuses a definition that breaks `scripts/tapis_policy.py`, never changes an existing version, and registers an application only if the file at its `containerImage` has the recorded digest.
-Nothing is to be registered with any tenant until a shell-inert encoding of the launch specification lands in the shared contract, the launcher and NEMAR's client together.
+Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
+the release-asset procedure (immutable releases, tag rulesets and a reviewed release workflow),
+whether the entry scripts delete the launch files after the job starts,
+whether the launcher adds `--no-mount hostfs`,
+and confirmation on the tenant of every Tapis behaviour marked "from source, to confirm on the tenant".
+The encoding of the launch specification is no longer one of them:
+the value of `NEMAR_LAUNCH_SPEC` is the base64url encoding (no padding) of the specification's JSON text,
+so a shell that sources the launch file reads only letters, digits, `-` and `_`,
+and the launcher decodes it strictly.
 Changing a definition, the policy, the derivation or the archive filter is a security change: it needs a test that fails when the line is mutated, and a reviewer.
 What the operator supplies and does is in [`docs/operator.md`](docs/operator.md).
 
@@ -50,6 +58,7 @@ What the operator supplies and does is in [`docs/operator.md`](docs/operator.md)
 The launch specification schema `launcher/schema/launch-spec.v1.json` is copied byte for byte from nemar-cli's `shared/contract/compute-launch.schema.json`.
 Never edit it here: change it in nemar-cli, then bump the pin described in `docs/contracts.md`.
 The seven failure codes and exit numbers 10 to 16 in `launcher/nemar_launch/codes.py` are nemar-cli's list in nemar-cli's order.
+The environment value `NEMAR_LAUNCH_SPEC` is the base64url encoding of the document's JSON text, decoded strictly by `launcher/nemar_launch/spec.py` (`docs/launcher.md`); a digest is over the text, never over the value, and a refusal is `invalid_spec`, never a new code.
 
 ### Never hand-bump a version, never set a secret, never touch production
 
@@ -61,6 +70,7 @@ Worker secrets, Tapis registrations and cloud buckets are the owner's.
 - Python is managed by **uv** only: never `pip`, `conda` or `virtualenv`.
 - **ruff** for lint and format and **ty** for types: never flake8, black, isort, pylint or mypy.
 - **pytest** with **coverage**.
+- **bun** is used for one script, `scripts/gen_wire_cases.ts`, which imports nemar-cli's TypeScript contract to write `tests/launcher/fixtures/wire_cases.json`: never npm or npx, **Biome** (nemar-cli's configuration) for its lint and format, and `--ignore-scripts` on every install (`docs/contracts.md`).
 - The launcher and the observer target **Python 3.9** and the standard library only; the rest of the repository targets 3.12.
 
 ```bash
@@ -92,8 +102,8 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
 | `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
 | `recipes/nemar_process/` | the recipes package; for now the placeholder `sj.py` and the vendored signalJourney schema in `_vendor/` |
-| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
-| `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `contract/` pins |
+| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `gen_wire_cases.ts` (bun; the table of wire cases, from nemar-cli's contract), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `vendor_signaljourney.py` |
+| `tests/` | `launcher/`, `images/`, `deploy/` and `observer/` tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`), `launcher/fixtures/wire_cases.json` (the table of wire cases), `contract/` pins |
 | `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
 | `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
 | `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, `released-versions.json` (the ledger of released zip digests), the vendored Tapis OpenAPI files and the schemas derived from them |

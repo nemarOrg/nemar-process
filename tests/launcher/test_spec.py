@@ -11,7 +11,7 @@ import copy
 import json
 
 import pytest
-from harness import JOB_ID, encode_spec, sha256_hex
+from harness import JOB_ID, encode_spec, sha256_hex, spec_text, wire_encode
 from jsonschema import Draft202012Validator
 from nemar_launch import spec as spec_mod
 
@@ -41,6 +41,7 @@ def base(rig=None) -> dict:
 
 
 def refused(document, detail: str = "invalid_spec") -> None:
+    """``document`` (a mapping, encoded here) or the bytes of an environment VALUE is refused."""
     raw = document if isinstance(document, bytes) else encode_spec(document)
     with pytest.raises(spec_mod.SpecError) as info:
         spec_mod.parse(raw)
@@ -58,7 +59,7 @@ def test_a_valid_specification_parses():
     assert parsed.datasets[0]["include"] == ["sub-01/**"]
     assert parsed.gpus == 0
     assert parsed.max_files == 38000
-    assert parsed.digest == sha256_hex(encode_spec(base()))
+    assert parsed.digest == sha256_hex(spec_text(base()))  # the text, not the encoded value
 
 
 def test_the_token_is_not_in_the_representation_of_a_parsed_specification():
@@ -137,15 +138,20 @@ def test_matlab_through_the_entry_point_is_a_runtime_error_and_nothing_is_fetche
 
 
 def test_a_specification_over_64_kib_is_refused_before_it_is_parsed():
-    document = encode_spec(base())
+    # The cap is on the JSON text: 64 KiB of it is 87,382 characters of value. A text of one byte
+    # more is a value of one character more, which is refused by its length.
+    document = spec_text(base())
     padded = document + b" " * (65536 - len(document))
     assert len(padded) == 65536
-    assert spec_mod.parse(padded).job_id == JOB_ID  # exactly 64 KiB is accepted
-    refused(padded + b" ")
+    assert spec_mod.parse(wire_encode(padded)).job_id == JOB_ID  # exactly 64 KiB is accepted
+    refused(wire_encode(padded + b" "))
+    with pytest.raises(spec_mod.SpecError) as info:
+        spec_mod.parse(wire_encode(padded + b" "))
+    assert info.value.reason == "too_long"
 
 
 def test_oversize_through_the_entry_point(rig):
-    launch = rig.launch(spec_bytes=b" " * 70000)
+    launch = rig.launch(spec_bytes=b"A" * 90000)  # valid base64url characters, too many of them
     assert launch.exit == 13
     assert launch.result["detail"] == "invalid_spec"
     assert rig.server.requests == []
@@ -301,25 +307,44 @@ def test_a_version_in_the_bare_form_is_refused_through_the_entry_point(rig):
 
 
 def test_non_ascii_bytes_are_refused_but_the_escape_is_accepted():
-    escaped = encode_spec(dict(base(), args=["caf\u00e9"]))
-    assert b"\\u00e9" in escaped
-    assert spec_mod.parse(escaped).args == ["caf\u00e9"]
-    refused(escaped.replace(b"\\u00e9", "\u00e9".encode()))
-    refused(escaped.replace(b"\\u00e9", b"\xe9"))
+    text = spec_text(dict(base(), args=["caf\u00e9"]))
+    assert b"\\u00e9" in text  # the Worker writes the escape, never the character
+    assert spec_mod.parse(wire_encode(text)).args == ["caf\u00e9"]
+    refused(wire_encode(text.replace(b"\\u00e9", "\u00e9".encode())))  # UTF-8 bytes in the text
+    refused(wire_encode(text.replace(b"\\u00e9", b"\xe9")))  # a Latin-1 byte in the text
+    # and the same bytes as the raw text, with no encoding at all, are not a value
+    refused(text.replace(b"\\u00e9", b"\xe9"))
+    # `parse_text` is a door of its own: non-ASCII text is refused there too, not only by the wire
+    for bad in (text.replace(b"\\u00e9", "\u00e9".encode()), text.replace(b"\\u00e9", b"\xe9")):
+        with pytest.raises(spec_mod.SpecError) as info:
+            spec_mod.parse_text(bad)
+        assert info.value.detail == "invalid_spec"
 
 
 def test_a_duplicate_key_is_refused():
-    raw = encode_spec(base())
-    duplicated = raw[:-1] + b',"job_id":"job_ffffffffffffffffffffffff"}'
-    refused(duplicated)
+    text = spec_text(base())
+    duplicated = text[:-1] + b',"job_id":"job_ffffffffffffffffffffffff"}'
+    refused(wire_encode(duplicated))
 
 
 @pytest.mark.parametrize(
-    "raw",
-    [b"", b"[]", b"null", b"{", b'{"job_id": NaN}', b"\x00", b'{"a":1} trailing', b"[" * 5000],
+    "text",
+    [
+        b"",
+        b"[]",
+        b"null",
+        b"{",
+        b'{"job_id": NaN}',
+        b"\x00",
+        b'{"a":1} trailing',
+        b"[" * 5000,
+        b"[" * 30_000,  # RecursionError on every Python from 3.9 to 3.12 (5000 is one only on 3.9)
+    ],
 )
-def test_text_that_is_not_one_json_object_is_refused(raw):
-    refused(raw)
+def test_text_that_is_not_one_json_object_is_refused(text):
+    refused(wire_encode(text))  # as an environment value
+    with pytest.raises(spec_mod.SpecError):
+        spec_mod.parse_text(text)  # and as the text itself
 
 
 def test_a_float_or_a_boolean_is_not_an_integer():

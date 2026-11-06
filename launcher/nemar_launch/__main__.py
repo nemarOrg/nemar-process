@@ -300,19 +300,29 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         slurm_id = env.get(ENV_SLURM_JOB_ID)
         state.slurm_job_id = slurm_id if slurm_id and _SLURM_ID.match(slurm_id) else None
         raw = env.raw(ENV_SPEC)
-        if raw is None:
-            state.digest = spec.digest_of(b"")  # the digest of no bytes
+        text: bytes | None = None
+        try:
+            # An unset variable is `None`, which is not bytes: refused by the first rule like any
+            # other value that is not the value of a launch specification.
+            text = spec.decode_wire(raw)
+        except spec.SpecError as problem:
+            # Which rule fired is a fixed word. The value, which holds the job token once decoded,
+            # is never logged, nor is any part of it.
+            what = "is not set" if raw is None else "value was refused"
+            log.error("the launch specification {} ({})".format(what, problem.reason))
             state.fail(
-                Failure("runtime_error", "invalid_spec", "the launch specification is not set")
+                Failure("runtime_error", problem.detail, "the launch specification was refused")
             )
-        else:
-            state.digest = spec.digest_of(raw)
+        # The digest is of the TEXT the value decodes to; with no text (the variable is not set, or
+        # its value is not one) there are no bytes to hash.
+        state.digest = spec.digest_of(b"" if text is None else text)
+        if text is not None:
             try:
-                job = spec.parse(raw)
+                job = spec.parse_text(text)
                 state.job_id = job.job_id
                 state.image = {"uri": job.image["uri"], "digest": job.image["digest"]}
             except spec.SpecError as problem:
-                state.job_id = spec.recover_job_id(raw)
+                state.job_id = spec.recover_job_id(text)
                 state.fail(
                     Failure("runtime_error", problem.detail, "the launch specification was refused")
                 )

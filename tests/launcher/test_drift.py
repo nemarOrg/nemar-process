@@ -11,6 +11,13 @@ once, in ``tests/contract/nemar-cli-pin.json``, and bumped deliberately.
   workflow checks out exactly the pinned commit and sets ``NEMAR_REQUIRE_DRIFT=1``, which turns the
   skip into a failure, so the comparison can never be skipped there unnoticed.
 
+``test_the_committed_wire_cases_are_what_nemar_clis_contract_writes`` is the heavier one: it runs
+``scripts/gen_wire_cases.ts`` with bun against the checkout named by ``NEMAR_CLI_DIR`` (which must be
+AT the pinned commit, with its production dependencies installed) and requires the committed table
+``tests/launcher/fixtures/wire_cases.json`` byte for byte. Without ``NEMAR_CLI_DIR`` it skips, and
+under ``NEMAR_REQUIRE_DRIFT=1`` a missing checkout, a checkout at another commit, no bun or no
+dependencies fail it.
+
 Because the comparison is against a pinned commit and not a moving branch, CI is never red because
 nemar-cli moved. A separate advisory CI job reports, without failing, when nemar-cli's ``dev`` has a
 newer schema than the pin.
@@ -22,11 +29,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import NoReturn
 
 import pytest
+import test_golden as golden
 from nemar_launch import codes, include
 from nemar_launch import spec as spec_mod
 
@@ -170,6 +179,7 @@ def test_nemar_sif_root_is_nemar_clis():
 
 
 CONTRACT_TEST = "test/compute-contract.unit.test.ts"
+LAUNCH_CONTRACT = "shared/contract/compute-launch.ts"
 
 
 def ts_strings(array_source: str) -> list:
@@ -204,3 +214,118 @@ def test_the_patterns_the_dialect_refuses_are_exactly_nemar_clis_lists():
     # The two that settle which problem is named first, and where a class ends.
     assert include.include_pattern_problem("[][z-a]") == "empty_class"
     assert include.include_pattern_problem("[z-a][]") == "inverted_range"
+
+
+def ts_string(source: str, name: str) -> str:
+    """A double-quoted string literal `NAME = "...";`, which may start on the next line."""
+    found = re.search(r"\b" + re.escape(name) + r'\s*=\s*"([^"\n]*)";', source)
+    assert found, name
+    return found.group(1)
+
+
+def ts_number(source: str, name: str) -> int:
+    found = re.search(r"\b" + re.escape(name) + r"\s*=\s*(\d+);", source)
+    assert found, name
+    return int(found.group(1))
+
+
+def ts_raw(source: str, name: str) -> str:
+    """A `String.raw` template with no backtick inside: ``NAME = String.raw`...`;``."""
+    found = re.search(r"\b" + re.escape(name) + r"\s*=\s*String\.raw`([^`]*)`;", source)
+    assert found, name
+    return found.group(1)
+
+
+def test_the_wire_format_is_nemar_clis():
+    source = at_ref(LAUNCH_CONTRACT).decode("utf-8")
+    assert ts_string(source, "SHELL_INERT_ENV_ALPHABET") == spec_mod.WIRE_ALPHABET
+    cap = re.search(r"export const LAUNCH_SPEC_MAX_BYTES = (\d+) \* (\d+);", source)
+    assert cap
+    assert int(cap.group(1)) * int(cap.group(2)) == spec_mod.MAX_SPEC_BYTES
+    formula = r"export const LAUNCH_SPEC_ENV_MAX_CHARS = Math\.ceil\(\(LAUNCH_SPEC_MAX_BYTES \* 4\) / 3\);"
+    assert re.search(formula, source), "the cap on the value is no longer ceil(bytes * 4 / 3)"
+    assert spec_mod.WIRE_MAX_CHARS == -(-spec_mod.MAX_SPEC_BYTES * 4 // 3)
+
+
+def test_the_refusal_words_are_nemar_clis():
+    # The same five words in the same order: the launcher logs the rule that fired, and a reader
+    # of the two logs sees one vocabulary. Log-only here, never a failure code or a detail.
+    source = at_ref(LAUNCH_CONTRACT).decode("utf-8")
+    assert list(spec_mod.WIRE_REASONS) == words(source, "LAUNCH_SPEC_ENV_REFUSALS")
+
+
+def test_the_golden_vectors_are_nemar_clis():
+    source = at_ref(CONTRACT_TEST).decode("utf-8")
+    assert ts_raw(source, "GOLDEN_TEXT") == golden.GOLDEN_TEXT
+    assert ts_string(source, "GOLDEN_SHA256") == golden.GOLDEN_SHA256
+    assert ts_string(source, "GOLDEN_ENV") == golden.GOLDEN_ENV
+    assert ts_number(source, "GOLDEN_ENV_LENGTH") == golden.GOLDEN_ENV_LENGTH
+    assert ts_string(source, "GOLDEN_ENV_SHA256") == golden.GOLDEN_ENV_SHA256
+    assert ts_string(source, "URLSAFE_SHA256") == golden.URLSAFE_SHA256
+    assert ts_string(source, "URLSAFE_ENV") == golden.URLSAFE_ENV
+    assert ts_string(source, "URLSAFE_ENV_SHA256") == golden.URLSAFE_ENV_SHA256
+
+
+GENERATOR = ROOT / "scripts" / "gen_wire_cases.ts"
+WIRE_CASES = ROOT / "tests" / "launcher" / "fixtures" / "wire_cases.json"
+DEPENDENCIES_MISSING = 3  # the generator's exit status when the checkout has no node_modules
+
+
+def row_differences(generated: bytes, committed: bytes) -> str:
+    """Which rows differ, by id, so a failure says what moved and not only that something did."""
+    try:
+        new, old = json.loads(generated), json.loads(committed)
+    except ValueError:
+        return "one of the two is not JSON"
+    lines = []
+    for key in sorted(set(new["provenance"]) | set(old["provenance"])):
+        if new["provenance"].get(key) != old["provenance"].get(key):
+            lines.append("provenance." + key + " differs")
+    now = {case["id"]: case for case in new["cases"]}
+    then = {case["id"]: case for case in old["cases"]}
+    lines += ["row only in the generated table: " + i for i in sorted(now.keys() - then.keys())]
+    lines += ["row only in the committed table: " + i for i in sorted(then.keys() - now.keys())]
+    lines += ["row differs: " + i for i in sorted(now.keys() & then.keys()) if now[i] != then[i]]
+    return "\n".join(lines[:20]) or "the rows are equal and the bytes are not (formatting)"
+
+
+def test_the_committed_wire_cases_are_what_nemar_clis_contract_writes():
+    given = os.environ.get("NEMAR_CLI_DIR")
+    checkout = Path(given) if given else None
+    if checkout is None or not (checkout / ".git").exists():
+        not_run(
+            "DRIFT CHECK NOT RUN: NEMAR_CLI_DIR names no nemar-cli checkout, and the wire cases are "
+            "regenerated from one at commit {} (bun install --frozen-lockfile --ignore-scripts "
+            "--production in it first).".format(PIN["ref"][:12])
+        )
+    assert checkout is not None
+    head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    if head != PIN["ref"]:
+        not_run(
+            "DRIFT CHECK NOT RUN: {} is at {}, not at the pinned commit {}; the table is written from "
+            "the working tree, so check the pinned commit out (detached).".format(
+                checkout.name, head[:12] or "no commit", PIN["ref"][:12]
+            )
+        )
+    bun = shutil.which("bun")
+    if bun is None:
+        not_run("DRIFT CHECK NOT RUN: bun is not on PATH (the generator is a bun script).")
+    assert bun is not None
+    done = subprocess.run(
+        [bun, "run", "--no-install", str(GENERATOR), str(checkout)],
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300,
+    )
+    if done.returncode == DEPENDENCIES_MISSING:
+        not_run("DRIFT CHECK NOT RUN: " + done.stderr.decode("utf-8", "replace").strip())
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")[-2000:]
+    committed = WIRE_CASES.read_bytes()
+    assert done.stdout == committed, (
+        "tests/launcher/fixtures/wire_cases.json is not what nemar-cli's contract writes at "
+        "{}; regenerate it (scripts/gen_wire_cases.ts) and read the diff:\n{}".format(
+            PIN["ref"][:12], row_differences(done.stdout, committed)
+        )
+    )

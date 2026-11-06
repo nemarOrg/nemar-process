@@ -14,10 +14,11 @@ import sys
 
 import pytest
 from callbacks import PRESIGN_SIGNATURE
-from harness import JOB_ID, TOKEN, encode_spec, launch_script
+from harness import JOB_ID, TOKEN, encode_spec, launch_script, spec_text
 
 FORBIDDEN = [
     TOKEN,
+    TOKEN[:16],  # a stretch of the token is as much a leak as the token
     PRESIGN_SIGNATURE,
     "X-Amz",
     "X-Compute-Job-Token",
@@ -47,11 +48,17 @@ def test_urls_are_logged_as_host_and_path_only(rig):
 
 
 def test_the_specification_itself_is_never_echoed(rig):
+    # Neither the environment value (base64url) nor the JSON text it decodes to, nor a stretch of
+    # either: the text holds the token, and a piece of the value decodes to a piece of it.
     spec = rig.script_spec(WRITE)
     launch = rig.launch(spec)
     text = launch.launcher_text()
     assert '"api_base"' not in text
-    assert encode_spec(spec).decode() not in text
+    value = encode_spec(spec).decode()
+    assert value not in text
+    assert spec_text(spec).decode() not in text
+    for start in range(0, len(value) - 24, 12):
+        assert value[start : start + 24] not in text
 
 
 @pytest.mark.parametrize(
