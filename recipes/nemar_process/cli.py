@@ -105,7 +105,10 @@ def add_identity(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--source-commit", type=matching(SOURCE_COMMIT, "40-digit commit hash"))
     parser.add_argument(
-        "--image-digest", type=matching(IMAGE_DIGEST, "image digest (sha256:<64 hex>)")
+        "--image-digest",
+        type=matching(IMAGE_DIGEST, "image digest (sha256:<64 hex>)"),
+        help="the digest of the image the job runs, as the caller states it; it is recorded and "
+        "not verified",
     )
     parser.add_argument("--run-id", type=matching(RUN_ID, "run id"))
 

@@ -4,7 +4,7 @@ A recipe is a short, fixed sequence of eegprep calls that annotates every electr
 The first recipe is `nemar-floor`.
 The command that runs recipes is `nemar-recipe` (`python -m nemar_process` outside the image).
 
-Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL).
+Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
 
 Two rules bind every recipe (see [`AGENTS.md`](../AGENTS.md)).
 A recipe holds no numerics: every signal-processing call is an eegprep function, and a step eegprep lacks is added to eegprep upstream, never written here.
@@ -33,6 +33,7 @@ nemar-recipe version
   `--dataset-id` is the directory's base name only when that is `nm`, `on` or `xx` and six digits.
   `--dataset-version` is the data-plane tag (`latest` or `vN.N.N`).
   `--image-digest` falls back to the environment variable `NEMAR_IMAGE_DIGEST`; the launch specification's `env` allowlist has no name for a digest, so the argument is the way a job passes it.
+  The image digest is the caller's claim: the command records what it is told and cannot check it against the image it runs in, so a record's `image.digest` says what the launch specification named and not what ran.
 - `run` refuses an `--out` that already holds product files (exit 5), writes one recording at a time into a private directory under `--out`, and moves its files into place only when every file and the record exist.
   A failed recording leaves no partial file.
   A SIGTERM ends the run through a normal exit (143), so what was finished stays and the private directory goes.
@@ -130,7 +131,8 @@ With the drift filter first, planted flat segments of 6, 8, 12, 20 and 30 s were
 | 8 | `bad_windows` | `eegprep.clean_windows` | `max_bad_channels=0.2`, `zthresholds=(-3.5, 5.0)`; applied defaults read from the signature (`window_len`, `window_overlap`, `max_dropout_fraction`, `min_clean_fraction`, `truncate_quant`, `step_sizes`, `shape_range`) and the `rules` that gated the step | the cleaned copy is discarded and the sample mask kept |
 | 9 | `qc` | `nemar_process.qc.floor_metrics` | `spectrum_hz=[1,70]`, `robust_amplitude='1.4826*MAD'` | measurement only |
 
-Steps 2 to 8 act on one working copy; the raw copy is dropped after the signal channels are selected, so a recording of an hour at 1 kHz with 128 channels (3.7 GB per float64 copy) needs about three copies at its peak.
+Steps 2 to 8 act on one working copy; the raw copy is dropped after the signal channels are selected, so a recording of an hour at 1 kHz with 128 channels (3.7 GB per float64 copy) is expected to need about three copies at its peak.
+That figure is read from the steps and not measured (see [unverified.md](unverified.md)).
 Every step rebinds `work = step(work, ...)` and never relies on whether eegprep copied or mutated its input (they differ: `clean_drifts` mutates in place).
 
 ### The rules
@@ -192,7 +194,7 @@ It is absent when the window step was skipped, because an empty file would claim
 ### The per-recording record
 
 `pipelineInfo.name` is `nemar-floor` and `pipelineInfo.version` is `1.0.0`.
-`processingSteps` has one entry per executed step in order, each with `stepId`, `name` (the function's public dotted path, which exists: a test imports every one), `software`, `parameters` (what is hashed), `inputSources`, `outputTargets` (an in-memory target and, on the step that produced it, a file target), `dependsOn`, `executionDateTime` and `qualityMetrics`.
+`processingSteps` has one entry per executed step in order, each with `stepId`, `name` (the function's dotted path; a test imports every one), `software`, `parameters` (what is hashed), `inputSources`, `outputTargets` (an in-memory target and, on the step that produced it, a file target), `dependsOn`, `executionDateTime` and `qualityMetrics`.
 `extensions.nemar` holds what the schema has no field for: the `recipe`, the `dataset` identity, the `recording`, the `inputs` and `outputs` with their size and SHA-256 (the schema's output targets have no checksum field), the `engine` (versions, the thread pin, the pools threadpoolctl found, the thread variables seen, the common layer's version), the image digest, the `seeds`, the `rules` that fired, the `skipped_steps` with reasons, the `plan_hash` and the `run_id`.
 
 Records validate against the vendored signalJourney schema.
@@ -206,7 +208,7 @@ The plan is built while the recording runs, because the line-noise and bad-chann
 The hash is the SHA-256 of that plan's canonical JSON (sorted keys, no spaces, ASCII, no NaN).
 It leaves out measurements, the engine, the image digest, the clock and every path, so two recordings with the same decisions share a hash and the dataset record counts the variants.
 Each parameter is cast to the type its row in `PARAMETER_TYPES` gives (`5.0` and `5` are different text), and a parameter that is not in the table is refused, so adding a step means adding a row.
-`records.verify` reports a record whose steps no longer match its hash (a parameter removed after the run) and a record with no hash.
+`plan.verify`, which `records.check` calls, reports a record whose steps no longer match its hash (a parameter removed after the run) and a record with no hash.
 
 ### QC (`_qc.json` and `summaryMetrics`)
 
@@ -282,6 +284,9 @@ The window step removes about half of the samples at eegprep's defaults on this 
 - A kernel kill (exit 137, the kernel's out-of-memory killer) ends the run without a dataset record.
   The recordings table has the rows of the recordings that finished, and the directory `<out>/.partial/` can hold the files of the one that was running; nothing in it is a finished recording.
   The size limit in the section above is what keeps a recording from reaching that point, and it is provisional.
+- The location guard accepts a montage that is flat to a picometer, because its rank test uses NumPy's default tolerance.
+  `clean_channels` then returns a degraded answer (the reproduction in [upstream.md](upstream.md) loses 2 of 19 channels it should keep).
+  The recipe sets no threshold of its own: where a nearly flat montage stops being usable is for the upstream check to define (sccn/eegprep#539).
 
 ## Decisions the owner has not yet confirmed
 

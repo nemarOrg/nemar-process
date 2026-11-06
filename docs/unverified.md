@@ -101,7 +101,7 @@ None of these is in place; each needs a repository setting, not a code change.
 [recipes.md](recipes.md) says what the recipe does.
 These are the facts nothing has confirmed yet, and what continuous integration (CI) has observed since.
 
-Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), microvolt (uV), Secure Hash Algorithm 256 (SHA-256).
+Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), microvolt (uV), Secure Hash Algorithm 256 (SHA-256), gigabyte (GB, 10^9 bytes), Basic Linear Algebra Subprograms (BLAS), Singularity Image Format (SIF), kill signal (SIGKILL).
 
 - **Equality across hosts.**
   The decisions pinned in `tests/recipes/test_golden_decisions.py` were generated on one machine (macOS arm64, NumPy on Apple's Accelerate) and reproduced by CI on a hosted Linux runner (ubuntu-24.04, x86-64, NumPy on OpenBLAS) on 2026-11-05.

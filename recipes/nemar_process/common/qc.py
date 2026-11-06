@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-# sccn/eegprep#536 and the risk of a private import (docs/recipes.md): eegprep's spectrum estimator, in a module that is not documented
+# sccn/eegprep#536 and the risk of a private import (docs/upstream.md): eegprep's spectrum estimator, in a module that is not documented
 # API (it imports matplotlib, which ``nemar_process.common`` points at a non-interactive backend).
 # One test pins its answer; this is one of the two files that import such a module (the other is
 # ``plan.py``, which imports the filter design).

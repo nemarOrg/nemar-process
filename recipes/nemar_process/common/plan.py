@@ -16,7 +16,7 @@ that is not in the table is refused, which keeps the table complete. Adding a st
 A parameter that is itself a mapping (the ``rules`` of a step: the constants that decided whether it
 ran) has a nested row, and its keys are held to the same standard.
 
-Upstream gap, sccn/eegprep#537, and the risk of a private import (docs/recipes.md): ``pop_eegfiltnew``
+Upstream gap, sccn/eegprep#537, and the risk of a private import (docs/upstream.md): ``pop_eegfiltnew``
 does not return the filter design it applied;
 ``recorded_band_stop`` reads it from eegprep's own design function, in a module that is not
 documented API, so that the record states the order, the transition width and the cutoffs that were

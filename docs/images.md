@@ -37,7 +37,7 @@ The image therefore has no licence label, because one value would be wrong for m
 The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED=0`, runs as a non-root user, and carries labels for the source commit (`org.opencontainers.image.revision`) and the lock's SHA-256 (`io.nemar.lock-sha256`).
 Its bases are digests: `python:3.12-slim` (used by two stages, with the same digest) and the `uv` image, each named with its version in the Dockerfile's comments.
 The image also holds the recipes package `nemar_process` (the signalJourney validator pointed at the vendored schema, the common layer and `nemar_floor`) and the command `nemar-recipe` in `/opt/venv/bin` (see [recipes.md](recipes.md)).
-The command is a two-line script that `python -m nemar_process` stands behind; a launch specification names it as an argument vector, for example `["nemar-recipe", "run", "nemar-floor", "--dataset-dir", "/data/<id>", ...]`.
+The command is a three-line script (the interpreter, an import and the call of `main`) that `python -m nemar_process` stands behind; a launch specification names it as an argument vector, for example `["nemar-recipe", "run", "nemar-floor", "--dataset-dir", "/data/<id>", ...]`.
 
 ## How a consumer refers to it
 
