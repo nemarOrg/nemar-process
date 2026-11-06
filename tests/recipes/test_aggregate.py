@@ -422,6 +422,28 @@ def test_an_input_whose_stamp_is_not_one_is_unreadable_and_not_merged(
     assert not out.exists()
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("version", None), ("package", None), ("version", ""), ("version", 7)],
+    ids=["null version", "null package", "empty version", "number for a version"],
+)
+def test_an_engine_key_that_is_not_text_is_refused_even_when_every_input_has_it(
+    runs, cli, tmp_path, key, value
+):
+    """Inputs that all carry a null agree with each other, and the merged record would name an
+    engine whose version is None: the engine stamp is read as text, or the input is unreadable."""
+
+    def stamped(nemar):
+        nemar["engine"][key] = value
+
+    first, second = (edited(runs[name], tmp_path / name, stamped) for name in ("a", "b"))
+    out = tmp_path / "o"
+    code, _, err = merge(cli, out, first, second)
+    assert code == 6
+    assert "an input directory holds a table or record that cannot be read (" in err
+    assert not out.exists()
+
+
 def test_a_file_that_two_inputs_hold_is_found_before_anything_is_copied(runs, cli, tmp_path):
     clash = tmp_path / "clash"
     shutil.copytree(runs["b"], clash)

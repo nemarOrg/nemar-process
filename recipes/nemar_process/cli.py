@@ -492,8 +492,11 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
         nemar = record["extensions"]["nemar"]
         dataset = nemar["dataset"]
         engine = dict(nemar["engine"])
-        if not {"package", "version"} <= engine.keys():
-            raise ValueError("an engine stamp names a package and its version")
+        if not all(
+            isinstance(engine.get(key), str) and engine[key] for key in ("package", "version")
+        ):
+            # null agrees with null, and the merged record would name an engine of None
+            raise ValueError("an engine stamp names a package and its version, as text")
         found = ProductInput(
             rows=rows,
             started_utc=nemar["report"]["started_utc"],
