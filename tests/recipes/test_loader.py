@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from nemar_process.common import io
 from nemar_process.common.errors import RecordingError
-from recipe_support import DATASET, RECORDING, copy_fixture, write_set
+from recipe_support import DATASET, RECORDING, copy_fixture, edf_bytes, write_set
 
 BIDS_PARAMETERS = {
     "bidschanloc": True,
@@ -136,7 +136,7 @@ def test_a_set_with_stale_cleaning_state_has_it_removed_before_any_step(tmp_path
     assert loaded.etc_normalized is False
 
 
-def test_a_file_that_is_not_an_edf_fails_to_load_with_only_the_error_class(tmp_path):
+def test_a_file_that_is_not_an_edf_fails_to_load_with_a_word_and_no_message(tmp_path):
     (tmp_path / "dataset_description.json").write_text(
         '{"Name": "t", "BIDSVersion": "1.9.0", "DatasetType": "raw"}', encoding="utf-8"
     )
@@ -151,7 +151,23 @@ def test_a_file_that_is_not_an_edf_fails_to_load_with_only_the_error_class(tmp_p
         "load_failed",
         "load",
     )
-    assert caught.value.detail == "ValueError"
+    assert caught.value.detail == "unreadable_header"
+
+
+def test_a_failure_of_the_reader_itself_keeps_only_its_error_class(tmp_path):
+    """A header the check can parse and MNE cannot (it counts the header's own length): the failure
+    is the reader's, so the detail is the class of its error and nothing it said."""
+    (tmp_path / "dataset_description.json").write_text(
+        '{"Name": "t", "BIDSVersion": "1.9.0", "DatasetType": "raw"}', encoding="utf-8"
+    )
+    target = tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.edf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(edf_bytes(4, 10, 50).replace(b"1280    ", b"9999    ", 1))
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step) == ("load_failed", "load")
+    assert caught.value.detail == "AssertionError"
 
 
 def eeg_of(data, types=None, srate=250.0):

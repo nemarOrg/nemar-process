@@ -38,6 +38,11 @@ def refusal(path, limit=LIMIT):
     return error.status, error.code, error.step, error.detail
 
 
+def never_called(*_arguments, **_keywords):
+    """Stands in for a loader that must not be reached: reaching it fails the test."""
+    pytest.fail("the loader was called on a recording the header check should have refused")
+
+
 def bids_directory(root):
     """The `eeg` directory of one subject in a minimal BIDS tree, which the BIDS route needs."""
     root.mkdir(parents=True, exist_ok=True)
@@ -80,26 +85,59 @@ def test_an_edf_still_being_written_is_sized_by_the_bytes_that_are_there(tmp_pat
     assert headers.read(bdf, LIMIT).values == 4 * 10 * 50  # three bytes a value
 
 
+UNREADABLE = ("failed", "load_failed", "load", "unreadable_header")
+
+
 @pytest.mark.parametrize("content", [b"", b"not an edf file" * 40, b"0       " + b"x" * 400])
-def test_a_header_that_cannot_be_read_gives_no_answer_and_is_left_to_eegprep(tmp_path, content):
+def test_a_header_that_cannot_be_parsed_is_refused_and_not_passed_to_eegprep(tmp_path, content):
     path = tmp_path / (STEM + ".edf")
     path.write_bytes(content)
-    assert headers.read(path, LIMIT) == headers.Header()
-    headers.check(path, LIMIT)  # no refusal: the loader fails on it with its own error class
+    assert refusal(path) == UNREADABLE
 
 
 @pytest.mark.parametrize("extension", [".set", ".vhdr", ".bdf"])
-def test_a_file_that_is_not_the_format_of_its_extension_gives_no_answer(tmp_path, extension):
+def test_a_file_that_is_not_the_format_of_its_extension_is_refused(tmp_path, extension):
     path = tmp_path / ("garbage_eeg" + extension)
     path.write_bytes(b"\x00\x01 this is not a recording " * 20)
-    assert headers.read(path, LIMIT) == headers.Header()
+    assert refusal(path) == UNREADABLE
 
 
-def test_an_extension_with_no_header_to_read_gives_no_answer(tmp_path):
+def test_a_header_file_that_does_not_exist_is_refused_with_the_error_class_eegprep_would_give(
+    tmp_path,
+):
+    assert refusal(tmp_path / (STEM + ".edf")) == (
+        "failed",
+        "load_failed",
+        "load",
+        "FileNotFoundError",
+    )
+
+
+def test_an_extension_with_no_header_to_read_cannot_be_sized_and_is_refused(tmp_path):
     path = tmp_path / (STEM + ".fif")
     path.write_bytes(b"x" * 100)
-    assert headers.read(path, LIMIT) == headers.Header()
-    headers.check(path, LIMIT)
+    assert refusal(path) == ("failed", "load_failed", "load", "size_unknown")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"", id="empty"),
+        pytest.param(b"\x00\x01 this is not a recording " * 20, id="not a MAT file"),
+        pytest.param(
+            b"MATLAB 5.0 MAT-file" + b" " * 109 + b"\x00\x01IM" + b"\x0f\x00\x00", id="cut off"
+        ),
+    ],
+)
+def test_a_set_that_cannot_be_parsed_is_never_handed_to_the_loader(tmp_path, monkeypatch, content):
+    eeg_dir = bids_directory(tmp_path / "dataset")
+    (eeg_dir / (STEM + ".set")).parent.mkdir(parents=True, exist_ok=True)
+    (eeg_dir / (STEM + ".set")).write_bytes(content)
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(tmp_path / "dataset")
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == UNREADABLE[1:]
 
 
 # ---- the size limit ---------------------------------------------------------------------------
@@ -266,6 +304,55 @@ def test_a_stale_datfile_beside_samples_that_are_in_the_set_is_not_followed(tmp_
         struct=struct,
     )
     assert headers.read(path, LIMIT).references == ()
+    headers.check(path, LIMIT)
+
+
+def a_structure_array_of_two():
+    two = np.zeros((1, 2), dtype=[("data", "O")])
+    two[0, 0], two[0, 1] = ("a",), ("b",)
+    return two
+
+
+EEG_THAT_IS_NOT_ONE_STRUCTURE = [
+    pytest.param(0.0, id="EEG is a number"),
+    pytest.param(a_structure_array_of_two(), id="EEG is a structure array of two"),
+    pytest.param("not a structure", id="EEG is text"),
+]
+
+
+@pytest.mark.parametrize("variable", EEG_THAT_IS_NOT_ONE_STRUCTURE)
+def test_a_set_whose_eeg_is_not_one_structure_is_read_from_its_top_level_as_eegprep_reads_it(
+    tmp_path, monkeypatch, variable
+):
+    """The crafted file of the review: eegprep uses `EEG` only when it is a single structure, and
+    otherwise follows the absolute `data` at the top level, which a check of `EEG` alone passes."""
+    outside = write_fdt(tmp_path / "secret.fdt", fill=1.0)
+    path = write_raw_set(
+        tmp_path / "dataset" / "sub-01" / "eeg" / (STEM + ".set"),
+        data=str(outside),
+        extra={"EEG": variable},
+    )
+    assert float(pop_loadset(str(path))["data"].mean()) == pytest.approx(1.0)  # eegprep alone
+    assert headers.read(path, LIMIT).references == (("data", str(outside)),)
+    assert refusal(path) == ("failed", "load_failed", "load", "external_reference")
+    monkeypatch.setattr(io, "pop_loadset", never_called)
+    (recording,) = io.discover(tmp_path / "dataset")
+    with pytest.raises(RecordingError) as caught:
+        io.load(recording)
+    assert (caught.value.code, caught.value.detail) == ("load_failed", "external_reference")
+
+
+def test_a_set_whose_eeg_is_a_cell_is_refused_because_eegprep_unwraps_it_to_a_structure(tmp_path):
+    cell = np.empty((1, 1), dtype=object)
+    cell[0, 0] = {"data": "somewhere/else.fdt"}
+    path = write_raw_set(tmp_path / (STEM + ".set"), data=STEM + ".fdt", extra={"EEG": cell})
+    assert refusal(path) == UNREADABLE
+
+
+def test_a_set_with_a_stray_top_level_eeg_that_is_not_a_structure_and_its_own_data_is_accepted(
+    tmp_path,
+):
+    path = write_raw_set(tmp_path / (STEM + ".set"), data=STEM + ".fdt", extra={"EEG": 0.0})
     headers.check(path, LIMIT)
 
 

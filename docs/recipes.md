@@ -102,11 +102,14 @@ Two things are decided from it.
   A recording may name only its own companions as bare file names: `<stem>.eeg` and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
   Anything else fails as `load_failed` with the detail `external_reference`, including a bare name that is not the recording's own and a name in another case.
   A set that holds its samples names no file, so a stale `datfile` beside them is not followed and not checked.
+  A set is read as `pop_loadset` reads it: the `EEG` variable counts only when it is a single 1 by 1 structure, and otherwise the variables at the top level of the file are the dataset and the names they hold are followed, so they are checked, whatever `EEG` is (a number, text, an array of structures).
+  An `EEG` that is a cell is refused, because eegprep unwraps a cell that holds a structure and the check does not model it.
 - **How much the header declares.**
   Channels times samples, as the loader would hold them, is compared with `MAX_CHANNEL_SAMPLES` in `common/io.py`, and a recording over it fails as `too_large` at step `load` before any of it is read.
   The number comes from the header alone: signals times records times the highest rate for EDF and BDF, the size of the data file divided by the width of a value for BrainVision, and the dimensions or the shape of the samples for a set.
   A set that keeps its variables in an `EEG` structure cannot be sized without reading it, so one whose file holds more four-byte values than the limit is sized by its file size and refused unread, and a smaller one is read.
-  A header that cannot be read gives no answer, and the recording goes to eegprep, which fails on it in its own words.
+  A header that cannot be read is refused and not passed on: eegprep would follow the files it names on the strength of a parse that this check could not make.
+  The recording fails as `load_failed` with the detail `unreadable_header`, or with the class of the error when the file cannot be opened at all (what eegprep would raise), and a recording whose size cannot be worked out fails with `size_unknown`.
 
 **The limit is provisional.**
 It is one billion values, which is 8 GB for a float64 copy and about 24 GB at the peak of three copies; 64 channels at 500 Hz for eight hours fits, 256 channels at 1 kHz for two hours does not.

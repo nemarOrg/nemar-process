@@ -125,7 +125,7 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and a `.bdf` were read in eegprep's source and not run through the whole floor.
   The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, on an HDF5 file with the structure the loader reads, and on EDF and BDF headers written byte by byte.
   It has not run on a set saved by MATLAB's EEGLAB, so its reading of that layout rests on eegprep's loader and on SciPy files shaped like it.
-  A header that cannot be read gives no answer and goes to eegprep.
+  A header that cannot be read is refused (`unreadable_header`), so a legitimate file that this parser reads differently from eegprep's loader would be refused too; the parser mirrors eegprep 0.5.0's rules and is not run against files from other writers.
 - **The all-flat failure listens to a log warning.**
   eegprep's `clean_flatlines` removes nothing, and says so only by a warning on its module's logger, when every channel has a flat portion; the floor fails such a recording (`all_channels_flat`).
   The detection depends on that logger name and level, taken from the function's module at run time and not from a message text.

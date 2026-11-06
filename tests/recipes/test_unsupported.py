@@ -96,7 +96,7 @@ def test_the_counts_say_one_succeeded_one_failed_and_two_were_skipped(mixed_run)
     ]
     # the step is a key of its own and the reason is the class name of what failed
     assert nemar["report"]["records"][0]["step"] == "load"
-    assert nemar["report"]["records"][0]["reason"] == "ValueError"
+    assert nemar["report"]["records"][0]["reason"] == "unreadable_header"
     assert nemar["report"]["records"][1]["step"] == "n/a"
 
 

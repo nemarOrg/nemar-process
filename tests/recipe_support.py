@@ -256,11 +256,15 @@ def write_raw_set(
     points: int = 2000,
     srate: float = 250.0,
     struct: bool = False,
+    extra: dict | None = None,
+    compress: bool = False,
 ) -> Path:
     """A real EEGLAB set (MAT v5) written by SciPy so that `data` and `datfile` say what a test needs.
 
     `data` is a file name (the samples are beside the set) or an array (they are in it). The
     variables are at the top level of the file, or in an `EEG` structure when `struct` is true.
+    `extra` adds variables at the top level of the file whichever the layout is (a variable named
+    `EEG` among them replaces the structure), and `compress` writes the file as MATLAB 7 does.
     """
     import numpy as np
     import scipy.io
@@ -296,7 +300,9 @@ def write_raw_set(
         "etc": np.array([]),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    scipy.io.savemat(str(path), {"EEG": fields} if struct else fields)
+    variables = {"EEG": fields} if struct else dict(fields)
+    variables.update(extra or {})
+    scipy.io.savemat(str(path), variables, do_compression=compress)
     return path
 
 
