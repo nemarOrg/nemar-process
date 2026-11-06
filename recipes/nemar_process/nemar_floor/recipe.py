@@ -59,7 +59,7 @@ def dataset_steps() -> list[DatasetStep]:
         ("line_noise_60", steps.BAND_STOP_FUNCTION, steps.band_stop_parameters(60)),
         ("bad_channels", steps.RANSAC_FUNCTION, steps.ransac_parameters()),
         ("bad_windows", steps.WINDOWS_FUNCTION, steps.windows_parameters()),
-        ("qc", steps.QC_FUNCTION, steps.QC_PARAMETERS),
+        ("qc", steps.QC_FUNCTION, steps.qc_parameters()),
     ]
     if tuple(step_id for step_id, _, _ in table) != steps.STEP_ORDER:
         raise ValueError("the dataset-level steps are not the steps of the recipe, in its order")

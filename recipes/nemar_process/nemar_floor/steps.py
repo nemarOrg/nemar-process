@@ -113,10 +113,21 @@ WINDOWS_APPLIED = (
 )
 
 QC_FUNCTION = "nemar_process.qc.floor_metrics"
-QC_PARAMETERS: dict[str, Any] = {"spectrum_hz": [1, 70], "robust_amplitude": "1.4826*MAD"}
 
 MEASURE_FUNCTION = qc.SPECTRA_FUNCTION
 SELECT_FUNCTION = "eegprep.pop_select"
+
+
+def qc_parameters() -> dict[str, Any]:
+    """The qc step's parameters, read from the constants the measurement applies.
+
+    The plan hash is taken over what is recorded, so what is recorded is what ``qc.py`` uses and
+    not a second copy of it: a change to the spectrum range or the scale changes the plan.
+    """
+    return {
+        "spectrum_hz": list(qc.SPECTRUM_RANGE_HZ),
+        "robust_amplitude": "{}*MAD".format(qc.MAD_SCALE),
+    }
 
 
 def band_stop_call(frequency: int) -> dict[str, Any]:

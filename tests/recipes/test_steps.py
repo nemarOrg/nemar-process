@@ -428,6 +428,33 @@ def test_the_plan_hash_changes_with_each_rule_constant(
         assert value == changed, (step_id, keys)
 
 
+@pytest.mark.parametrize(
+    ("name", "changed", "key", "recorded"),
+    [
+        ("SPECTRUM_RANGE_HZ", (2, 60), "spectrum_hz", [2, 60]),
+        ("MAD_SCALE", 2.0, "robust_amplitude", "2.0*MAD"),
+    ],
+)
+def test_the_qc_step_records_the_constants_it_applies_and_the_plan_hash_follows_them(
+    tmp_path, monkeypatch, name, changed, key, recorded
+):
+    """The qc step's parameters were typed in twice, here and in `qc.py`; a change to the one the
+    measurement uses must show in the plan, in a recording's and in the recipe's."""
+    from nemar_process.nemar_floor import recipe
+
+    baseline = synthetic_floor(tmp_path / "before")
+    assert step_of(baseline.plan, "qc").parameters == {
+        "spectrum_hz": [1, 70],
+        "robust_amplitude": "1.4826*MAD",
+    }
+    monkeypatch.setattr(qc, name, changed)
+    result = synthetic_floor(tmp_path / "after")
+    assert result.plan.hash() != baseline.plan.hash()
+    assert step_of(result.plan, "qc").parameters[key] == recorded
+    dataset_step = next(s for s in recipe.dataset_steps() if s.step_id == "qc")
+    assert dataset_step.parameters[key] == recorded
+
+
 def test_a_failure_in_the_bookkeeping_of_a_step_is_that_steps_failure(tmp_path, monkeypatch):
     """The parameter table is complete by test; a row missing would say which step it broke."""
     monkeypatch.delitem(plan.PARAMETER_TYPES, "eegprep.clean_drifts")

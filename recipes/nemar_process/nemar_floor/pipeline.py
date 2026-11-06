@@ -375,7 +375,7 @@ def process(loaded: Loaded) -> FloorResult:
         recipe.add_step(
             "qc",
             steps.QC_FUNCTION,
-            steps.QC_PARAMETERS,
+            steps.qc_parameters(),
             description=steps.DESCRIPTIONS["qc"],
             quality={
                 "percentGoodChannels": metrics["channels"]["percentGood"],
