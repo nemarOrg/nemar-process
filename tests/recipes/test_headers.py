@@ -219,7 +219,7 @@ def set_with_a_large_fdt(directory, declared_points=500, held_points=50_000):
 
 
 def test_eegprep_reads_the_whole_fdt_before_it_compares_it_with_the_header(tmp_path):
-    """The behaviour the size rule rests on: `np.fromfile` takes every value of the file."""
+    """The behavior the size rule rests on: `np.fromfile` takes every value of the file."""
     path = set_with_a_large_fdt(tmp_path)
     with pytest.raises(ValueError, match="200000 samples, expected 2000"):
         pop_loadset(str(path))
@@ -925,7 +925,7 @@ def test_the_loader_refuses_a_set_that_names_a_file_outside_the_dataset(tmp_path
 
 
 def test_eegprep_alone_reads_the_brainvision_file_a_header_names_wherever_it_is(tmp_path):
-    """The behaviour the check exists for (docs/upstream.md), pinned so that a fix upstream shows."""
+    """The behavior the check exists for (docs/upstream.md), pinned so that a fix upstream shows."""
     outside = write_brainvision(tmp_path / "elsewhere", "secret", fill=10)
     inside = tmp_path / "dataset" / "sub-01" / "eeg"
     absolute = write_brainvision(inside, "a", data=str(outside.with_suffix(".eeg")))

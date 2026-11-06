@@ -8,7 +8,7 @@ Two checks run before ``io.load`` hands a recording to eegprep, because eegprep 
   (``<stem>.eeg`` or ``<stem>.dat`` and ``<stem>.vmrk`` for a header, ``<stem>.fdt`` for a set) as bare
   file names.
   Anything else fails as ``load_failed`` with the detail ``external_reference``: the file named
-  would be read as samples and summarised in the product, and the record's inputs would list the
+  would be read as samples and summarized in the product, and the record's inputs would list the
   companions and not the file that was read. The files the reader opens must also lead, every link
   followed, to a place within the dataset directory (``check`` takes it as ``root``), and so must
   the recording.
@@ -412,7 +412,7 @@ def _set(path: Path, max_values: int) -> Header:
     ``dataset_from_mat`` takes the ``EEG`` variable when it unwraps to one structure, and otherwise
     the variables at the top level of the file, ``EEG`` among them ignored. A single structure is a
     1 by 1 ``struct``; a number, text or an array of structures is no dataset, and a 1 by 1 ``cell``
-    that holds a structure is unwrapped to one, which is not modelled here and is refused.
+    that holds a structure is unwrapped to one, which is not modeled here and is refused.
 
     Nothing is loaded before the variables are counted: a set whose variables take more than a
     limit's worth of values (``MAT_VALUE_BYTES`` each, with ``MAT_MARGIN_BYTES`` for the rest) is

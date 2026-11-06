@@ -127,8 +127,8 @@ def line_noise_excess(
     """For each line frequency, the dB excess of its bin over the ten bins around it.
 
     The legacy ``linenoise_magn``: the mean over channels of the dB at the bin nearest the
-    frequency, minus the mean over channels and over the ten neighbouring bins. ``None`` where the
-    neighbourhood does not fit under the Nyquist bin, or the result is not finite.
+    frequency, minus the mean over channels and over the ten neighboring bins. ``None`` where the
+    neighborhood does not fit under the Nyquist bin, or the result is not finite.
     """
     spectra, freqs = spectra_db(eeg)
     found: dict[int, float | None] = {}
@@ -138,9 +138,9 @@ def line_noise_excess(
         if low < 0 or high >= len(freqs):
             found[frequency] = None
             continue
-        neighbours = [i + offset for offset in NEIGHBOR_BIN_OFFSETS]
+        neighbors = [i + offset for offset in NEIGHBOR_BIN_OFFSETS]
         with np.errstate(invalid="ignore"):
-            excess = float(np.mean(spectra[:, i]) - np.mean(spectra[:, neighbours]))
+            excess = float(np.mean(spectra[:, i]) - np.mean(spectra[:, neighbors]))
         found[frequency] = excess if math.isfinite(excess) else None
     return found
 
@@ -167,8 +167,8 @@ def spectrum_summary(eeg: dict[str, Any]) -> dict[str, Any]:
 
 def robust_amplitude(data: np.ndarray) -> np.ndarray:
     """Per channel: 1.4826 times the median absolute deviation, in the unit the loader delivered."""
-    centres = np.median(data, axis=1, keepdims=True)
-    return MAD_SCALE * np.median(np.abs(data - centres), axis=1)
+    centers = np.median(data, axis=1, keepdims=True)
+    return MAD_SCALE * np.median(np.abs(data - centers), axis=1)
 
 
 def runs(mask: np.ndarray) -> list[tuple[int, int]]:

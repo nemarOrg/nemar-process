@@ -633,7 +633,7 @@ def test_a_recording_whose_product_cannot_be_placed_is_a_disk_error_and_the_rest
     multi, tmp_path, cli
 ):
     """A real write failure: the recording is loaded, processed and written whole in its private
-    directory, and the directory it belongs in refuses it. Its neighbour is not affected."""
+    directory, and the directory it belongs in refuses it. Its neighbor is not affected."""
     out = tmp_path / "o"
     refusing = out / "sub-02"
     refusing.mkdir(parents=True)

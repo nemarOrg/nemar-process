@@ -103,7 +103,7 @@ Two things are decided from it.
 
 - **Files the header names.**
   A BrainVision header names its data file and its marker file, and an EEGLAB set names its data file, and eegprep 0.5.0 follows what they say: an absolute path, a `..`, or a path into another directory (`pop_loadbv` for `DataFile` and `MarkerFile`; `pop_loadset` for `data`, or for `datfile` when `data` is `in set file`).
-  The file would be read as samples and summarised in the product, and the record's inputs would list the companions and not the file that was read.
+  The file would be read as samples and summarized in the product, and the record's inputs would list the companions and not the file that was read.
   A recording may name only its own companions as bare file names: `<stem>.eeg` (or `<stem>.dat`) and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
   Anything else fails as `load_failed` with the detail `external_reference`, including a bare name that is not the recording's own and a name in another case.
   The recording and the files its reader opens (the data file and the marker file of a header, the `.fdt` of a set) must also lead, every link followed, to a place within the dataset directory, or the recording fails the same way, before anything is read: a link out of the dataset makes a file elsewhere the recording's data, with nothing in the record that says so.
@@ -171,7 +171,7 @@ A step that was skipped has no parameters, so a recording that skipped a step re
 | `few-channels` | fewer than 4 channels reach the bad-channel step | `bad_channels` is skipped (`few_channels`); the count is of the channels that remain after flatline, because that is what the step receives |
 | `locations-usable` | at least half of those channels, and at least 4, have finite X, Y and Z, and their unit-length position vectors have numerical rank 3 | the RANSAC branch; otherwise the nolocs branch |
 
-Other recorded skips: `all_channels_are_signal`, `below_threshold`, `frequency_not_measurable` (the neighbourhood of the frequency does not fit under the Nyquist bin, as at 128 Hz for 60 Hz), and `sampling_rate_too_low` (the nolocs branch needs more than 110 Hz).
+Other recorded skips: `all_channels_are_signal`, `below_threshold`, `frequency_not_measurable` (the neighborhood of the frequency does not fit under the Nyquist bin, as at 128 Hz for 60 Hz), and `sampling_rate_too_low` (the nolocs branch needs more than 110 Hz).
 The rank test exists because `clean_channels` raises nothing for positions that are one point, a line or a plane through the origin, and removes six to ten of nineteen channels; it is a rank test and not a decomposition of data.
 
 ### The line-noise estimator
@@ -288,7 +288,7 @@ Floats were not compared across hosts, and no other architecture was run.
 
 ## The fixture
 
-`tests/fixtures/eeg/` holds one real recording and its sidecars (see its README for the source, the licence and the checksums).
+`tests/fixtures/eeg/` holds one real recording and its sidecars (see its README for the source, the license and the checksums).
 Observed on the reference machine (macOS arm64): no flat channel, bad channels `O1` and `T6`, 40 bad segments, 49.4043 percent good samples, 90.4762 percent good channels, a drift kernel of 1,005 samples, line noise 0.072 dB at 50 Hz and 7.480 dB at 60 Hz.
 The window step removes about half of the samples at eegprep's defaults on this recording; the floor annotates only, so nothing is lost.
 

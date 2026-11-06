@@ -339,7 +339,7 @@ def test_epoched_data_is_not_a_continuous_recording():
     assert (caught.value.code, caught.value.detail) == ("load_failed", "epoched_data")
 
 
-def test_normalising_casts_to_float64_and_replaces_a_non_dict_etc():
+def test_normalizing_casts_to_float64_and_replaces_a_non_dict_etc():
     eeg = eeg_of(np.ones((3, 100), dtype=np.float32))
     eeg["etc"] = np.array([])
     normalized, notes = io.normalize(eeg)

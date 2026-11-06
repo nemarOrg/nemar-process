@@ -122,7 +122,7 @@ class Loaded:
     def take(self) -> dict[str, Any]:
         """Hand the dataset to the caller and keep nothing: a long recording is gigabytes per copy.
 
-        ``eeg`` is an empty dict afterwards, which is how a consumed recording is recognised.
+        ``eeg`` is an empty dict afterwards, which is how a consumed recording is recognized.
         """
         eeg, self.eeg = self.eeg, {}
         return eeg

@@ -9,7 +9,7 @@ Source: "A COVID-19 survivors and close contacts EEG dataset", OpenNeuro ds00782
 
 Authors: Ana Calzada-Reyes, Eduardo Aubert-Vázquez, Lidice Galán-García, Maria Luisa Bringas-Vega, Trinidad Virués-Alba, Lidia Charroó-Ruiz, Yanely Acosta-Imás, Mitchell Valdés-Sosa, Laura Perez-Mayo, Joel Gutiérrez-Gil, Antonio Caballero-Moreno, Miguel Angel Alvarez, Norge Santiesteban, Javier Vicente Sánchez-Lopez, Annette Valdés-Virués, Elba Elvira Varona-Galindo, Elizabeth Méndez-Parra, Joviana Castro-Valiente, Leyanis Ramos-Hernández, Mabel Whilby-Santiesteban, Thelma Luz Carrillo-Alfonso, Shahwar Yasir, Yu Kin, Peng Ren, Dezhong Yao, Luo Cheng, Roberto Rodriguez-Labrada, Pedro Valdés-Sosa (Cuban Neuroscience Center and collaborators).
 
-Licence: CC0 1.0 Universal (a public-domain dedication, declared in `dataset_description.json`); attribution is given as a courtesy.
+License: CC0 1.0 Universal (a public-domain dedication, declared in `dataset_description.json`); attribution is given as a courtesy.
 
 Reference: Calzada-Reyes A. et al., "EEG Signatures of COVID-19 Survival compared to close contacts and the Cuban EEG normative database", Clinical Neurophysiology Practice 2026;11:174-186, https://doi.org/10.1016/j.cnp.2026.02.007
 
@@ -33,7 +33,7 @@ dataset/                     the Brain Imaging Data Structure (BIDS) tree, byte 
 ```
 
 The recording is resting EEG with eyes closed: 22 channels at 200 Hz for 282 s (56,400 samples).
-Nineteen channels are scalp EEG with 10-20 locations in `electrodes.tsv` (the Montreal Neurological Institute 305 coordinate system, in millimetres), two further EEG-typed channels (`Pg1`, `Pg2`) have no location, and one is `ECG` (electrocardiography).
+Nineteen channels are scalp EEG with 10-20 locations in `electrodes.tsv` (the Montreal Neurological Institute 305 coordinate system, in millimeters), two further EEG-typed channels (`Pg1`, `Pg2`) have no location, and one is `ECG` (electrocardiography).
 The declared power line frequency is 60 Hz, and the acquisition filters declared in `channels.tsv` are 0.5 and 70 Hz.
 The files total 2,492,895 bytes, under the 5,000,000 the phase allows.
 

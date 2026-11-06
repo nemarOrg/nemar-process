@@ -135,7 +135,7 @@ def test_clean_channels_judges_noise_at_101_hertz_and_not_at_100(tmp_path):
     assert quality["notAssessedChannels"] == ["Ch9", "Ch10"]
 
 
-# ---- the line-noise threshold: 10 dB over the neighbouring bins --------------------------------
+# ---- the line-noise threshold: 10 dB over the neighboring bins --------------------------------
 
 
 def line_noise_floor(tmp_path, amplitude):
@@ -152,7 +152,7 @@ def line_noise_floor(tmp_path, amplitude):
         pytest.param(0.48, 10.0, 11.0, True, id="10.7 dB, over it"),
     ],
 )
-def test_a_band_stop_runs_for_a_line_at_least_ten_decibels_over_its_neighbours(
+def test_a_band_stop_runs_for_a_line_at_least_ten_decibels_over_its_neighbors(
     tmp_path, amplitude, low, high, removed
 ):
     """The measured excess is asserted too, so the pair is known to bracket the constant."""

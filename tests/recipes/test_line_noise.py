@@ -1,4 +1,4 @@
-"""Line noise: measured on every recording, removed only at 10 dB or more over its neighbours.
+"""Line noise: measured on every recording, removed only at 10 dB or more over its neighbors.
 
 The contamination is applied in memory, with NumPy, to the loaded fixture and handed to the floor's
 in-memory entry point: eegprep cannot write what `pop_load_frombids` returns for channels without an
@@ -88,7 +88,7 @@ def test_the_step_description_says_the_filter_is_a_notch_one_hertz_wide_at_minus
 
 
 @pytest.mark.parametrize("srate", [128, 200, 250, 256, 500, 1000])
-def test_the_notch_eegprep_designs_is_one_hertz_wide_at_minus_six_db_centred_on_the_line(srate):
+def test_the_notch_eegprep_designs_is_one_hertz_wide_at_minus_six_db_centered_on_the_line(srate):
     """The arguments are f-1 and f+1, the notch is not 2 Hz wide: the description rests on this."""
     for frequency in (50, 60):
         low, high = recorded_band_stop(float(srate), frequency)["cutoffHz"]
@@ -96,7 +96,7 @@ def test_the_notch_eegprep_designs_is_one_hertz_wide_at_minus_six_db_centred_on_
         assert (low + high) / 2 == pytest.approx(frequency, abs=1e-6)
 
 
-def test_a_band_stop_leaves_a_notch_below_its_neighbours_so_the_excess_after_is_negative(noisy):
+def test_a_band_stop_leaves_a_notch_below_its_neighbors_so_the_excess_after_is_negative(noisy):
     assert noisy.line_after[50] < 0.0
 
 

@@ -41,8 +41,8 @@ def welch_db(data, srate):
 def oracle_excess(data, srate, frequency):
     freqs, db = welch_db(data, srate)
     i = int(np.argmin(np.abs(freqs - frequency)))
-    neighbours = [i - 6, i - 5, i - 4, i - 3, i - 2, i + 2, i + 3, i + 4, i + 5, i + 6]
-    return float(np.mean(db[:, i]) - np.mean(db[:, neighbours]))
+    neighbors = [i - 6, i - 5, i - 4, i - 3, i - 2, i + 2, i + 3, i + 4, i + 5, i + 6]
+    return float(np.mean(db[:, i]) - np.mean(db[:, neighbors]))
 
 
 # ---- line noise -------------------------------------------------------------------------------
@@ -82,10 +82,10 @@ def test_the_excess_is_the_mean_over_channels_of_the_db_not_the_db_of_a_mean():
     assert mean_of_dbs < only_one
 
 
-def test_a_frequency_whose_neighbourhood_does_not_fit_under_nyquist_is_not_measurable():
+def test_a_frequency_whose_neighborhood_does_not_fit_under_nyquist_is_not_measurable():
     low = qc.line_noise_excess(eeg_like(noise(3, 30, 128), 128))
     assert low[50] is not None
-    assert low[60] is None  # nyquist is 64 Hz and the neighbourhood reaches 66 Hz
+    assert low[60] is None  # nyquist is 64 Hz and the neighborhood reaches 66 Hz
     very_low = qc.line_noise_excess(eeg_like(noise(3, 30, 100), 100))
     assert very_low == {50: None, 60: None}
 
