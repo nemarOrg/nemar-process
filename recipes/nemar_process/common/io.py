@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 from eegprep import pop_load_frombids, pop_loadset
 
-from nemar_process.common import files, naming, qc
+from nemar_process.common import files, headers, naming, qc
 from nemar_process.common.errors import (
     FILE_NOT_FOUND,
     LOAD_FAILED,
@@ -34,6 +34,11 @@ from nemar_process.common.errors import (
 from nemar_process.common.params import jsonable, signature_defaults
 
 SUPPORTED = (".edf", ".bdf", ".vhdr", ".set")
+# The most channels times samples a recording may declare in its header and still be loaded. A float64
+# copy takes 8 bytes a value, so this is 8 GB a copy and about 24 GB at the peak of three copies
+# (docs/recipes.md). PROVISIONAL: the arithmetic of the peak, to be replaced by the scale
+# measurement (docs/unverified.md).
+MAX_CHANNEL_SAMPLES = 1_000_000_000
 COMPANION_EXTENSIONS = (".eeg", ".vmrk", ".fdt", ".json", ".tsv")
 # The files beside a recording that carry part of its data and are read through it.
 DATA_COMPANIONS = (".eeg", ".vmrk", ".fdt")
@@ -325,12 +330,17 @@ def _inputs(recording: Recording, report: dict[str, Any]) -> list[dict[str, Any]
     return items
 
 
-def load(recording: Recording) -> Loaded:
-    """Load a supported recording. Failures are ``RecordingError`` with a word and a class name."""
+def load(recording: Recording, max_channel_samples: int = MAX_CHANNEL_SAMPLES) -> Loaded:
+    """Load a supported recording. Failures are ``RecordingError`` with a word and a class name.
+
+    The header is read first (``headers.check``): a recording that names a file other than its own
+    companions, or declares more than ``max_channel_samples``, fails before eegprep reads any of it.
+    """
     try:
+        headers.check(recording.abs_path, max_channel_samples)
         eeg, report, function, parameters = _read(recording)
         located = qc.count_located(eeg["chanlocs"])
-    except MemoryError:
+    except (RecordingError, MemoryError):
         raise
     except Exception as error:
         raise RecordingError(LOAD_FAILED, "load", type(error).__name__) from error

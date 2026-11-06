@@ -58,7 +58,7 @@ Where a recipe works around a gap, the code names the issue beside the workaroun
 `pop_saveset` writes an empty `etc` as an empty matrix and `pop_loadset` reads it back as an array, so the failure follows a plain save and load; setting `EEG["etc"] = {}` after loading avoids it.
 The workaround stays until that is fixed upstream: `scripts/make_smoke_fixture.py` gives the fixture's `etc` a key, with a comment pointing here, and a recipe that loads sets it did not write should expect the same.
 
-### Gaps found by the `nemar-floor` recipe (phase 3, 2026-11-04)
+### Gaps found by the `nemar-floor` recipe (phase 3, 2026-11-04 and 2026-11-05)
 
 Every reproduction was run against eegprep 0.5.0; the first and the eighth were also read on the `develop` branch of the same day.
 Public wording only: "a processing pipeline wants X".
@@ -74,6 +74,7 @@ Public wording only: "a processing pipeline wants X".
 | [sccn/eegprep#539](https://github.com/sccn/eegprep/issues/539) | `clean_channels` accepts degenerate channel locations and silently removes a large part of the channels | a rank test of the position vectors in `common/qc.py` before the call |
 | [sccn/eegprep#540](https://github.com/sccn/eegprep/issues/540) | the RANSAC seed (5489) is hardcoded in `clean_channels` | recorded as an engine constant, and a test compares it with eegprep's source |
 | [sccn/eegprep#541](https://github.com/sccn/eegprep/issues/541) | the cleaning steps differ in whether they mutate their input or return a copy | every step rebinds its working copy and never relies on the answer |
+| [sccn/eegprep#561](https://github.com/sccn/eegprep/issues/561) | `pop_loadbv` and `pop_loadset` read the file a header names wherever it is: an absolute path, a `..` or a sub-directory for a BrainVision `DataFile` or `MarkerFile`, an absolute `data` or `datfile` for a set | `common/headers.py` reads the header first and refuses any recording that names a file other than its own companions (`load_failed`, detail `external_reference`); `tests/recipes/test_headers.py` pins what eegprep alone does, so a fix upstream shows |
 
 Three imports of the recipes reach into eegprep modules that are not documented API (`eegprep.functions.sigprocfunc.spectopo.compute_spectra`, `eegprep.plugins.firfilt._filtering.design_eegfiltnew` and `eegprep.plugins.EEG_BIDS.coords.chanloc_has_coords`).
 A new eegprep can move them.

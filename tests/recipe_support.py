@@ -124,6 +124,185 @@ def sphere_positions(names, seed=1):
     return {name: tuple(point) for name, point in zip(names, points, strict=True)}
 
 
+def edf_bytes(
+    signals: int,
+    records: int,
+    rates: list[int] | int,
+    *,
+    bdf: bool = False,
+    with_data: bool = True,
+) -> bytes:
+    """A real EDF (or BDF) file written by hand: the fixed header, the signal headers and the records.
+
+    ``rates`` is the number of samples in each data record, one for every signal or one for all.
+    """
+    import numpy as np
+
+    per_record = [rates] * signals if isinstance(rates, int) else list(rates)
+
+    def field(text: str, width: int) -> bytes:
+        return text.ljust(width).encode("ascii")
+
+    def each(text: str, width: int) -> bytes:
+        return b"".join(field(text, width) for _ in range(signals))
+
+    fixed = (
+        (b"\xffBIOSEMI" if bdf else field("0", 8))
+        + field("X X X X", 80)
+        + field("Startdate 01-JAN-2020 X X X", 80)
+        + field("01.01.20", 8)
+        + field("00.00.00", 8)
+        + field(str(256 * (signals + 1)), 8)
+        + field("BDF" if bdf else "", 44)
+        + field(str(records), 8)
+        + field("1", 8)
+        + field(str(signals), 4)
+    )
+    digital = ("-8388608", "8388607") if bdf else ("-32768", "32767")
+    per_signal = (
+        b"".join(field("Ch{}".format(i + 1), 16) for i in range(signals))
+        + each("", 80)
+        + each("uV", 8)
+        + each("-3200", 8)
+        + each("3200", 8)
+        + each(digital[0], 8)
+        + each(digital[1], 8)
+        + each("", 80)
+        + b"".join(field(str(rate), 8) for rate in per_record)
+        + each("", 32)
+    )
+    if not with_data:
+        return fixed + per_signal
+    width = 3 if bdf else 2
+    body = np.zeros(records * sum(per_record) * width, dtype=np.uint8)
+    return fixed + per_signal + body.tobytes()
+
+
+BRAINVISION_HEADER = """Brain Vision Data Exchange Header File Version 1.0
+; a header written for a test
+
+[Common Infos]
+Codepage=UTF-8
+DataFile={data}
+MarkerFile={marker}
+DataFormat={fmt}
+DataOrientation=MULTIPLEXED
+NumberOfChannels={channels}
+SamplingInterval=4000
+
+[Binary Infos]
+BinaryFormat={binary}
+
+[Channel Infos]
+{channel_lines}
+"""
+
+BRAINVISION_MARKERS = """Brain Vision Data Exchange Marker File, Version 1.0
+
+[Common Infos]
+Codepage=UTF-8
+DataFile={data}
+
+[Marker Infos]
+Mk1=New Segment,,1,1,0
+"""
+
+
+def write_brainvision(
+    directory: Path,
+    stem: str,
+    *,
+    data: str | None = None,
+    marker: str | None = None,
+    channels: int = 4,
+    samples: int = 2000,
+    fill: int = 0,
+    fmt: str = "BINARY",
+    binary: str = "INT_16",
+) -> Path:
+    """A real BrainVision triple (header, 16-bit data, markers) written by hand, in `directory`.
+
+    ``data`` and ``marker`` are what the header says; they default to the files beside it.
+    """
+    import numpy as np
+
+    directory.mkdir(parents=True, exist_ok=True)
+    data = stem + ".eeg" if data is None else data
+    marker = stem + ".vmrk" if marker is None else marker
+    lines = "\n".join("Ch{0}=Ch{0},,0.1,uV".format(i + 1) for i in range(channels))
+    header = BRAINVISION_HEADER.format(
+        data=data, marker=marker, fmt=fmt, channels=channels, binary=binary, channel_lines=lines
+    )
+    (directory / (stem + ".vhdr")).write_text(header, encoding="utf-8")
+    (directory / (stem + ".vmrk")).write_text(
+        BRAINVISION_MARKERS.format(data=data), encoding="utf-8"
+    )
+    dtype = {"INT_16": "<i2", "UINT_16": "<u2", "IEEE_FLOAT_32": "<f4"}[binary]
+    np.full((samples, channels), fill, dtype=dtype).tofile(directory / (stem + ".eeg"))
+    return directory / (stem + ".vhdr")
+
+
+def write_raw_set(
+    path: Path,
+    *,
+    data,
+    datfile: str = "",
+    channels: int = 4,
+    points: int = 2000,
+    srate: float = 250.0,
+    struct: bool = False,
+) -> Path:
+    """A real EEGLAB set (MAT v5) written by SciPy so that `data` and `datfile` say what a test needs.
+
+    `data` is a file name (the samples are beside the set) or an array (they are in it). The
+    variables are at the top level of the file, or in an `EEG` structure when `struct` is true.
+    """
+    import numpy as np
+    import scipy.io
+
+    chanlocs = np.empty((channels,), dtype=[("labels", "O"), ("type", "O")])
+    for i in range(channels):
+        chanlocs[i] = ("Ch{}".format(i + 1), "EEG")
+    fields = {
+        "setname": "",
+        "filename": path.name,
+        "filepath": str(path.parent),
+        "subject": "",
+        "group": "",
+        "condition": "",
+        "session": np.array([]),
+        "comments": "",
+        "nbchan": float(channels),
+        "trials": 1.0,
+        "pnts": float(points),
+        "srate": float(srate),
+        "xmin": 0.0,
+        "xmax": (points - 1) / srate,
+        "times": np.array([]),
+        "data": data,
+        "datfile": datfile,
+        "chanlocs": chanlocs,
+        "event": np.array([]),
+        "icaact": np.array([]),
+        "icawinv": np.array([]),
+        "icasphere": np.array([]),
+        "icaweights": np.array([]),
+        "icachansind": np.array([]),
+        "etc": np.array([]),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scipy.io.savemat(str(path), {"EEG": fields} if struct else fields)
+    return path
+
+
+def write_fdt(path: Path, *, channels: int = 4, points: int = 2000, fill: float = 0.0) -> Path:
+    """The sample file of a two-file EEGLAB set: 32-bit floats, one frame of channels at a time."""
+    import numpy as np
+
+    np.full((points, channels), fill, dtype="<f4").tofile(path)
+    return path
+
+
 def loaded_fixture():
     """The fixture recording, freshly loaded: a test may change it in memory before the floor."""
     from nemar_process.common import io

@@ -122,7 +122,10 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   It is recorded as "as loaded" and not verified for other sources.
 - **Loaders.**
   The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` were run here.
-  A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and a `.bdf` were read in eegprep's source and not run.
+  A `.set` with a separate `.fdt`, a MATLAB v7.3 `.set`, and a `.bdf` were read in eegprep's source and not run through the whole floor.
+  The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, on an HDF5 file with the structure the loader reads, and on EDF and BDF headers written byte by byte.
+  It has not run on a set saved by MATLAB's EEGLAB, so its reading of that layout rests on eegprep's loader and on SciPy files shaped like it.
+  A header that cannot be read gives no answer and goes to eegprep.
 - **The all-flat failure listens to a log warning.**
   eegprep's `clean_flatlines` removes nothing, and says so only by a warning on its module's logger, when every channel has a flat portion; the floor fails such a recording (`all_channels_flat`).
   The detection depends on that logger name and level, taken from the function's module at run time and not from a message text.
@@ -134,6 +137,11 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   A run holds about three float64 copies of the longest recording at its peak.
   For a recording of an hour at 1 kHz with 128 channels that is about 11 GB; nothing was measured at that size.
   A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
+- **The size limit is provisional.**
+  A recording whose header declares more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
+  The number is arithmetic and not a measurement.
+  Pre-registered follow-ups, to be settled by the scale measurement and not before: (1) measure the peak memory and the time of the floor at 100 million, 500 million and one billion values and set the limit from them; (2) run each recording in a child process, so that one that exhausts memory or is killed by the kernel fails alone, with a row in the table and the other recordings' products intact, instead of ending the run without a dataset record.
+  Neither is built.
 - **Staging cost.**
   The phase plan read in eegprep's source that pybids indexes the whole staged tree once per process; the cost for a job that stages tens of thousands of files was not measured.
   Job authors include `dataset_description.json` and the recording's `channels.tsv`, `electrodes.tsv`, `coordsystem.json` and `eeg.json` and nothing else they can avoid.

@@ -71,7 +71,8 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `skipped` | `no_signal_channels` | no channel is typed EEG or untyped |
 | `skipped` | `duplicate_recording` | the product stem collides with an earlier recording (an `.edf` and a `.set` of one recording) |
 | `failed` | `file_not_found` | a `--recording` path is not a file |
-| `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or the data are epoched |
+| `failed` | `load_failed` | eegprep raised while loading (a garbage EDF raises `ValueError`), or the data are epoched, or the header names a file other than the recording's own companions (the detail is `external_reference`, below) |
+| `failed` | `too_large` | the header declares more channels times samples than the provisional limit of 1,000,000,000 values (step `load`; below) |
 | `failed` | `non_finite_samples` | the loaded data contain NaN or infinity |
 | `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
 | `failed` | `all_channels_flagged` | the no-locations criterion flags every channel, so eegprep removes none and the recording cannot be annotated honestly (step `bad_channels`); on the RANSAC branch eegprep itself raises when more than 75 percent are flagged, which is `step_failed` |
@@ -79,6 +80,27 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `failed` | `out_of_memory` | `MemoryError` (a SIGKILL by the kernel ends the job and the launcher records it) |
 | `failed` | `disk_error` | writing or moving the recording's files failed |
 | `failed` | `internal_error` | anything else the recipe's own code raised, and a record that fails its own checks |
+
+### What is checked before eegprep reads a recording
+
+`common/headers.py` reads the header of each recording first, and only the header: the fixed block of an EDF or BDF file, the text of a BrainVision header and the size of its data file, and the variables of an EEGLAB set that are not the samples.
+Two things are decided from it.
+
+- **Files the header names.**
+  A BrainVision header names its data file and its marker file, and an EEGLAB set names its data file, and eegprep 0.5.0 follows what they say: an absolute path, a `..`, or a path into another directory (`pop_loadbv` for `DataFile` and `MarkerFile`; `pop_loadset` for `data`, or for `datfile` when `data` is `in set file`).
+  The file would be read as samples and summarised in the product, and the record's inputs would list the companions and not the file that was read.
+  A recording may name only its own companions as bare file names: `<stem>.eeg` and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
+  Anything else fails as `load_failed` with the detail `external_reference`, including a bare name that is not the recording's own and a name in another case.
+  A set that holds its samples names no file, so a stale `datfile` beside them is not followed and not checked.
+- **How much the header declares.**
+  Channels times samples, as the loader would hold them, is compared with `MAX_CHANNEL_SAMPLES` in `common/io.py`, and a recording over it fails as `too_large` at step `load` before any of it is read.
+  The number comes from the header alone: signals times records times the highest rate for EDF and BDF, the size of the data file divided by the width of a value for BrainVision, and the dimensions or the shape of the samples for a set.
+  A set that keeps its variables in an `EEG` structure cannot be sized without reading it, so one whose file holds more four-byte values than the limit is sized by its file size and refused unread, and a smaller one is read.
+  A header that cannot be read gives no answer, and the recording goes to eegprep, which fails on it in its own words.
+
+**The limit is provisional.**
+It is one billion values, which is 8 GB for a float64 copy and about 24 GB at the peak of three copies; 64 channels at 500 Hz for eight hours fits, 256 channels at 1 kHz for two hours does not.
+It is the arithmetic of the peak and not a measurement, and the scale measurement that replaces it is listed in `docs/unverified.md`.
 
 ## `nemar-floor` 1.0.0: the steps
 
@@ -247,6 +269,9 @@ The window step removes about half of the samples at eegprep's defaults on this 
 - A recording in which the no-locations criterion flags every channel also fails (`all_channels_flagged`, step `bad_channels`).
   `clean_channels_nolocs` then removes nothing and returns its mask with every entry set, which the floor used to discard.
   Channels that share nothing with each other, such as independent noise, are all flagged.
+- A kernel kill (exit 137, the kernel's out-of-memory killer) ends the run without a dataset record.
+  The recordings table has the rows of the recordings that finished, and the directory `<out>/.partial/` can hold the files of the one that was running; nothing in it is a finished recording.
+  The size limit in the section above is what keeps a recording from reaching that point, and it is provisional.
 
 ## Decisions the owner has not yet confirmed
 

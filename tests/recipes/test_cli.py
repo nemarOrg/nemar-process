@@ -20,9 +20,11 @@ from recipe_support import (
     DATASET,
     RECORDING,
     copy_fixture,
+    edf_bytes,
     floor_literals,
     touch_tree,
     tree_digest,
+    write_brainvision,
     write_set,
 )
 
@@ -280,6 +282,37 @@ def test_a_recording_whose_channels_are_all_flat_is_one_failed_row_at_flatline(t
     assert "status=failed code=all_channels_flat step=flatline" in err
     assert json.loads(stdout.strip().splitlines()[-1])["counts"]["failed"] == 1
     assert not [name for name in product_files(out) if name.startswith("sub-01")]
+
+
+def test_a_recording_that_names_a_file_outside_the_dataset_is_one_failed_row_at_load(tmp_path, cli):
+    dataset = tmp_path / "dataset"
+    touch_tree(dataset, ["dataset_description.json"])
+    secret = write_brainvision(tmp_path / "elsewhere", "secret", fill=10)
+    name = "sub-01_task-x_eeg"
+    write_brainvision(
+        dataset / "sub-01" / "eeg", name, data=str(secret.with_suffix(".eeg")), samples=250 * 70
+    )
+    out = tmp_path / "o"
+    code, _, err = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", out)
+    assert code == 4
+    (row,) = table_rows(out)
+    assert (row["status"], row["code"], row["step"]) == ("failed", "load_failed", "load")
+    assert "status=failed code=load_failed step=load" in err
+    assert str(secret) not in err  # the log says that, and never what the file was called
+    assert not [name for name in product_files(out) if name.startswith("sub-01")]
+
+
+def test_a_recording_whose_header_declares_too_much_is_one_failed_row_at_load(tmp_path, cli):
+    dataset = tmp_path / "dataset"
+    target = dataset / "sub-01" / "eeg" / "sub-01_task-x_eeg.edf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(edf_bytes(4, 99_999_999, 250, with_data=False))
+    out = tmp_path / "o"
+    code, _, err = cli("run", "nemar-floor", "--dataset-dir", dataset, "--out", out)
+    assert code == 4
+    (row,) = table_rows(out)
+    assert (row["status"], row["code"], row["step"]) == ("failed", "too_large", "load")
+    assert "status=failed code=too_large step=load" in err
 
 
 def test_a_requested_path_that_is_not_a_file_is_one_failed_row_and_the_run_goes_on(tmp_path, cli):
