@@ -207,3 +207,46 @@ def test_a_summary_key_that_would_replace_one_of_the_floors_is_refused(
             info=ICA_INFO,
             summary_extra={"nSignalChannels": 0},
         )
+
+
+@pytest.mark.parametrize("clash", ["channels", "sphere"])
+def test_two_files_that_would_have_one_name_are_refused_before_any_is_written(
+    clash, fixture_result, recording, tmp_path
+):
+    """An extra file with a floor file's name, and two extra files with one name."""
+    result = replace(fixture_result, plan=own_plan(fixture_result))
+    extras = (
+        (outputs.Product("channels", "tsv", "ica", "x", lambda path: None),)
+        if clash == "channels"
+        else (matrix_product("sphere"), matrix_product("sphere"))
+    )
+    with pytest.raises(RecordingError) as caught:
+        outputs.write_product(
+            recording,
+            make_context(),
+            tmp_path,
+            result,
+            io.load(recording).inputs,
+            info=ICA_INFO,
+            extra_products=extras,
+        )
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "internal_error",
+        "record",
+        "duplicate_file",
+    )
+    assert list(tmp_path.rglob("*.*")) == []
+
+
+def test_the_floor_can_run_under_another_recipes_plan_name_with_the_same_decisions(fixture_result):
+    from nemar_process.common import determinism
+    from nemar_process.nemar_floor import process
+    from recipe_support import loaded_fixture
+
+    with determinism.pinned_threads():
+        other = process(loaded_fixture(), recipe_id="nemar-ica", recipe_version="2.0.0")
+    assert (other.plan.recipe_id, other.plan.recipe_version) == ("nemar-ica", "2.0.0")
+    last = fixture_result.plan.steps[-1].step_id
+    assert other.plan.hash() == fixture_result.plan.hash_as("nemar-ica", "2.0.0", last)
+    assert other.plan.hash() != fixture_result.plan.hash()
+    assert fixture_result.plan.recipe_id == "nemar-floor"  # the default is the floor's own

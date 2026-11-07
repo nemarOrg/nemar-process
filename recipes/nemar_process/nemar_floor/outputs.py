@@ -253,6 +253,9 @@ def write_product(
         ),
     ]
     jobs += extra_products
+    names = [(job.suffix, job.extension) for job in jobs]
+    if len(set(names)) != len(names):  # a file written over another would be recorded once
+        raise RecordingError(INTERNAL_ERROR, "record", "duplicate_file")
     written: list[tuple[str, str, records.FileTarget, dict[str, Any]]] = []
     for job in jobs:
         location = place(job.suffix, job.extension)
