@@ -176,11 +176,19 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
 - **What happens to a run that exits 9 or 8, outside this repository.**
   The command exits 9 (`time_budget_exhausted`) after it wrote its dataset record, and 8 (`engine_unavailable`) before it wrote anything.
   The launcher records both as `runtime_error` with the detail `entry_failed` and, from its code and its tests (an entry that writes files and then exits 3), still hashes and uploads what the entry wrote and completes the upload; nothing was run with exit 9 or 8 in particular, and no real storage or Worker took the upload.
-  Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost; whether the job is charged for the time used and how; and whether a later run that picks up the recordings the budget left out can be merged with `aggregate` (it exits 9 itself while a `time_budget` row is in the merge, by design, so the later run must replace those rows, not add to them).
-  Epic A's recipe registry should treat that as open before the Worker dispatches a recipe that can exit 9.
+  Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost, and whether the job is charged for the time used and how.
+  Resuming a budget-cut run is not supported in 1.0.0: `aggregate` refuses two inputs that name the same recording, so a later run of the skipped recordings cannot replace their `time_budget` rows (the Worker runs one whole dataset per job, so nothing needs it yet).
+  Resume or replace is a follow-up: nemarOrg/nemar-process#16.
+  Epic A's recipe registry should treat the Worker's handling of failed jobs' outputs as open before it dispatches a recipe that can exit 9.
+- **Exit 8 is charged.**
+  The launcher records every non-zero entry exit except 137 as `runtime_error` with the detail `entry_failed`, which is the submitter's and charged, so an `engine_unavailable` exit (no GPU, a binary that is not there), which is the platform's fault, is charged too.
+  A distinct uncharged failure code would change the seven-code launcher contract shared with nemar-cli, a cross-repository change, so nothing here changes it: it is a decision for Epic A (for instance by checking the engine before the Worker dispatches).
 - **The time budget's estimate.**
   The rule starts a recording only if the time spent plus 1.5 times the slowest recording so far would fit, which assumes the next recording is not much slower than the slowest one seen.
   The 1.5 is a starting value, not a measurement; the first recording is started unless the budget is already spent, and a dataset whose recordings grow in cost can still run over.
+- **A recipe that embeds the floor names the plan.**
+  `nemar_floor.process(loaded, recipe_id=, recipe_version=)` takes the name and version of the plan (the defaults are the floor's), so the embedding recipe's records verify against its own plan hash; `Plan.hash_as` then gives the embedded floor part's hash under the floor's name.
+  A test shows the hash of the floor run under another name equals the floor plan's `hash_as` under that name.
 - **CUDA out-of-memory by name.**
   The recipes recognize torch's out-of-memory error by the name and module of its class, so torch is never imported for it.
   The test uses a class made to carry that name and, where torch is installed, torch's own class built by hand; a real GPU running out of memory was not produced, and a torch release that renames the class would make it a plain `step_failed`.
