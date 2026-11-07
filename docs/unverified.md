@@ -308,6 +308,10 @@ Still unconfirmed, each to be confirmed on the tenant:
   `POST` of a `nemar.observation.v1` document with `Authorization: Bearer <token>` is NEMAR's route in nemar-cli, and its Worker takes the document as this observer writes it (the owner decided that on 2026-11-06; the observer was not changed).
   The document is pinned in both repositories by one JSON Schema, `observer/schema/observation-v1.schema.json`, written in nemar-cli and copied byte for byte ([contracts](contracts.md)); every document the observer tests post is checked against it, and the two fixtures the observer wrote are held in both repositories.
   What stays unconfirmed: the Worker has been tested against those documents and not against a cluster's; the token is for one run and the Worker spends it on the first post it accepts, so a retry after an answer was lost is refused (the observer reports it as not delivered); and `raw_lines` is treated by the Worker as text it only validates and never stores.
+  The row cap and the byte cap differ: this observer cuts its export by bytes only (1 MiB, from the end) and the Worker refuses more than 5,000 rows (partitions and accounting jobs together).
+  A busy day of short rows can pass 5,000 jobs inside 1 MiB, and the document is then refused on every retry (`too_big`), so that day never settles.
+  The observer is not changed for this; it is an open item for the observer-dispatch phase (a row cap in the observer, a larger Worker bound, or reading the day in parts).
+  The Worker also refuses a whole document for one allocation item it cannot read, or for a row with elapsed time and no `cpu` or no `node` item, rather than skipping the row; the owner is asked to confirm that choice (nemar-cli ADR 0118, amendment of 2026-11-06).
   A token has to be minted for every run, including each 15-minute `quick` run, which is the operator's procedure and is not decided here.
 
 ### Also listed above
