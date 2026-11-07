@@ -8,6 +8,7 @@ not. Only an exception's class name is ever kept, never its message, which can h
 from __future__ import annotations
 
 import contextlib
+import re
 from typing import Final, Literal
 
 Status = Literal["failed", "skipped"]
@@ -25,6 +26,9 @@ Code = Literal[
     "all_channels_flat",
     "all_channels_flagged",
     "too_large",
+    "ica_ineligible",
+    "ica_degenerate",
+    "time_budget",
 ]
 
 LOAD_FAILED: Final = "load_failed"
@@ -40,6 +44,18 @@ DUPLICATE_RECORDING: Final = "duplicate_recording"
 ALL_CHANNELS_FLAT: Final = "all_channels_flat"
 ALL_CHANNELS_FLAGGED: Final = "all_channels_flagged"
 TOO_LARGE: Final = "too_large"
+# The decomposition recipe's: a recording too short or of too low a rank is skipped, not failed,
+# because nothing is wrong with it (detail INSUFFICIENT_DATA or RANK_TOO_LOW); a decomposition that
+# came out degenerate is a failure of the step; a recording the time budget left out is skipped.
+ICA_INELIGIBLE: Final = "ica_ineligible"
+ICA_DEGENERATE: Final = "ica_degenerate"
+TIME_BUDGET: Final = "time_budget"
+INSUFFICIENT_DATA: Final = "insufficient_data"
+RANK_TOO_LOW: Final = "rank_too_low"
+CUDA: Final = "cuda"  # the detail of an out_of_memory that was the GPU's
+
+# What a recipe says when its engine cannot run: one fixed word, never text that could hold a path.
+REASON = re.compile(r"[a-z0-9_]{1,40}")
 
 
 class RecordingError(Exception):
@@ -68,12 +84,41 @@ class RecordingSkipped(RecordingError):
     status: Status = "skipped"
 
 
+class EngineUnavailable(Exception):
+    """The engine a run needs cannot run here (a preflight raises it): ``reason`` is one fixed word.
+
+    The command ends the run with exit 8 before it writes anything, and never runs another engine
+    in its place.
+    """
+
+    def __init__(self, reason: str) -> None:
+        if not REASON.fullmatch(reason):
+            raise ValueError("an engine's reason is a word of lowercase letters, digits and _")
+        super().__init__(reason)
+        self.reason = reason
+
+
+def is_cuda_out_of_memory(error: BaseException) -> bool:
+    """Whether ``error`` is torch's CUDA out-of-memory error, found by name.
+
+    Torch is never imported here: where it is absent no error of its class exists, and where it is
+    present the class is found among the error's bases by module and name. The message is not read,
+    since a message can hold a path.
+    """
+    return any(
+        base.__name__ == "OutOfMemoryError" and base.__module__.split(".")[0] == "torch"
+        for base in type(error).__mro__
+    )
+
+
 @contextlib.contextmanager
 def guarded(step_id: str):
     """Turn what a step raises into a recorded failure of ``step_id``, keeping only a class name.
 
     A ``RecordingError`` passes as it is. ``MemoryError`` is ``out_of_memory`` in this step, and any
-    other exception is ``step_failed`` in it: the step is what a reader needs to find the cause.
+    other exception is ``step_failed`` in it: the step is what a reader needs to find the cause. A
+    CUDA out-of-memory error is ``out_of_memory`` with the detail ``cuda``, so that a record tells a
+    full GPU from a full host.
     """
     try:
         yield
@@ -82,4 +127,6 @@ def guarded(step_id: str):
     except MemoryError as error:
         raise RecordingError(OUT_OF_MEMORY, step_id, type(error).__name__) from error
     except Exception as error:
+        if is_cuda_out_of_memory(error):
+            raise RecordingError(OUT_OF_MEMORY, step_id, CUDA) from error
         raise RecordingError(STEP_FAILED, step_id, type(error).__name__) from error

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import threading
 from pathlib import Path
 
@@ -315,3 +316,113 @@ def test_a_directory_that_was_already_there_is_kept_when_a_move_is_undone(tmp_pa
         files.move_into_place(source, destination, ["a.tsv", "sub-01/b.tsv", "later/c.tsv"])
     assert sorted(p.name for p in destination.iterdir()) == ["later", "sub-01"]
     assert [p.name for p in (destination / "sub-01").iterdir()] == ["kept.tsv"]
+
+
+# ---- matrices -------------------------------------------------------------------------------------
+
+
+def read_matrix(path):
+    """A matrix file read back the way a consumer would: the header, then float64 rows."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    assert lines.pop() == ""  # the final newline
+    return lines[0].split("\t"), [[float(cell) for cell in line.split("\t")] for line in lines[1:]]
+
+
+def test_a_matrix_is_a_header_of_labels_then_rows_with_no_row_label_column(tmp_path):
+    path = tmp_path / "m.tsv"
+    files.write_matrix_tsv(path, [[1.5, -2.0], [0.25, 3.0]], ["IC1", "IC2"])
+    assert path.read_bytes() == b"IC1\tIC2\n1.5\t-2\n0.25\t3\n"
+
+
+def test_a_matrix_round_trips_float64_exactly(tmp_path):
+    rng = random.Random(7)
+    rows = [
+        [rng.uniform(-1e3, 1e3) * 10 ** rng.randint(-12, 12) for _ in range(5)] for _ in range(9)
+    ]
+    rows.append([0.1, 1 / 3, 2**-1074, 1.7976931348623157e308, -0.0])
+    path = tmp_path / "m.tsv"
+    files.write_matrix_tsv(path, rows, ["a", "b", "c", "d", "e"])
+    labels, back = read_matrix(path)
+    assert labels == ["a", "b", "c", "d", "e"]
+    assert back == rows  # every value is the very float that was written
+
+
+def test_a_matrix_takes_numpy_values_and_integers(tmp_path):
+    from recipe_support import require_runtime
+
+    require_runtime()  # NumPy is in the runtime environment only; this module runs without it
+    import numpy as np
+
+    path = tmp_path / "m.tsv"
+    files.write_matrix_tsv(path, np.array([[1.0, 2.5], [3.0, 4.0]]), ["a", "b"])
+    files.write_matrix_tsv(tmp_path / "n.tsv", [[1, 2]], ["a", "b"])
+    assert path.read_text(encoding="utf-8") == "a\tb\n1\t2.5\n3\t4\n"
+    assert (tmp_path / "n.tsv").read_text(encoding="utf-8") == "a\tb\n1\t2\n"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_matrix_with_a_value_that_is_not_finite_is_refused_and_leaves_no_file(tmp_path, bad):
+    path = tmp_path / "m.tsv"
+    with pytest.raises(ValueError, match="finite"):
+        files.write_matrix_tsv(path, [[1.0, bad]], ["a", "b"])
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad", ["1.0", None, True, [1.0]])
+def test_a_matrix_cell_that_is_not_a_real_number_is_refused(tmp_path, bad):
+    with pytest.raises(TypeError, match="number"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, bad]], ["a", "b"])
+
+
+def test_a_matrix_row_of_the_wrong_width_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="columns"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0]], ["a", "b"])
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "a\tb",
+        "c\n",
+        "c\r",
+        "",
+        'say "x"',
+        "a\u2028b",  # line separator: str.splitlines splits on it
+        "a\u2029b",  # paragraph separator
+        "a\x00b",
+        "a\x0bb",  # vertical tab
+        "a\x85b",  # next line
+        "a\x1bb",
+    ],
+)
+def test_matrix_labels_that_would_break_the_header_are_refused(tmp_path, bad):
+    with pytest.raises(ValueError, match="label"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], ["fine", bad])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_matrix_labels_that_repeat_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="label"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], ["a", "a"])
+
+
+def test_ordinary_labels_with_spaces_and_non_ascii_are_kept(tmp_path):
+    files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], ["IC 1", "Fp1-\u00e9"])
+    text = (tmp_path / "m.tsv").read_text(encoding="utf-8")
+    assert text.splitlines() == ["IC 1\tFp1-\u00e9", "1\t2"]
+
+
+def test_a_matrix_with_no_rows_or_no_columns_is_refused_and_leaves_no_file(tmp_path):
+    with pytest.raises(ValueError, match="row"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [], ["a", "b"])
+    with pytest.raises(ValueError, match="column"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[], []], [])
+    with pytest.raises(ValueError, match="column"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [], [])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_integer_too_large_for_a_float_is_the_same_clean_refusal(tmp_path):
+    with pytest.raises(ValueError, match="too large"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[10**400]], ["a"])
+    assert list(tmp_path.iterdir()) == []

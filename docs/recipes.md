@@ -17,6 +17,7 @@ A recipe annotates: nothing that carries samples is ever written, so raw samples
 nemar-recipe run <recipe> --dataset-dir DIR [--out DIR] [--recording PATH ...]
                           [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                           [--image-digest sha256:HEX] [--run-id ID]
+                          [the options the recipe declares, such as --time-budget-s N]
 nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
 nemar-recipe version
 ```
@@ -50,6 +51,20 @@ nemar-recipe version
   It then copies every per-recording file byte for byte into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, and moves everything into place at the end.
   A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.
   It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
+- A recipe can declare options of its own (`Recipe.options`), such as `--time-budget-s N` or the choice of a decomposition engine.
+  The command accepts a flag only for a recipe that declares it (exit 2 for any other), fills in the default of one that is not given, and hands the values to the recipe's hooks and to `run_recording` (`RunContext.options`).
+  The floor declares none.
+- `--time-budget-s N` (a recipe lists it in `options`) keeps a run inside a number of seconds.
+  The clock starts when the command starts.
+  A recording that would be run is not started when the time spent plus 1.5 times the slowest recording that has finished (it succeeded or failed) would be more than `N`: it is skipped with the code `time_budget`, and so is every one after it, because the rule only gets stricter as the run goes on.
+  A recording that ends at once for another reason (an unsupported format, a path that is not a file, a duplicate) keeps that reason.
+  The dataset record is written, with the unstarted recordings in its counts as skipped, and the run exits 9: the dataset is not complete, and nothing stamps it so.
+  `aggregate` of product directories that include such rows exits 9 for the same reason.
+- A recipe's `preflight` checks, once, that its engine can run here: it raises `EngineUnavailable` with one fixed word.
+  The command calls it before it creates anything, so a run whose engine is missing (no GPU, a binary that is not there) exits 8 with `engine_unavailable: <word>` on standard error, writes nothing, not even `--out`, and never runs another engine in its place.
+  A preflight that fails any other way is an internal error (exit 1), still before anything is written.
+  So is a recipe whose `seeds` or `engine_extra` the command refuses (a seed the engine fixes, an engine field that replaces one of the stamp's, a value that is not plain JSON): the run exits 1 with `seeds refused: <class name>` or `engine_extra refused: <class name>`, before `--out` is touched.
+  `RunContext.options` is a read-only copy made for each recording, so a recording cannot change the options, nor leak a change to the next.
 - Standard error carries one line per recording, `recording=<path> status=<status> code=<code>`, with `step=` and `error=` (an exception's class name) when there are any.
   Standard output carries one final JSON line with the counts.
   NEMAR never parses either.
@@ -64,8 +79,11 @@ nemar-recipe version
 | 5 | `output_unusable` | `--out` cannot be created or written, or already holds product files, or the dataset record cannot be written |
 | 6 | `dataset_unreadable` | `--dataset-dir`, or an `--in`, is missing, not a directory, or cannot be listed |
 | 7 | `no_compatible_recording` | recordings were found, every one was skipped for its format (`unsupported_format`: the recipe does not load it), and none succeeded (the record is written); a requested file that is not an EEG recording (a `scans.tsv`, an `.edf` outside `eeg/`) is skipped that way too, while a requested path that is not a file is `file_not_found` and exits 4 |
+| 8 | `engine_unavailable` | the recipe's preflight found that its engine cannot run here; decided before anything is created, so nothing is written (not `--out`, no table, no record) and no other engine is used |
+| 9 | `time_budget_exhausted` | `--time-budget-s` left recordings out (skipped, `time_budget`); the dataset record is written and the dataset is not complete. It outranks 0, 4 and 7: a run that was cut short is never reported as finished, however many recordings succeeded or failed |
 
-The launcher records any non-zero exit as `runtime_error` with the detail `entry_failed`; its own numbers 10 to 16 are not used here.
+The launcher records any non-zero exit as `runtime_error` with the detail `entry_failed` (exit 8 and exit 9 included); its own numbers 10 to 16 are not used here.
+After a non-zero exit it still reads back what the entry wrote, uploads it and completes the upload, so a run that exits 9 leaves its finished recordings, its table and its dataset record in the job's outputs (tested with exit 3; whether the Worker keeps and uses the outputs of a job that is recorded as failed is for the Worker to say: `unverified.md`).
 Exit 7 tells an input with nothing the recipe could try from a run that tried and found nothing it could use: a recording that failed, or that was skipped for any other reason than its format (such as `no_signal_channels`), makes the run exit 4, and a single success makes it exit 0.
 `aggregate` decides its exit code the same way, from the rows it merges.
 Whether a run with some failed recordings is a job success is decision O3 below.
@@ -95,7 +113,10 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
 | `failed` | `all_channels_flagged` | the no-locations criterion flags every channel, so eegprep removes none and the recording cannot be annotated honestly (step `bad_channels`); on the RANSAC branch eegprep itself raises when more than 75 percent are flagged, which is `step_failed` |
 | `failed` | `step_failed` | an eegprep step raised; the `step` column names it; only the exception's class name is kept |
-| `failed` | `out_of_memory` | `MemoryError`, in the step it was raised in, the float64 cast of the load included (a SIGKILL by the kernel ends the job and the launcher records it) |
+| `failed` | `out_of_memory` | `MemoryError`, in the step it was raised in, the float64 cast of the load included (a SIGKILL by the kernel ends the job and the launcher records it); a CUDA out-of-memory error from torch is the same code in its step with the detail `cuda`, recognized by its class name so that torch is not imported where it is absent |
+| `skipped` | `ica_ineligible` | the decomposition recipe: the recording is too short for its rank (`insufficient_data`) or its rank is too low (`rank_too_low`); nothing is wrong with it |
+| `skipped` | `time_budget` | the run's time budget left the recording out (above) |
+| `failed` | `ica_degenerate` | the decomposition recipe: the decomposition came out unusable (step `ica`) |
 | `failed` | `disk_error` | writing or moving the recording's files failed (reading an input that cannot be read is `load_failed`) |
 | `failed` | `internal_error` | anything else the recipe's own code raised, and a record that fails its own checks |
 
@@ -290,7 +311,7 @@ A recording without a percentage is left out of the percent-good-channels histog
 
 `desc-nemarfloor_signalJourney.json` is a valid signalJourney record whose `processingSteps` are a constant list of the recipe's steps with the recipe-level parameters (never read from a recording), and whose `qualityMetrics` count the recordings that succeeded and the recordings that skipped each step for each reason.
 `summaryMetrics` has the counts and, for percent good channels, percent good samples and the line-noise excess before and after, `n`, `min`, `median`, `max` and a histogram with fixed edges (percentages every 10; dB at -10, -5, 0, 5, 10, 15, 20, 30, 40) where a value belongs to the bin `[edge_i, edge_i+1)`, the last bin is closed and values outside are counted as underflow and overflow.
-`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.0/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` 0, and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
+`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.0/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
 The record is at most 256 KB (262,144 bytes): rows are added in path order while the serialized record stays at or under 200,000 bytes, and the rest are counted in `rows_truncated` and live only in the table file; the report's `records` is capped at 200 entries with `records_truncated`.
 Both caps are deterministic.
 At about 420 bytes a row as indented JSON, roughly 300 rows fit; a larger dataset reads the remaining rows from the table file, and the counts, the distributions and the plan variants cover every recording.
@@ -357,6 +378,17 @@ The driver adopted the plan's recommendations pending the owner; each is reversi
 `nemar_floor.process` returns a `FloorResult` that carries the working copy, the sample mask, the signal channels' names and both keep vectors (so a later recipe can record the good-channel set without recomputing it) and the plan so far; it writes nothing.
 `COMMON_VERSION` in `common/__init__.py` is recorded under `extensions.nemar.engine.commonLayer`.
 A change under `common/` that alters a byte of the floor fixture's pinned outputs is a `nemar-floor` version bump; one that does not bumps only this version's patch.
+Until a layer is released, a change that alters no byte of a product does not bump it: the version names released code, and a record that says `1.0.0` is the same bytes either way.
+The hooks below were added to the unreleased `1.0.0` that way, and the floor fixture's whole product tree (records and engine stamp included, clock aside) was compared before and after.
+
+A second recipe that embeds the floor uses these, none of which the floor sets:
+
+- `Recipe.threads` (a number, or a function of the options), `Recipe.seeds` (`(name, value)` pairs, so the recipe stays hashable, added to `determinism.SEEDS`; a name the engine fixes is refused), `Recipe.engine_extra` (fields added to the engine stamp; a field the stamp has is refused) and `Recipe.preflight`, all described above, and `Recipe.options` with the shared `TIME_BUDGET_S`.
+- `nemar_floor.process(loaded, recipe_id=, recipe_version=)` names the plan it builds (the floor's by default).
+- `nemar_floor.outputs.write_product(..., info=, extra_products=, summary_extra=)` writes the floor's four files under another recipe's label, name and version, then the recipe's own `Product`s (each belongs to a step of the plan, its writer returns the matrix fields for its entry, and two files with one suffix and extension are refused as `internal_error` / `duplicate_file` before any is written), and builds one record; the defaults are the floor's own.
+- `files.write_matrix_tsv(path, rows, columns)` writes a numeric matrix as a header of column labels and rows of `format(x, ".17g")`, with no row-label column, so that float64 values read back exactly; NaN, infinity, non-numbers, an integer too large for a float, a matrix with no rows or no columns, and a column label that is empty, repeated, or holds a control character, a Unicode line or paragraph separator or a double quote are refused before a file is made.
+- `Plan.hash_as(recipe_id, version, upto_step)` is the hash the plan's first steps (and the skips among them) would have had as the plan of the embedded recipe, for a record that states which floor decisions it shares.
+- `errors.EngineUnavailable`, and the codes `ica_ineligible`, `ica_degenerate` and `time_budget`.
 
 ## Running the tests
 

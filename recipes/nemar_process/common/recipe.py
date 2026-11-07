@@ -11,8 +11,9 @@ list of steps the dataset record states, and the function that processes one rec
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+import math
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 
@@ -52,6 +53,43 @@ class Distribution:
 
 
 @dataclass(frozen=True)
+class Option:
+    """A command-line option a recipe declares for ``run`` (``--ica-engine``, ``--time-budget-s``).
+
+    ``name`` is the key the value has in the options a recipe's hooks and ``run_recording`` get;
+    ``parse`` turns the text into the value (and raises ``ValueError`` for one it refuses);
+    ``default`` is the value when the option is not given. Only a recipe that declares an option
+    takes it: the command refuses the flag for any other (exit 2).
+    """
+
+    name: str
+    flag: str
+    parse: Callable[[str], Any]
+    default: Any
+    help: str
+    choices: tuple[Any, ...] | None = None
+
+
+def _positive_seconds(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("a time budget is a positive, finite number of seconds")
+    return value
+
+
+# `--time-budget-s N`: a recording is not started when the time spent plus one and a half times the
+# slowest recording that has finished would pass N seconds (docs/recipes.md); the rest are skipped
+# with the code `time_budget` and the run exits 9. A recipe that wants it lists it in `options`.
+TIME_BUDGET_S = Option(
+    "time_budget_s",
+    "--time-budget-s",
+    _positive_seconds,
+    None,
+    "seconds the run may take: no recording is started that would probably not finish in time",
+)
+
+
+@dataclass(frozen=True)
 class DatasetStep:
     """One step of the recipe as the dataset record states it: the recipe-level parameters."""
 
@@ -85,6 +123,7 @@ class RunContext:
     engine: dict[str, Any]
     seeds: dict[str, int]
     validator: Any
+    options: Mapping[str, Any] = field(default_factory=dict)  # the values of the recipe's options
 
 
 @dataclass
@@ -128,15 +167,57 @@ class RunRecording(Protocol):
     ) -> RecordingProduct: ...
 
 
+def _nothing_extra(options: Mapping[str, Any]) -> dict[str, Any]:
+    return {}
+
+
+def _no_preflight(options: Mapping[str, Any]) -> None:
+    return None
+
+
 @dataclass(frozen=True)
 class Recipe:
-    """A registered recipe: its identity, its table, and the function that processes a recording."""
+    """A registered recipe: its identity, its table, and the function that processes a recording.
+
+    The fields after ``run_recording`` are hooks, each with the value that leaves a run as it was,
+    so the floor sets none of them. ``options`` are the flags the recipe adds to ``run``; every hook
+    that takes ``options`` gets their values (defaults filled in), as ``RunContext.options`` does.
+
+    * ``threads``: how many threads every pool is pinned to, recorded in the engine stamp; a number,
+      or a function of the options (one engine may need more than another).
+    * ``seeds``: ``(name, value)`` pairs of the recipe's own (a tuple, so the recipe stays hashable), added to the engine's (``determinism.SEEDS``) in every
+      record; a name the engine already has is refused.
+    * ``engine_extra``: fields added to the engine stamp (versions, device, the engine chosen); a
+      field the stamp already has is refused.
+    * ``preflight``: raises ``EngineUnavailable`` when the engine cannot run here. The command calls
+      it once, before it creates anything, and ends the run with exit 8 if it raises.
+    """
 
     info: RecipeInfo
     columns: tuple[Column, ...]
     distributions: tuple[Distribution, ...]
     dataset_steps: Callable[[], list[DatasetStep]]
     run_recording: RunRecording
+    threads: int | Callable[[Mapping[str, Any]], int] = 1
+    seeds: tuple[tuple[str, int], ...] = ()
+    engine_extra: Callable[[Mapping[str, Any]], dict[str, Any]] = _nothing_extra
+    options: tuple[Option, ...] = ()
+    preflight: Callable[[Mapping[str, Any]], None] = _no_preflight
+
+    def threads_for(self, options: Mapping[str, Any]) -> int:
+        count = self.threads(options) if callable(self.threads) else self.threads
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("a recipe pins a whole number of threads, at least one")
+        return count
+
+    def option_values(self, given: Mapping[str, Any]) -> dict[str, Any]:
+        """The value of each option the recipe declares: the one given, else the default."""
+        return {
+            option.name: given[option.name]
+            if given.get(option.name) is not None
+            else option.default
+            for option in self.options
+        }
 
     @property
     def id(self) -> str:

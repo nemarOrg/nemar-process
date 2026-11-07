@@ -4,6 +4,7 @@ directories into one, ``version``.
     nemar-recipe run <recipe> --dataset-dir DIR [--out DIR] [--recording PATH ...]
                               [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                               [--image-digest sha256:HEX] [--run-id ID]
+                              [the recipe's own options, e.g. --time-budget-s N]
     nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
     nemar-recipe version
 
@@ -30,6 +31,10 @@ numbers 10 to 16 are not used here):
        written); a requested file that is not an EEG recording (a ``scans.tsv``, an ``.edf``
        outside ``eeg/``) is skipped that way too, while a requested path that is not a file is
        ``file_not_found`` and exits 4
+    8  engine_unavailable: the recipe's preflight found that its engine cannot run here; this is
+       decided before anything is created, so nothing is written, and no other engine is used
+    9  time_budget_exhausted: ``--time-budget-s`` left recordings out (skipped, ``time_budget``); the
+       dataset record is written, and the dataset is not complete
 
 Each recording runs inside one failure boundary: its files are written into a private directory
 under ``--out`` and moved into place only when every file and the record exist, so a failed
@@ -42,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -50,27 +56,33 @@ import re
 import shutil
 import signal
 import sys
+import time
 import uuid
 import warnings
-from collections.abc import Generator, Sequence
-from dataclasses import dataclass
+from collections.abc import Generator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from importlib import metadata
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from nemar_process import sj
 from nemar_process.common import COMMON_VERSION, determinism, files, io, naming, records, table
 from nemar_process.common.errors import (
+    CUDA,
     DISK_ERROR,
     DUPLICATE_RECORDING,
     INTERNAL_ERROR,
     OUT_OF_MEMORY,
+    TIME_BUDGET,
     UNSUPPORTED_FORMAT,
     Code,
+    EngineUnavailable,
     RecordingError,
     Status,
+    is_cuda_out_of_memory,
 )
-from nemar_process.common.recipe import Identity, Recipe, RunContext
+from nemar_process.common.recipe import Identity, Option, Recipe, RunContext
 from nemar_process.recipes import REGISTRY
 
 EXIT_OK = 0
@@ -81,6 +93,14 @@ EXIT_NONE_SUCCEEDED = 4
 EXIT_OUTPUT_UNUSABLE = 5
 EXIT_DATASET_UNREADABLE = 6
 EXIT_NO_COMPATIBLE = 7
+EXIT_ENGINE_UNAVAILABLE = 8
+EXIT_TIME_BUDGET = 9
+
+# The clock the time budget reads. A module attribute so that a test sets the time by hand.
+CLOCK = time.monotonic
+# A recording is not started when the time spent plus this many times the slowest recording that has
+# finished would pass the budget.
+BUDGET_MARGIN = 1.5
 
 PARTIAL = ".partial"
 # Matched whole with ``fullmatch``: a ``$`` would accept a trailing newline.
@@ -120,6 +140,41 @@ def add_identity(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-id", type=matching(RUN_ID, "run id"))
 
 
+def declared_options() -> dict[str, Option]:
+    """The options of every registered recipe, by flag. A flag two recipes declare is one option:
+    declared differently, it is refused, because ``--help`` and the parsing could not both be true."""
+    found: dict[str, Option] = {}
+    for recipe in REGISTRY.values():
+        for option in recipe.options:
+            if found.setdefault(option.flag, option) != option:
+                raise ValueError("{} is declared twice, differently".format(option.flag))
+    return found
+
+
+def add_options(run: argparse.ArgumentParser) -> None:
+    """Add the recipes' options to ``run``. A flag is parsed for any recipe and refused, after
+    parsing, for one that does not declare it (``option_values``)."""
+    for option in declared_options().values():
+        run.add_argument(
+            option.flag,
+            dest=option.name,
+            type=option.parse,
+            default=None,
+            choices=option.choices,
+            help=option.help,
+        )
+
+
+def option_values(
+    recipe: Recipe, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> dict[str, Any]:
+    """The values of the recipe's options; a flag the recipe does not declare is a usage error."""
+    for option in declared_options().values():
+        if getattr(args, option.name, None) is not None and option not in recipe.options:
+            parser.error("{} is not an option of {}".format(option.flag, recipe.id))
+    return recipe.option_values(vars(args))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nemar-recipe", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -134,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="a recording, relative to the dataset; repeatable",
     )
     add_identity(run)
+    add_options(run)
     aggregate = commands.add_parser("aggregate", help="merge product directories into one")
     aggregate.add_argument("recipe", choices=sorted(REGISTRY))
     aggregate.add_argument(
@@ -178,6 +234,8 @@ def outcome_of(error: BaseException) -> tuple[Status, Code, str | None, str | No
         return error.status, error.code, error.step, error.detail
     if isinstance(error, MemoryError):
         return "failed", OUT_OF_MEMORY, None, type(error).__name__
+    if is_cuda_out_of_memory(error):
+        return "failed", OUT_OF_MEMORY, None, CUDA
     if isinstance(error, OSError):
         return "failed", DISK_ERROR, None, type(error).__name__
     return "failed", INTERNAL_ERROR, None, type(error).__name__
@@ -290,11 +348,12 @@ def finalize(
     context: RunContext,
     ignored: dict[str, int],
     started_utc: str,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any], int, int]:
     """Build and write the dataset record from the table in ``out``.
 
-    Returns the record, and how many of the recordings in the table were skipped for their format,
-    which with the counts in the record tell the exit code apart (``exit_for``).
+    Returns the record, how many of the recordings in the table were skipped for their format, and
+    how many were left out by the time budget, which with the counts in the record tell the exit
+    code apart (``exit_for``).
     """
     label = recipe.label
     table_path = out / naming.dataset_path(label, "recordings", "tsv")
@@ -313,7 +372,11 @@ def finalize(
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
-    return record, sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT)
+    return (
+        record,
+        sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT),
+        sum(1 for row in rows if row["code"] == TIME_BUDGET),
+    )
 
 
 def result_line(recipe: Recipe, record: dict[str, Any], word: str) -> None:
@@ -327,14 +390,17 @@ def result_line(recipe: Recipe, record: dict[str, Any], word: str) -> None:
     print(json.dumps(summary, sort_keys=True), flush=True)
 
 
-def exit_for(counts: dict[str, int], unsupported: int) -> tuple[int, str]:
+def exit_for(counts: dict[str, int], unsupported: int, unfinished: int = 0) -> tuple[int, str]:
     """The exit code and its word for a run, or a merge, that wrote its record.
 
     ``unsupported`` is how many of the recordings found were skipped for their format. When none
     succeeded and that is all of them, the recipe had nothing it could try (exit 7); one recording
     that was not skipped for its format, whatever came of it, makes the run an ordinary failure
-    (exit 4).
+    (exit 4). ``unfinished`` is how many the time budget left out: the dataset is not complete, so
+    that is exit 9 whatever else the counts say.
     """
+    if unfinished:
+        return EXIT_TIME_BUDGET, "time_budget_exhausted"
     if counts["discovered"] == 0:
         return EXIT_NO_RECORDINGS, "no_recordings"
     if counts["succeeded"] == 0:
@@ -381,8 +447,38 @@ def restorable(previous: Any) -> Any:
     return signal.SIG_DFL if previous is None else previous
 
 
+class TimeBudget:
+    """The seconds a run may take, and the rule that keeps it inside them.
+
+    A recording is not started when the time spent plus ``BUDGET_MARGIN`` times the slowest recording
+    that has finished (it succeeded or failed) would pass the budget; the rule can only get stricter
+    as the run goes on, so once it refuses one recording it refuses the rest. With no budget it
+    permits everything.
+    """
+
+    def __init__(self, seconds: float | None) -> None:
+        self.seconds = seconds
+        self.started = CLOCK()
+        self.slowest = 0.0
+
+    def permits(self) -> bool:
+        if self.seconds is None:
+            return True
+        return (CLOCK() - self.started) + BUDGET_MARGIN * self.slowest <= self.seconds
+
+    def finished(self, took: float) -> None:
+        self.slowest = max(self.slowest, took)
+
+
+def frozen(options: Mapping[str, Any]) -> MappingProxyType[str, Any]:
+    """A copy of the options that a recording cannot change, nor change for the next one."""
+    return MappingProxyType(copy.deepcopy(dict(options)))
+
+
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     recipe = REGISTRY[args.recipe]
+    options = option_values(recipe, args, parser)
+    budget = TimeBudget(options.get("time_budget_s"))  # the clock starts here
     if args.out:
         out = Path(args.out)
     elif os.environ.get("NEMAR_OUT"):
@@ -400,16 +496,36 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
     validator = (
         sj.validator()
     )  # built once, before anything is written: it ends the run if it fails
-    try:
-        prepare_out(out, recipe.label)
-    except OutputUnusable as error:
-        print("the output directory cannot be used: {}".format(error), file=sys.stderr)
-        return EXIT_OUTPUT_UNUSABLE
-    started = determinism.utc_now()
-    with determinism.pinned_threads(), quiet(), terminated_as_exit():
-        context = RunContext(
-            dataset_dir, identity, determinism.engine_info(), dict(determinism.SEEDS), validator
-        )
+    with (
+        determinism.pinned_threads(recipe.threads_for(options)) as threads,
+        quiet(),
+        terminated_as_exit(),
+    ):
+        # before anything is created: an engine that cannot run writes nothing
+        try:
+            recipe.preflight(options)
+        except EngineUnavailable as error:
+            print("engine_unavailable: {}".format(error.reason), file=sys.stderr)
+            return EXIT_ENGINE_UNAVAILABLE
+        # the recipe's seeds and engine fields are checked before anything is created too: a hook
+        # that is refused is a fault of the recipe, named by its hook and the class of the refusal
+        try:
+            seeds = determinism.run_seeds(recipe.seeds)
+        except Exception as error:  # noqa: BLE001
+            print("seeds refused: {}".format(type(error).__name__), file=sys.stderr)
+            return EXIT_INTERNAL
+        try:
+            engine = determinism.engine_info(threads, recipe.engine_extra(options))
+        except Exception as error:  # noqa: BLE001
+            print("engine_extra refused: {}".format(type(error).__name__), file=sys.stderr)
+            return EXIT_INTERNAL
+        try:
+            prepare_out(out, recipe.label)
+        except OutputUnusable as error:
+            print("the output directory cannot be used: {}".format(error), file=sys.stderr)
+            return EXIT_OUTPUT_UNUSABLE
+        started = determinism.utc_now()
+        context = RunContext(dataset_dir, identity, engine, seeds, validator, frozen(options))
         try:
             items, owned = work_items(dataset_dir, args.recording)
             ignored = io.ignored_datatypes(dataset_dir, owned)
@@ -425,7 +541,7 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
                 out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
             ) as writer:
                 for counter, (path, target) in enumerate(items):
-                    row = run_one(recipe, target, path, context, out, counter, seen)
+                    row = run_one(recipe, target, path, context, out, counter, seen, budget)
                     writer.append(row)
                     report(path, row)
         except OSError as error:
@@ -434,14 +550,14 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         finally:
             shutil.rmtree(out / PARTIAL, ignore_errors=True)
         try:
-            record, unsupported = finalize(recipe, out, context, ignored, started)
+            record, unsupported, unfinished = finalize(recipe, out, context, ignored, started)
         except OSError as error:
             print(
                 "the dataset record cannot be written: {}".format(type(error).__name__),
                 file=sys.stderr,
             )
             return EXIT_OUTPUT_UNUSABLE
-    code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported)
+    code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported, unfinished)
     result_line(recipe, record, word)
     return code
 
@@ -454,6 +570,7 @@ def run_one(
     out: Path,
     counter: int,
     seen: set[str],
+    budget: TimeBudget,
 ) -> dict[str, Any]:
     if isinstance(target, RecordingError):
         return row_for(path, target.status, target.code)
@@ -463,7 +580,14 @@ def run_one(
     if key in seen:
         return row_for(path, "skipped", DUPLICATE_RECORDING)
     seen.add(key)
-    return process_recording(recipe, target, context, out, counter)
+    if not budget.permits():  # only a recording that would have been run is held back
+        return row_for(path, "skipped", TIME_BUDGET)
+    began = CLOCK()
+    # each recording gets its own copy of the options: nothing it does reaches the next one
+    own = replace(context, options=frozen(context.options))
+    row = process_recording(recipe, target, own, out, counter)
+    budget.finished(CLOCK() - began)
+    return row
 
 
 # ---- aggregate --------------------------------------------------------------------------------
@@ -659,7 +783,7 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
             with table.TableWriter(staging / table_name, recipe.columns) as writer:
                 for path in sorted(merged):
                     writer.append(merged[path])
-            record, unsupported = finalize(
+            record, unsupported, unfinished = finalize(
                 recipe, staging, context, dict(sorted(ignored.items())), started
             )
             files.move_into_place(staging, out, [*sorted(targets), table_name, record_name])
@@ -671,7 +795,7 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         return EXIT_OUTPUT_UNUSABLE
     finally:
         shutil.rmtree(out / PARTIAL, ignore_errors=True)
-    code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported)
+    code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported, unfinished)
     result_line(recipe, record, word)
     return code
 

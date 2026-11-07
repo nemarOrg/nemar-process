@@ -118,13 +118,21 @@ def names_where(names: list[str], mask: np.ndarray) -> list[str]:
     return [name for name, flag in zip(names, mask, strict=True) if flag]
 
 
-def process(loaded: Loaded) -> FloorResult:
+def process(
+    loaded: Loaded,
+    *,
+    recipe_id: str = steps.RECIPE_ID,
+    recipe_version: str = steps.RECIPE_VERSION,
+) -> FloorResult:
     """Run the floor on a loaded recording. Consumes ``loaded.eeg``.
+
+    A recipe that embeds the floor passes its own ``recipe_id`` and ``recipe_version``, which name
+    the plan; the steps and their parameters are the floor's either way.
 
     Every step, the bookkeeping that records it included, runs inside ``guarded(step)``: whatever
     it raises is that step's failure, with the step named, and never an anonymous internal error.
     """
-    recipe = plans.Plan(steps.RECIPE_ID, steps.RECIPE_VERSION)
+    recipe = plans.Plan(recipe_id, recipe_version)
     eeg = loaded.take()  # the floor owns it from here; the raw copy is not kept
 
     # 1 load (done by the loader; recorded here with what it reported)

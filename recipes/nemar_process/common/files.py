@@ -12,9 +12,11 @@ import contextlib
 import hashlib
 import json
 import math
+import numbers
 import os
 import secrets
-from collections.abc import Mapping, Sequence
+import unicodedata
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,62 @@ def tsv_text(
             "\t".join(tsv_cell(v, places.get(c)) for c, v in zip(columns, row, strict=True))
         )
     return "\n".join(lines) + "\n"
+
+
+def matrix_cell(value: Any) -> str:
+    """One number of a matrix, as 17 significant digits: a float64 is read back exactly."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError("a matrix cell is a number: {!r}".format(value))
+    try:
+        number = float(value)
+    except OverflowError:  # an integer too large for a float64
+        raise ValueError("a value too large for a float64 cannot be written") from None
+    if not math.isfinite(number):
+        raise ValueError("a value that is not finite cannot be written: {!r}".format(value))
+    return format(number, ".17g")
+
+
+def _label_character(character: str) -> bool:
+    """A character a header label may hold: not a control character (tab and line ends included),
+    not a Unicode line or paragraph separator (``str.splitlines`` splits on them), not a double quote
+    (a CSV reader would take the label for a quoted field)."""
+    return character != '"' and unicodedata.category(character) not in ("Cc", "Zl", "Zp")
+
+
+def matrix_text(rows: Iterable[Any], columns: Sequence[str]) -> str:
+    """A header of the column labels, then one line per row: no row-label column.
+
+    The labels name the columns and are unique, so the header cannot be mistaken for a row of data
+    or split into other columns than the ones it names.
+    """
+    if not columns:
+        raise ValueError("a matrix has at least one column")
+    for label in columns:
+        if not label or not all(_label_character(c) for c in label):
+            raise ValueError(
+                "a matrix column label is text without control characters, line separators or quotes"
+            )
+    if len(set(columns)) != len(columns):
+        raise ValueError("a matrix column label appears twice")
+    lines = ["\t".join(columns)]
+    count = 0
+    for row in rows:
+        count += 1
+        if len(row) != len(columns):
+            raise ValueError("a row has {} cells for {} columns".format(len(row), len(columns)))
+        lines.append("\t".join(matrix_cell(value) for value in row))
+    if count == 0:
+        raise ValueError("a matrix has at least one row")
+    return "\n".join(lines) + "\n"
+
+
+def write_matrix_tsv(path: Path, rows: Iterable[Any], columns: Sequence[str]) -> None:
+    """Write a numeric matrix as text a consumer reads back to the same float64 values.
+
+    ``rows`` are sequences of numbers, one per row, or a two-dimensional NumPy array. Every value is ``format(x, ".17g")``; a value that is not a
+    finite real number is refused before anything is written.
+    """
+    write_text(path, matrix_text(rows, columns))
 
 
 def json_text(value: Any) -> str:

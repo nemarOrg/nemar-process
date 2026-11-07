@@ -197,6 +197,10 @@ class Plan:
     steps: list[PlanStep] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     rules: list[str] = field(default_factory=list)
+    # ("step" or "skip", step id) in the order each happened; kept for ``hash_as``, never written.
+    _events: list[tuple[str, str]] = field(
+        default_factory=list, init=False, repr=False, compare=False
+    )
 
     def add_step(
         self,
@@ -218,10 +222,12 @@ class Plan:
             quality=dict(quality or {}),
         )
         self.steps.append(step)
+        self._events.append(("step", step_id))
         return step
 
     def add_skip(self, step_id: str, function: str, reason: str) -> None:
         self.skipped.append({"step_id": step_id, "function": function, "reason": reason})
+        self._events.append(("skip", step_id))
 
     def add_rule(self, name: str) -> None:
         if name not in self.rules:
@@ -237,6 +243,34 @@ class Plan:
                 self.recipe_version,
                 [(s.step_id, s.function, s.parameters) for s in self.steps],
                 self.skipped,
+            )
+        )
+
+    def hash_as(self, recipe_id: str, version: str, upto_step: str) -> str:
+        """The hash this plan's first steps would have had as the plan of another recipe.
+
+        A recipe that embeds another's steps (``nemar-ica`` runs the floor first) states the hash its
+        embedded part has under the embedded recipe's own name and version, so that its records can
+        be told apart by the floor decisions they share. The prefix is everything executed or
+        skipped up to and including ``upto_step`` (a step that ran or one that was skipped); what
+        came after, a skip included, is left out. The result equals ``hash()`` of a plan that had
+        only that prefix and was named ``recipe_id`` at ``version``.
+        """
+        if len(self._events) != len(self.steps) + len(self.skipped):
+            raise ValueError("the order of this plan is unknown: a skip was not added by add_skip")
+        names = [name for _, name in self._events]
+        if upto_step not in names:
+            raise ValueError(
+                "{} is neither a step nor a skipped step of this plan".format(upto_step)
+            )
+        prefix = self._events[: names.index(upto_step) + 1]
+        ran = sum(1 for kind, _ in prefix if kind == "step")
+        return plan_hash(
+            _resolved(
+                recipe_id,
+                version,
+                [(s.step_id, s.function, s.parameters) for s in self.steps[:ran]],
+                self.skipped[: len(prefix) - ran],
             )
         )
 
