@@ -376,12 +376,50 @@ def test_a_matrix_row_of_the_wrong_width_is_refused(tmp_path):
         files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0]], ["a", "b"])
 
 
-def test_matrix_labels_that_would_break_the_header_are_refused(tmp_path):
-    for labels in (["a\tb", "c"], ["a", "c\n"], ["a", ""], ["a", "a"]):
-        with pytest.raises(ValueError, match="label"):
-            files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], labels)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "a\tb",
+        "c\n",
+        "c\r",
+        "",
+        'say "x"',
+        "a\u2028b",  # line separator: str.splitlines splits on it
+        "a\u2029b",  # paragraph separator
+        "a\x00b",
+        "a\x0bb",  # vertical tab
+        "a\x85b",  # next line
+        "a\x1bb",
+    ],
+)
+def test_matrix_labels_that_would_break_the_header_are_refused(tmp_path, bad):
+    with pytest.raises(ValueError, match="label"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], ["fine", bad])
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_a_matrix_with_no_rows_is_its_header_alone(tmp_path):
-    files.write_matrix_tsv(tmp_path / "m.tsv", [], ["a", "b"])
-    assert (tmp_path / "m.tsv").read_text(encoding="utf-8") == "a\tb\n"
+def test_matrix_labels_that_repeat_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="label"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], ["a", "a"])
+
+
+def test_ordinary_labels_with_spaces_and_non_ascii_are_kept(tmp_path):
+    files.write_matrix_tsv(tmp_path / "m.tsv", [[1.0, 2.0]], ["IC 1", "Fp1-\u00e9"])
+    text = (tmp_path / "m.tsv").read_text(encoding="utf-8")
+    assert text.splitlines() == ["IC 1\tFp1-\u00e9", "1\t2"]
+
+
+def test_a_matrix_with_no_rows_or_no_columns_is_refused_and_leaves_no_file(tmp_path):
+    with pytest.raises(ValueError, match="row"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [], ["a", "b"])
+    with pytest.raises(ValueError, match="column"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[], []], [])
+    with pytest.raises(ValueError, match="column"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [], [])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_integer_too_large_for_a_float_is_the_same_clean_refusal(tmp_path):
+    with pytest.raises(ValueError, match="too large"):
+        files.write_matrix_tsv(tmp_path / "m.tsv", [[10**400]], ["a"])
+    assert list(tmp_path.iterdir()) == []
