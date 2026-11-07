@@ -305,9 +305,14 @@ Still unconfirmed, each to be confirmed on the tenant:
   `squeue --start` is asked with an explicit format (`%i|%P|%T|%S`), which the manual says overrides the one `--start` implies; which jobs `sacct -X -S -E` selects for a day, and the time zone of its times, are also unconfirmed.
   A state word or reason the observer has not seen is carried as printed, and a row in another format is counted, never guessed at.
 - **The receiving route and the observation contract.**
-  `POST` of a `nemar.observation.v1` document with a bearer token is NEMAR's, built in the gateway epic; the observer is tested against a stand-in of it, and its header comment is the only description of the document today.
-  Phase A7 must pin the contract in BOTH repositories: a JSON Schema in nemar-cli's shared contract, a run identifier that is the Tapis job's UUID so a retried post is idempotent, a per-run token separate from every job's token, a 2xx answer with no redirect, and `raw_lines` treated as untrusted text.
-  This pull request is safe to merge before that, because the observer does nothing until NEMAR submits it.
+  `POST` of a `nemar.observation.v1` document with `Authorization: Bearer <token>` is NEMAR's route in nemar-cli, and its Worker takes the document as this observer writes it (the owner decided that on 2026-11-06; the observer was not changed).
+  The document is pinned in both repositories by one JSON Schema, `observer/schema/observation-v1.schema.json`, written in nemar-cli and copied byte for byte ([contracts](contracts.md)); every document the observer tests post is checked against it, and the two fixtures the observer wrote are held in both repositories.
+  What stays unconfirmed: the Worker has been tested against those documents and not against a cluster's; the token is for one run and the Worker spends it on the first post it accepts, so a retry after an answer was lost is refused (the observer reports it as not delivered); and `raw_lines` is treated by the Worker as text it only validates and never stores.
+  The row cap and the byte cap differ: this observer cuts its export by bytes only (1 MiB, from the end) and the Worker refuses more than 5,000 rows (partitions and accounting jobs together).
+  A busy day of short rows can pass 5,000 jobs inside 1 MiB, and the document is then refused on every retry (`too_big`), so that day never settles.
+  The observer is not changed for this; it is an open item for the observer-dispatch phase (a row cap in the observer, a larger Worker bound, or reading the day in parts).
+  The Worker also refuses a whole document for one allocation item it cannot read, or for a row with elapsed time and no `cpu` or no `node` item, rather than skipping the row; the owner is asked to confirm that choice (nemar-cli ADR 0118, amendment of 2026-11-06).
+  A token has to be minted for every run, including each 15-minute `quick` run, which is the operator's procedure and is not decided here.
 
 ### Also listed above
 
