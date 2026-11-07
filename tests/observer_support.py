@@ -4,8 +4,8 @@ NONE OF THIS WAS CAPTURED FROM A CLUSTER OR FROM NEMAR'S API. The Slurm text fol
 Slurm manual documents for ``sinfo -o``, ``squeue -o`` and ``sacct --format`` (state words as the
 manual lists them, ``*`` after a default partition, ``N/A`` for an unknown start); the allocation
 client's table follows the example in the public Expanse user guide, with the project and user names
-replaced; and the receiving route is a stand-in for the NEMAR route that Epic A builds and that does
-not exist yet.
+replaced; and the receiving route is a stand-in for NEMAR's route, which takes the document this
+observer writes (the JSON Schema is shared with nemar-cli; docs/contracts.md).
 
 Python 3.9 compatible: the observer tests run on the observer's own floor.
 """
@@ -20,8 +20,14 @@ from pathlib import Path
 from typing import Any
 
 import observe
+from jsonschema import Draft202012Validator
 from server import Request, Response, StandinServer
 from slurm import SlurmBin
+
+ROOT = Path(__file__).resolve().parents[1]
+# The document's JSON Schema: written in nemar-cli, copied here byte for byte (docs/contracts.md).
+SCHEMA_PATH = ROOT / "observer" / "schema" / "observation-v1.schema.json"
+FIXTURE_DIR = Path(__file__).resolve().parent / "observer" / "fixtures"
 
 TOKEN = "obs-6f2a91c0d4-NOT-A-REAL-TOKEN"
 ROUTE = "/compute/observer"
@@ -92,8 +98,23 @@ def default_bin(root: Path) -> SlurmBin:
     )
 
 
+def schema_validator() -> Any:
+    return Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+
+
+def schema_problems(document: Any) -> list[str]:
+    """What is wrong with ``document`` against the shared schema, as ``path: message`` lines (none if valid)."""
+    errors = sorted(schema_validator().iter_errors(document), key=lambda e: list(map(str, e.path)))
+    return ["/".join(map(str, e.path)) + ": " + e.message[:200] for e in errors[:10]]
+
+
 class ObserverRoute:
-    """A stand-in for NEMAR's observer route: records what arrives, answers a scripted sequence."""
+    """A stand-in for NEMAR's observer route: records what arrives, answers a scripted sequence.
+
+    ``bodies()`` hands back each posted document only after checking it against the schema shared with
+    nemar-cli, so every test that reads what the observer posted also proves that it is a valid
+    ``nemar.observation.v1`` document.
+    """
 
     def __init__(self, answers: Sequence[int | Response] | None = None) -> None:
         self.answers = list(answers) if answers else [200]
@@ -110,7 +131,10 @@ class ObserverRoute:
         return Response.json_body(answer, {"echo": request.headers.get("authorization", "")})
 
     def bodies(self) -> list[dict[str, Any]]:
-        return [json.loads(r.body.decode("utf-8")) for r in self.requests]
+        documents = [json.loads(r.body.decode("utf-8")) for r in self.requests]
+        for document in documents:
+            assert schema_problems(document) == []
+        return documents
 
 
 def base_env(slurm: SlurmBin, server: StandinServer, **extra: str) -> dict[str, str]:

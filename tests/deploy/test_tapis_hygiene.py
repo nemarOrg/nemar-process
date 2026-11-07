@@ -34,7 +34,16 @@ SCANNED = [ts.ROOT / "deploy", ts.ROOT / "observer"]
 EXCLUDED = [ts.OPENAPI, ts.SCHEMAS]
 SUFFIXES = {"", ".json", ".tmpl", ".env", ".py", ".sh", ".md", ".txt", ".yml", ".yaml", ".toml"}
 
-ALLOWED_HOSTS = {"127.0.0.1", "localhost", "github.com", "example.org", "example.com"}
+# json-schema.org is the name of the draft in a schema's `$schema` (observer/schema/); it is an identifier
+# and no program here connects to it.
+ALLOWED_HOSTS = {
+    "127.0.0.1",
+    "localhost",
+    "github.com",
+    "example.org",
+    "example.com",
+    "json-schema.org",
+}
 TLDS = "edu|org|com|net|io|gov|dev|app|info|cloud"
 
 HOST_URL = re.compile(r"\bhttps?://([A-Za-z0-9.-]+)")

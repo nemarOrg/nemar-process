@@ -206,6 +206,9 @@ jobs:
       # In CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
       NEMAR_REQUIRE_TAPIS_DRIFT: "1"
       NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
+      # ... nor the comparison of the observation schema and fixtures with nemar-cli's.
+      NEMAR_REQUIRE_OBSERVATION_DRIFT: "1"
+      NEMAR_CLI_OBSERVATION_DIR: ${{ github.workspace }}/.nemar-cli-observation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -222,6 +225,22 @@ jobs:
           sparse-checkout: |
             /backend/src/services/tapis/
             /shared/contract/compute.ts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Read the nemar-cli pin of the observation schema
+        id: observation-pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the observation schema and fixtures are compared with its own)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.observation-pin.outputs.ref }}
+          path: .nemar-cli-observation
+          sparse-checkout: |
+            /shared/contract/compute-observation.schema.json
+            /test/fixtures/compute-observation/
           sparse-checkout-cone-mode: false
           fetch-depth: 1
 
@@ -242,7 +261,7 @@ jobs:
           uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
 
       - name: Observer tests on its Python floor (3.9)
-        run: uv run --no-project --python 3.9 --with pytest pytest tests/observer
+        run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/observer
 
   nemar-cli-latest:
     # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.
