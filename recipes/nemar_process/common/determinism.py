@@ -16,6 +16,7 @@ import json
 import math
 import os
 import platform
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from importlib import metadata
 from typing import Any
@@ -71,11 +72,29 @@ def thread_pools() -> list[dict[str, Any]]:
     return sorted(pools, key=lambda pool: (pool["api"], str(pool["version"]), pool["num_threads"]))
 
 
-def engine_info(limit: int = 1) -> dict[str, Any]:
-    """The engine stamp: versions, the thread pin, the pools found and the variables seen."""
+def run_seeds(extra: Mapping[str, int] | None = None) -> dict[str, int]:
+    """The seeds a run records: the engine's, then the recipe's own.
+
+    A recipe cannot change a seed the engine fixes, so one of the same name is refused. The result
+    is a copy: a run never edits ``SEEDS``.
+    """
+    seeds = dict(SEEDS)
+    for name, value in (extra or {}).items():
+        if name in seeds:
+            raise ValueError("{} is a seed the engine fixes".format(name))
+        seeds[name] = value
+    return seeds
+
+
+def engine_info(limit: int = 1, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The engine stamp: versions, the thread pin, the pools found and the variables seen.
+
+    ``extra`` are the recipe's fields (``Recipe.engine_extra``): plain JSON values under names the
+    stamp does not already use.
+    """
     import numpy
 
-    return {
+    stamp: dict[str, Any] = {
         "package": "eegprep",
         "version": metadata.version("eegprep"),
         "python": platform.python_version(),
@@ -86,6 +105,15 @@ def engine_info(limit: int = 1) -> dict[str, Any]:
         "environment": {name: os.environ.get(name) for name in RECORDED_ENVIRONMENT},
         "commonLayer": COMMON_VERSION,
     }
+    for name, value in (extra or {}).items():
+        if name in stamp:
+            raise ValueError("{} is a field the engine stamp already has".format(name))
+        try:
+            canonical_json(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("the engine field {} is not plain JSON".format(name)) from error
+        stamp[name] = value
+    return stamp
 
 
 def utc_now() -> str:
