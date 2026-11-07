@@ -12,7 +12,7 @@ private directory, and return the product; it moves nothing into place and appen
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,13 +166,17 @@ def table_row(recording: Recording, result: FloorResult, content_sha256: str) ->
 
 @dataclass(frozen=True)
 class Product:
-    """One file of a recording's product: its name, the step that made it and how to write it."""
+    """One file of a recording's product: its name, the step that made it and how to write it.
+
+    ``write`` returns the optional fields the file's entry in the record carries (``shape``,
+    ``dtype``, ``rowLabels``, ``columnLabels``, ``encoding``: see ``records.output_entry``), or None.
+    """
 
     suffix: str
     extension: str
     step_id: str
     description: str
-    write: Callable[[Path], None]
+    write: Callable[[Path], Mapping[str, Any] | None]
 
 
 def write_product(
@@ -181,13 +185,31 @@ def write_product(
     directory: Path,
     result: FloorResult,
     inputs: list[dict[str, Any]],
+    *,
+    info: RecipeInfo | None = None,
+    extra_products: Sequence[Product] = (),
+    summary_extra: Mapping[str, Any] | None = None,
 ) -> RecordingProduct:
-    """Write the recording's files and record into ``directory``; return what was written."""
+    """Write the recording's files and record into ``directory``; return what was written.
+
+    The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the four
+    files are then named with its label, stamped with its name and version and described by its
+    record, and ``result.plan`` is expected to be that recipe's plan. ``extra_products`` are its
+    own files, written after the floor's and listed after them (each belongs to a step of the plan),
+    and ``summary_extra`` its own summary metrics, which may not replace one of the floor's. The
+    identity is looked up when called, not when defined, so a caller that replaces ``INFO`` is
+    honored.
+    """
+    info = INFO if info is None else info
+    label = info.label
 
     def place(suffix: str, extension: str) -> str:
-        return naming.product_path(recording.path, LABEL, suffix, extension)
+        return naming.product_path(recording.path, label, suffix, extension)
 
-    stamp = {"recipe": steps.RECIPE_ID, "recipeVersion": steps.RECIPE_VERSION}
+    stamp = {"recipe": info.id, "recipeVersion": info.version}
+    for product in extra_products:
+        if not result.plan.has_step(product.step_id):
+            raise RecordingError(INTERNAL_ERROR, "record", "unknown_step")
     # the files in the order they are listed: what each is, the step that produced it, how it is written
     jobs = [
         Product(
@@ -230,22 +252,31 @@ def write_product(
             lambda path: files.write_json(path, {**stamp, **result.metrics}),
         ),
     ]
-    written: list[tuple[str, str, records.FileTarget]] = []  # location, role, target
+    jobs += extra_products
+    written: list[tuple[str, str, records.FileTarget, dict[str, Any]]] = []
     for job in jobs:
         location = place(job.suffix, job.extension)
-        job.write(directory / location)
+        entry_fields = dict(job.write(directory / location) or {})
         role = "{}.{}".format(job.suffix, job.extension)
         target = records.FileTarget(job.step_id, location, job.extension.upper(), job.description)
-        written.append((location, role, target))
+        written.append((location, role, target, entry_fields))
 
+    metrics = summary_metrics(result)
+    for name in summary_extra or {}:
+        if name in metrics:
+            raise ValueError("{} is a summary metric of the floor".format(name))
+    metrics.update(summary_extra or {})
     record = records.build_recording_record(
-        INFO,
+        info,
         result.plan,
         recording=recording,
-        file_targets=[target for _, _, target in written],
+        file_targets=[target for _, _, target, _ in written],
         inputs=inputs,
-        outputs=[records.output_entry(directory, location, role) for location, role, _ in written],
-        summary_metrics=summary_metrics(result),
+        outputs=[
+            records.output_entry(directory, location, role, **fields)
+            for location, role, _, fields in written
+        ],
+        summary_metrics=metrics,
         context=context,
     )
     problems = records.problems_of(record, context.validator)
@@ -255,7 +286,7 @@ def write_product(
     record_path = place("signalJourney", "json")
     files.write_json(directory / record_path, record)
     return RecordingProduct(
-        files=[location for location, _, _ in written] + [record_path],
+        files=[location for location, _, _, _ in written] + [record_path],
         record=record,
         record_path=record_path,
         row=table_row(recording, result, records.content_sha256(record)),

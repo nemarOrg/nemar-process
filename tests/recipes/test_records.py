@@ -8,6 +8,7 @@ about its files is compared with the files on disk.
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import itertools
 import json
@@ -363,3 +364,46 @@ def test_each_step_of_the_written_record_runs_with_the_pinned_parameters(record)
     # and the drift step is the one whose transition is not eegprep's default
     drift = next(s for s in steps if s["stepId"] == "drift")
     assert drift["parameters"]["transition"] == [0.25, 0.75]
+
+
+# ---- the entries for matrices -----------------------------------------------------------------------
+
+
+def test_an_output_entry_is_the_size_and_digest_of_the_bytes_on_disk(tmp_path):
+    (tmp_path / "a.tsv").write_bytes(b"x\ty\n1\t2\n")
+    entry = records.output_entry(tmp_path, "a.tsv", "unmixing.tsv")
+    assert entry == {
+        "location": "a.tsv",
+        "role": "unmixing.tsv",
+        "size": 8,
+        "sha256": hashlib.sha256(b"x\ty\n1\t2\n").hexdigest(),
+    }
+
+
+def test_an_output_entry_can_carry_what_a_matrix_needs_and_leaves_out_what_is_none(tmp_path):
+    (tmp_path / "a.tsv").write_bytes(b"x\ty\n1\t2\n")
+    entry = records.output_entry(
+        tmp_path,
+        "a.tsv",
+        "unmixing.tsv",
+        shape=[1, 2],
+        dtype="float64",
+        rowLabels=None,
+        columnLabels=["x", "y"],
+        encoding="text/%.17g",
+    )
+    assert entry["shape"] == [1, 2]
+    assert entry["dtype"] == "float64"
+    assert entry["columnLabels"] == ["x", "y"]
+    assert entry["encoding"] == "text/%.17g"
+    assert "rowLabels" not in entry
+    assert {"location", "role", "size", "sha256"} <= set(entry)
+
+
+def test_an_output_entry_with_matrix_fields_still_validates_in_a_record(record, tmp_path):
+    """The schema has no field for the checksums, so they live in the open `extensions.nemar`."""
+    (tmp_path / "a.tsv").write_bytes(b"x\ty\n1\t2\n")
+    entry = records.output_entry(tmp_path, "a.tsv", "m.tsv", shape=[1, 2], dtype="float64")
+    changed = copy.deepcopy(record)
+    changed["extensions"]["nemar"]["outputs"].append(entry)
+    assert sj.validator().validate(changed, raise_exceptions=False) == []
