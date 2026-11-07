@@ -12,9 +12,10 @@ import contextlib
 import hashlib
 import json
 import math
+import numbers
 import os
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,44 @@ def tsv_text(
             "\t".join(tsv_cell(v, places.get(c)) for c, v in zip(columns, row, strict=True))
         )
     return "\n".join(lines) + "\n"
+
+
+def matrix_cell(value: Any) -> str:
+    """One number of a matrix, as 17 significant digits: a float64 is read back exactly."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError("a matrix cell is a number: {!r}".format(value))
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("a value that is not finite cannot be written: {!r}".format(value))
+    return format(number, ".17g")
+
+
+def matrix_text(rows: Iterable[Any], columns: Sequence[str]) -> str:
+    """A header of the column labels, then one line per row: no row-label column.
+
+    The labels name the columns and are unique, so the header cannot be mistaken for a row of data
+    or split into other columns than the ones it names.
+    """
+    for label in columns:
+        if not label or any(c in label for c in "\t\r\n"):
+            raise ValueError("a matrix column label is text without tabs or line ends")
+    if len(set(columns)) != len(columns):
+        raise ValueError("a matrix column label appears twice")
+    lines = ["\t".join(columns)]
+    for row in rows:
+        if len(row) != len(columns):
+            raise ValueError("a row has {} cells for {} columns".format(len(row), len(columns)))
+        lines.append("\t".join(matrix_cell(value) for value in row))
+    return "\n".join(lines) + "\n"
+
+
+def write_matrix_tsv(path: Path, rows: Iterable[Any], columns: Sequence[str]) -> None:
+    """Write a numeric matrix as text a consumer reads back to the same float64 values.
+
+    ``rows`` are sequences of numbers, one per row, or a two-dimensional NumPy array. Every value is ``format(x, ".17g")``; a value that is not a
+    finite real number is refused before anything is written.
+    """
+    write_text(path, matrix_text(rows, columns))
 
 
 def json_text(value: Any) -> str:

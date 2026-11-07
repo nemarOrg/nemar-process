@@ -224,3 +224,117 @@ def test_software_is_eegprep_at_its_version_or_this_layer_at_its_own():
 
 def test_the_one_clock_the_recipes_read_writes_utc_to_the_second():
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", utc_now())
+
+
+# ---- the hash of a prefix, under another recipe's name ----------------------------------------------
+
+
+def longer_plan():
+    """The sample plan under another recipe, with a step of its own after the floor's, and a skip."""
+    made = plan.Plan("nemar-floor", "1.0.0")
+    made.add_step(
+        "flatline",
+        "eegprep.clean_flatlines",
+        {"max_flatline_duration": 5, "max_allowed_jitter": 20},
+        description="Detect flat-line channels",
+    )
+    made.add_skip("line_noise_50", "eegprep.pop_eegfiltnew", "below_threshold")
+    made.add_step(
+        "drift",
+        "eegprep.clean_drifts",
+        {"transition": (0.25, 0.75), "attenuation": 80, "method": "fft"},
+        description="Remove slow drifts",
+    )
+    made.add_skip("later_skip", "eegprep.pop_eegfiltnew", "after_the_prefix")
+    made.add_step(
+        "later",
+        "eegprep.clean_flatlines",
+        {"max_flatline_duration": 9, "max_allowed_jitter": 20},
+        description="A step of the longer recipe",
+    )
+    made.recipe_id, made.recipe_version = "nemar-ica", "1.0.0"
+    return made
+
+
+def prefix_plan():
+    """What the floor itself would have recorded: the longer plan cut after ``drift``."""
+    made = plan.Plan("nemar-floor", "1.0.0")
+    made.add_step(
+        "flatline",
+        "eegprep.clean_flatlines",
+        {"max_flatline_duration": 5, "max_allowed_jitter": 20},
+        description="Detect flat-line channels",
+    )
+    made.add_skip("line_noise_50", "eegprep.pop_eegfiltnew", "below_threshold")
+    made.add_step(
+        "drift",
+        "eegprep.clean_drifts",
+        {"transition": (0.25, 0.75), "attenuation": 80, "method": "fft"},
+        description="Remove slow drifts",
+    )
+    return made
+
+
+def test_the_hash_of_a_prefix_under_the_floors_name_is_the_hash_the_floor_would_have_made():
+    longer = longer_plan()
+    embedded = longer.hash_as("nemar-floor", "1.0.0", "drift")
+    assert embedded == prefix_plan().hash()
+    assert embedded != longer.hash()
+
+
+def test_the_prefix_hash_leaves_out_what_happened_after_the_last_step_of_the_prefix():
+    """A skip that came after the cut, and a step that came after it, are not in the prefix."""
+    longer = longer_plan()
+    assert longer.hash_as("nemar-floor", "1.0.0", "drift") == prefix_plan().hash()
+    # cut earlier: the skip between flatline and drift is the one thing that was added
+    only_flatline = plan.Plan("nemar-floor", "1.0.0")
+    only_flatline.add_step(
+        "flatline",
+        "eegprep.clean_flatlines",
+        {"max_flatline_duration": 5, "max_allowed_jitter": 20},
+        description="x",
+    )
+    assert longer.hash_as("nemar-floor", "1.0.0", "flatline") == only_flatline.hash()
+
+
+def test_the_prefix_hash_takes_the_recipe_name_and_version_it_is_given():
+    longer = longer_plan()
+    assert longer.hash_as("nemar-floor", "1.0.0", "drift") != longer.hash_as(
+        "nemar-floor", "1.0.1", "drift"
+    )
+    assert longer.hash_as("nemar-floor", "1.0.0", "drift") != longer.hash_as(
+        "other", "1.0.0", "drift"
+    )
+
+
+def test_the_prefix_can_end_at_a_step_that_was_skipped():
+    made = longer_plan()
+    cut = made.hash_as("nemar-floor", "1.0.0", "line_noise_50")
+    expected = plan.Plan("nemar-floor", "1.0.0")
+    expected.add_step(
+        "flatline",
+        "eegprep.clean_flatlines",
+        {"max_flatline_duration": 5, "max_allowed_jitter": 20},
+        description="x",
+    )
+    expected.add_skip("line_noise_50", "eegprep.pop_eegfiltnew", "below_threshold")
+    assert cut == expected.hash()
+
+
+def test_a_prefix_that_ends_at_no_step_of_the_plan_is_refused():
+    with pytest.raises(ValueError, match="no_such_step"):
+        longer_plan().hash_as("nemar-floor", "1.0.0", "no_such_step")
+
+
+def test_a_plan_whose_skips_were_not_added_through_add_skip_has_no_order_and_is_refused():
+    made = sample_plan()
+    made.skipped.append({"step_id": "x", "function": "f", "reason": "r"})
+    with pytest.raises(ValueError, match="order"):
+        made.hash_as("nemar-floor", "1.0.0", "drift")
+
+
+def test_the_hash_of_the_whole_plan_under_its_own_name_is_its_hash():
+    made = sample_plan()  # its last event is the skip of line_noise_50
+    assert made.hash_as(made.recipe_id, made.recipe_version, "line_noise_50") == made.hash()
+    # cut before that skip, it is a different plan
+    assert made.hash_as(made.recipe_id, made.recipe_version, "drift") != made.hash()
