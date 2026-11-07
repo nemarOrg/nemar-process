@@ -173,6 +173,17 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   Job authors include `dataset_description.json` and the recording's `channels.tsv`, `electrodes.tsv`, `coordsystem.json` and `eeg.json` and nothing else they can avoid.
 - **The dataset record's size cap** keeps about 300 rows in the record: 312 of 5,000 rows fit in a test with session-level paths, at about 420 bytes a row as indented JSON.
   The rest are in the table file, which is complete and hashed, and the counts, the distributions and the plan variants cover every recording.
+- **What happens to a run that exits 9 or 8, outside this repository.**
+  The command exits 9 (`time_budget_exhausted`) after it wrote its dataset record, and 8 (`engine_unavailable`) before it wrote anything.
+  The launcher records both as `runtime_error` with the detail `entry_failed` and, from its code and its tests (an entry that writes files and then exits 3), still hashes and uploads what the entry wrote and completes the upload; nothing was run with exit 9 or 8 in particular, and no real storage or Worker took the upload.
+  Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost; whether the job is charged for the time used and how; and whether a later run that picks up the recordings the budget left out can be merged with `aggregate` (it exits 9 itself while a `time_budget` row is in the merge, by design, so the later run must replace those rows, not add to them).
+  Epic A's recipe registry should treat that as open before the Worker dispatches a recipe that can exit 9.
+- **The time budget's estimate.**
+  The rule starts a recording only if the time spent plus 1.5 times the slowest recording so far would fit, which assumes the next recording is not much slower than the slowest one seen.
+  The 1.5 is a starting value, not a measurement; the first recording is started unless the budget is already spent, and a dataset whose recordings grow in cost can still run over.
+- **CUDA out-of-memory by name.**
+  The recipes recognize torch's out-of-memory error by the name and module of its class, so torch is never imported for it.
+  The test uses a class made to carry that name and, where torch is installed, torch's own class built by hand; a real GPU running out of memory was not produced, and a torch release that renames the class would make it a plain `step_failed`.
 
 ## The Tapis definitions and the observer
 
