@@ -86,6 +86,7 @@ It records the nemar-cli commit, and the SHA-256 of the schema and of the two fi
   In CI the `deploy` job checks out exactly the pinned commit (sparse) and sets `NEMAR_REQUIRE_OBSERVATION_DRIFT=1`, which turns that skip into a failure.
 - `ObserverRoute.bodies()` in `tests/observer_support.py` checks every document the observer posts against the schema, so each observer test that reads a body also proves it valid.
   `tests/observer/test_observation_schema.py` adds the failure shapes (a command that fails, is missing, hangs or prints another format, an export cut to 1 MiB, odd `sacct` rows), pins the schema's words to the constants in `observe.py`, and refuses documents the observer does not write.
+- An advisory CI job, `nemar-cli-observation-latest`, warns without failing when nemar-cli's compute epic branch has changed the schema or the fixtures since the pinned commit (or when the comparison cannot be made).
 - The committed fixtures must be what the observer writes now; `NEMAR_WRITE_OBSERVATION_FIXTURES=1` rewrites them.
 
 To bump the pin:

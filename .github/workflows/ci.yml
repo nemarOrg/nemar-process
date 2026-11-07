@@ -286,6 +286,35 @@ jobs:
             echo "::warning title=launch schema differs from nemar-cli dev::Bump the pin (docs/contracts.md) once the change is reviewed."
           fi
 
+  nemar-cli-observation-latest:
+    # Advisory: says, without failing, when nemar-cli's compute epic branch has changed the observation
+    # schema or the observer fixtures since the commit the pin `tests/contract/nemar-cli-observation-pin.json`
+    # names, so the copies here are moved deliberately.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compare the pin with the epic branch
+        run: |
+          set -euo pipefail
+          ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')
+          branch=feature/issue-2005-epic-compute-core
+          # The API call comes first and on its own: a failure of it (the pinned commit is not on that
+          # branch yet, the branch is gone once the epic merges, or the commit is unknown) must not read
+          # as "nothing changed".
+          if ! files=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename'); then
+            echo "::warning title=nemar-cli's observation schema could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
+            exit 0
+          fi
+          changed=$(printf '%s\n' "$files" | grep -E '^(shared/contract/compute-observation\.schema\.json$|test/fixtures/compute-observation/)' || true)
+          if [ -n "$changed" ]; then
+            echo "::warning title=nemar-cli's observation schema or fixtures moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Copy them (docs/contracts.md, Bumping the pin), then bump the pin in tests/contract/nemar-cli-observation-pin.json."
+          else
+            echo "the observation schema and fixtures are unchanged since the pin"
+          fi
+
   nemar-cli-tapis-latest:
     # Advisory: says, without failing, when nemar-cli's compute epic branch has changed the files the
     # Tapis definitions are compared with (the client and the contract) since the commit the pin
