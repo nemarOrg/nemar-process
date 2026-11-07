@@ -27,6 +27,7 @@ from typing import Any
 from nemar_process.common import files, naming
 from nemar_process.common import plan as plans
 from nemar_process.common.determinism import canonical_json, rounded, utc_now
+from nemar_process.common.errors import TIME_BUDGET
 from nemar_process.common.io import Recording
 from nemar_process.common.recipe import Recipe, RecipeInfo, RunContext
 
@@ -425,7 +426,7 @@ def build_dataset_record(
         "discovered_count": counts["discovered"],
         "succeeded_count": counts["succeeded"],
         "failed_count": counts["failed"],
-        "pending_count": 0,
+        "pending_count": sum(1 for row in rows if row["code"] == TIME_BUDGET),
         "records": [
             {
                 "path": row["path"],
