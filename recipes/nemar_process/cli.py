@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -58,10 +59,11 @@ import sys
 import time
 import uuid
 import warnings
-from collections.abc import Generator, Sequence
-from dataclasses import dataclass
+from collections.abc import Generator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from importlib import metadata
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from nemar_process import sj
@@ -468,6 +470,11 @@ class TimeBudget:
         self.slowest = max(self.slowest, took)
 
 
+def frozen(options: Mapping[str, Any]) -> MappingProxyType[str, Any]:
+    """A copy of the options that a recording cannot change, nor change for the next one."""
+    return MappingProxyType(copy.deepcopy(dict(options)))
+
+
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     recipe = REGISTRY[args.recipe]
     options = option_values(recipe, args, parser)
@@ -500,20 +507,25 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         except EngineUnavailable as error:
             print("engine_unavailable: {}".format(error.reason), file=sys.stderr)
             return EXIT_ENGINE_UNAVAILABLE
+        # the recipe's seeds and engine fields are checked before anything is created too: a hook
+        # that is refused is a fault of the recipe, named by its hook and the class of the refusal
+        try:
+            seeds = determinism.run_seeds(recipe.seeds)
+        except Exception as error:  # noqa: BLE001
+            print("seeds refused: {}".format(type(error).__name__), file=sys.stderr)
+            return EXIT_INTERNAL
+        try:
+            engine = determinism.engine_info(threads, recipe.engine_extra(options))
+        except Exception as error:  # noqa: BLE001
+            print("engine_extra refused: {}".format(type(error).__name__), file=sys.stderr)
+            return EXIT_INTERNAL
         try:
             prepare_out(out, recipe.label)
         except OutputUnusable as error:
             print("the output directory cannot be used: {}".format(error), file=sys.stderr)
             return EXIT_OUTPUT_UNUSABLE
         started = determinism.utc_now()
-        context = RunContext(
-            dataset_dir,
-            identity,
-            determinism.engine_info(threads, recipe.engine_extra(options)),
-            determinism.run_seeds(recipe.seeds),
-            validator,
-            options,
-        )
+        context = RunContext(dataset_dir, identity, engine, seeds, validator, frozen(options))
         try:
             items, owned = work_items(dataset_dir, args.recording)
             ignored = io.ignored_datatypes(dataset_dir, owned)
@@ -571,7 +583,9 @@ def run_one(
     if not budget.permits():  # only a recording that would have been run is held back
         return row_for(path, "skipped", TIME_BUDGET)
     began = CLOCK()
-    row = process_recording(recipe, target, context, out, counter)
+    # each recording gets its own copy of the options: nothing it does reaches the next one
+    own = replace(context, options=frozen(context.options))
+    row = process_recording(recipe, target, own, out, counter)
     budget.finished(CLOCK() - began)
     return row
 

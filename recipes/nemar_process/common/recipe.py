@@ -185,7 +185,7 @@ class Recipe:
 
     * ``threads``: how many threads every pool is pinned to, recorded in the engine stamp; a number,
       or a function of the options (one engine may need more than another).
-    * ``seeds``: seeds of the recipe's own, added to the engine's (``determinism.SEEDS``) in every
+    * ``seeds``: ``(name, value)`` pairs of the recipe's own (a tuple, so the recipe stays hashable), added to the engine's (``determinism.SEEDS``) in every
       record; a name the engine already has is refused.
     * ``engine_extra``: fields added to the engine stamp (versions, device, the engine chosen); a
       field the stamp already has is refused.
@@ -199,7 +199,7 @@ class Recipe:
     dataset_steps: Callable[[], list[DatasetStep]]
     run_recording: RunRecording
     threads: int | Callable[[Mapping[str, Any]], int] = 1
-    seeds: Mapping[str, int] = field(default_factory=dict)
+    seeds: tuple[tuple[str, int], ...] = ()
     engine_extra: Callable[[Mapping[str, Any]], dict[str, Any]] = _nothing_extra
     options: tuple[Option, ...] = ()
     preflight: Callable[[Mapping[str, Any]], None] = _no_preflight

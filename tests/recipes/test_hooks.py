@@ -107,7 +107,8 @@ def nemar_of(out):
 
 def test_the_floor_asks_for_nothing_extra():
     assert RECIPE.options == ()
-    assert RECIPE.seeds == {}
+    assert RECIPE.seeds == ()
+    assert isinstance(hash(RECIPE), int)  # a frozen recipe stays hashable: no mutable default
     assert RECIPE.threads_for({}) == 1
     assert RECIPE.engine_extra({}) == {}
     assert RECIPE.preflight({}) is None
@@ -238,7 +239,7 @@ def test_the_threads_are_put_back_when_the_run_ends(tmp_path, cli, monkeypatch, 
 
 
 def test_a_recipes_seeds_join_the_engines_in_every_record(tmp_path, cli, monkeypatch, clock):
-    register(monkeypatch, seeds={"toy.seed": 42}, run_recording=timed(clock, 1))
+    register(monkeypatch, seeds=(("toy.seed", 42),), run_recording=timed(clock, 1))
     code, _, _, out = run_toy(cli, tmp_path, dataset_of(tmp_path / "d", 1))
     assert code == 0
     assert nemar_of(out)["seeds"] == {**determinism.SEEDS, "toy.seed": 42}
@@ -250,10 +251,10 @@ def test_a_recipes_seeds_join_the_engines_in_every_record(tmp_path, cli, monkeyp
 
 def test_a_seed_may_not_replace_one_the_engine_fixes():
     with pytest.raises(ValueError, match=r"clean_channels\.ransac"):
-        determinism.run_seeds({"clean_channels.ransac": 1})
-    assert determinism.run_seeds({}) == determinism.SEEDS
+        determinism.run_seeds((("clean_channels.ransac", 1),))
+    assert determinism.run_seeds(()) == determinism.SEEDS
     assert (
-        determinism.run_seeds({}) is not determinism.SEEDS
+        determinism.run_seeds(()) is not determinism.SEEDS
     )  # a copy: a run never edits the constant
 
 
@@ -270,6 +271,54 @@ def test_engine_fields_join_the_stamp_and_may_not_replace_one_of_its_own():
 def test_engine_fields_that_are_not_plain_json_are_refused():
     with determinism.pinned_threads(), pytest.raises(ValueError, match="icaEngine"):
         determinism.engine_info(1, {"icaEngine": float("nan")})
+
+
+# ---- hooks that are refused, and what a recording may change ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("changes", "word"),
+    [
+        ({"seeds": (("clean_channels.ransac", 1),)}, "seeds refused: ValueError"),
+        ({"engine_extra": lambda options: {"threads": 99}}, "engine_extra refused: ValueError"),
+        (
+            {"engine_extra": lambda options: {"icaEngine": float("nan")}},
+            "engine_extra refused: ValueError",
+        ),
+        ({"engine_extra": lambda options: 1 / 0}, "engine_extra refused: ZeroDivisionError"),
+    ],
+)
+def test_a_hook_that_is_refused_ends_the_run_before_anything_is_created(
+    changes, word, tmp_path, cli, monkeypatch, clock
+):
+    register(monkeypatch, run_recording=timed(clock, 1), **changes)
+    code, stdout, stderr, out = run_toy(cli, tmp_path, dataset_of(tmp_path / "d", 1))
+    assert code == 1
+    assert stderr.strip().splitlines()[-1] == word
+    assert stdout == ""
+    assert not out.exists()
+
+
+def test_the_options_a_recording_sees_cannot_be_changed_and_one_cannot_leak_to_the_next(
+    tmp_path, cli, monkeypatch, clock
+):
+    listing = Option("names", "--names", lambda text: text.split(","), ["a"], "a list")
+    seen, outcomes = [], []
+
+    def meddling(recording, context, directory, *, loaded=None):
+        try:
+            context.options["names"] = ["changed"]
+        except TypeError:
+            outcomes.append("top-level refused")
+        context.options["names"].append("leaked")  # nested: this recording's own copy
+        seen.append(list(context.options["names"]))
+        return outputs.run_recording(recording, context, directory, loaded=loaded)
+
+    register(monkeypatch, options=(listing,), run_recording=meddling)
+    code, _, _, _ = run_toy(cli, tmp_path, dataset_of(tmp_path / "d", 2), "--names", "x,y")
+    assert code == 0
+    assert outcomes == ["top-level refused"] * 2
+    assert seen == [["x", "y", "leaked"]] * 2  # the second recording did not see the first's edit
 
 
 # ---- the preflight: exit 8 ---------------------------------------------------------------------------------------
@@ -388,7 +437,7 @@ def test_an_unfinished_dataset_has_its_record_written_and_counts_the_rest_as_ski
     assert nemar["counts"] == {"discovered": 4, "succeeded": 2, "failed": 0, "skipped": 2}
     skipped = [r for r in nemar["report"]["records"] if r["code"] == "time_budget"]
     assert [r["status"] for r in skipped] == ["skipped", "skipped"]
-    assert nemar["report"]["pending_count"] == 0
+    assert nemar["report"]["pending_count"] == 2  # the recordings the budget left unstarted
     # what was finished is whole, and what was not left nothing behind
     done = sorted(p.name for p in out.rglob("*_desc-nemarfloor_signalJourney.json"))
     assert len(done) == 2

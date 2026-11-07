@@ -16,7 +16,7 @@ import json
 import math
 import os
 import platform
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from importlib import metadata
 from typing import Any
@@ -72,14 +72,14 @@ def thread_pools() -> list[dict[str, Any]]:
     return sorted(pools, key=lambda pool: (pool["api"], str(pool["version"]), pool["num_threads"]))
 
 
-def run_seeds(extra: Mapping[str, int] | None = None) -> dict[str, int]:
+def run_seeds(extra: Iterable[tuple[str, int]] = ()) -> dict[str, int]:
     """The seeds a run records: the engine's, then the recipe's own.
 
     A recipe cannot change a seed the engine fixes, so one of the same name is refused. The result
     is a copy: a run never edits ``SEEDS``.
     """
     seeds = dict(SEEDS)
-    for name, value in (extra or {}).items():
+    for name, value in extra:
         if name in seeds:
             raise ValueError("{} is a seed the engine fixes".format(name))
         seeds[name] = value
