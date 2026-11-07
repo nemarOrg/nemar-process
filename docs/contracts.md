@@ -11,6 +11,7 @@ Abbreviations: continuous integration (CI), JavaScript Object Notation (JSON), S
 | The launcher file names, the environment names (including `NEMAR_SIF_ROOT`), the environment allowlist, the output limits | `shared/contract/compute.ts` (`LAUNCHER_FILE_NAMES`, `LAUNCHER_ENV`, `JOB_ENV_ALLOWLIST`, `COMPUTE_MAX_OUTPUT_FILES`, `RESULT_MAX_FILE_BYTES`) | `launcher/nemar_launch/codes.py` and the schema's `env` |
 | The declared details per failure code, and which are the platform's | `shared/compute-state.ts` (`LAUNCHER_DETAILS`, `PLATFORM_LAUNCHER_DETAILS`, `RESULT_REFUSAL_DETAILS`) | `codes.LAUNCHER_DETAILS`, `codes.PLATFORM_LAUNCHER_DETAILS`, `codes.RESULT_REFUSAL_DETAILS` |
 | The wire form of `NEMAR_LAUNCH_SPEC`: the alphabet, the cap on the value (87,382 characters) and the five words of a refusal | `shared/contract/compute-launch.ts` (`SHELL_INERT_ENV_ALPHABET`, `LAUNCH_SPEC_ENV_MAX_CHARS`, `LAUNCH_SPEC_ENV_REFUSALS`, and `decodeLaunchSpecEnv`, whose rules the launcher mirrors in order) | `launcher/nemar_launch/spec.py` (`WIRE_ALPHABET`, `WIRE_MAX_CHARS`, `WIRE_REASONS`, `decode_wire`) |
+| The observation document `nemar.observation.v1` the observer posts to NEMAR: a JSON Schema (draft 2020-12, every object closed) derived from `observer/observe.py`, and the two documents the observer wrote (a `quick` and a `daily` one) | `shared/contract/compute-observation.schema.json`, `test/fixtures/compute-observation/{quick,daily}.v1.json` | `observer/schema/observation-v1.schema.json`, byte for byte; `tests/observer/fixtures/observation-{quick,daily}.v1.json`, byte for byte |
 | The table of wire cases: about five hundred values of `NEMAR_LAUNCH_SPEC`, each with the answer the contract gives (every rule, every edge, the order of the rules) | nemar-cli's `decodeLaunchSpecEnv`, written out by `scripts/gen_wire_cases.ts` | `tests/launcher/fixtures/wire_cases.json`, replayed by `tests/launcher/test_wire_cases.py` |
 | The golden vectors: the JSON text and its digest, and the environment value (1022 and 842 characters, the second holding `-` and `_`) and its digest | nemar-cli's `test/compute-contract.unit.test.ts` | `tests/launcher/test_golden.py` |
 
@@ -70,3 +71,36 @@ The bump checklist, in full:
 5. update `docs/launcher.md` (the codes and details tables) and `docs/unverified.md`;
 6. regenerate `tests/launcher/fixtures/wire_cases.json` (the commands above) and read the diff of its rows: a row that changed is a rule that changed, and `decode_wire` follows it, with its words, in the same change;
 7. run every gate, including the 3.9 leg, with `NEMAR_CLI_DIR` pointing at the checkout (at the pinned commit, dependencies installed) so no drift test skips.
+
+## The observation document
+
+The observer posts one `nemar.observation.v1` document with `Authorization: Bearer <token>`, and nemar-cli's Worker takes that document as it is: the Worker adopted the observer's shape and the observer was not changed.
+The schema is written in nemar-cli (the Worker owns what it accepts) and copied here, and it was derived from what `observer/observe.py` emits, so a change to the document is made there and copied here, never edited in one copy.
+
+It has its own pin, `tests/contract/nemar-cli-observation-pin.json`, apart from the launch specification's, so the observer's contract moves without the wire-case table.
+It records the nemar-cli commit, and the SHA-256 of the schema and of the two fixtures.
+
+- `test_the_schema_copy_is_the_pinned_bytes` and `test_the_fixture_copies_are_the_pinned_bytes` need no checkout and always run.
+- `test_the_copies_match_nemar_cli_at_the_pinned_ref` and `test_the_fixtures_match_nemar_cli_at_the_pinned_ref` compare with nemar-cli's own files at the pinned commit through `git show`, using a checkout named by `NEMAR_CLI_OBSERVATION_DIR` or a `nemar-cli` directory beside this checkout.
+  Without one they skip with a message that says the check did not run.
+  In CI the `deploy` job checks out exactly the pinned commit (sparse) and sets `NEMAR_REQUIRE_OBSERVATION_DRIFT=1`, which turns that skip into a failure.
+- `ObserverRoute.bodies()` in `tests/observer_support.py` checks every document the observer posts against the schema, so each observer test that reads a body also proves it valid.
+  `tests/observer/test_observation_schema.py` adds the failure shapes (a command that fails, is missing, hangs or prints another format, an export cut to 1 MiB, odd `sacct` rows), pins the schema's words to the constants in `observe.py`, and refuses documents the observer does not write.
+- The committed fixtures must be what the observer writes now; `NEMAR_WRITE_OBSERVATION_FIXTURES=1` rewrites them.
+
+To bump the pin:
+
+```bash
+NEMAR_CLI=/path/to/nemar-cli          # a checkout that contains the new commit
+REF=<the new nemar-cli commit, 40 hex digits>
+git -C "$NEMAR_CLI" show "$REF:shared/contract/compute-observation.schema.json" > observer/schema/observation-v1.schema.json
+git -C "$NEMAR_CLI" show "$REF:test/fixtures/compute-observation/quick.v1.json" > tests/observer/fixtures/observation-quick.v1.json
+git -C "$NEMAR_CLI" show "$REF:test/fixtures/compute-observation/daily.v1.json" > tests/observer/fixtures/observation-daily.v1.json
+shasum -a 256 observer/schema/observation-v1.schema.json tests/observer/fixtures/*.json && wc -c < observer/schema/observation-v1.schema.json
+# edit tests/contract/nemar-cli-observation-pin.json: ref, the schema's sha256 and bytes, the fixtures' sha256
+NEMAR_CLI_OBSERVATION_DIR="$NEMAR_CLI" NEMAR_REQUIRE_OBSERVATION_DRIFT=1 uv run pytest tests/observer
+```
+
+If the observer's output changed, regenerate the fixtures with `NEMAR_WRITE_OBSERVATION_FIXTURES=1 uv run pytest tests/observer/test_observation_schema.py`, change the schema in nemar-cli, and copy all three back.
+The observer's own file, `observer/observe.py`, is inside the digest recorded in the application (`notes.observer_sha256`), so a change to what it emits is a new observer version.
+The pinned commit must stay reachable from a branch or tag of nemar-cli; when the change lands on the compute epic branch or `dev`, bump the pin to the commit there that holds the same files.
