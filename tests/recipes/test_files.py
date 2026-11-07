@@ -348,6 +348,9 @@ def test_a_matrix_round_trips_float64_exactly(tmp_path):
 
 
 def test_a_matrix_takes_numpy_values_and_integers(tmp_path):
+    from recipe_support import require_runtime
+
+    require_runtime()  # NumPy is in the runtime environment only; this module runs without it
     import numpy as np
 
     path = tmp_path / "m.tsv"
