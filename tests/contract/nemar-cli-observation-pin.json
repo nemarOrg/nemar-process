@@ -1,7 +1,7 @@
 {
   "comment": "The nemar-cli commit the observation schema and the two observer fixtures are copied from. The schema is written in nemar-cli (shared/contract/compute-observation.schema.json) and copied here byte for byte; the fixtures are what this observer writes, and nemar-cli holds the same bytes. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/observer/test_observation_schema.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
-  "ref": "6e4e8b6bcd441fa00112d793358c5d18f0bd79e0",
+  "ref": "91945d93489cd43ed2b9653b82a25e73fb0c2d99",
   "schema": {
     "source": "shared/contract/compute-observation.schema.json",
     "copy": "observer/schema/observation-v1.schema.json",
