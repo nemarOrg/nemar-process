@@ -271,9 +271,9 @@ def get_json(url: str, *, limit: int) -> Any:
 class Checker:
     """How to verify a downloaded file: its size and, when known, its checksum.
 
-    ``algorithm`` is an annex backend name (``SHA256E``, ``SHA256``, ``SHA512``, ``SHA512E``) or
-    ``git`` (the blob SHA-1 git computes), in any case: the live data plane spells an annexed
-    SHA-256 ``sha256``, and a name means the same algorithm whatever its case. ``known`` says
+    ``algorithm`` is ``sha256``, ``md5`` or ``git`` (the blob SHA-1 git computes), the three the live
+    data plane serves, or an annex backend spelling (``SHA256``, ``SHA256E``, ``SHA512``,
+    ``SHA512E``, ``MD5``, ``MD5E``), in any case: a name means the same algorithm whatever its case. ``known`` says
     whether the name is one of these; a caller refuses an entry that has a checksum under a name
     that is not, because it cannot be verified and must never be passed on a size check alone. An
     entry with no checksum has nothing to verify: ``verifiable`` says which.
@@ -285,6 +285,8 @@ class Checker:
         "SHA256E": "sha256",
         "SHA512": "sha512",
         "SHA512E": "sha512",
+        "MD5": "md5",
+        "MD5E": "md5",
     }
     _GIT = "GIT"
 
