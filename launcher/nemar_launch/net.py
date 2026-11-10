@@ -271,35 +271,43 @@ def get_json(url: str, *, limit: int) -> Any:
 class Checker:
     """How to verify a downloaded file: its size and, when known, its checksum.
 
-    ``algorithm`` is an annex backend name (``SHA256E``, ``SHA256``) or ``git`` (the blob SHA-1 git
-    computes). Anything else cannot be verified here and is checked by size only, as is an entry with
-    no checksum: ``verifiable`` says which.
+    ``algorithm`` is an annex backend name (``SHA256E``, ``SHA256``, ``SHA512``, ``SHA512E``) or
+    ``git`` (the blob SHA-1 git computes), in any case: the live data plane spells an annexed
+    SHA-256 ``sha256``, and a name means the same algorithm whatever its case. ``known`` says
+    whether the name is one of these; a caller refuses an entry that has a checksum under a name
+    that is not, because it cannot be verified and must never be passed on a size check alone. An
+    entry with no checksum has nothing to verify: ``verifiable`` says which.
     """
 
+    # Keys are upper-case; a name is looked up upper-cased. The one place the accepted names live.
     _HASHES: ClassVar[dict[str, str]] = {
         "SHA256": "sha256",
         "SHA256E": "sha256",
         "SHA512": "sha512",
         "SHA512E": "sha512",
     }
+    _GIT = "GIT"
 
     def __init__(self, size: int, algorithm: str | None, expected: str | None) -> None:
         self.size = size
         self.algorithm = algorithm
         self.expected = expected.lower() if isinstance(expected, str) else None
+        self._name = algorithm.upper() if isinstance(algorithm, str) else None
+
+    @property
+    def known(self) -> bool:
+        return self._name == self._GIT or self._name in self._HASHES
 
     @property
     def verifiable(self) -> bool:
-        return self.expected is not None and (
-            self.algorithm == "git" or self.algorithm in self._HASHES
-        )
+        return self.expected is not None and self.known
 
     def new(self) -> Any:
         if not self.verifiable:
             return None
-        if self.algorithm == "git":
+        if self._name == self._GIT:
             return hashlib.sha1(b"blob %d\0" % self.size, usedforsecurity=False)
-        return hashlib.new(self._HASHES[self.algorithm or ""])
+        return hashlib.new(self._HASHES[self._name or ""])
 
     def matches(self, hasher: Any) -> bool:
         return hasher is None or hasher.hexdigest() == self.expected

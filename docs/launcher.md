@@ -223,9 +223,12 @@ Every pattern is compiled before any file is selected, so a refused pattern is `
 Matching never backtracks: a pattern is compiled to an automaton whose states are the bits of one integer, and a path costs its length times a few integer operations (`launcher/nemar_launch/include.py`).
 A regular expression, or a glob that backs up to an earlier `*`, can take exponential or cubic time on a hostile pattern, and a job's author writes the pattern.
 
-- **bind**: when `NEMAR_LOCAL_DATASETS_ROOT` holds `<id>/<version>/` (a real directory, not a symlink) and every selected file there matches the manifest by size and checksum (`SHA256E` sha256, or the git blob SHA-1 for `git`), that directory is mounted read-only; no file is requested.
+- **bind**: when `NEMAR_LOCAL_DATASETS_ROOT` holds `<id>/<version>/` (a real directory, not a symlink) and every selected file there matches the manifest by size and checksum (sha256 for `SHA256` and `SHA256E`, sha512 for `SHA512` and `SHA512E`, or the git blob SHA-1 for `git`), that directory is mounted read-only; no file is requested.
+  The algorithm name is matched in any case, so the lowercase `sha256` the data plane spells for annexed files is checked as sha256.
   A symlink, a missing file, a different byte or an entry without a checksum falls back to download.
   The whole directory is mounted, so files the `include` globs did not select are visible too; only the selected files are verified.
+- **unknown algorithm**: a selected entry that has a checksum under any other algorithm name, or a checksum with no algorithm name, is refused as `bad_manifest` before anything is fetched or bound; it is never passed on its size alone.
+  An entry with neither a checksum nor an algorithm name is checked by size only.
 - **download**: each file from its `bytes_url` into scratch, five attempts with backoff and jitter, `Range` resume after a truncated body, size and checksum checks, four files at a time.
   A 502 whose `error` is "Published file is missing from storage" is lost content: it is not retried and its path is logged.
   Any other 502 is a transport fault and is retried.

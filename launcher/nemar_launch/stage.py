@@ -167,6 +167,25 @@ def select(entries: list[Entry], patterns: list[str] | None) -> list[Entry]:
     return [e for e in entries if any(p.match(e.path) for p in compiled)]
 
 
+def refuse_unverifiable(selected: list[Entry]) -> None:
+    """Refuse a selected entry whose checksum cannot be checked, before a byte is fetched.
+
+    An entry with no checksum and no algorithm is the data plane saying it has none: it is checked
+    by size alone, as before. An entry that names an algorithm the launcher does not know, or that
+    has a checksum with no algorithm, would pass on its size alone if it were let through, so it is
+    refused (``bad_manifest``) and never silently treated as verified.
+    """
+    for entry in selected:
+        if net.Checker(entry.size, entry.algorithm, entry.checksum).known:
+            continue
+        if entry.checksum is None and entry.algorithm is None:
+            continue
+        raise _fail(
+            "bad_manifest",
+            "{} has a checksum algorithm this launcher cannot verify".format(entry.path),
+        )
+
+
 # ---- binding NEMAR's own copy ---------------------------------------------------------------------
 
 
@@ -303,6 +322,7 @@ def stage_all(
             job.api_base, dataset["id"], dataset["version"], sleep=sleep, log=log
         )
         selected = select(entries, dataset.get("include"))
+        refuse_unverifiable(selected)
         total_files += len(selected)
         total_bytes += sum(e.size for e in selected)
         plans.append((dataset, selected))
