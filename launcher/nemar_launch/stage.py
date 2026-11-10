@@ -167,6 +167,32 @@ def select(entries: list[Entry], patterns: list[str] | None) -> list[Entry]:
     return [e for e in entries if any(p.match(e.path) for p in compiled)]
 
 
+def refuse_unverifiable(dataset_id: str, version: str, selected: list[Entry], log: Log) -> None:
+    """Refuse a selected entry whose checksum cannot be checked, before a byte is fetched.
+
+    Checked by size alone (as before): an entry with a known algorithm name and no checksum, and an
+    entry with neither a name nor a checksum (the data plane saying it has none). Refused as
+    ``bad_manifest``, never silently treated as verified: an entry that names an algorithm not in
+    ``net.Checker``'s table (with or without a checksum), and an entry with a checksum and no name.
+    The log names the dataset, the version, the path and the algorithm name (public data, shown
+    escaped and truncated: it comes from the manifest), never a checksum value.
+    """
+    for entry in selected:
+        if net.Checker(entry.size, entry.algorithm, entry.checksum).known:
+            continue
+        if entry.checksum is None and entry.algorithm is None:
+            continue
+        if entry.algorithm is None:
+            what = "has a checksum and no checksum algorithm"
+        else:
+            what = "uses checksum algorithm {}".format(ascii(entry.algorithm[:40]))
+        message = "{}@{}: {} {}, which this launcher cannot verify".format(
+            dataset_id, version, entry.path, what
+        )
+        log.error(message)
+        raise _fail("bad_manifest", message)
+
+
 # ---- binding NEMAR's own copy ---------------------------------------------------------------------
 
 
@@ -303,6 +329,7 @@ def stage_all(
             job.api_base, dataset["id"], dataset["version"], sleep=sleep, log=log
         )
         selected = select(entries, dataset.get("include"))
+        refuse_unverifiable(dataset["id"], dataset["version"], selected, log)
         total_files += len(selected)
         total_bytes += sum(e.size for e in selected)
         plans.append((dataset, selected))

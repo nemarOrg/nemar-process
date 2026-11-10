@@ -483,3 +483,406 @@ def test_an_entry_without_a_checksum_cannot_be_verified_so_it_is_not_bound(rig, 
     rig.plane.omit_checksum.add("README")
     launch = run_with_local_root(rig)
     assert launch.provenance["staging"][0]["mode"] == "download"
+
+
+# ---- checksum algorithm names (issue 12) --------------------------------------------------------
+# The live data plane serves three names, all lowercase (`git`, `sha256`, `md5`), the checksum a bare
+# hex value; a name matches whatever its case, and a name the launcher cannot verify must never fall
+# back to a size-only check.
+
+CASES = [
+    "SHA256",
+    "SHA256E",
+    "sha256",
+    "Sha256",
+    "sha256e",
+    "SHA512",
+    "SHA512E",
+    "sha512",
+    "Sha512E",
+    "md5",
+    "MD5",
+    "MD5E",
+    "Md5e",
+]
+
+
+def hash_name(algorithm: str) -> str:
+    """The hashlib algorithm a manifest name stands for (the test's own table, not the launcher's)."""
+    lowered = algorithm.lower()
+    return "sha512" if "512" in lowered else "md5" if "md5" in lowered else "sha256"
+
+
+def relabel(algorithm: str, wrong: bool = False):
+    """A manifest transform that gives every annexed (non-git) entry ``algorithm``, with the real
+    digest of that algorithm's width, or a wrong one of the right shape when ``wrong``."""
+    import hashlib
+
+    def transform(entries):
+        files = fixture_files()
+        out = []
+        for entry in entries:
+            if entry.get("checksum_algorithm") == "git":
+                out.append(entry)
+                continue
+            digest = hashlib.new(hash_name(algorithm))
+            digest.update(files[entry["path"]])
+            checksum = digest.hexdigest()
+            if wrong:
+                checksum = ("0" if checksum[0] != "0" else "1") + checksum[1:]
+            out.append(dict(entry, checksum=checksum, checksum_algorithm=algorithm))
+        return out
+
+    return transform
+
+
+@pytest.mark.parametrize("algorithm", CASES)
+def test_a_checker_hashes_the_bytes_whatever_the_case_of_the_algorithm(algorithm):
+    import hashlib
+
+    from nemar_launch import net
+
+    data = b"some annexed bytes"
+    name = hash_name(algorithm)
+    good = hashlib.new(name, data).hexdigest()
+    checker = net.Checker(len(data), algorithm, good)
+    assert checker.verifiable
+    hasher = checker.new()
+    hasher.update(data)
+    assert checker.matches(hasher)
+    wrong = net.Checker(len(data), algorithm, "0" * len(good))
+    hasher = wrong.new()
+    hasher.update(data)
+    assert not wrong.matches(hasher)
+
+
+@pytest.mark.parametrize("algorithm", ["git", "GIT", "Git"])
+def test_a_checker_computes_the_git_blob_id_whatever_the_case_of_git(algorithm):
+    from dataplane import git_blob_sha1
+    from nemar_launch import net
+
+    data = b"plain text\n"
+    checker = net.Checker(len(data), algorithm, git_blob_sha1(data))
+    assert checker.verifiable
+    hasher = checker.new()
+    hasher.update(data)
+    assert checker.matches(hasher)
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    ["BLAKE2B", "SHA3-256", "SHA1", "sha-256", "unknown", "g\u0131t", "\u017fha256", "", None],
+)
+def test_a_checker_does_not_claim_an_algorithm_it_does_not_know(algorithm):
+    from nemar_launch import net
+
+    checker = net.Checker(3, algorithm, "0" * 64)
+    assert not checker.known
+    assert not checker.verifiable
+
+
+@pytest.mark.parametrize("algorithm", ["sha256", "Sha256E"])
+def test_a_wrong_checksum_under_a_lowercase_or_mixed_case_name_is_refused(rig, algorithm):
+    rig.plane.manifest_transform = relabel(algorithm, wrong=True)
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["failure_code"] == "dataset_fetch_failed"
+    assert launch.result["detail"] == "checksum_mismatch"
+    assert rig.runtime_calls() == []
+
+
+@pytest.mark.parametrize("algorithm", CASES)
+def test_a_correct_checksum_under_any_spelling_is_accepted(rig, algorithm):
+    rig.plane.manifest_transform = relabel(algorithm)
+    launch = rig.launch(rig.script_spec(COPY_DATA, datasets=DATASET))
+    assert launch.exit == 0, launch.log
+    assert seen_tree(launch) == fixture_files()
+
+
+def test_a_local_copy_is_bound_by_a_lowercase_checksum(rig, local_copy):
+    rig.plane.manifest_transform = relabel("sha256")
+    launch = run_with_local_root(rig, COPY_DATA)
+    assert launch.exit == 0, launch.log
+    assert launch.provenance["staging"][0]["mode"] == "bind"
+    assert file_requests(rig) == []
+
+
+def test_a_local_copy_with_a_wrong_byte_is_not_bound_under_a_lowercase_checksum(rig, local_copy):
+    rig.plane.manifest_transform = relabel("sha256")
+    path = local_copy / EDF1
+    data = bytearray(path.read_bytes())
+    data[100] ^= 0x01
+    path.write_bytes(bytes(data))
+    launch = run_with_local_root(rig, COPY_DATA)
+    assert launch.exit == 0, launch.log
+    assert launch.provenance["staging"][0]["mode"] == "download"
+    assert seen_tree(launch) == fixture_files()
+
+
+@pytest.mark.parametrize(
+    "algorithm", ["BLAKE2B", "SHA3-256", "sha-256", "unknown", "g\u0131t", "", None]
+)
+def test_a_selected_entry_with_a_checksum_and_an_unknown_algorithm_is_refused(rig, algorithm):
+    def transform(entries):
+        out = [dict(e) for e in entries]
+        out[0]["checksum"] = "0" * 32
+        out[0]["checksum_algorithm"] = algorithm
+        if algorithm is None:
+            del out[0]["checksum_algorithm"]
+        return out
+
+    rig.plane.manifest_transform = transform
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["failure_code"] == "dataset_fetch_failed"
+    assert launch.result["detail"] == "bad_manifest"
+    assert file_requests(rig) == []  # refused before a byte is fetched
+    assert rig.runtime_calls() == []
+
+
+def test_an_unknown_algorithm_is_refused_before_a_local_copy_is_bound(rig, local_copy):
+    rig.plane.manifest_transform = lambda entries: [
+        dict(entries[0], checksum="0" * 32, checksum_algorithm="BLAKE2B"),
+        *entries[1:],
+    ]
+    launch = run_with_local_root(rig)
+    assert launch.exit == 11
+    assert launch.result["detail"] == "bad_manifest"
+    assert rig.runtime_calls() == []
+
+
+def test_an_unknown_algorithm_on_a_file_the_include_list_does_not_select_is_not_refused(rig):
+    first = sorted(fixture_files())[0]
+    rig.plane.manifest_transform = lambda entries: [
+        dict(e, checksum="0" * 32, checksum_algorithm="BLAKE2B") if e["path"] == first else e
+        for e in entries
+    ]
+    other = next(p for p in sorted(fixture_files()) if p != first)
+    spec = rig.script_spec(LIST_DATA, datasets=[dict(DATASET[0], include=[other])])
+    launch = rig.launch(spec)
+    assert launch.exit == 0, launch.log
+
+
+# ---- the names the data plane really serves ------------------------------------------------------
+# Read from live manifests on 2026-11-10 (69 sampled datasets and the five live ones): exactly
+# `git`, `sha256` and `md5`, lowercase, with the checksum a bare hex value. md5 is real content
+# hashing (a downloaded file's stored md5 equals the MD5 of its bytes), and about a fifth of the
+# entries of some live datasets use it. The backend also yields the literal word `unknown` for a
+# stored checksum with no algorithm prefix: that is refused (see the unknown-algorithm tests).
+
+SERVED_NAMES = {"git", "sha256", "md5"}
+
+
+def test_the_accepted_names_are_the_served_ones_plus_the_annex_spellings():
+    # A new name in a served manifest needs one line in net.Checker._HASHES and a test here.
+    from nemar_launch import net
+
+    accepted = {name.lower() for name in net.Checker._HASHES} | {net.Checker._GIT.lower()}
+    assert accepted >= SERVED_NAMES
+    assert accepted == SERVED_NAMES | {"sha256e", "sha512", "sha512e", "md5e"}
+    for name in SERVED_NAMES:
+        assert net.Checker(3, name, "0" * 40).verifiable
+
+
+def served_shape(wrong_md5: bool = False):
+    """A manifest as the data plane serves it: text as `git`, binary files alternating `sha256` and
+    `md5`, lowercase names and bare hex values."""
+    import hashlib
+
+    def transform(entries):
+        files = fixture_files()
+        out = []
+        binary = 0
+        for entry in sorted(entries, key=lambda e: e["path"]):
+            if entry.get("checksum_algorithm") == "git":
+                out.append(entry)
+                continue
+            name = "md5" if binary % 2 else "sha256"
+            binary += 1
+            checksum = hashlib.new(name, files[entry["path"]]).hexdigest()
+            if name == "md5" and wrong_md5:
+                checksum = ("0" if checksum[0] != "0" else "1") + checksum[1:]
+            out.append(dict(entry, checksum=checksum, checksum_algorithm=name))
+        assert {e["checksum_algorithm"] for e in out} == SERVED_NAMES
+        return out
+
+    return transform
+
+
+def test_a_manifest_as_the_data_plane_serves_it_is_staged(rig):
+    rig.plane.manifest_transform = served_shape()
+    launch = rig.launch(rig.script_spec(COPY_DATA, datasets=DATASET))
+    assert launch.exit == 0, launch.log
+    assert seen_tree(launch) == fixture_files()
+
+
+def test_a_wrong_md5_is_refused_as_a_checksum_mismatch(rig):
+    rig.plane.manifest_transform = served_shape(wrong_md5=True)
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["failure_code"] == "dataset_fetch_failed"
+    assert launch.result["detail"] == "checksum_mismatch"
+    assert rig.runtime_calls() == []
+
+
+def test_a_local_copy_is_bound_by_git_sha256_and_md5_checksums(rig, local_copy):
+    rig.plane.manifest_transform = served_shape()
+    launch = run_with_local_root(rig, COPY_DATA)
+    assert launch.exit == 0, launch.log
+    assert launch.provenance["staging"][0]["mode"] == "bind"
+    assert file_requests(rig) == []
+
+
+def test_a_local_copy_with_a_wrong_byte_in_an_md5_file_is_not_bound(rig, local_copy):
+    rig.plane.manifest_transform = served_shape()
+    md5_path = sorted(p for p in fixture_files() if p.endswith(".edf"))[1]
+    manifest = {e["path"]: e for e in served_shape()(rig.plane.manifest())}
+    assert manifest[md5_path]["checksum_algorithm"] == "md5"
+    path = local_copy / md5_path
+    data = bytearray(path.read_bytes())
+    data[100] ^= 0x01
+    path.write_bytes(bytes(data))
+    launch = run_with_local_root(rig, COPY_DATA)
+    assert launch.exit == 0, launch.log
+    assert launch.provenance["staging"][0]["mode"] == "download"
+    assert seen_tree(launch) == fixture_files()
+
+
+# ---- review round 1: sharper edges --------------------------------------------------------------
+
+
+def test_a_name_that_only_upper_cases_to_a_known_one_is_not_known():
+    # str.upper() maps the dotless i and the long s onto ASCII letters: a look-alike is not a name.
+    from nemar_launch import net
+
+    assert "g\u0131t".upper() == "GIT"
+    assert "\u017fha256".upper() == "SHA256"
+    for name in ("g\u0131t", "\u017fha256", "m\u0064\u0035\u212a"):
+        assert not net.Checker(3, name, "0" * 40).known
+
+
+def test_the_e_spellings_hash_the_whole_content_like_the_plain_ones():
+    import hashlib
+
+    from nemar_launch import net
+
+    data = b"content of a file whose path has no extension"
+    for plain, extended, name in (("md5", "MD5E", "md5"), ("sha256", "SHA256E", "sha256")):
+        digest = hashlib.new(name, data).hexdigest()
+        for algorithm in (plain, extended):
+            checker = net.Checker(len(data), algorithm, digest)
+            hasher = checker.new()
+            hasher.update(data)
+            assert checker.matches(hasher)
+
+
+def test_the_hashes_are_not_declared_for_security(monkeypatch):
+    # On a FIPS-mode Python hashlib.new("md5") raises unless usedforsecurity=False is passed.
+    import hashlib
+
+    from nemar_launch import net
+
+    real = hashlib.new
+    seen = []
+
+    def strict(name, *args, **kwargs):
+        seen.append((name, kwargs.get("usedforsecurity", True)))
+        if kwargs.get("usedforsecurity", True) and name == "md5":
+            raise ValueError("disabled for FIPS")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(net.hashlib, "new", strict)
+    for algorithm in ("md5", "sha256", "SHA512E", "MD5E"):
+        assert net.Checker(1, algorithm, "0" * 32).new() is not None
+    assert seen
+    assert all(flag is False for _, flag in seen)
+
+
+def test_an_uppercase_hex_value_is_compared_lower_cased(rig, local_copy):
+    def upper(entries):
+        return [dict(e, checksum=e["checksum"].upper()) for e in entries]
+
+    rig.plane.manifest_transform = lambda entries: upper(served_shape()(entries))
+    launch = run_with_local_root(rig, COPY_DATA)
+    assert launch.exit == 0, launch.log
+    assert launch.provenance["staging"][0]["mode"] == "bind"
+
+
+def test_a_wrong_git_blob_id_in_the_manifest_is_refused_on_download(rig):
+    rig.plane.manifest_transform = lambda entries: [
+        dict(e, checksum="0" * 40) if e["path"] == "dataset_description.json" else e
+        for e in entries
+    ]
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["detail"] == "checksum_mismatch"
+
+
+@pytest.mark.parametrize("suffix", ["C", "01"])
+def test_a_sha256_value_with_a_suffix_is_a_mismatch_and_nothing_is_bound(rig, local_copy, suffix):
+    # Live data fault (nemarOrg/nemar-cli#2118): a stored sha256 of 65 characters ending in `C`, or
+    # 66 ending in `01`. The launcher fails closed; it neither trims the value nor binds the copy.
+    import hashlib
+
+    files = fixture_files()
+
+    def suffixed(entries):
+        out = []
+        for e in entries:
+            if e["path"] == EDF1:
+                good = hashlib.sha256(files[EDF1]).hexdigest()
+                e = dict(e, checksum=good + suffix, checksum_algorithm="sha256")
+                assert len(e["checksum"]) == 64 + len(suffix)
+            out.append(e)
+        return out
+
+    rig.plane.manifest_transform = suffixed
+    launch = run_with_local_root(rig, COPY_DATA)
+    assert launch.exit == 11
+    assert launch.result["detail"] == "checksum_mismatch"
+    assert rig.runtime_calls() == []
+    assert EDF1 in launch.log
+
+
+def test_an_unknown_name_without_a_checksum_is_refused(rig):
+    def unknown_name(entries):
+        out = [dict(e) for e in entries]
+        del out[0]["checksum"]
+        out[0]["checksum_algorithm"] = "BLAKE2B"
+        return out
+
+    rig.plane.manifest_transform = unknown_name
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    assert launch.result["detail"] == "bad_manifest"
+    assert "BLAKE2B" in launch.log
+    assert file_requests(rig) == []
+
+
+def test_a_known_name_without_a_checksum_is_checked_by_size_only(rig):
+    def name_only(entries):
+        out = []
+        for e in entries:
+            e = dict(e)
+            e.pop("checksum", None)
+            out.append(e)
+        return out
+
+    rig.plane.manifest_transform = name_only
+    launch = rig.launch(rig.script_spec(COPY_DATA, datasets=DATASET))
+    assert launch.exit == 0, launch.log
+    assert seen_tree(launch) == fixture_files()
+
+
+def test_the_refusal_names_the_dataset_version_path_and_algorithm_and_no_checksum(rig):
+    rig.plane.manifest_transform = lambda entries: [
+        dict(entries[0], checksum="a1b2c3d4" * 4, checksum_algorithm="BLAKE2B"),
+        *entries[1:],
+    ]
+    launch = rig.launch(rig.script_spec(LIST_DATA, datasets=DATASET))
+    assert launch.exit == 11
+    line = next(x for x in launch.log.splitlines() if "cannot verify" in x)
+    assert "{}@{}".format(DATASET_ID, DATASET_VERSION) in line
+    assert "'BLAKE2B'" in line
+    assert sorted(fixture_files())[0] in line
+    assert "a1b2c3d4" not in launch.log
