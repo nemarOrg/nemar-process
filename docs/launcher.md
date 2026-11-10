@@ -224,12 +224,14 @@ Matching never backtracks: a pattern is compiled to an automaton whose states ar
 A regular expression, or a glob that backs up to an earlier `*`, can take exponential or cubic time on a hostile pattern, and a job's author writes the pattern.
 
 - **bind**: when `NEMAR_LOCAL_DATASETS_ROOT` holds `<id>/<version>/` (a real directory, not a symlink) and every selected file there matches the manifest by size and checksum (sha256 for `sha256`, `SHA256` and `SHA256E`, md5 for `md5`, `MD5` and `MD5E`, sha512 for `SHA512` and `SHA512E`, or the git blob SHA-1 for `git`), that directory is mounted read-only; no file is requested.
-  The algorithm name is matched in any case; the data plane serves `git`, `sha256` and `md5`, all lowercase, with the checksum a bare hex value.
+  The algorithm name is matched in any ASCII case; the data plane serves `git`, `sha256` and `md5`, all lowercase, with the checksum a bare hex value.
   A symlink, a missing file, a different byte or an entry without a checksum falls back to download.
   The whole directory is mounted, so files the `include` globs did not select are visible too; only the selected files are verified.
-- **unknown algorithm**: a selected entry that has a checksum under any other algorithm name, or a checksum with no algorithm name, is refused as `bad_manifest` before anything is fetched or bound; it is never passed on its size alone.
-  That includes the word `unknown`, which the data plane yields for a stored checksum that has no algorithm prefix.
-  An entry with neither a checksum nor an algorithm name is checked by size only.
+- **unknown algorithm**: a selected entry is refused as `bad_manifest` before anything is fetched or bound when it names an algorithm outside the accepted names (with or without a checksum), or has a checksum and no algorithm name; it is never passed on its size alone.
+  That includes the word `unknown`, which the data plane yields for a stored checksum that has no algorithm prefix, and any name with a non-ASCII letter.
+  The log line names the dataset, version, path and the algorithm name, never a checksum value.
+  Checked by size only, by design: an entry with a known algorithm name and no checksum, and an entry with neither.
+  A checksum value is compared whole, after lower-casing: a value with whitespace or a suffix (a SHA-256 value of 65 characters, say) never matches and fails as `checksum_mismatch` or falls back to download when binding.
 - **download**: each file from its `bytes_url` into scratch, five attempts with backoff and jitter, `Range` resume after a truncated body, size and checksum checks, four files at a time.
   A 502 whose `error` is "Published file is missing from storage" is lost content: it is not retried and its path is logged.
   Any other 502 is a transport fault and is retried.

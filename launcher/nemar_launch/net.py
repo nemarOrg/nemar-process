@@ -273,10 +273,13 @@ class Checker:
 
     ``algorithm`` is ``sha256``, ``md5`` or ``git`` (the blob SHA-1 git computes), the three the live
     data plane serves, or an annex backend spelling (``SHA256``, ``SHA256E``, ``SHA512``,
-    ``SHA512E``, ``MD5``, ``MD5E``), in any case: a name means the same algorithm whatever its case. ``known`` says
-    whether the name is one of these; a caller refuses an entry that has a checksum under a name
-    that is not, because it cannot be verified and must never be passed on a size check alone. An
-    entry with no checksum has nothing to verify: ``verifiable`` says which.
+    ``SHA512E``, ``MD5``, ``MD5E``), in any ASCII case: a name means the same algorithm whatever its case, and a
+    name with a non-ASCII letter is unknown (``"g\u0131t".upper()`` is ``"GIT"``, so a Unicode
+    upper-casing would let a look-alike through). ``known`` says whether the name is one of these;
+    a caller refuses an entry that names an algorithm not in the table, or has a checksum under no
+    name, because it cannot be verified and must never be passed on a size check alone. A known
+    name with no checksum has nothing to verify: ``verifiable`` says which. A checksum value is
+    lower-cased and compared as a whole: whitespace or a suffix in it never matches (fail closed).
     """
 
     # Keys are upper-case; a name is looked up upper-cased. The one place the accepted names live.
@@ -294,7 +297,9 @@ class Checker:
         self.size = size
         self.algorithm = algorithm
         self.expected = expected.lower() if isinstance(expected, str) else None
-        self._name = algorithm.upper() if isinstance(algorithm, str) else None
+        self._name = (
+            algorithm.upper() if isinstance(algorithm, str) and algorithm.isascii() else None
+        )
 
     @property
     def known(self) -> bool:
@@ -309,7 +314,7 @@ class Checker:
             return None
         if self._name == self._GIT:
             return hashlib.sha1(b"blob %d\0" % self.size, usedforsecurity=False)
-        return hashlib.new(self._HASHES[self._name or ""])
+        return hashlib.new(self._HASHES[self._name or ""], usedforsecurity=False)
 
     def matches(self, hasher: Any) -> bool:
         return hasher is None or hasher.hexdigest() == self.expected
