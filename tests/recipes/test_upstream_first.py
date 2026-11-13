@@ -189,6 +189,7 @@ def test_the_scan_covers_the_zarr_recipe_and_its_input_layer():
         "nemar_floor_zarr/__init__.py",
         "nemar_floor_zarr/recipe.py",
         "common/zarr_input.py",
+        "common/zarr_hosts.py",
     ):
         assert name in names, name
 

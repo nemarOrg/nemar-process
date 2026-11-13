@@ -1,14 +1,17 @@
-"""``nemar-floor-zarr`` end to end against a local stand-in for the Zarr serving copy.
+"""``nemar-floor-zarr`` end to end against a local stand-in for NEMAR's Zarr hosts.
 
-The stores are real Zarr written by zarr, served over real HTTP with ``Range`` (``tests/zarr_support``);
-eegprep-lean's host seam answers the address of an external host from that server, and everything
-else is the recipe's own code: the index check, the guards, the reader, the floor's steps and the
-records. Nothing is mocked. The same run on the public serving copy is ``test_floor_zarr_network.py``.
+The stores are real Zarr written by zarr, served over real HTTP with ``Range`` and a redirect from
+the Zarr host to the data host as production has it (``tests/zarr_support``); the stand-in replaces
+``fetch_https``, the one function that touches the network, and everything else is the recipe's own
+code: the index checks, the transport and its redirect policy, the reader, the floor's steps and the
+records. The network rule's own tests are in ``test_floor_zarr_hosts.py``, and the same run on the
+public serving copy is ``test_floor_zarr_network.py``.
 """
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
+import io as stdlib_io
 import json
 import re
 import socket
@@ -21,6 +24,7 @@ import zarr_support as z
 from nemar_process import sj
 from nemar_process.common import records, zarr_input
 from recipe_support import PINNED_EEGPREP_VERSION, ROOT
+from zarr_support import no_fence, routing, served  # noqa: F401  fixtures
 
 ARGS = [
     "--zarr-base",
@@ -34,7 +38,17 @@ ARGS = [
     "--image-digest",
     "sha256:" + "0" * 64,
 ]
-PROCESSED = (z.EEG_ONE, z.EEG_TWO)
+PROCESSED = (z.EEG_ONE, z.EEG_TWO, z.EEG_MU)
+IN_INDEX_ORDER = [
+    z.EEG_ONE,
+    z.EEG_TWO,
+    z.EEG_MU,
+    z.HUGE,
+    z.MISSING,
+    z.BAD_UNIT,
+    z.FLAT,
+    z.NON_FINITE,
+]
 PRODUCT_SUFFIXES = (
     "channels.tsv",
     "badsegments.tsv",
@@ -42,6 +56,7 @@ PRODUCT_SUFFIXES = (
     "qc.json",
     "signalJourney.json",
 )
+BOTH_HOSTS = sorted([z.ZARR_HOST, z.DATA_HOST])
 DELTA = [".nemar/availability-report.json", ".nemar/metadata.json"]
 ATTESTED = [
     *ARGS,
@@ -54,45 +69,27 @@ ATTESTED = [
 
 
 @pytest.fixture(scope="module")
-def served(tmp_path_factory):
-    stand_in = z.Served(tmp_path_factory.mktemp("served"))
-    yield stand_in
-    stand_in.close()
-
-
-@pytest.fixture
-def routing(served):
-    from eegprep_lean import set_default_transport
-
-    served.requested.clear()
-    transport = z.RoutingTransport(served.port)
-    set_default_transport(transport)
-    yield transport
-    set_default_transport(None)
-
-
-@pytest.fixture(scope="module")
-def ran(served, tmp_path_factory):
-    """One run over the whole stand-in, with the metadata_only attestation: (exit code, line, out, watch)."""
-    from eegprep_lean import set_default_transport
+def ran(served, tmp_path_factory):  # noqa: F811
+    """One run over the whole stand-in, with the metadata_only attestation."""
     from nemar_process import cli as command
+    from nemar_process.common import zarr_hosts
 
     out = tmp_path_factory.mktemp("product")
-    routing = z.RoutingTransport(served.port)
-    set_default_transport(routing)
+    stand_in = z.StandIn(served.port)
     served.requested.clear()
+    served.policy = z.default_policy
+    patch = pytest.MonkeyPatch()
+    patch.setattr(zarr_input, "fetch_https", stand_in.fetch)
+    patch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
     try:
-        import contextlib
-        import io as stdlib_io
-
         captured = stdlib_io.StringIO()
         with z.Watch() as watch, contextlib.redirect_stdout(captured):
             code = command.main(["run", "nemar-floor-zarr", "--out", str(out), *ATTESTED])
         requested = list(served.requested)
     finally:
-        set_default_transport(None)
+        patch.undo()
     line = json.loads(captured.getvalue().strip().splitlines()[-1])
-    return code, line, out, watch, routing, requested
+    return code, line, out, watch, stand_in, requested
 
 
 def table(out: Path) -> dict[str, dict[str, str]]:
@@ -116,23 +113,31 @@ def test_every_eeg_store_is_processed_or_counted(ran):
     code, line, out, *_ = ran
     assert code == 0  # the run fails only when nothing was processed
     assert line["recipe"] == "nemar-floor-zarr"
-    assert (line["processed"], line["too_large"], line["read_failed"]) == (2, 1, 1)
-    assert line["counts"] == {"discovered": 4, "failed": 1, "skipped": 1, "succeeded": 2}
+    assert line["counts"] == {"discovered": 8, "failed": 4, "skipped": 1, "succeeded": 3}
     rows = table(out)
-    assert list(rows) == [
-        z.EEG_ONE,
-        z.EEG_TWO,
-        z.HUGE,
-        z.MISSING,
-    ]  # index order; the EMG store is not one
+    assert list(rows) == IN_INDEX_ORDER  # index order; the EMG store is not an EEG store
     assert [(r["status"], r["code"]) for r in rows.values()] == [
+        ("succeeded", "n/a"),
         ("succeeded", "n/a"),
         ("succeeded", "n/a"),
         ("skipped", "too_large"),
         ("failed", "read_failed"),
+        ("failed", "convert_failed"),
+        ("failed", "all_channels_flat"),
+        ("failed", "convert_failed"),
     ]
     assert rows[z.MISSING]["step"] == "load"
     assert rows[z.MISSING]["detail"] == "ArrayNotFoundError"  # a class name, never the address
+    assert rows[z.BAD_UNIT]["detail"] == "ValueError"
+    assert rows[z.NON_FINITE]["detail"] == "non_finite_samples"  # the loader's word, not its class
+    assert rows[z.FLAT]["step"] == "flatline"
+
+
+def test_every_store_is_in_exactly_one_count(ran):
+    _, line, *_ = ran
+    keys = ("processed", "too_large", "read_failed", "convert_failed", "other")
+    assert [line[key] for key in keys] == [3, 1, 1, 2, 1]
+    assert sum(line[key] for key in keys) == line["counts"]["discovered"]
 
 
 def test_the_floors_files_are_written_under_the_label_for_each_processed_store_only(ran):
@@ -141,7 +146,7 @@ def test_the_floors_files_are_written_under_the_label_for_each_processed_store_o
         for suffix in PRODUCT_SUFFIXES:
             assert product(out, path, suffix).is_file(), (path, suffix)
     written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
-    assert len(written) == 2 * len(PRODUCT_SUFFIXES) + 2  # the table and the dataset record
+    assert len(written) == len(PROCESSED) * len(PRODUCT_SUFFIXES) + 2  # the table and the record
     assert all("desc-nemarfloorzarr" in name for name in written)
     assert all(
         name.endswith((".tsv", ".json")) for name in written
@@ -149,7 +154,7 @@ def test_the_floors_files_are_written_under_the_label_for_each_processed_store_o
     assert not [p for p in out.rglob("*") if p.is_dir() and p.name.startswith(".")]
 
 
-def test_the_records_validate_and_say_where_the_data_came_from(ran, served):
+def test_the_records_validate_and_say_where_the_data_came_from(ran, served):  # noqa: F811
     _, _, out, *_ = ran
     validator = sj.validator()
     dataset = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
@@ -168,8 +173,9 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):
         "commit_check": "attested_by_caller",
         "index_sha256": served.index_sha256,
         "zarr_engine_version": "3",
-        "stores": [z.EEG_ONE, z.EEG_TWO, z.HUGE, z.MISSING],
+        "stores": IN_INDEX_ORDER,
         "bytes_read": nemar["input"]["bytes_read"],
+        "hosts_contacted": BOTH_HOSTS,
     }
     assert nemar["ignored_datatypes"] == {"emg": 1}
     assert re.fullmatch(r"eegprep-lean@\d+\.\d+\.\d+\+[0-9a-f]{40}", nemar["reader"])
@@ -189,17 +195,18 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):
         assert mine["input"]["tag_commit"] == z.TAG_COMMIT
         assert mine["input"]["commit_equivalence"] == "metadata_only"
         assert mine["input"]["commit_delta_paths"] == DELTA
+        assert mine["input"]["hosts_contacted"] == BOTH_HOSTS  # the redirect went to the data host
         assert mine["reader"] == nemar["reader"]
         assert mine["recording"]["format"] == "zarr"
         assert [i["role"] for i in mine["inputs"]] == ["index", "zarr_store"]
         assert mine["inputs"][0]["sha256"] == served.index_sha256
 
 
-def test_every_byte_read_is_counted_and_the_index_is_read_once(ran, served):
-    _, _, out, _, routing, requested = ran
+def test_every_byte_read_is_counted_and_the_index_is_read_once(ran):
+    _, _, out, _, stand_in, requested = ran
     dataset = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
     total = dataset["extensions"]["nemar"]["input"]["bytes_read"]
-    assert total == routing.bytes > 0
+    assert total == stand_in.bytes > 0
     per_store = sum(
         json.loads(product(out, p, "signalJourney.json").read_text())["extensions"]["nemar"][
             "input"
@@ -213,16 +220,23 @@ def test_every_byte_read_is_counted_and_the_index_is_read_once(ran, served):
     assert {agent for _, _, agent in requested} == {"eegprep-lean"}
 
 
-def test_the_run_reaches_only_the_addresses_the_network_rule_allows(ran):
-    _, _, _, watch, routing, _ = ran
+def test_requests_carry_a_user_agent_and_a_range_and_nothing_else(ran):
+    _, _, _, _, stand_in, _ = ran
+    sent = {name for headers in stand_in.headers for name in headers}
+    assert sent <= {"User-Agent", "Range"}  # no Authorization, no cookie
+
+
+def test_the_run_reaches_only_the_stand_in_and_asks_only_for_allowed_hosts(ran):
+    _, _, _, watch, stand_in, _ = ran
     assert watch.addresses == {"127.0.0.1"}
     assert watch.names <= {"127.0.0.1"}
     assert watch.hosts == {"127.0.0.1"}
-    assert routing.urls
-    assert all(url.startswith(z.ORIGIN + "/") for url in routing.urls)
+    hosts = {url.split("/")[2] for url in stand_in.urls}
+    assert hosts == {z.ZARR_HOST, z.DATA_HOST}
+    assert all(url.startswith("https://") for url in stand_in.urls)
 
 
-def test_the_watch_can_fail(ran, served):
+def test_the_watch_can_fail(ran, served):  # noqa: F811
     """A lookup of, or a connection to, anywhere else would show up in the audit events read above."""
     with z.Watch() as watch:
         with pytest.raises(OSError):
@@ -237,29 +251,19 @@ def test_the_watch_can_fail(ran, served):
     assert quiet.addresses == set()
 
 
-def test_the_guard_refuses_another_host_and_plain_http(routing):
-    guard = zarr_input.GuardedTransport(z.ORIGIN, inner=routing)
-    from eegprep_lean import TransportError
-
-    for url in ("https://elsewhere.example.test/x", "http://zarr.example.test/x"):
-        with pytest.raises(TransportError):
-            asyncio.run(guard.get(url))
-    assert routing.urls == []
-    assert guard.requests == 0
-
-
 # ---- what the reader returns ------------------------------------------------------------------
 
 
-def test_the_loaded_recording_holds_the_physical_values_in_microvolts(served, routing):
-    """Both spellings of microvolts give the stored counts times the scale: the label alone is mapped."""
-    from recipe_support import make_context  # noqa: F401  (the support module also pins the runtime)
-
+def test_the_loaded_recording_holds_the_physical_values_whatever_the_microvolt_spelling(
+    served,  # noqa: F811
+    routing,  # noqa: F811
+):
+    """``uV``, the micro sign and the Greek mu all give the stored counts times the scale."""
     source = zarr_input.ZarrSource(
         z.ORIGIN, z.DATASET, z.VERSION, zarr_input.attest(z.SOURCE_COMMIT)
     )
     source.open()
-    for path, seed in ((z.EEG_ONE, 1), (z.EEG_TWO, 2)):
+    for path, seed in ((z.EEG_ONE, 1), (z.EEG_TWO, 2), (z.EEG_MU, 3)):
         loaded = source.load(path)
         eeg = loaded.take()
         counts = z._signal(seed)
@@ -277,6 +281,12 @@ def test_the_loaded_recording_holds_the_physical_values_in_microvolts(served, ro
         assert loaded.power_line_hz_declared == (50.0 if path == z.EEG_ONE else None)
 
 
+def test_the_recipe_passes_the_unit_through_and_renames_nothing():
+    assert not hasattr(zarr_input, "MICROVOLT_SPELLINGS")
+    source = (ROOT / "recipes" / "nemar_process" / "common" / "zarr_input.py").read_text()
+    assert "dataclasses.replace" not in source
+
+
 def test_the_reader_is_named_with_the_commit_the_lock_pins():
     pin = re.search(
         r"eegprep-lean\[zarr\] @ git\+https://github.com/sccn/eegprep@([0-9a-f]{40})#",
@@ -290,7 +300,10 @@ def test_the_reader_is_named_with_the_commit_the_lock_pins():
 
 
 def test_an_index_built_from_another_commit_is_refused_and_nothing_is_written(
-    cli, served, routing, tmp_path
+    cli,
+    served,  # noqa: F811
+    routing,  # noqa: F811
+    tmp_path,
 ):
     wrong = "c" * 40
     argv = [a if a != z.SOURCE_COMMIT else wrong for a in ARGS]
@@ -305,7 +318,10 @@ def test_an_index_built_from_another_commit_is_refused_and_nothing_is_written(
 
 
 def test_an_attested_commit_that_the_index_does_not_have_is_refused_even_when_consistent(
-    cli, served, routing, tmp_path
+    cli,
+    served,  # noqa: F811
+    routing,  # noqa: F811
+    tmp_path,
 ):
     """The attestation can say the tag differs; the index's own commit must still be the one given."""
     argv = [a if a != z.SOURCE_COMMIT else z.TAG_COMMIT for a in ARGS]
@@ -326,42 +342,12 @@ def test_an_attested_commit_that_the_index_does_not_have_is_refused_even_when_co
     assert "built from commit {}".format(z.SOURCE_COMMIT) in stderr
 
 
-def serve_variant(tmp_path_factory, name: str, mutate):
-    return z.Served(tmp_path_factory.mktemp(name), mutate=mutate)
-
-
-@pytest.mark.parametrize(
-    ("label", "mutate"),
-    [
-        ("a paged index", lambda d: d.update(store_count=99)),
-        (
-            "another contract base",
-            lambda d: d.update(contract_base="https://elsewhere.example.test/x/zarr/"),
-        ),
-        ("another dataset", lambda d: d.update(dataset_id="xx000002")),
-        ("an older format", lambda d: d.update(format_version=2)),
-        ("no source commit", lambda d: d.pop("source_commit")),
-    ],
-)
-def test_an_index_that_cannot_serve_the_run_is_refused(
-    cli, tmp_path_factory, tmp_path, label, mutate
+def test_an_index_that_is_not_served_is_refused(
+    cli,
+    served,  # noqa: F811
+    routing,  # noqa: F811
+    tmp_path,
 ):
-    from eegprep_lean import set_default_transport
-
-    stand_in = serve_variant(tmp_path_factory, "variant", mutate)
-    set_default_transport(z.RoutingTransport(stand_in.port))
-    try:
-        code, stdout, stderr = cli("run", "nemar-floor-zarr", "--out", tmp_path / "o", *ARGS)
-    finally:
-        set_default_transport(None)
-        stand_in.close()
-    assert code == 6, label
-    assert stdout == ""
-    assert "refused" in stderr
-    assert not (tmp_path / "o").exists()
-
-
-def test_an_index_that_is_not_served_is_refused(cli, served, routing, tmp_path):
     argv = [a if a != z.DATASET else "xx000002" for a in ARGS]
     code, _, stderr = cli("run", "nemar-floor-zarr", "--out", tmp_path / "o", *argv)
     assert code == 6
@@ -369,10 +355,49 @@ def test_an_index_that_is_not_served_is_refused(cli, served, routing, tmp_path):
     assert not (tmp_path / "o").exists()
 
 
+def test_a_stores_hosts_are_those_of_its_own_read(cli, served, routing, tmp_path):  # noqa: F811
+    """Hosts are listed per store as that store's read used them, and for the dataset as a whole."""
+    direct = z.zarr_name(z.EEG_TWO)
+
+    def policy(host, path):
+        if host == z.ZARR_HOST and direct in path:
+            return "serve", None
+        return z.default_policy(host, path)
+
+    served.policy = policy
+    out = tmp_path / "o"
+    code, _, _ = cli(
+        "run",
+        "nemar-floor-zarr",
+        "--out",
+        out,
+        *ARGS,
+        "--recording",
+        z.EEG_ONE,
+        "--recording",
+        z.EEG_TWO,
+    )
+    assert code == 0
+
+    def hosts(path):
+        record = json.loads(product(out, path, "signalJourney.json").read_text())
+        return record["extensions"]["nemar"]["input"]["hosts_contacted"]
+
+    assert hosts(z.EEG_ONE) == BOTH_HOSTS
+    assert hosts(z.EEG_TWO) == [z.ZARR_HOST]  # served by the Zarr host itself: no bucket
+    dataset = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
+    assert dataset["extensions"]["nemar"]["input"]["hosts_contacted"] == BOTH_HOSTS
+
+
 # ---- which stores ----------------------------------------------------------------------------
 
 
-def test_recording_names_exactly_the_stores_to_process(cli, served, routing, tmp_path):
+def test_recording_names_exactly_the_stores_to_process(
+    cli,
+    served,  # noqa: F811
+    routing,  # noqa: F811
+    tmp_path,
+):
     out = tmp_path / "o"
     code, stdout, _ = cli(
         "run", "nemar-floor-zarr", "--out", out, *ARGS, "--recording", z.zarr_name(z.EEG_TWO)
@@ -386,9 +411,13 @@ def test_recording_names_exactly_the_stores_to_process(cli, served, routing, tmp
     assert not product(out, z.EEG_ONE, "channels.tsv").exists()
 
 
-@pytest.mark.parametrize("name", ["sub-09/eeg/sub-09_task-rest_eeg.edf", z.EMG, "sub-01"])
+@pytest.mark.parametrize("name", ["sub-99/eeg/sub-99_task-rest_eeg.edf", z.EMG, "sub-01"])
 def test_a_store_the_index_does_not_have_as_an_eeg_store_is_a_usage_error(
-    cli, served, routing, tmp_path, name
+    cli,
+    served,  # noqa: F811
+    routing,  # noqa: F811
+    tmp_path,
+    name,
 ):
     with pytest.raises(SystemExit) as stopped:
         cli("run", "nemar-floor-zarr", "--out", tmp_path / "o", *ARGS, "--recording", name)
@@ -397,19 +426,111 @@ def test_a_store_the_index_does_not_have_as_an_eeg_store_is_a_usage_error(
 
 
 @pytest.mark.parametrize(
-    ("store", "code_word"), [(z.HUGE, "too_large"), (z.MISSING, "read_failed")]
+    ("store", "code_word"),
+    [
+        (z.HUGE, "too_large"),
+        (z.MISSING, "read_failed"),
+        (z.BAD_UNIT, "convert_failed"),
+        (z.FLAT, "all_channels_flat"),
+        (z.NON_FINITE, "convert_failed"),
+    ],
 )
-def test_the_run_fails_when_nothing_was_processed(cli, served, routing, tmp_path, store, code_word):
+def test_the_run_fails_when_nothing_was_processed(
+    cli,
+    served,  # noqa: F811
+    routing,  # noqa: F811
+    tmp_path,
+    store,
+    code_word,
+):
     out = tmp_path / "o"
     code, stdout, _ = cli("run", "nemar-floor-zarr", "--out", out, *ARGS, "--recording", store)
     assert code == 4
     line = json.loads(stdout.strip().splitlines()[-1])
     assert line["processed"] == 0
-    assert line[code_word] == 1
+    assert sum(line[k] for k in ("too_large", "read_failed", "convert_failed", "other")) == 1
     assert table(out)[store]["code"] == code_word
     assert (out / "desc-nemarfloorzarr_signalJourney.json").is_file()  # the record is still written
     if code_word == "too_large":  # refused before any signal was requested
         assert not [u for u in routing.urls if "/eeg_250hz/" in u]
+
+
+# ---- the counts ------------------------------------------------------------------------------
+
+
+def row(status: str, code: str | None) -> dict:
+    return {"status": status, "code": code}
+
+
+def test_zarr_counts_put_every_outcome_in_one_count():
+    from nemar_process.cli import zarr_counts
+
+    rows = [
+        row("succeeded", None),
+        row("skipped", "too_large"),
+        row("failed", "read_failed"),
+        row("failed", "convert_failed"),
+        row("failed", "convert_failed"),
+        row("failed", "out_of_memory"),
+        row("failed", "step_failed"),
+        row("skipped", "no_signal_channels"),
+    ]
+    counts = zarr_counts(rows, len(rows))
+    assert counts == {
+        "processed": 1,
+        "too_large": 1,
+        "read_failed": 1,
+        "convert_failed": 2,
+        "other": 3,
+    }
+    assert sum(counts.values()) == len(rows)
+
+
+class Dies(str):
+    """A dataset id that runs the process out of memory when it is formatted, as the dictionary's
+    ``setname`` is built from it after the read."""
+
+    def __format__(self, spec):
+        raise MemoryError
+
+
+def opened(served, routing):  # noqa: F811
+    source = zarr_input.ZarrSource(
+        z.ORIGIN, z.DATASET, z.VERSION, zarr_input.attest(z.SOURCE_COMMIT)
+    )
+    source.open()
+    return source
+
+
+def test_running_out_of_memory_while_converting_is_out_of_memory(served, routing):  # noqa: F811
+    from nemar_process.common.errors import RecordingError
+
+    source = opened(served, routing)
+    source.dataset_id = Dies(z.DATASET)
+    with pytest.raises(RecordingError) as died:
+        source.load(z.EEG_ONE)
+    assert (died.value.code, died.value.step, died.value.detail) == (
+        "out_of_memory",
+        "load",
+        "MemoryError",
+    )
+
+
+def test_running_out_of_memory_while_reading_is_out_of_memory(served, routing, monkeypatch):  # noqa: F811
+    from nemar_process.common.errors import RecordingError
+
+    source = opened(served, routing)
+    inner = routing.fetch
+
+    def fetch(url, headers, timeout, limit):
+        if "/eeg_250hz/0/c/" in url:
+            raise MemoryError
+        return inner(url, headers, timeout, limit)
+
+    monkeypatch.setattr(zarr_input, "fetch_https", fetch)
+    with pytest.raises(RecordingError) as died:
+        source.load(z.EEG_ONE)
+    assert (died.value.code, died.value.detail) == ("out_of_memory", "MemoryError")
 
 
 # ---- the validator wrapper --------------------------------------------------------------------

@@ -9,8 +9,9 @@ that this is so is GitHub's compare call, repeated by hand when the constants be
     gh api repos/<org>/nm000274/commits/v1.0.5 --jq .sha                 # the tag commit
     gh api "repos/<org>/nm000274/compare/<tag commit>...<source commit>"  # ahead, 0 behind, 2 files
 
-The run reads 4 stores (about 28 MB) and takes about 15 seconds on a laptop. Its connections are
-watched: the Zarr host, and the bucket the index names as ``data_base``, are the only hosts reached.
+The run reads 4 stores (about 28 MB) and takes about 15 seconds on a laptop. The run is inside the
+recipe's own fence (``zarr_hosts``), and its connections are watched as well: the allowlist of the
+code, the Zarr host and the data bucket, holds the only hosts reached.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from urllib.parse import urlsplit
 import pytest
 import zarr_support as z
 from nemar_process import cli as command
+from nemar_process.common import zarr_hosts
 from recipe_support import ROOT
 
 pytestmark = pytest.mark.network
@@ -88,7 +90,10 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     if live != CHOSEN_INDEX_SHA256:
         print("the index changed since it was chosen: now {}".format(live))
     assert document["source_commit"] == SOURCE_COMMIT, "the index was rebuilt: renew the constants"
-    allowed = {urlsplit(BASE).hostname, urlsplit(document["data_base"]).hostname}
+    # the allowed hosts are the code's constants, never what the live index says; the index must agree
+    allowed = set(zarr_hosts.ALLOWED_HOSTS)
+    assert urlsplit(document["data_base"]).hostname in zarr_hosts.ZARR_DATA_HOSTS
+    assert urlsplit(BASE).hostname in zarr_hosts.ZARR_HOSTS
 
     out = tmp_path / "product"
     started = time.monotonic()
@@ -103,7 +108,8 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     # every EEG store processed or counted
     assert code == 0
     assert line["counts"]["discovered"] == STORES
-    assert (line["processed"], line["too_large"], line["read_failed"]) == (STORES, 0, 0)
+    keys = ("processed", "too_large", "read_failed", "convert_failed", "other")
+    assert [line[key] for key in keys] == [STORES, 0, 0, 0, 0]
 
     # every output present, and each record valid for the schema
     validate = ROOT / "scripts" / "validate_signaljourney.py"
@@ -133,6 +139,7 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     assert nemar["input"]["commit_delta_paths"] == DELTA
     assert nemar["input"]["commit_check"] == "attested_by_caller"
     assert nemar["input"]["zarr_base"] == BASE
+    assert nemar["input"]["hosts_contacted"] == sorted(zarr_hosts.ALLOWED_HOSTS)
     assert nemar["reader"].startswith("eegprep-lean@")
     assert nemar["engine"]["package"] == "eegprep"
     print(
@@ -156,7 +163,7 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     # the network rule: only the Zarr host and the bucket it redirects reads to
     assert watch.names <= allowed, watch.names
     assert watch.hosts <= allowed, watch.hosts
-    assert watch.hosts  # the watch saw the connections
+    assert watch.hosts == allowed  # and both were reached: the Zarr host, then the bucket
     print("hosts reached: {}".format(sorted(watch.hosts)))
 
 

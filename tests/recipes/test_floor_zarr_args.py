@@ -21,28 +21,25 @@ IDENTITY = [
     "--source-commit",
     S,
 ]
-BASE = ["--zarr-base", "https://zarr.example.test"]
+BASE = ["--zarr-base", "https://zarr.nemar.org"]
 
 
 class Forbidden:
-    """A transport that must not be used: every request is recorded and fails the test after."""
+    """A stand-in for ``fetch_https`` that must not be called: every call is recorded and fails."""
 
     def __init__(self) -> None:
         self.urls: list[str] = []
 
-    async def get(self, url, *, start=None, end=None):
+    def fetch(self, url, headers, timeout, limit):
         self.urls.append(url)
         raise AssertionError("a request was made: " + url)
 
 
 @pytest.fixture
-def silent():
-    from eegprep_lean import set_default_transport
-
-    transport = Forbidden()
-    set_default_transport(transport)
-    yield transport
-    set_default_transport(None)
+def silent(monkeypatch):
+    forbidden = Forbidden()
+    monkeypatch.setattr(zarr_input, "fetch_https", forbidden.fetch)
+    return forbidden
 
 
 def usage(cli, silent, *argv):
@@ -121,39 +118,6 @@ def test_the_flags_parse_what_the_attestation_checks():
             zarr_input.delta_path(bad)
 
 
-@pytest.mark.parametrize(
-    ("given", "expected"),
-    [
-        ("https://zarr.nemar.org", "https://zarr.nemar.org"),
-        ("https://ZARR.EXAMPLE.TEST/", "https://zarr.example.test"),
-        ("https://zarr.example.test:8443", "https://zarr.example.test:8443"),
-    ],
-)
-def test_an_https_origin_is_normalized(given, expected):
-    assert zarr_input.origin(given) == expected
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "http://zarr.nemar.org",
-        "zarr.nemar.org",
-        "https://",
-        "https://zarr.nemar.org/nm000274",
-        "https://zarr.nemar.org?x=1",
-        "https://zarr.nemar.org#x",
-        "https://user:pw@zarr.nemar.org",
-        "https://zarr.nemar.org:port",
-        "https://zarr.nemar.org\n",
-        "file:///tmp/zarr",
-        "//zarr.nemar.org",
-    ],
-)
-def test_anything_but_an_https_origin_is_refused(bad):
-    with pytest.raises(ValueError):
-        zarr_input.origin(bad)
-
-
 # ---- the command ------------------------------------------------------------------------------
 
 
@@ -172,10 +136,6 @@ def test_each_required_argument_is_required(cli, silent, left_out):
     assert usage(cli, silent, *arguments) == 2
 
 
-def test_a_zarr_base_that_is_not_https_is_a_usage_error(cli, silent):
-    assert usage(cli, silent, "--zarr-base", "http://zarr.example.test", *IDENTITY) == 2
-
-
 @pytest.mark.parametrize("label", sorted(INCONSISTENT))
 def test_an_inconsistent_attestation_is_a_usage_error_before_any_request(cli, silent, label):
     source, tag, kind, paths = INCONSISTENT[label]
@@ -192,7 +152,7 @@ def test_an_inconsistent_attestation_is_a_usage_error_before_any_request(cli, si
 
 def test_the_zarr_options_belong_to_the_zarr_recipe_alone(cli, tmp_path):
     for flag, value in (
-        ("--zarr-base", "https://zarr.example.test"),
+        ("--zarr-base", "https://zarr.nemar.org"),
         ("--tag-commit", T),
         ("--commit-equivalence", "exact"),
         ("--commit-delta-path", ".nemar/x"),
