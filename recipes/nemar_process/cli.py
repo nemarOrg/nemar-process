@@ -13,11 +13,12 @@ directories into one, ``version``.
 The command is an argument vector, so a launch specification names it without a shell. It reads only
 ``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``). It opens no
 network connection, with one exception: a recipe whose input is ``zarr`` (``nemar-floor-zarr``)
-reads the dataset's Zarr serving copy over HTTPS from the ``--zarr-base`` host (and the bucket that
-host redirects reads to), refuses ``--dataset-dir``, and holds nothing on disk. Standard error gets
+reads the dataset's Zarr serving copy over HTTPS from the hosts in the allowlist of
+``common/zarr_hosts.py`` only (the Zarr host and, after one redirect, the data bucket), refuses
+``--dataset-dir``, and holds nothing on disk. Standard error gets
 one line per recording, standard output one final JSON line with the counts (for people: NEMAR never
-parses a job's output); a zarr recipe's line also has ``processed``, ``too_large`` and
-``read_failed``.
+parses a job's output); a zarr recipe's line also has ``processed``, ``too_large``,
+``read_failed``, ``convert_failed`` and ``other``, which add up to the stores found.
 
 Exit codes (the launcher records any non-zero one as ``runtime_error``, ``entry_failed``; its own
 numbers 10 to 16 are not used here):
@@ -31,8 +32,9 @@ numbers 10 to 16 are not used here):
     5  output_unusable: ``--out`` cannot be created or written, or already holds product files, or
        the dataset record cannot be written
     6  dataset_unreadable: ``--dataset-dir`` (or an ``--in``) is missing, not a directory, or cannot
-       be listed; for a zarr recipe, the serving copy was refused (its index cannot be read, or was
-       built from another commit than ``--source-commit``): nothing is written
+       be listed; for a zarr recipe, the serving copy was refused (``--zarr-base`` or the index's
+       ``data_base`` is off the allowlist, the index cannot be read, is malformed, or was built
+       from another commit than ``--source-commit``): nothing is written
     7  no_compatible_recording: recordings were found, every one was skipped for its format
        (``unsupported_format``: the recipe does not load it), and none succeeded (the record is
        written); a requested file that is not an EEG recording (a ``scans.tsv``, an ``.edf``
@@ -82,9 +84,11 @@ from nemar_process.common import (
     naming,
     records,
     table,
+    zarr_hosts,
     zarr_input,
 )
 from nemar_process.common.errors import (
+    CONVERT_FAILED,
     CUDA,
     DISK_ERROR,
     DUPLICATE_RECORDING,
@@ -560,13 +564,27 @@ def zarr_items(
     return [(store.path, source.recording(store)) for store in stores]
 
 
-def zarr_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
-    """What the final line of a zarr recipe adds: processed, and the two kinds that were counted out."""
-    return {
+def zarr_counts(rows: list[dict[str, Any]], discovered: int) -> dict[str, int]:
+    """What the final line of a zarr recipe adds: every store is in exactly one of these counts.
+
+    ``processed`` succeeded; ``too_large`` was skipped before any read; ``read_failed`` could not be
+    read; ``convert_failed`` was read and could not be turned into the floor's input; ``other`` is
+    everything else (the floor's own failures and skips, running out of memory), so that the five
+    add up to ``discovered``.
+    """
+    counts = {
         "processed": sum(1 for row in rows if row["status"] == "succeeded"),
         "too_large": sum(1 for row in rows if row["code"] == TOO_LARGE),
         "read_failed": sum(1 for row in rows if row["code"] == READ_FAILED),
+        "convert_failed": sum(1 for row in rows if row["code"] == CONVERT_FAILED),
     }
+    counts["other"] = discovered - sum(counts.values())
+    return counts
+
+
+def network_fence(recipe: Recipe) -> contextlib.AbstractContextManager[Any]:
+    """The socket-level fence of ``zarr_hosts`` for a recipe whose input is ``zarr``, else nothing."""
+    return zarr_hosts.fence() if recipe.input == "zarr" else contextlib.nullcontext()
 
 
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -601,6 +619,7 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         determinism.pinned_threads(recipe.threads_for(options)) as threads,
         quiet(),
         terminated_as_exit(),
+        network_fence(recipe),
     ):
         # before anything is created: an engine that cannot run writes nothing
         try:
@@ -679,7 +698,8 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         extra = zarr_counts(
             table.read_rows(
                 out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
-            )
+            ),
+            record["extensions"]["nemar"]["counts"]["discovered"],
         )
     result_line(recipe, record, word, extra)
     return code

@@ -52,10 +52,10 @@ OPTIONS = (
     Option(
         "zarr_base",
         "--zarr-base",
-        zarr_input.origin,
+        str,
         None,
-        "the https:// origin of the Zarr serving copy; the run connects to this host only "
-        "(and to the bucket it redirects reads to)",
+        "the https:// origin of the Zarr serving copy; it must be on the fixed allowlist of Zarr "
+        "hosts (zarr_hosts.py), else the run is refused before any request",
     ),
     Option(
         "tag_commit",

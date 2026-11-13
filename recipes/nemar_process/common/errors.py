@@ -27,6 +27,7 @@ Code = Literal[
     "all_channels_flagged",
     "too_large",
     "read_failed",
+    "convert_failed",
     "ica_ineligible",
     "ica_degenerate",
     "time_budget",
@@ -47,6 +48,8 @@ ALL_CHANNELS_FLAGGED: Final = "all_channels_flagged"
 TOO_LARGE: Final = "too_large"
 # A recipe that reads a remote source (the Zarr serving copy): a recording whose read failed.
 READ_FAILED: Final = "read_failed"
+# ... and one whose read succeeded but could not be turned into the EEG dictionary the floor takes.
+CONVERT_FAILED: Final = "convert_failed"
 # The decomposition recipe's: a recording too short or of too low a rank is skipped, not failed,
 # because nothing is wrong with it (detail INSUFFICIENT_DATA or RANK_TOO_LOW); a decomposition that
 # came out degenerate is a failure of the step; a recording the time budget left out is skipped.
