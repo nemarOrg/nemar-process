@@ -1,10 +1,10 @@
 # The recipes and `nemar-recipe`
 
 A recipe is a short, fixed sequence of eegprep calls that annotates every electroencephalography (EEG) recording of a dataset and writes what it decided as state files and a signalJourney record.
-The first recipe is `nemar-floor`.
+The first recipe is `nemar-floor`; `nemar-floor-zarr` runs the same steps on NEMAR's Zarr serving copy.
 The command that runs recipes is `nemar-recipe` (`python -m nemar_process` outside the image).
 
-Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), mebibyte (MiB, 1,048,576 bytes), megabyte (MB, 10^6 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
+Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), Hypertext Transfer Protocol Secure (HTTPS), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), mebibyte (MiB, 1,048,576 bytes), megabyte (MB, 10^6 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
 
 Two rules bind every recipe (see [`AGENTS.md`](../AGENTS.md)).
 A recipe holds no numerics: every signal-processing call is an eegprep function, and a step eegprep lacks is added to eegprep upstream, never written here.
@@ -18,12 +18,19 @@ nemar-recipe run <recipe> --dataset-dir DIR [--out DIR] [--recording PATH ...]
                           [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                           [--image-digest sha256:HEX] [--run-id ID]
                           [the options the recipe declares, such as --time-budget-s N]
+nemar-recipe run <zarr recipe> --zarr-base https://HOST --dataset-id ID --dataset-version TAG
+                          --source-commit SHA [--out DIR] [--recording STORE ...]
+                          [--image-digest sha256:HEX] [--run-id ID] [the attestation options]
 nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
 nemar-recipe version
 ```
 
 - `--dataset-dir` is the directory the launcher mounts read-only (`/data/<id>`).
   The command never writes there; a test makes the tree read-only and runs it.
+  It is required, except for a recipe whose input is `zarr` (below), which refuses it (exit 2).
+- The command opens no network connection, with one exception: a recipe whose input is `zarr` may open HTTPS connections to the host of its `--zarr-base`, and to the bucket that host redirects reads to (named by the index's `data_base`).
+  Every other recipe opens none.
+  A test installs an audit hook on the interpreter's sockets and HTTP connections, runs the recipe and fails on any other host.
 - `--out` defaults to `$NEMAR_OUT/product`.
   The command is an argument vector, so a shell never expands the variable in a launch specification.
   With neither `--out` nor `NEMAR_OUT` the exit code is 2.
@@ -53,7 +60,8 @@ nemar-recipe version
   It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
 - A recipe can declare options of its own (`Recipe.options`), such as `--time-budget-s N` or the choice of a decomposition engine.
   The command accepts a flag only for a recipe that declares it (exit 2 for any other), fills in the default of one that is not given, and hands the values to the recipe's hooks and to `run_recording` (`RunContext.options`).
-  The floor declares none.
+  The floor declares none; `nemar-floor-zarr` declares four (below).
+  An option can be repeatable (`Option.repeatable`): its value is the tuple of what was given.
 - `--time-budget-s N` (a recipe lists it in `options`) keeps a run inside a number of seconds.
   The clock starts when the command starts.
   A recording that would be run is not started when the time spent plus 1.5 times the slowest recording that has finished (it succeeded or failed) would be more than `N`: it is skipped with the code `time_budget`, and so is every one after it, because the rule only gets stricter as the run goes on.
@@ -77,7 +85,7 @@ nemar-recipe version
 | 3 | `no_recordings` | no EEG recording was found (the dataset record is still written, with zero counts) |
 | 4 | `no_recording_succeeded` | recordings were found, at least one was not skipped for its format (it failed, or was skipped for another reason), and none succeeded (the record is written) |
 | 5 | `output_unusable` | `--out` cannot be created or written, or already holds product files, or the dataset record cannot be written |
-| 6 | `dataset_unreadable` | `--dataset-dir`, or an `--in`, is missing, not a directory, or cannot be listed |
+| 6 | `dataset_unreadable` | `--dataset-dir`, or an `--in`, is missing, not a directory, or cannot be listed; for a zarr recipe, the serving copy was refused (its index cannot be read, is not usable, or was built from another commit than `--source-commit`), and nothing is written |
 | 7 | `no_compatible_recording` | recordings were found, every one was skipped for its format (`unsupported_format`: the recipe does not load it), and none succeeded (the record is written); a requested file that is not an EEG recording (a `scans.tsv`, an `.edf` outside `eeg/`) is skipped that way too, while a requested path that is not a file is `file_not_found` and exits 4 |
 | 8 | `engine_unavailable` | the recipe's preflight found that its engine cannot run here; decided before anything is created, so nothing is written (not `--out`, no table, no record) and no other engine is used |
 | 9 | `time_budget_exhausted` | `--time-budget-s` left recordings out (skipped, `time_budget`); the dataset record is written and the dataset is not complete. It outranks 0, 4 and 7: a run that was cut short is never reported as finished, however many recordings succeeded or failed |
@@ -338,6 +346,48 @@ Floats were not compared across hosts, and no other architecture was run.
 `tests/fixtures/eeg/` holds one real recording and its sidecars (see its README for the source, the license and the checksums).
 Observed on the reference machine (macOS arm64): no flat channel, bad channels `O1` and `T6`, 40 bad segments, 49.4043 percent good samples, 90.4762 percent good channels, a drift kernel of 1,005 samples, line noise 0.072 dB at 50 Hz and 7.480 dB at 60 Hz.
 The window step removes about half of the samples at eegprep's defaults on this recording; the floor annotates only, so nothing is lost.
+
+## `nemar-floor-zarr` 1.0.0: the floor on the Zarr serving copy
+
+`nemar-recipe run nemar-floor-zarr --out DIR --dataset-id ID --dataset-version TAG --source-commit SHA --image-digest sha256:HEX --zarr-base https://zarr.nemar.org` runs the floor's steps, unchanged, on every EEG store of a dataset's Zarr serving copy, read whole over HTTPS, with nothing downloaded to disk.
+The input is the serving copy (EEG resampled to 250 Hz at most, 16-bit), not the archived recordings, and every record says so (`extensions.nemar.input.profile` is `serving`).
+It exists under this name until the floor and this recipe converge into one `nemar-floor` with the input kind as an argument.
+
+- **Input kind.** A recipe declares `input`, `"bids"` (the default) or `"zarr"`.
+  For `zarr`, `--dataset-dir` is refused and `--zarr-base` (an `https://` origin: a host and an optional port) and `--dataset-id`, `--dataset-version` and `--source-commit` are required (exit 2); `aggregate` is not offered, because a merged record would have no input of its own to state.
+- **The chain is the floor's.** Per store the recipe reads the level-0 recording in physical units with eegprep-lean (`load_recording`, then `to_eeg`), runs `eegprep.eeg_checkset` and the floor's `process` and `write_product` with the floor's parameters.
+  The files are the floor's, under the label `nemarfloorzarr`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloorzarr_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloorzarr_recordings.tsv` and `desc-nemarfloorzarr_signalJourney.json` for the dataset.
+  Nothing is written outside `--out`, and there is no cache directory.
+  The serving copy carries no electrode coordinates and no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
+  The serving copy writes microvolts with the micro sign (`µV`), which eegprep-lean's `to_eeg` at the pinned commit does not recognize; the recipe passes the unit as `uV` and never changes a value (the upstream fix is a patch note on sccn/eegprep#616, after which this mapping can go).
+- **Which stores.** Every store whose group is EEG, in index order, or exactly the stores `--recording` names (by source path or by store path; a name that is not an EEG store of the index is exit 2, before anything is created).
+  Stores with no EEG group are counted in `ignored_datatypes` by modality.
+  A store whose whole read would exceed eegprep-lean's `max_bytes` (2 GiB of peak memory, 24 bytes per channel-sample) is skipped as `too_large` before any signal is requested; a read that fails is `failed` with `read_failed` and the exception's class name.
+  Both are rows of the recordings table and are counted, with `processed`, in the final JSON line (`processed`, `too_large`, `read_failed`).
+  The run fails (exit 4) only when nothing was processed.
+- **The commit attestation.** The serving index is often built a few metadata-only commits after the version tag, and its `source_commit` is the commit it was built from.
+  `--source-commit` is the commit the caller attests the index was built from.
+  The recipe reads `index.json` once, records the SHA-256 of its bytes, and refuses the run (exit 6, naming both commits, nothing written) when the index's `source_commit` is another.
+  The caller's check that this commit has the data of the version tag is carried in three more options and only recorded: `--tag-commit` (40 hexadecimal digits), `--commit-equivalence` (`exact` or `metadata_only`) and the repeatable `--commit-delta-path` (at most 32, each under `.nemar/` or `.github/`), made with GitHub's compare call (`ahead`, no commit behind, and every changed path under those two directories).
+  When they are absent the run is `exact` with the tag commit equal to `--source-commit`.
+  A contradictory attestation is exit 2, before any request: `exact` with a different tag commit or any delta path; `metadata_only` with equal commits, no delta path, or a path outside `.nemar/` and `.github/`.
+  The run's network reaches the Zarr host only, so it cannot check the ancestry itself, and the records say so: `commit_check` is `attested_by_caller`.
+- **Provenance.** Every per-store record and the dataset record add `extensions.nemar.input` and `extensions.nemar.reader`.
+  `input` is `{kind: "zarr", profile: "serving", zarr_base, dataset_id, version, source_commit, tag_commit, commit_equivalence, commit_delta_paths, commit_check, index_sha256, zarr_engine_version, stores, bytes_read}`: `zarr_engine_version` is the index's `engine_version`, `stores` is the store's source path in a store's record and every store in scope in the dataset record, and `bytes_read` counts every byte the transport returned (the dataset total includes the index).
+  `reader` is `eegprep-lean@<version>+<commit>`, the commit read from how the package was installed.
+  The engine stays `eegprep@<installed version>` (the image reports `eegprep@0.5.0`), because the reader is a separate distribution recorded separately.
+- **The network rule.** Every request goes through a transport that refuses any host but the `--zarr-base` host and any scheme but `https`, and counts the bytes.
+  The one hop it cannot see is the redirect the Zarr host answers each read with: the standard library follows it to the bucket the index names as `data_base`.
+  The index must name the Zarr host's own contract base (`<zarr base>/<id>/zarr/`), so the index cannot send the reader elsewhere; the network test lists the hosts reached and fails on any besides these two.
+- **The image.** The `runtime` group holds `zarr==3.4.0` and `eegprep-lean[zarr]` at a commit of sccn/eegprep (the head of sccn/eegprep#616, unmerged).
+  The pin must move to the merge commit, or to the release, when that pull request merges: the head commit is on a branch that can be deleted or rewritten, and nothing else keeps it reachable.
+  `scripts/validate_signaljourney.py FILE` checks a file against the vendored schema (exit 0 when valid, 1 with the validator's messages).
+
+The tests: `tests/recipes/test_floor_zarr_args.py` (arguments, attestation), `test_floor_zarr.py` (a local stand-in for the serving copy: real Zarr stores over real HTTP, with eegprep-lean's host seam answering an example domain), and `test_floor_zarr_network.py`, which reads the public serving copy of the demo dataset and runs only with `-m network`:
+
+```bash
+uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_zarr_network.py -m network -q
+```
 
 ## Known limits
 

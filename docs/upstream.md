@@ -76,6 +76,15 @@ Public wording only: "a processing pipeline wants X".
 | [sccn/eegprep#541](https://github.com/sccn/eegprep/issues/541) | the cleaning steps differ in whether they mutate their input or return a copy | every step rebinds its working copy and never relies on the answer |
 | [sccn/eegprep#561](https://github.com/sccn/eegprep/issues/561) | `pop_loadbv` and `pop_loadset` read the file a header names wherever it is: an absolute path, a `..` or a sub-directory for a BrainVision `DataFile` or `MarkerFile`, an absolute `data` or `datfile` for a set | `common/headers.py` reads the header first and refuses any recording that names a file other than its own companions, or whose files lead outside the dataset directory through a link (`load_failed`, detail `external_reference`); `tests/recipes/test_headers.py` pins what eegprep alone does, so a fix upstream shows |
 
+### The Zarr reader (`nemar-floor-zarr`, 2026-11-13)
+
+The recipe reads the serving copy with eegprep-lean from the head of sccn/eegprep#616, installed from a pinned commit (see [recipes.md](recipes.md)).
+One gap found against the live serving copy:
+
+| Where | Gap | What the recipe does meanwhile |
+|---|---|---|
+| sccn/eegprep#616 (`eegprep_lean.to_eeg`) | the live index writes microvolts with the micro sign (`µV`), and `to_eeg` accepts only `V`, `mV` and `uV`, so every real store is refused | `common/zarr_input.py` renames the unit of the window to `uV` before `to_eeg` (the label only, never a value); a test reads a store with each spelling and compares the values |
+
 The rank test of the location guard (sccn/eegprep#539) uses NumPy's default tolerance, which is of the order of machine precision times the number of channels.
 A montage that is flat to a picometer therefore has numerical rank 3 and passes, and `clean_channels` still returns a degraded answer for it: with the 19 positions of the reproduction in that issue flattened onto a plane (thickness 1e-9 mm to 0.1 mm), it removed 2 of 19 channels from data that lose none with the true positions.
 Where the line between a montage and a nearly flat one lies is a question for the upstream check, which should define its tolerance, so it is the point to add to that discussion; the recipe does not invent a threshold of its own.
