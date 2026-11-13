@@ -27,6 +27,7 @@ Exit number: 0, or 10 to 16 for the seven failure codes (``codes.exit_number``).
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import platform
 import re
@@ -171,6 +172,9 @@ def _do_work(
         state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
         reference = runtime.image_reference(job)
         if engine != runtime.APPTAINER:  # like the image file: before anything is fetched
+            assert settings.limits is not None  # read_settings refuses a launch without them
+            runtime.check_registry(reference, env)
+            runtime.preflight(engine, runtime_path, settings.limits, env, terminator.stop, log)
             runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
 
         code_dir: str | None = None
@@ -217,13 +221,29 @@ def _do_work(
         else:
             runtime.check_mount_sources(binds)
             assert settings.limits is not None  # read_settings refuses a launch without them
+            assert settings.runner_label is not None
             container = runtime.container_name()
+            log.info("container: named {}".format(container))
             argv = runtime.build_argv(
-                engine, runtime_path, job, reference, container, binds, settings.limits
+                engine,
+                runtime_path,
+                job,
+                reference,
+                container,
+                binds,
+                settings.limits,
+                settings.runner_label,
             )
+        oom_check = (
+            None
+            if container is None
+            else functools.partial(runtime.oom_killed, runtime_path, container, env)
+        )
         started = time.monotonic()
         try:
-            outcome = run.run_container(argv, env, state.layout.work, terminator, log)
+            outcome = run.run_container(
+                argv, env, state.layout.work, terminator, log, oom_check=oom_check
+            )
         finally:
             state.phase("run", started)
             if container is not None:

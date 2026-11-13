@@ -25,18 +25,23 @@ from .codes import (
     ENV_MEMORY_MB,
     ENV_OUTPUT_DIR,
     ENV_RUNNER_END_TIME,
+    ENV_RUNNER_LABEL,
     ENV_RUNNER_OUTPUT_DIR,
     ENV_RUNNER_SCRATCH_DIR,
     ENV_SLURM_END_TIME,
     LEASE_ID_PATTERN,
+    RUNNER_LABEL_PATTERN,
     Env,
     Failure,
 )
 
 _LEASE = re.compile(LEASE_ID_PATTERN)
+_RUNNER_LABEL = re.compile(RUNNER_LABEL_PATTERN)
 _EPOCH = re.compile(r"[0-9]+")
 _CPUS = re.compile(r"[1-9][0-9]{0,3}")
 _MEMORY_MB = re.compile(r"[1-9][0-9]{0,8}")
+# The smallest `--memory` Docker and Podman accept, in megabytes.
+MIN_ENGINE_MEMORY_MB = 6
 
 
 class Limits(NamedTuple):
@@ -52,6 +57,7 @@ class Settings(NamedTuple):
     scratch_base: str
     lease: str | None
     limits: Limits | None
+    runner_label: str | None
     problem: Failure | None
 
 
@@ -69,10 +75,12 @@ def _end_time(env: Env) -> float | None:
 
 
 def _limits(env: Env) -> tuple[Limits | None, Failure | None]:
-    # Docker and Podman always apply the limits (the daemon, not the user's own cgroup, enforces
-    # them), so `NEMAR_ENFORCE_LIMITS` is not consulted for them: a missing or unusable
-    # `NEMAR_CPUS` ends the launch at the start, whatever that variable says.
-    if env.get(ENV_CONTAINER_RUNTIME) not in ENGINE_RUNTIMES:
+    # Docker and Podman are always given both limits (the daemon, not the user's own cgroup,
+    # enforces them; `runtime.preflight` checks that it can), so `NEMAR_ENFORCE_LIMITS` is not
+    # consulted for them: a missing or unusable `NEMAR_CPUS` or `NEMAR_MEMORY_MB`, or a memory
+    # below Docker's minimum of 6 MB, ends the launch at the start, whatever that variable says.
+    engine = env.get(ENV_CONTAINER_RUNTIME) in ENGINE_RUNTIMES
+    if not engine:
         flag = env.get(ENV_ENFORCE_LIMITS)
         if flag is None or flag == "0":
             return None, None
@@ -82,9 +90,25 @@ def _limits(env: Env) -> tuple[Limits | None, Failure | None]:
     memory = env.get(ENV_MEMORY_MB)
     if cpus is None or _CPUS.fullmatch(cpus) is None:
         return None, _refused("CPU count to enforce")
+    if memory is None and engine:
+        return None, _refused("memory size to enforce")
     if memory is not None and _MEMORY_MB.fullmatch(memory) is None:
         return None, _refused("memory size to enforce")
+    if engine and memory is not None and int(memory) < MIN_ENGINE_MEMORY_MB:
+        return None, _refused("memory size to enforce")
     return Limits(int(cpus), None if memory is None else int(memory)), None
+
+
+def _runner_label(env: Env) -> tuple[str | None, Failure | None]:
+    """Under Docker or Podman ``NEMAR_RUNNER_LABEL`` must be a runner registration id (it becomes the
+    container label ``nemar.runner``); missing or malformed ends the launch at the start. Under
+    Apptainer it is not read."""
+    if env.get(ENV_CONTAINER_RUNTIME) not in ENGINE_RUNTIMES:
+        return None, None
+    value = env.get(ENV_RUNNER_LABEL)
+    if value is None or _RUNNER_LABEL.fullmatch(value) is None:
+        return None, _refused("runner label")
+    return value, None
 
 
 def read_settings(env: Env) -> Settings:
@@ -93,6 +117,7 @@ def read_settings(env: Env) -> Settings:
     if lease is not None and _LEASE.fullmatch(lease) is None:
         lease, problem = None, _refused("lease id")
     limits, limits_problem = _limits(env)
+    label, label_problem = _runner_label(env)
     return Settings(
         out_dir=env.get(ENV_OUTPUT_DIR) or env.get(ENV_RUNNER_OUTPUT_DIR),
         end_time=_end_time(env),
@@ -104,5 +129,6 @@ def read_settings(env: Env) -> Settings:
         ),
         lease=lease,
         limits=limits,
-        problem=problem or limits_problem,
+        runner_label=label,
+        problem=problem or limits_problem or label_problem,
     )

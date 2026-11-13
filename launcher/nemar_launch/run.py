@@ -41,6 +41,7 @@ import stat
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from . import net, spec
@@ -576,7 +577,12 @@ def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
 
 
 def run_container(
-    argv: list[str], env: Env, work: str, terminator: Terminator, log: Log
+    argv: list[str],
+    env: Env,
+    work: str,
+    terminator: Terminator,
+    log: Log,
+    oom_check: Callable[[], bool] | None = None,
 ) -> Outcome:
     """Start the container, wait for it, and map how it ended (the first failure wins).
 
@@ -638,7 +644,10 @@ def run_container(
         return Outcome(code, terminated_failure(terminator, env))
     if code == 0:
         return Outcome(code, None)
-    if code == 137:
+    # Under Apptainer a 137 is the kernel's out-of-memory killer. A container engine can say whether
+    # it was (`oom_check`); when it says it was not, the entry was killed some other way (a SIGKILL
+    # of its own, an operator) and that is an ordinary `entry_failed`, below.
+    if code == 137 and (oom_check is None or oom_check()):
         return Outcome(code, Failure("out_of_memory", None, "the entry was killed (exit 137)"))
     return Outcome(
         code, Failure("runtime_error", "entry_failed", "the entry exited with {}".format(code))

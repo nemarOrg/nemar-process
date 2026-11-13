@@ -59,9 +59,18 @@ ENV_CPUS = "NEMAR_CPUS"
 ENV_MEMORY_MB = "NEMAR_MEMORY_MB"
 # Which container runtime the launcher drives: unset or `apptainer` is the Apptainer (or Singularity)
 # path every launch used before; `docker` or `podman` run the same image digest through that engine
-# (`runtime.py`). Any other value is refused. The engines always apply the CPU and memory limits.
+# (`runtime.py`). Any other value is refused. An engine needs both limits, `NEMAR_CPUS` and
+# `NEMAR_MEMORY_MB`, whatever `NEMAR_ENFORCE_LIMITS` says, and a preflight that the engine can enforce them.
 ENV_CONTAINER_RUNTIME = "NEMAR_CONTAINER_RUNTIME"
 ENGINE_RUNTIMES = ("docker", "podman")
+# The runner's registration id (nemar-cli: `RUNNER_ID_RE`), put on every container as the label
+# `nemar.runner` so that one runner's sweeps never remove another's containers on a shared daemon.
+# Required under an engine, ignored under Apptainer.
+ENV_RUNNER_LABEL = "NEMAR_RUNNER_LABEL"
+RUNNER_LABEL_PATTERN = r"rnr_[0-9a-f]{24}"
+# The registries an image may be pulled from under an engine: comma-separated, each as it appears
+# before the first `/` of the reference. Unset is `ghcr.io` only; set and empty allows none.
+ENV_ALLOWED_REGISTRIES = "NEMAR_ALLOWED_REGISTRIES"
 # Where the Singularity image files named by `image.sif` live on the node. Set by the Tapis
 # application definition; when unset, `image.sif` is relative to the launcher's working directory.
 ENV_SIF_ROOT = "NEMAR_SIF_ROOT"
