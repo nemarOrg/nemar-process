@@ -28,7 +28,9 @@ import asyncio
 import hashlib
 import json
 import math
+import posixpath
 import re
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -38,7 +40,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urljoin
 
-from nemar_process.common import io, zarr_hosts
+from nemar_process.common import io, naming, zarr_hosts
 from nemar_process.common.errors import (
     CONVERT_FAILED,
     OUT_OF_MEMORY,
@@ -62,10 +64,12 @@ COMMIT_CHECK = "attested_by_caller"
 # counts its ``max_bytes`` in this unit) and the default bound: 2 GiB of peak memory.
 DEFAULT_MAX_BYTES = 2 * 1024**3
 EEG = "EEG"
-# The index is read at most this far (64 MiB; the largest real one is well under 1 MiB), any other
-# response at most as far as a recording may be (``DEFAULT_MAX_BYTES``), each with a timeout.
+# The index is read at most this far (64 MiB; the largest real one is well under 1 MiB). A ranged
+# read is read at most as far as its range is long; any other object (a metadata file, an unsharded
+# chunk) at most 256 MiB. Each read has a timeout, and at most ``MAX_CONCURRENT_READS`` are in flight.
 MAX_INDEX_BYTES = 64 * 1024**2
-MAX_OBJECT_BYTES = DEFAULT_MAX_BYTES
+MAX_OBJECT_BYTES = 256 * 1024**2
+MAX_CONCURRENT_READS = 8
 TIMEOUT_S = 60.0
 # The most an index may declare for a store: more channels or samples than any recording has.
 MAX_DECLARED_CHANNELS = 100_000
@@ -251,6 +255,18 @@ def fetch_https(url: str, headers: Mapping[str, str], timeout: float, limit: int
 Fetch = Callable[[str, Mapping[str, str], float, int], Reply]
 
 
+def read_cap(start: int | None, end: int | None, limit: int | None) -> int:
+    """The most bytes a read may return: its explicit limit, else as many as its range is long (a
+    suffix range ``-n`` is ``n``), else ``MAX_OBJECT_BYTES`` for a read with no closed range."""
+    if limit is not None:
+        return limit
+    if start is None and end is not None:
+        return max(int(end), 0)
+    if start is not None and end is not None:
+        return max(int(end) - int(start) + 1, 0)
+    return MAX_OBJECT_BYTES
+
+
 class GuardedTransport:
     """eegprep-lean's transport, limited to the allowlist, with one redirect, counting what it reads.
 
@@ -259,7 +275,9 @@ class GuardedTransport:
     ``ZARR_DATA_HOSTS`` (``redirect_target``); a second redirect is refused. Every request is made by
     ``fetch`` (``fetch_https``, looked up when called, unless a caller gives another: the tests give
     a stand-in for the external hosts), with eegprep-lean's native User-Agent and a ``Range`` header
-    when a range is asked for, and a ranged request answered in full is refused.
+    when a range is asked for, and a ranged request answered in full is refused. A reply longer than
+    its range, or than ``MAX_OBJECT_BYTES`` when it has none, is refused, and at most
+    ``MAX_CONCURRENT_READS`` requests are in flight at once.
     """
 
     def __init__(self, base: str, fetch: Fetch | None = None) -> None:
@@ -271,6 +289,19 @@ class GuardedTransport:
         self.bytes_read = 0
         self.requests = 0
         self.requests_by_host: dict[str, int] = {}
+        # reads run on worker threads: the counters change under this lock, and a semaphore bounds
+        # how many requests are in flight
+        self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
+
+    def _count_request(self, host: str) -> None:
+        with self._lock:
+            self.requests += 1
+            self.requests_by_host[host] = self.requests_by_host.get(host, 0) + 1
+
+    def _count_bytes(self, count: int) -> None:
+        with self._lock:
+            self.bytes_read += count
 
     @property
     def contacted(self) -> list[str]:
@@ -296,17 +327,17 @@ class GuardedTransport:
             headers["Range"] = "bytes=-{}".format(int(end))
         elif start is not None:
             headers["Range"] = "bytes={}-{}".format(int(start), "" if end is None else int(end))
-        cap = MAX_OBJECT_BYTES if limit is None else limit
+        cap = read_cap(start, end, limit)
         current, hops = url, 0
         while True:
             allowed = zarr_hosts.ZARR_HOSTS if hops == 0 else zarr_hosts.ZARR_DATA_HOSTS
             host = zarr_hosts.https_host(current, allowed)
             if host is None:
                 raise TransportError("request refused: not an allowed https host", url=current)
-            self.requests += 1
-            self.requests_by_host[host] = self.requests_by_host.get(host, 0) + 1
+            self._count_request(host)
             fetch = self._fetch if self._fetch is not None else fetch_https
-            reply = fetch(current, headers, TIMEOUT_S, cap)
+            with self._slots:
+                reply = fetch(current, headers, TIMEOUT_S, cap)
             if 300 <= reply.status < 400:
                 if hops:
                     raise TransportError(
@@ -326,7 +357,7 @@ class GuardedTransport:
                 raise TransportError(
                     "range request was answered in full", url=current, status=reply.status
                 )
-            self.bytes_read += len(reply.body)
+            self._count_bytes(len(reply.body))
             return Response(status=reply.status, body=reply.body)
 
 
@@ -364,8 +395,17 @@ def _name(value: Any) -> bool:
     )
 
 
+UNSAFE_PATH_CHARACTERS = frozenset("?#%\\")
+
+
 def _relative(value: Any) -> bool:
-    return _name(value) and not value.startswith("/") and ".." not in value.split("/")
+    """A relative path of plain segments: none empty (so none absolute), none starting with a dot (``.``, ``..``,
+    ``.partial``), and no character that changes what an address means (``?``, ``#``, ``%``, ``\\``)."""
+    return (
+        _name(value)
+        and not any(segment == "" or segment.startswith(".") for segment in value.split("/"))
+        and not UNSAFE_PATH_CHARACTERS & set(value)
+    )
 
 
 def validate_document(document: Any) -> None:
@@ -570,6 +610,16 @@ class ZarrSource:
         found = [store for store in stores if store.path in chosen]
         self.scope = [store.path for store in found]
         return found
+
+    @staticmethod
+    def producible(path: str) -> bool:
+        """Whether a store's products can be named: a file name ``<stem>_eeg.<ext>`` in a directory.
+
+        A path with no directory would put a store's files in the product's root, beside the dataset's
+        own, and a name that does not end in ``_eeg.<ext>`` has no BIDS product name; such an EEG
+        store is a skipped row (``unsupported_format``), never a crash and never a file.
+        """
+        return "/" in path and naming.match_recording(posixpath.basename(path)) is not None
 
     def recording(self, store: Any) -> io.Recording:
         """The store as the command's ``Recording``: keyed by its source path, read through the source."""

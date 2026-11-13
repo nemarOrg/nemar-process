@@ -101,6 +101,7 @@ from nemar_process.common.errors import (
     Code,
     EngineUnavailable,
     RecordingError,
+    RecordingSkipped,
     Status,
     is_cuda_out_of_memory,
 )
@@ -561,7 +562,13 @@ def zarr_items(
         stores = source.select(requested)
     except ValueError as error:
         parser.error(str(error))
-    return [(store.path, source.recording(store)) for store in stores]
+    items: list[tuple[str, io.Recording | RecordingError]] = []
+    for store in stores:
+        if source.producible(store.path):
+            items.append((store.path, source.recording(store)))
+        else:  # its products could not be named: a row, and nothing written
+            items.append((store.path, RecordingSkipped(UNSUPPORTED_FORMAT)))
+    return items
 
 
 def zarr_counts(rows: list[dict[str, Any]], discovered: int) -> dict[str, int]:
@@ -582,9 +589,10 @@ def zarr_counts(rows: list[dict[str, Any]], discovered: int) -> dict[str, int]:
     return counts
 
 
-def network_fence(recipe: Recipe) -> contextlib.AbstractContextManager[Any]:
-    """The socket-level fence of ``zarr_hosts`` for a recipe whose input is ``zarr``, else nothing."""
-    return zarr_hosts.fence() if recipe.input == "zarr" else contextlib.nullcontext()
+def network_fence(recipe: Recipe) -> zarr_hosts.Fence:
+    """The socket-level fence of ``zarr_hosts``: the allowlist for a recipe whose input is ``zarr``,
+    and an empty one (no lookup, no connection at all) for every other recipe."""
+    return zarr_hosts.fence() if recipe.input == "zarr" else zarr_hosts.Fence(hosts=())
 
 
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
