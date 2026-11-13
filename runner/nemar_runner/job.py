@@ -1,0 +1,486 @@
+"""One claimed job, from its directory to its completion.
+
+The steps, each with its own way to stop:
+
+1. the launch value is decoded with the launcher's canonical rules (a malformed one ends the job
+   here, as `runtime_error` `invalid_spec`, the answer the launcher would give);
+2. a heartbeat thread starts and renews the lease every 60 seconds, and wakes at once when the
+   launcher has written `out/launcher/result.json` to say `uploading`;
+3. the image is made available (an Apptainer pull when the file is absent);
+4. the launcher runs in a new process group with an environment built from nothing but the card's
+   keys; the supervisor reaps it with `os.wait4` (so usage is measured by the kernel), sends SIGTERM
+   at the deadline (`NEMAR_JOB_END_TIME` plus 60 s), on a cancel, on a lost lease, when the runner is
+   stopping and when the resident memory of the process tree passes the job's `memory_mb` (without
+   enforced limits), and SIGKILL 30 s after any SIGTERM;
+5. the job's whole directory is deleted in a `finally`, whatever happened, and only then is the job
+   completed (a lost lease is not completed).
+
+Nothing the launcher or the job wrote is logged: a line holds ids, counts, fixed words and exception
+class names.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from typing import Any, NamedTuple
+
+from . import containers, contract, images, scratch, usage, wire
+from .api import Api, ApiError
+from .config import ENGINES, Config, Tuning
+from .logs import Log
+
+# The line `launcher/tapisjob_app.sh` uses, as docs/launcher.md gives it for a runner.
+BOOT = (
+    "import runpy, sys; sys.path.insert(0, sys.argv[1]); "
+    'runpy.run_module("nemar_launch", run_name="__main__", alter_sys=True)'
+)
+
+RESULT_RELATIVE = os.path.join("launcher", "result.json")
+_RESULT_MAX_BYTES = 65_536
+
+
+class Outcome(NamedTuple):
+    exit_number: int
+    failure_code: str | None
+    detail: str | None
+    usage: usage.Usage
+    usage_partial: bool
+    lease_lost: bool = False
+
+
+def refusal(detail: str, code: str = "runtime_error") -> Outcome:
+    """A job the runner ends itself, without launching: the launcher's own exit number for the code."""
+    return Outcome(10 + contract.FAILURE_CODES.index(code), code, detail, usage.ZERO, False)
+
+
+def effective_memory_mb(job: contract.ClaimedJob, config: Config) -> int | None:
+    """The memory size the job runs under: the claimed one; under Docker or Podman, which fail closed
+    without a size, the configured default when the claim has none; under Apptainer, none."""
+    if job.memory_mb is not None:
+        return job.memory_mb
+    if config.runtime in ENGINES:
+        return config.default_job_memory_mb
+    return None
+
+
+def launch_environment(
+    job: contract.ClaimedJob,
+    dirs: scratch.JobDirs,
+    config: Config,
+    tuning: Tuning,
+    enforce: bool,
+) -> dict[str, str]:
+    """The launcher's whole environment: these keys and no others (docs/runner.md)."""
+    end_time = int(job.claimed_at) + job.minutes * 60
+    env = {
+        "NEMAR_LAUNCH_SPEC": job.launch_spec_env,
+        "NEMAR_SIF_ROOT": config.sif_root,
+        "NEMAR_OUTPUT_DIR": dirs.out,
+        "NEMAR_SCRATCH_DIR": dirs.scratch,
+        "NEMAR_JOB_END_TIME": str(end_time),
+        "NEMAR_LEASE_ID": job.lease_id,
+        "NEMAR_CONTAINER_RUNTIME": config.runtime,
+        "NEMAR_ENFORCE_LIMITS": "1" if enforce else "0",
+        "NEMAR_CPUS": str(job.cores),
+        "HOME": dirs.home,
+        "PATH": tuning.launch_path,
+        "LANG": "C.UTF-8",
+    }
+    memory = effective_memory_mb(job, config)
+    if memory is not None:
+        env["NEMAR_MEMORY_MB"] = str(memory)
+    return env
+
+
+def read_result(path: str) -> tuple[str | None, str | None]:
+    """The launcher's `failure_code` and `detail` from `result.json`, or (None, None) when the file is
+    absent or not what the launcher writes. The file is read without following a link."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None, None
+    try:
+        raw = os.read(fd, _RESULT_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > _RESULT_MAX_BYTES:
+        return None, None
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None, None
+    if not isinstance(document, dict):
+        return None, None
+    code, detail = document.get("failure_code"), document.get("detail")
+    if code is not None and code not in contract.FAILURE_CODES:
+        return None, None
+    if code is None:
+        return None, None
+    if detail is not None and (
+        not isinstance(detail, str) or contract.WORD_RE.fullmatch(detail) is None
+    ):
+        return None, None
+    return code, detail
+
+
+def completion_body(job: contract.ClaimedJob, outcome: Outcome, discarded: bool) -> dict[str, Any]:
+    return {
+        "job_id": job.id,
+        "lease_id": job.lease_id,
+        "exit_number": max(0, min(255, outcome.exit_number)),
+        "launcher_failure_code": outcome.failure_code,
+        "launcher_detail": outcome.detail,
+        "usage": {
+            "wall_seconds": outcome.usage.wall_seconds,
+            "cpu_seconds": outcome.usage.cpu_seconds,
+            "max_rss_mb": outcome.usage.max_rss_mb,
+        },
+        "usage_partial": outcome.usage_partial,
+        "scratch_discarded": discarded,
+    }
+
+
+class Heartbeat(threading.Thread):
+    """Renews the lease every `heartbeat_seconds`, reports the phase, and records what NEMAR answers:
+    a cancel, or that the lease is gone."""
+
+    def __init__(
+        self,
+        api: Api,
+        job: contract.ClaimedJob,
+        log: Log,
+        tuning: Tuning,
+        cancel: threading.Event,
+        lease_lost: threading.Event,
+    ) -> None:
+        super().__init__(name="heartbeat-" + job.id, daemon=True)
+        self._api, self._job, self._log, self._tuning = api, job, log, tuning
+        self._cancel, self._lease_lost = cancel, lease_lost
+        self._done = threading.Event()
+        self._wake = threading.Event()
+        self._uploading = False
+
+    def uploading(self) -> None:
+        """The launcher's result exists: the next heartbeat says `uploading`, now."""
+        self._uploading = True
+        self._wake.set()
+
+    @property
+    def is_uploading(self) -> bool:
+        return self._uploading
+
+    def finish(self) -> None:
+        self._done.set()
+        self._wake.set()
+        if self.is_alive():
+            self.join(self._tuning.http_timeout_seconds + 5)
+
+    def run(self) -> None:
+        while not self._done.is_set():
+            phase = "uploading" if self._uploading else "started"
+            pause = self._tuning.heartbeat_seconds
+            try:
+                if self._api.heartbeat(self._job.id, self._job.lease_id, phase):
+                    if not self._cancel.is_set():
+                        self._log.info("cancel_requested", job=self._job.id)
+                    self._cancel.set()
+            except ApiError as error:
+                if error.lease_lost:
+                    self._log.warn("lease_lost", job=self._job.id, **error.fields())
+                    self._lease_lost.set()
+                    return
+                self._log.warn("heartbeat_failed", job=self._job.id, **error.fields())
+                pause = min(pause, 10.0)
+            except Exception as error:  # noqa: BLE001 - a bug here must not end the job's lease silently
+                self._log.error("heartbeat_error", job=self._job.id, error=type(error).__name__)
+                pause = min(pause, 10.0)
+            self._wake.wait(pause)
+            self._wake.clear()
+
+
+class JobRunner:
+    def __init__(
+        self,
+        job: contract.ClaimedJob,
+        config: Config,
+        tuning: Tuning,
+        api: Api,
+        log: Log,
+        locks: images.PullLocks,
+        limits: images.Limits,
+        stop: threading.Event,
+    ) -> None:
+        self.job, self.config, self.tuning = job, config, tuning
+        self.api, self.log, self.locks, self.limits, self.stop = api, log, locks, limits, stop
+        self.cancel = threading.Event()
+        self.lease_lost = threading.Event()
+        self._usage = usage.ZERO
+
+    # ---- the whole life of the job ------------------------------------------------------------------
+
+    def run(self) -> str | None:
+        """Run the job and complete it. The state NEMAR answered, or None (a lost lease, or no answer)."""
+        job = self.job
+        self.log.info(
+            "job_claimed", job=job.id, minutes=job.minutes, cores=job.cores, memory_mb=job.memory_mb
+        )
+        outcome: Outcome | None = None
+        discarded, held = False, 0
+        dirs: scratch.JobDirs | None = None
+        try:
+            dirs = scratch.make_job_dirs(self.config.root, job.id)
+            outcome = self._execute(dirs)
+        except Exception as error:  # noqa: BLE001 - whatever fails, the directory goes and the job ends
+            self.log.error("job_internal_error", job=job.id, error=type(error).__name__)
+            outcome = Outcome(
+                10 + contract.FAILURE_CODES.index("runtime_error"),
+                "runtime_error",
+                "internal_error",
+                self._usage,
+                self.config.runtime != "apptainer",
+            )
+        finally:
+            containers.remove_job_containers(self.config, self.tuning, self.log, job.id)
+            discarded, held = scratch.discard(scratch.job_path(self.config.root, job.id))
+            self.log.info("scratch_discarded", job=job.id, bytes=held, discarded=discarded)
+        if outcome is None or outcome.lease_lost or self.lease_lost.is_set():
+            self.log.warn("job_not_completed", job=job.id, reason="lease_lost")
+            return None
+        return self._complete(outcome, discarded)
+
+    def _complete(self, outcome: Outcome, discarded: bool) -> str | None:
+        job = self.job
+        try:
+            state = self.api.complete(completion_body(job, outcome, discarded))
+        except ApiError as error:
+            level = self.log.warn if error.lease_lost else self.log.error
+            level("complete_failed", job=job.id, **error.fields())
+            return None
+        self.log.info("job_completed", job=job.id, exit=outcome.exit_number, state=state)
+        return state
+
+    # ---- the steps ----------------------------------------------------------------------------------
+
+    def _execute(self, dirs: scratch.JobDirs) -> Outcome:
+        job = self.job
+        problem = self._spec_problem()
+        if problem is not None:
+            self.log.warn("launch_value_refused", job=job.id, reason=problem)
+            return refusal("invalid_spec")
+        heartbeat = Heartbeat(self.api, job, self.log, self.tuning, self.cancel, self.lease_lost)
+        heartbeat.start()
+        try:
+            return self._launch(dirs, heartbeat)
+        finally:
+            heartbeat.finish()
+
+    def _spec_problem(self) -> str | None:
+        """Why the claim's launch value cannot run, as a fixed word, or None. The decoded text holds the
+        job token and is never logged."""
+        job = self.job
+        try:
+            text = wire.decode_wire(job.launch_spec_env.encode("ascii"))
+        except (wire.WireError, UnicodeEncodeError) as error:
+            return error.word if isinstance(error, wire.WireError) else "not_base64url"
+        if job.image_sif != job.digest_hex + ".sif":
+            return "image_mismatch"
+        try:
+            document = json.loads(text.decode("ascii"))
+        except ValueError:
+            return None  # the launcher refuses a text that is not JSON, and says so in result.json
+        if not isinstance(document, dict):
+            return None
+        if document.get("job_id") != job.id:
+            return "job_mismatch"
+        image = document.get("image")
+        if isinstance(image, dict) and image.get("sif") != job.image_sif:
+            return "image_mismatch"
+        return None
+
+    def _stop_reason(self) -> str | None:
+        if self.lease_lost.is_set():
+            return "lease_lost"
+        if self.cancel.is_set():
+            return "cancelled"
+        if self.stop.is_set():
+            return "runner_stopping"
+        return None
+
+    def _end_time(self) -> int:
+        return int(self.job.claimed_at) + self.job.minutes * 60
+
+    def _launch(self, dirs: scratch.JobDirs, heartbeat: Heartbeat) -> Outcome:
+        job, config, tuning = self.job, self.config, self.tuning
+        term_at = self._end_time() + tuning.deadline_grace_seconds
+        sif: str | None = None
+        if config.runtime == "apptainer":
+            try:
+                sif = images.ensure_sif(
+                    config,
+                    tuning,
+                    self.log,
+                    self.locks,
+                    job.digest_hex,
+                    job.id,
+                    dirs.scratch,
+                    dirs.home,
+                    lambda argv, env, label: self._run_helper(
+                        argv, env, label, dirs, term_at, heartbeat
+                    ),
+                )
+            except images.Interrupted as stopped:
+                if self.lease_lost.is_set():
+                    return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
+                self.log.info("job_stopped_before_launch", job=job.id, reason=str(stopped))
+                return refusal("terminated")
+            except images.ImageError as error:
+                self.log.error("image_unavailable", job=job.id, reason=str(error))
+                return refusal("image_missing")
+        enforce = sif is not None and self.limits.proven(sif, dirs.home)
+        env = launch_environment(job, dirs, config, tuning, enforce)
+        argv = [self._python(), "-I", "-S", "-c", BOOT, config.launcher_dir]
+        reason = self._stop_reason()
+        if reason is not None:  # stopped while the image was being made: do not start
+            if reason == "lease_lost":
+                return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
+            return refusal("terminated")
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            cwd=dirs.job,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        self.log.info("job_started", job=job.id, pid=proc.pid, enforce_limits=enforce)
+        result_path = os.path.join(dirs.out, RESULT_RELATIVE)
+        memory_watch = None if enforce else effective_memory_mb(job, config)
+        if config.runtime in ENGINES and job.memory_mb is None:
+            self.log.info("memory_default_applied", job=job.id, mb=memory_watch)
+        status, rusage, wall, why = self._supervise(
+            proc, term_at, memory_watch, result_path, heartbeat
+        )
+        measured = usage.measure(wall, rusage) if rusage is not None else usage.ZERO
+        self._usage = measured
+        number = usage.exit_number(status)
+        code, detail = read_result(result_path)
+        partial = config.runtime != "apptainer"
+        if partial:
+            self.log.info("usage_partial", job=job.id, runtime=config.runtime)
+        self.log.info(
+            "job_exited",
+            job=job.id,
+            exit=number,
+            stopped_for=why,
+            failure_code=code,
+            wall_seconds=measured.wall_seconds,
+            cpu_seconds=measured.cpu_seconds,
+            max_rss_mb=measured.max_rss_mb,
+        )
+        return Outcome(number, code, detail, measured, partial, lease_lost=why == "lease_lost")
+
+    def _python(self) -> str:
+        return shutil.which("python3", path=self.tuning.launch_path) or sys.executable
+
+    def _run_helper(
+        self,
+        argv: list[str],
+        env: dict[str, str],
+        label: str,
+        dirs: scratch.JobDirs,
+        job_term_at: float,
+        heartbeat: Heartbeat,
+    ) -> int:
+        """Run a helper process (an image pull) under the same supervision as the launcher."""
+        term_at = min(job_term_at, time.time() + self.tuning.pull_timeout_seconds)
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            cwd=dirs.job,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        status, _rusage, _wall, why = self._supervise(proc, term_at, None, None, heartbeat)
+        if why in ("lease_lost", "cancelled", "runner_stopping"):
+            raise images.Interrupted(why)
+        self.log.info(
+            "helper_exited", job=self.job.id, helper=label, exit=usage.exit_number(status)
+        )
+        return usage.exit_number(status)
+
+    # ---- supervising a process group ----------------------------------------------------------------
+
+    def _signal_group(self, proc: subprocess.Popen[bytes], signum: int) -> None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signum)
+
+    def _supervise(
+        self,
+        proc: subprocess.Popen[bytes],
+        term_at: float,
+        memory_mb: int | None,
+        result_path: str | None,
+        heartbeat: Heartbeat | None,
+    ) -> tuple[int, Any, float, str | None]:
+        """Wait for ``proc`` and its group, acting on the deadline, a cancel, a lost lease, a stop and
+        memory. ``(wait status, rusage, wall seconds, why it was terminated or None)``."""
+        tuning = self.tuning
+        started = time.monotonic()
+        term_sent: float | None = None
+        killed = False
+        why: str | None = None
+        next_watch = started + tuning.watchdog_seconds
+        status, rusage = 0, None
+        while True:
+            try:
+                pid, status, rusage = os.wait4(proc.pid, os.WNOHANG)
+            except ChildProcessError:  # reaped elsewhere: nothing to measure
+                status, rusage = 255 << 8, None
+                break
+            if pid == proc.pid:
+                break
+            now = time.monotonic()
+            if (
+                result_path is not None
+                and heartbeat is not None
+                and not heartbeat.is_uploading
+                and os.path.exists(result_path)
+            ):
+                heartbeat.uploading()
+            if term_sent is None:
+                reason = self._stop_reason()
+                if reason is None and time.time() >= term_at:
+                    reason = "deadline"
+                if reason is None and memory_mb is not None and now >= next_watch:
+                    next_watch = now + tuning.watchdog_seconds
+                    held = usage.tree_rss_kb(proc.pid)
+                    if held is not None and held / 1024.0 > memory_mb:
+                        reason = "memory"
+                if reason is not None:
+                    why, term_sent = reason, now
+                    self.log.warn("terminating", job=self.job.id, reason=reason)
+                    self._signal_group(proc, signal.SIGTERM)
+            elif not killed and now - term_sent >= tuning.kill_grace_seconds:
+                killed = True
+                self.log.warn("killing", job=self.job.id, reason=why)
+                self._signal_group(proc, signal.SIGKILL)
+            time.sleep(tuning.tick_seconds)
+        wall = time.monotonic() - started
+        self._signal_group(proc, signal.SIGKILL)  # nothing of the job outlives it
+        proc.returncode = usage.exit_number(status)
+        if why is None and self.lease_lost.is_set():
+            why = "lease_lost"
+        return status, rusage, wall, why
