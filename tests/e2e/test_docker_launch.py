@@ -30,6 +30,9 @@ REQUIRE = os.environ.get("NEMAR_REQUIRE_DOCKER") == "1"
 IMAGE_HEX = "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
 IMAGE_DIGEST = "sha256:" + IMAGE_HEX
 IMAGE_URI = "docker://public.ecr.aws/docker/library/python@" + IMAGE_DIGEST
+# The registry is on the launcher's allowlist only because the test names it (the default is ghcr.io).
+REGISTRY = "public.ecr.aws"
+RUNNER_LABEL = "rnr_0123456789abcdef01234567"
 MEMORY_LIMIT_MB = 128
 
 PROBE = r"""
@@ -51,6 +54,28 @@ status = dict(
 facts["no_new_privs"] = status.get("NoNewPrivs")
 facts["cap_eff"] = status.get("CapEff")
 facts["process_count"] = len([n for n in os.listdir("/proc") if n.isdigit()])
+
+
+def first_line(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return None
+
+
+# The limits as the container itself sees them (cgroup v2 files, else the v1 ones): a daemon that
+# dropped a flag silently would show an unlimited value here.
+facts["cgroup"] = {
+    "cpu.max": first_line("/sys/fs/cgroup/cpu.max"),
+    "memory.max": first_line("/sys/fs/cgroup/memory.max"),
+    "memory.swap.max": first_line("/sys/fs/cgroup/memory.swap.max"),
+    "pids.max": first_line("/sys/fs/cgroup/pids.max"),
+    "v1.memory": first_line("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    "v1.cfs_quota": first_line("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+    "v1.cfs_period": first_line("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+    "v1.pids": first_line("/sys/fs/cgroup/pids/pids.max"),
+}
 
 
 def can_write(directory):
@@ -98,14 +123,18 @@ def image_spec(rig: Rig, **overrides) -> dict:
 
 
 def containers_left() -> str:
-    done = subprocess.run(
-        [ENGINE, "ps", "--all", "--quiet", "--filter", "name=nemar-launch-"],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=60,
-    )
-    return done.stdout.strip()
+    """The containers the launcher made and did not remove: by name and by the job label."""
+    found = []
+    for selector in ("name=nemar-launch-", "label=nemar.job"):
+        done = subprocess.run(
+            [ENGINE, "ps", "--all", "--quiet", "--filter", selector],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        found.append(done.stdout.strip())
+    return "".join(found)
 
 
 @pytest.fixture(scope="module")
@@ -133,6 +162,8 @@ def probed(tmp_path_factory):
         NEMAR_CONTAINER_RUNTIME=ENGINE,
         NEMAR_CPUS="1",
         NEMAR_MEMORY_MB="512",
+        NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+        NEMAR_RUNNER_LABEL=RUNNER_LABEL,
         NEMAR_TEST_CANARY="host-only-secret-canary",
     )
     assert launch.exit == 0, launch.log + launch.stderr
@@ -180,6 +211,7 @@ def test_its_environment_is_the_allowlist_and_the_output_path(probed):
         "NEMAR_TEST_CANARY",
         "NEMAR_LAUNCH_SPEC",
         "NEMAR_CONTAINER_RUNTIME",
+        "NEMAR_RUNNER_LABEL",
         "NEMAR_CPUS",
         "NEMAR_MEMORY_MB",
         "_tapisExecSystemOutputDir",
@@ -194,6 +226,20 @@ def test_the_launcher_directory_is_not_inside_and_the_working_directory_is_work(
     assert facts["cwd"] == "/work"
     assert "launcher" not in facts["root_entries"]
     assert str(rig.out / "launcher") not in facts["mountinfo"]
+
+
+def test_the_limits_are_in_force_inside_the_container(probed):
+    _rig, _launch, facts = probed
+    limits = facts["cgroup"]
+    if limits["memory.max"] is not None:  # cgroup v2
+        assert limits["memory.max"] == str(512 << 20)
+        assert limits["memory.swap.max"] == "0"
+        assert limits["cpu.max"].split()[0] == limits["cpu.max"].split()[1]  # one CPU's quota
+        assert limits["pids.max"] == "4096"
+    else:  # cgroup v1
+        assert limits["v1.memory"] == str(512 << 20)
+        assert limits["v1.cfs_quota"] == limits["v1.cfs_period"]
+        assert limits["v1.pids"] == "4096"
 
 
 def test_it_has_a_process_namespace_of_its_own(probed):
@@ -216,6 +262,8 @@ def test_a_container_that_outgrows_its_memory_limit_is_killed_and_recorded(tmp_p
             NEMAR_CONTAINER_RUNTIME=ENGINE,
             NEMAR_CPUS="1",
             NEMAR_MEMORY_MB=str(MEMORY_LIMIT_MB),
+            NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+            NEMAR_RUNNER_LABEL=RUNNER_LABEL,
         )
         assert launch.exit == 14, launch.log + launch.stderr
         result = launch.result
