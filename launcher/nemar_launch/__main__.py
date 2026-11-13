@@ -288,6 +288,8 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
     if not out_dir:
         sys.stderr.write("nemar-launch: _tapisExecSystemOutputDir or NEMAR_OUTPUT_DIR is not set\n")
         return exit_number("runtime_error")
+    if settings.problem is not None:  # a fixed line, never the value, for a hand-run operator
+        sys.stderr.write("nemar-launch: {}\n".format(settings.problem.message))
     refused: Failure | None = None
     layout: run.Layout | None = None
     try:

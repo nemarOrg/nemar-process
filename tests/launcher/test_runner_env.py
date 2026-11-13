@@ -255,8 +255,8 @@ def test_enforced_limits_without_a_memory_size_add_only_cpus(rig):
     assert "--memory" not in argv
 
 
-@pytest.mark.parametrize("flag", [None, "0", "true", "yes", "11", ""])
-def test_unless_enforcement_is_exactly_one_the_argv_is_unchanged(rig, flag):
+@pytest.mark.parametrize("flag", [None, "0"])
+def test_unset_or_zero_enforcement_leaves_the_argv_unchanged(rig, flag):
     plain = argv_without_any_variable(rig)
     extra = {"NEMAR_CPUS": "4", "NEMAR_MEMORY_MB": "2048"}
     if flag is not None:
@@ -316,3 +316,42 @@ def test_build_argv_places_the_limits_before_the_binds_and_after_the_working_dir
     assert on == [*off[:9], "--cpus", "3", "--memory", "512M", *off[9:]]
     only_cpus = run.build_argv("/bin/apptainer", job, "/x.sif", [], limits=run.Limits(3, None))
     assert only_cpus == [*off[:9], "--cpus", "3", *off[9:]]
+
+
+@pytest.mark.parametrize("flag", ["true", "yes", " 1", "1 ", "01", "11", "", "\u0661"])
+def test_a_set_enforcement_flag_that_is_not_zero_or_one_fails_closed(rig, flag):
+    code, stderr = launch_with(
+        rig, entry_spec(rig), NEMAR_ENFORCE_LIMITS=flag, NEMAR_CPUS="4", NEMAR_MEMORY_MB="2048"
+    )
+    assert code == 13
+    assert result_of(rig)["detail"] == "invalid_spec"
+    assert "limits setting" in stderr
+    assert rig.server.requests == []
+    assert rig.runtime_calls() == []
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("NEMAR_LEASE_ID", "bad"),
+        ("NEMAR_ENFORCE_LIMITS", "1"),
+        ("NEMAR_ENFORCE_LIMITS", "maybe"),
+    ],
+)
+def test_a_refused_setting_prints_one_fixed_line_without_the_value(rig, variable, value):
+    code, stderr = launch_with(rig, entry_spec(rig), **{variable: value})
+    assert code == 13
+    lines = [line for line in stderr.splitlines() if line.startswith("nemar-launch: the ")]
+    assert len(lines) == 1
+    assert lines[0].endswith("is not valid")
+    assert value not in lines[0].split(": ", 1)[1]
+
+
+@pytest.mark.parametrize("digit", ["\u00b2", "\u0663", "\uff11", "\u2460"])
+@pytest.mark.parametrize("variable", ["SLURM_JOB_END_TIME", "NEMAR_JOB_END_TIME"])
+def test_a_non_ascii_digit_in_a_deadline_is_absent_and_never_raises(rig, variable, digit):
+    assert run.end_time(Env({variable.encode(): digit.encode()})) is None
+    assert run.end_time(Env({variable.encode(): ("1" + digit).encode()})) is None
+    code, _ = launch_with(rig, entry_spec(rig), **{variable: digit})
+    assert code == 0
+    assert result_of(rig)["failure_code"] is None

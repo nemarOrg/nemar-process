@@ -32,6 +32,7 @@ from .codes import (
 )
 
 _LEASE = re.compile(LEASE_ID_PATTERN)
+_EPOCH = re.compile(r"[0-9]+")
 _CPUS = re.compile(r"[1-9][0-9]{0,3}")
 _MEMORY_MB = re.compile(r"[1-9][0-9]{0,8}")
 
@@ -59,14 +60,18 @@ def _refused(what: str) -> Failure:
 def _end_time(env: Env) -> float | None:
     for name in (ENV_SLURM_END_TIME, ENV_RUNNER_END_TIME):
         raw = env.get(name)
-        if raw is not None and raw.strip().isdigit():
+        # ASCII digits only: `str.isdigit()` is also true for "\u00b2", which `float` refuses.
+        if raw is not None and _EPOCH.fullmatch(raw.strip()) is not None:
             return float(raw.strip())
     return None
 
 
 def _limits(env: Env) -> tuple[Limits | None, Failure | None]:
-    if env.get(ENV_ENFORCE_LIMITS) != "1":
+    flag = env.get(ENV_ENFORCE_LIMITS)
+    if flag is None or flag == "0":
         return None, None
+    if flag != "1":  # "true", " 1" or "01" is not a yes: fail closed rather than run unlimited
+        return None, _refused("limits setting")
     cpus = env.get(ENV_CPUS)
     memory = env.get(ENV_MEMORY_MB)
     if cpus is None or _CPUS.fullmatch(cpus) is None:

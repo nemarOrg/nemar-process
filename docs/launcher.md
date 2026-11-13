@@ -54,21 +54,22 @@ The launcher reads a runner's variables only where the Tapis or SLURM one is uns
 | What | Read from, in this order |
 |---|---|
 | the output directory | `_tapisExecSystemOutputDir`, else `NEMAR_OUTPUT_DIR`; neither is exit 13 with a message on stderr, before anything is created |
-| the deadline | `SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`: seconds since the epoch, digits only; a value that is not that is the same as none, and the next variable is tried |
+| the deadline | `SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`: seconds since the epoch, ASCII digits 0 to 9 only (a superscript or any other script's digit is not one); a value that is not that is the same as none, and the next variable is tried |
 | scratch | `SLURM_TMPDIR`, else `NEMAR_SCRATCH_DIR`, else `TMPDIR`, else the system's temporary directory |
 | the job id in provenance | `SLURM_JOB_ID`; unset, `slurm_job_id` is null, and nothing about the runner is written into provenance |
 
 **The lease.**
 When `NEMAR_LEASE_ID` is set, it must be exactly 32 lowercase hexadecimal digits, and the bundle, outputs and outputs-complete calls to NEMAR carry it as `X-Compute-Lease` beside the job token.
 The storage addresses those calls return never get it.
-A set value of any other shape (an empty one, uppercase, a trailing newline) ends the launch at the start: exit 13, `runtime_error` with detail `invalid_spec`, the four launcher files written, and nothing fetched, run or uploaded, because the lease is what authorizes a runner's upload and a malformed one cannot be sent.
+A set value of any other shape (an empty one, uppercase, a trailing newline) ends the launch at the start: exit 13, `runtime_error` with detail `invalid_spec`, one fixed line on stderr naming what was refused (never the value), the four launcher files written, and nothing fetched, run or uploaded, because the lease is what authorizes a runner's upload and a malformed one cannot be sent.
 The value is never logged.
 
 **Limits.**
-With `NEMAR_ENFORCE_LIMITS=1` (exactly that) the container runtime is given its own limits: `--cpus <NEMAR_CPUS>`, and `--memory <NEMAR_MEMORY_MB>M` when `NEMAR_MEMORY_MB` is set, right after `--pwd /work`.
+With `NEMAR_ENFORCE_LIMITS=1` the container runtime is given its own limits: `--cpus <NEMAR_CPUS>`, and `--memory <NEMAR_MEMORY_MB>M` when `NEMAR_MEMORY_MB` is set, right after `--pwd /work`.
 `NEMAR_CPUS` is a whole number from 1 to 9999 and `NEMAR_MEMORY_MB` a whole number of at least 1; the launch specification carries neither, so the runner passes them.
-Enforcement asked for without a usable `NEMAR_CPUS`, or with a `NEMAR_MEMORY_MB` that is set and unusable, fails closed like a malformed lease.
-With the variable unset or anything else, the command line is byte for byte what it is under Tapis.
+Unset or `0` means no limits, and the command line is byte for byte what it is under Tapis.
+Any other set value (`true`, ` 1`, `01`, an empty one) is refused like a malformed lease, as is enforcement asked for without a usable `NEMAR_CPUS` or with a `NEMAR_MEMORY_MB` that is set and unusable: a runner that asked for limits never silently runs without them.
+The detail is `invalid_spec` for all of these, because the word list is shared with nemar-cli and held by the drift test.
 A runner sets it only after proving that the host lets the user's own processes apply those limits; the launcher does not check.
 
 None of these variables reaches the container (`run.HOST_PASSTHROUGH` is a short allowlist).
