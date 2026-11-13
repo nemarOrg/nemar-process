@@ -41,6 +41,22 @@ ENV_LOCAL_DATASETS_ROOT = "NEMAR_LOCAL_DATASETS_ROOT"
 ENV_HOST_PYTHON = "NEMAR_HOST_PYTHON"
 # Tapis's own: the directory the job's outputs are archived from.
 ENV_OUTPUT_DIR = "_tapisExecSystemOutputDir"
+# A runner's variables, for a host with no Tapis or SLURM (docs/launcher.md, "Outside Tapis and
+# SLURM"). Each is read only when its Tapis or SLURM counterpart is unset.
+ENV_RUNNER_OUTPUT_DIR = "NEMAR_OUTPUT_DIR"
+ENV_RUNNER_END_TIME = "NEMAR_JOB_END_TIME"
+ENV_RUNNER_SCRATCH_DIR = "NEMAR_SCRATCH_DIR"
+# The lease a runner holds on the job: sent as `X-Compute-Lease` with the bundle, outputs and
+# outputs-complete calls. The header name and the shape are nemar-cli's (`RUNNER_LEASE_HEADER` and
+# `LEASE_ID_RE` in shared/contract/compute-runner.ts).
+ENV_LEASE_ID = "NEMAR_LEASE_ID"
+LEASE_HEADER = "X-Compute-Lease"
+LEASE_ID_PATTERN = r"[0-9a-f]{32}"
+# `1` asks for the container runtime's own CPU and memory limits; `NEMAR_CPUS` and `NEMAR_MEMORY_MB`
+# are the sizes (the launch specification carries none).
+ENV_ENFORCE_LIMITS = "NEMAR_ENFORCE_LIMITS"
+ENV_CPUS = "NEMAR_CPUS"
+ENV_MEMORY_MB = "NEMAR_MEMORY_MB"
 # Where the Singularity image files named by `image.sif` live on the node. Set by the Tapis
 # application definition; when unset, `image.sif` is relative to the launcher's working directory.
 ENV_SIF_ROOT = "NEMAR_SIF_ROOT"

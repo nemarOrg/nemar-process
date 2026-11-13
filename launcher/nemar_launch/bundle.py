@@ -201,6 +201,7 @@ def fetch(
     sleep: net.Sleep,
     log: Log,
     stop: threading.Event | None = None,
+    lease: str | None = None,
 ) -> tuple[str, str]:
     """Get, verify and extract the job's bundle under ``scratch``; return (code dir, archive sha256)."""
     assert job.bundle is not None
@@ -218,7 +219,7 @@ def fetch(
     log.info("bundle: asking {}".format(net.redact(url)))
     try:
         _status, answer = net.retrying(
-            lambda _n: net.post_json(url, {}, job.job_token),
+            lambda _n: net.post_json(url, {}, job.job_token, lease),
             attempts=net.ATTEMPTS,
             sleep=sleep,
             on_retry=retry_note,

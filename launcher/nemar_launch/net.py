@@ -30,7 +30,7 @@ from typing import Any, Callable, ClassVar
 from urllib.parse import urljoin, urlsplit
 
 from . import __version__
-from .codes import Stopped, is_word
+from .codes import LEASE_HEADER, Stopped, is_word
 
 ATTEMPTS = 5
 PUT_ATTEMPTS = 3
@@ -215,23 +215,24 @@ def encode_json(body: dict[str, Any]) -> bytes:
     return json.dumps(body, separators=(",", ":")).encode("utf-8")
 
 
-def post_json(url: str, body: dict[str, Any], token: str) -> tuple[int, dict[str, Any]]:
-    """POST ``body`` as JSON with the job token header; return (status, JSON object).
+def post_json(
+    url: str, body: dict[str, Any], token: str, lease: str | None = None
+) -> tuple[int, dict[str, Any]]:
+    """POST ``body`` as JSON with the job token header (and the lease header, when ``lease`` is
+    given); return (status, JSON object).
 
     Never follows a redirect. A refusal is an ``HttpFailure`` with the response's ``code`` word.
     """
     data = encode_json(body)
-    request = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-            "X-Compute-Job-Token": token,
-        },
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "X-Compute-Job-Token": token,
+    }
+    if lease is not None:
+        headers[LEASE_HEADER] = lease
+    request = urllib.request.Request(url, data=data, method="POST", headers=headers)
     try:
         with open_url(request, follow=False) as response:
             raw = response.read(MAX_JSON_RESPONSE)

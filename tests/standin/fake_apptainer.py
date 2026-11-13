@@ -29,7 +29,7 @@ import sys
 import time
 
 VALUELESS = {"--containall", "--cleanenv", "--no-home", "--nv"}
-VALUED = {"--pwd", "--bind", "--env", "--no-mount"}
+VALUED = {"--pwd", "--bind", "--env", "--no-mount", "--cpus", "--memory"}
 PROBE_MARKER = "# nemar-pid-namespace-probe"
 
 
