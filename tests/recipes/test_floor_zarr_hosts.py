@@ -52,6 +52,13 @@ CHUNK = "{}/{}/zarr/{}/eeg_250hz/0/zarr.json".format(z.ORIGIN, z.DATASET, z.zarr
 ON_DATA = "https://{}/x".format(z.DATA_HOST)
 
 
+def teredo(server: int, client: int) -> ipaddress.IPv6Address:
+    """A Teredo address (2001:0::/32) carrying the given IPv4 server and client addresses."""
+    return ipaddress.IPv6Address(
+        (0x20010000 << 96) | (server << 64) | (0xFFFF << 32) | (client ^ 0xFFFFFFFF)
+    )
+
+
 def address(value: int) -> str:
     """An IPv4 address from its number, so no address is written out in this file."""
     return str(ipaddress.IPv4Address(value))
@@ -249,7 +256,7 @@ def test_an_answer_after_the_redirect_that_is_an_error_is_an_error(served):  # n
 
 
 def test_a_ranged_request_answered_in_full_is_refused():
-    documents = z.DocumentFetch({CHUNK: b"0123456789"})
+    documents = z.DocumentFetch({CHUNK: b"0123"})  # the four bytes asked for, but a 200
     guarded = zarr_input.GuardedTransport(z.ORIGIN, documents.fetch)
     with pytest.raises(TransportError) as refused:
         get(guarded, start=0, end=3)
@@ -435,6 +442,20 @@ MALFORMED = {
     "no path": lambda d: first_store(d).pop("path"),
     "an empty zarr": lambda d: first_store(d).update(zarr=""),
     "a path with a control character": lambda d: first_store(d).update(path="a\x00_eeg.edf"),
+    "a path under the work directory": lambda d: first_store(d).update(
+        path=".partial/x/sub-01_task-rest_eeg.edf"
+    ),
+    "a hidden file name": lambda d: first_store(d).update(path="sub-01/eeg/.sub-01_eeg.edf"),
+    "a hidden directory": lambda d: first_store(d).update(path="sub-01/.eeg/sub-01_eeg.edf"),
+    "a current-directory segment": lambda d: first_store(d).update(path="sub-01/./sub-01_eeg.edf"),
+    "an empty segment": lambda d: first_store(d).update(path="sub-01//sub-01_eeg.edf"),
+    "a path with a query": lambda d: first_store(d).update(path="sub-01/eeg/a?b_eeg.edf"),
+    "a path with a fragment": lambda d: first_store(d).update(path="sub-01/eeg/a#b_eeg.edf"),
+    "a path with an escape": lambda d: first_store(d).update(path="sub-01/eeg/a%2e_eeg.edf"),
+    "a path with a backslash": lambda d: first_store(d).update(path="sub-01\\eeg\\a_eeg.edf"),
+    "a zarr with a query": lambda d: first_store(d).update(zarr="sub-01/a?b_eeg.zarr"),
+    "a zarr with an escape": lambda d: first_store(d).update(zarr="sub-01/%2e%2e/a_eeg.zarr"),
+    "a zarr with a hidden segment": lambda d: first_store(d).update(zarr="sub-01/.x/a_eeg.zarr"),
     "store_count as text": lambda d: d.update(store_count="8"),
     "store_count missing": lambda d: d.pop("store_count"),
     "store_count of another size": lambda d: d.update(store_count=99),
@@ -605,12 +626,28 @@ def test_the_fence_refuses_other_lookups_and_local_connections_and_then_lets_go(
         listener.close()
 
 
-def test_the_fence_refuses_a_connection_with_no_lookup_to_a_public_address_and_the_rest_by_kind():
+def test_the_fence_refuses_a_public_address_when_no_allowed_host_was_looked_up():
     fence = zarr_hosts.Fence()
+    for target in ((PUBLIC, 80), ("2001:4860:4860::8888", 80, 0, 0)):
+        with pytest.raises(zarr_hosts.NetworkRefused):
+            fence.check_connect(target)
+    fence.lookups = 1
+    fence.check_connect((PUBLIC, 80))  # the same address, once an allowed host was looked up
+
+
+def test_the_fence_refuses_every_kind_of_address_that_is_not_public_even_after_a_lookup():
+    fence = zarr_hosts.Fence()
+    fence.lookups = 1  # so that only the kind of address decides
     for target in (
         ("::1", 80, 0, 0),
         ("::ffff:" + address(0x7F000001), 80, 0, 0),  # loopback in IPv6 clothes
         ("::ffff:" + PRIVATE, 80, 0, 0),
+        ("64:ff9b::a9fe:a9fe", 80, 0, 0),  # NAT64 of the link-local metadata address
+        ("64:ff9b::a00:1", 80, 0, 0),  # NAT64 of a private address
+        ("::7f00:1", 80, 0, 0),  # IPv4-compatible loopback
+        ("2002:a9fe:a9fe::1", 80, 0, 0),  # 6to4 of the link-local metadata address
+        (str(teredo(server=0x08080808, client=0x0A000001)), 80, 0, 0),  # Teredo, private client
+        (str(teredo(server=0x0A000001, client=0x08080808)), 80, 0, 0),  # Teredo, private server
         ("fe80::1", 80, 0, 0),
         (address(0), 80),
         (PRIVATE, 80),
@@ -618,14 +655,97 @@ def test_the_fence_refuses_a_connection_with_no_lookup_to_a_public_address_and_t
         ("not an address", 80),
         "/tmp/a-unix-socket",
         (),
-        (PUBLIC, 80),  # public, but no allowed host was looked up first
     ):
         with pytest.raises(zarr_hosts.NetworkRefused):
             fence.check_connect(target)
-    fence.lookups = 1
     fence.check_connect((PUBLIC, 443))  # a public address after an allowed lookup is not stopped
+    fence.check_connect(("2001:4860:4860::8888", 443, 0, 0))  # nor is a public IPv6 address
+    fence.check_connect(("::ffff:" + PUBLIC, 443, 0, 0))  # nor a mapped public IPv4 address
     with pytest.raises(zarr_hosts.NetworkRefused):
         fence.check_connect(("::1", 443, 0, 0))
+
+
+def test_embedded_addresses_are_found_and_judged():
+    v6 = ipaddress.IPv6Address
+    assert zarr_hosts.embedded_v4(v6("64:ff9b::a9fe:a9fe")) == [ipaddress.IPv4Address(0xA9FEA9FE)]
+    assert zarr_hosts.embedded_v4(v6("::7f00:1")) == [ipaddress.IPv4Address(0x7F000001)]
+    assert zarr_hosts.embedded_v4(v6("2002:a9fe:a9fe::1")) == [ipaddress.IPv4Address(0xA9FEA9FE)]
+    assert zarr_hosts.embedded_v4(v6("::ffff:" + PRIVATE)) == [ipaddress.IPv4Address(0x0A000001)]
+    carried = zarr_hosts.embedded_v4(teredo(server=0x08080808, client=0x0A000001))
+    assert ipaddress.IPv4Address(0x0A000001) in carried
+    assert zarr_hosts.embedded_v4(v6("2001:4860:4860::8888")) == []
+    assert not zarr_hosts.public(v6("64:ff9b::a9fe:a9fe"))
+    assert zarr_hosts.public(v6("2001:4860:4860::8888"))
+    assert zarr_hosts.public(ipaddress.IPv4Address(0x08080808))
+    assert not zarr_hosts.public(ipaddress.IPv4Address(0x7F000001))
+
+
+def test_a_datagram_or_a_fast_open_send_is_judged_like_a_connection():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    try:
+        with zarr_hosts.Fence(), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            assert refused(sender.sendto, b"x", ("127.0.0.1", port))
+            assert refused(sender.sendmsg, [b"x"], [], 0, ("127.0.0.1", port))
+            assert refused(sender.sendto, b"x", (PRIVATE, port))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:  # no fence: it goes
+            sender.sendto(b"x", ("127.0.0.1", port))
+        assert listener.recvfrom(8)[0] == b"x"
+        # a send on a connected socket names no address, and is not judged again
+        zarr_hosts.Fence().check("socket.sendmsg", (None, None))
+    finally:
+        listener.close()
+
+
+def test_a_recipe_that_reads_a_directory_cannot_connect_anywhere(cli, tmp_path, monkeypatch):
+    """Its run is inside a fence with an empty allowlist: not the Zarr host, not the loopback address."""
+    import dataclasses
+
+    from nemar_process.recipes import REGISTRY
+    from recipe_support import DATASET
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    outcomes: list[str] = []
+
+    def tries_to_connect(options):
+        for call in (
+            lambda: socket.getaddrinfo(z.ZARR_HOST, 443),
+            lambda: socket.create_connection(("127.0.0.1", port), timeout=1),
+        ):
+            try:
+                call()
+            except zarr_hosts.NetworkRefused:
+                outcomes.append("refused")
+            except OSError as error:
+                outcomes.append("os:" + type(error).__name__)
+            else:
+                outcomes.append("allowed")
+
+    # the recipe's own preflight hook runs inside the run's fence
+    monkeypatch.setitem(
+        REGISTRY,
+        "nemar-floor",
+        dataclasses.replace(REGISTRY["nemar-floor"], preflight=tries_to_connect),
+    )
+    try:
+        cli("run", "nemar-floor", "--dataset-dir", DATASET, "--out", tmp_path / "o")
+    finally:
+        listener.close()
+    assert outcomes == ["refused", "refused"]
+
+
+def test_the_command_gives_a_directory_recipe_a_fence_with_no_hosts():
+    from nemar_process import cli as command
+    from nemar_process.recipes import REGISTRY
+
+    fence = command.network_fence(REGISTRY["nemar-floor"])
+    assert isinstance(fence, zarr_hosts.Fence)
+    assert fence.hosts == frozenset()
+    assert command.network_fence(REGISTRY["nemar-floor-zarr"]).hosts == zarr_hosts.ALLOWED_HOSTS
 
 
 def test_nested_fences_each_apply_and_closing_them_leaves_none():
@@ -720,9 +840,140 @@ def test_the_command_runs_a_zarr_recipe_inside_the_fence_and_no_other(cli, monke
     assert "NetworkRefused" in stderr
 
 
-def test_a_recipe_that_reads_a_directory_runs_in_no_fence():
-    from nemar_process import cli as command
-    from nemar_process.recipes import REGISTRY
+# ---- a store whose products cannot be named ----------------------------------------------------
 
-    assert isinstance(command.network_fence(REGISTRY["nemar-floor"]), contextlib.nullcontext)
-    assert isinstance(command.network_fence(REGISTRY["nemar-floor-zarr"]), zarr_hosts.Fence)
+UNNAMEABLE = {
+    "no directory, and a stem that collides with the dataset's own files": "desc-_eeg.edf",
+    "a bare name": "x.edf",
+    "no directory": "sub-01_task-rest_eeg.edf",
+    "a meg store with an EEG group": "sub-01/meg/sub-01_task-rest_meg.fif",
+    "no _eeg suffix": "sub-01/eeg/sub-01_task-rest.edf",
+    "an empty stem": "sub-01/eeg/_eeg.edf",
+}
+
+
+@pytest.mark.parametrize("label", sorted(UNNAMEABLE))
+def test_an_eeg_store_whose_products_cannot_be_named_is_a_skipped_row(
+    cli, monkeypatch, tmp_path, label
+):
+    """Never a crash (exit 1) and never a file: a row, and the dataset record is the dataset's own."""
+    path = UNNAMEABLE[label]
+    document = z.index_document()
+    store = dict(document["stores"][0], path=path, zarr="sub-01/x_eeg.zarr")
+    document.update(stores=[store], store_count=1)
+    documents = z.DocumentFetch({z.INDEX_URL: z.index_bytes(document)})
+    monkeypatch.setattr(zarr_input, "fetch_https", documents.fetch)
+    monkeypatch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
+    out = tmp_path / "o"
+    code, stdout, _ = cli("run", "nemar-floor-zarr", "--out", out, *ARGS)
+    assert code == 7  # every store was skipped for its format
+    assert json.loads(stdout.strip().splitlines()[-1])["other"] == 1
+    assert documents.urls == [z.INDEX_URL]  # nothing was read
+    written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert written == [
+        "desc-nemarfloorzarr_recordings.tsv",
+        "desc-nemarfloorzarr_signalJourney.json",
+    ]
+    record = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
+    assert record["extensions"]["nemar"]["profile"] == "dataset"
+    rows = (out / "desc-nemarfloorzarr_recordings.tsv").read_text().splitlines()
+    assert rows[1].split("\t")[:4] == [path, "eeg", "skipped", "unsupported_format"]
+
+
+def test_a_name_that_can_be_a_product_is_producible_and_the_rest_are_not():
+    producible = zarr_input.ZarrSource.producible
+    assert producible("sub-01/eeg/sub-01_task-rest_eeg.edf")
+    assert producible("sub-01/ses-0/eeg/sub-01_ses-0_task-rest_eeg.set")
+    for label in UNNAMEABLE:
+        assert not producible(UNNAMEABLE[label]), label
+
+
+# ---- how much is read, and how many reads at once ----------------------------------------------
+
+
+def test_the_most_a_read_may_return_is_its_range_or_a_fixed_limit():
+    cap = zarr_input.read_cap
+    assert cap(0, 9, None) == 10  # bytes=0-9
+    assert cap(100, 100, None) == 1
+    assert cap(None, 16, None) == 16  # the last 16 bytes
+    assert cap(5, None, None) == zarr_input.MAX_OBJECT_BYTES  # open-ended
+    assert cap(None, None, None) == zarr_input.MAX_OBJECT_BYTES
+    assert cap(0, 9, 7) == 7  # an explicit limit wins
+    assert cap(9, 0, None) == 0  # an empty range allows nothing
+    assert zarr_input.MAX_OBJECT_BYTES == 256 * 1024**2
+
+
+def test_the_fetch_is_told_the_cap_of_the_range_and_a_longer_reply_is_refused():
+    seen: list[int] = []
+
+    def fetch(url, headers, timeout, limit):
+        seen.append(limit)
+        return z.Reply(206, {}, b"x" * 11)  # one byte more than the 10 asked for
+
+    guarded = zarr_input.GuardedTransport(z.ORIGIN, fetch)
+    with pytest.raises(TransportError) as refused:
+        get(guarded, start=0, end=9)
+    assert "longer than its limit" in str(refused.value)
+    assert seen == [10]
+    ok = zarr_input.GuardedTransport(z.ORIGIN, lambda *a: z.Reply(206, {}, b"x" * 10))
+    assert len(get(ok, start=0, end=9).body) == 10
+
+
+def test_an_unranged_object_longer_than_the_limit_is_refused(monkeypatch):
+    monkeypatch.setattr(zarr_input, "MAX_OBJECT_BYTES", 5)
+    guarded = zarr_input.GuardedTransport(z.ORIGIN, lambda *a: z.Reply(200, {}, b"x" * 6))
+    with pytest.raises(TransportError):
+        get(guarded)
+
+
+def test_at_most_a_few_reads_are_in_flight_and_every_one_is_counted():
+    import threading
+    import time
+
+    lock = threading.Lock()
+    state = {"now": 0, "most": 0}
+
+    def fetch(url, headers, timeout, limit):
+        with lock:
+            state["now"] += 1
+            state["most"] = max(state["most"], state["now"])
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return z.Reply(200, {}, b"abc")
+
+    guarded = zarr_input.GuardedTransport(z.ORIGIN, fetch)
+
+    async def many():
+        return await asyncio.gather(*[guarded.get(CHUNK) for _ in range(60)])
+
+    replies = asyncio.run(many())
+    assert len(replies) == 60
+    assert zarr_input.MAX_CONCURRENT_READS == 8
+    assert 1 < state["most"] <= 8
+    assert (guarded.requests, guarded.bytes_read) == (60, 180)
+    assert guarded.requests_by_host == {z.ZARR_HOST: 60}
+
+
+class Tracked:
+    """A lock that counts how often it is taken."""
+
+    def __init__(self) -> None:
+        self.taken = 0
+        self.inner = __import__("threading").Lock()
+
+    def __enter__(self):
+        self.taken += 1
+        return self.inner.__enter__()
+
+    def __exit__(self, *exc):
+        return self.inner.__exit__(*exc)
+
+
+def test_the_counters_are_updated_under_the_lock():
+    guarded = zarr_input.GuardedTransport(z.ORIGIN, lambda *a: z.Reply(200, {}, b"abc"))
+    tracked = Tracked()
+    vars(guarded)["_lock"] = tracked
+    get(guarded)
+    assert tracked.taken == 2  # once for the request, once for the bytes
+    assert (guarded.requests, guarded.bytes_read) == (1, 3)
