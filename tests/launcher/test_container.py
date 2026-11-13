@@ -135,6 +135,8 @@ def test_no_host_environment_variable_reaches_the_entry(probed):
         "NEMAR_JOB_END_TIME",
         "NEMAR_LEASE_ID",
         "NEMAR_CONTAINER_RUNTIME",
+        "NEMAR_ALLOWED_REGISTRIES",
+        "NEMAR_RUNNER_LABEL",
         "NEMAR_ENFORCE_LIMITS",
         "NEMAR_CPUS",
         "NEMAR_MEMORY_MB",
