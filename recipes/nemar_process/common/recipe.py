@@ -68,6 +68,9 @@ class Option:
     default: Any
     help: str
     choices: tuple[Any, ...] | None = None
+    # A repeatable option is given as many times as wanted and its value is the tuple of what was
+    # given (each parsed on its own); its default is a tuple too.
+    repeatable: bool = False
 
 
 def _positive_seconds(text: str) -> float:
@@ -124,6 +127,9 @@ class RunContext:
     seeds: dict[str, int]
     validator: Any
     options: Mapping[str, Any] = field(default_factory=dict)  # the values of the recipe's options
+    # What a recipe whose input is not a dataset directory reads from (the Zarr source of
+    # `nemar-floor-zarr`); None for the recipes that read a directory.
+    source: Any = None
 
 
 @dataclass
@@ -175,6 +181,10 @@ def _no_preflight(options: Mapping[str, Any]) -> None:
     return None
 
 
+def _no_record_extras(context: RunContext) -> dict[str, Any]:
+    return {}
+
+
 @dataclass(frozen=True)
 class Recipe:
     """A registered recipe: its identity, its table, and the function that processes a recording.
@@ -191,6 +201,11 @@ class Recipe:
       field the stamp already has is refused.
     * ``preflight``: raises ``EngineUnavailable`` when the engine cannot run here. The command calls
       it once, before it creates anything, and ends the run with exit 8 if it raises.
+    * ``input``: what the recipe reads. ``"bids"`` is a dataset directory (``--dataset-dir``);
+      ``"zarr"`` is NEMAR's Zarr serving copy over HTTPS (``--zarr-base``), and the command then
+      refuses ``--dataset-dir`` and requires the dataset id, version and source commit.
+    * ``dataset_extras``: keys added to ``extensions.nemar`` of the dataset record, read after the
+      last recording (what a recipe that reads a remote source says about it).
     """
 
     info: RecipeInfo
@@ -203,6 +218,8 @@ class Recipe:
     engine_extra: Callable[[Mapping[str, Any]], dict[str, Any]] = _nothing_extra
     options: tuple[Option, ...] = ()
     preflight: Callable[[Mapping[str, Any]], None] = _no_preflight
+    input: Literal["bids", "zarr"] = "bids"
+    dataset_extras: Callable[[RunContext], dict[str, Any]] = _no_record_extras
 
     def threads_for(self, options: Mapping[str, Any]) -> int:
         count = self.threads(options) if callable(self.threads) else self.threads
@@ -212,12 +229,14 @@ class Recipe:
 
     def option_values(self, given: Mapping[str, Any]) -> dict[str, Any]:
         """The value of each option the recipe declares: the one given, else the default."""
-        return {
-            option.name: given[option.name]
-            if given.get(option.name) is not None
-            else option.default
-            for option in self.options
-        }
+        values: dict[str, Any] = {}
+        for option in self.options:
+            value = given.get(option.name)
+            if value is None:
+                values[option.name] = option.default
+            else:
+                values[option.name] = tuple(value) if option.repeatable else value
+        return values
 
     @property
     def id(self) -> str:
