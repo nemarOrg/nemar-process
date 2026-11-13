@@ -17,6 +17,8 @@ import tempfile
 from typing import NamedTuple
 
 from .codes import (
+    ENGINE_RUNTIMES,
+    ENV_CONTAINER_RUNTIME,
     ENV_CPUS,
     ENV_ENFORCE_LIMITS,
     ENV_LEASE_ID,
@@ -67,11 +69,15 @@ def _end_time(env: Env) -> float | None:
 
 
 def _limits(env: Env) -> tuple[Limits | None, Failure | None]:
-    flag = env.get(ENV_ENFORCE_LIMITS)
-    if flag is None or flag == "0":
-        return None, None
-    if flag != "1":  # "true", " 1" or "01" is not a yes: fail closed rather than run unlimited
-        return None, _refused("limits setting")
+    # Docker and Podman always apply the limits (the daemon, not the user's own cgroup, enforces
+    # them), so `NEMAR_ENFORCE_LIMITS` is not consulted for them: a missing or unusable
+    # `NEMAR_CPUS` ends the launch at the start, whatever that variable says.
+    if env.get(ENV_CONTAINER_RUNTIME) not in ENGINE_RUNTIMES:
+        flag = env.get(ENV_ENFORCE_LIMITS)
+        if flag is None or flag == "0":
+            return None, None
+        if flag != "1":  # "true", " 1" or "01" is not a yes: fail closed rather than run unlimited
+            return None, _refused("limits setting")
     cpus = env.get(ENV_CPUS)
     memory = env.get(ENV_MEMORY_MB)
     if cpus is None or _CPUS.fullmatch(cpus) is None:

@@ -91,15 +91,17 @@ _LOG_LIMIT = 100
 # ---- finding the runtime and the image ------------------------------------------------------------
 
 
-def find_runtime(env: Env) -> tuple[str, str]:
-    """The first of ``apptainer``, ``singularity`` on the launcher's PATH: (name, absolute path)."""
+def find_runtime(env: Env, names: tuple[str, ...] = RUNTIME_BINARIES) -> tuple[str, str]:
+    """The first of ``names`` (``apptainer``, ``singularity``) on the launcher's PATH: (name, path)."""
     search = env.get("PATH", "") or ""
-    for name in RUNTIME_BINARIES:
+    for name in names:
         for directory in search.split(os.pathsep):
             candidate = os.path.join(directory or ".", name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return name, candidate
-    raise Failure("runtime_error", "no_container_runtime", "no apptainer or singularity on PATH")
+    raise Failure(
+        "runtime_error", "no_container_runtime", "no {} on PATH".format(" or ".join(names))
+    )
 
 
 def resolve_sif(job: spec.Spec, env: Env) -> str:
