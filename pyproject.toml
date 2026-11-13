@@ -86,6 +86,7 @@ pythonpath = ["launcher", "observer", "recipes", "scripts", "tests/standin", "te
 addopts = "-ra --strict-markers"
 markers = [
     "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
+    "docker: needs a real Docker daemon (or Podman) and the registry; skipped where there is none, required in the docker CI job",
 ]
 
 [tool.coverage.run]
