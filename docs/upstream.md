@@ -82,6 +82,8 @@ The recipe reads the serving copy with eegprep-lean from the head of sccn/eegpre
 The first pinned commit refused the unit the live index uses for microvolts, the micro sign (`µV`), so every real store failed; the recipe renamed the label to `uV` until the commit 14ba46e8 of that pull request accepted the micro sign and the Greek mu.
 The pin is that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
 
+Patch note for sccn/eegprep#616: `load_recording` should check each array's `zarr.json` (shape, chunk and shard grid, data type) against the index's declared channels and samples before it decodes anything, so that a store whose metadata disagrees with its index is refused by the reader and not left to the caller's size bound.
+
 The rank test of the location guard (sccn/eegprep#539) uses NumPy's default tolerance, which is of the order of machine precision times the number of channels.
 A montage that is flat to a picometer therefore has numerical rank 3 and passes, and `clean_channels` still returns a degraded answer for it: with the 19 positions of the reproduction in that issue flattened onto a plane (thickness 1e-9 mm to 0.1 mm), it removed 2 of 19 channels from data that lose none with the true positions.
 Where the line between a montage and a nearly flat one lies is a question for the upstream check, which should define its tolerance, so it is the point to add to that discussion; the recipe does not invent a threshold of its own.
