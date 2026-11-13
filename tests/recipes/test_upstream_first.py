@@ -183,6 +183,16 @@ def test_the_scan_covers_the_validator_wrapper_and_skips_the_vendored_schema():
     assert not [name for name in names if name.startswith("_vendor")]
 
 
+def test_the_scan_covers_the_zarr_recipe_and_its_input_layer():
+    names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
+    for name in (
+        "nemar_floor_zarr/__init__.py",
+        "nemar_floor_zarr/recipe.py",
+        "common/zarr_input.py",
+    ):
+        assert name in names, name
+
+
 FLAGGED = {
     "scipy.signal import": "import scipy.signal",
     "scipy.signal from-import": "from scipy.signal import firwin",
