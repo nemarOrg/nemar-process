@@ -37,6 +37,34 @@ ALLOWED_HOSTS = ZARR_HOSTS | ZARR_DATA_HOSTS
 
 LOOKUPS = ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex")
 REVERSE_LOOKUPS = ("socket.gethostbyaddr", "socket.getnameinfo")
+SENDS = ("socket.sendto", "socket.sendmsg")
+
+
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
+IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
+def embedded_v4(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    """The IPv4 addresses an IPv6 address carries: mapped, 6to4, Teredo, NAT64 and IPv4-compatible."""
+    found: list[ipaddress.IPv4Address] = []
+    for carried in (ip.ipv4_mapped, ip.sixtofour):
+        if carried is not None:
+            found.append(carried)
+    if ip.teredo is not None:
+        found.extend(ip.teredo)
+    if ip in NAT64 or ip in IPV4_COMPATIBLE:
+        found.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return found
+
+
+def public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether a connection to ``ip`` may go to a public host: it is global, and so is every IPv4
+    address an IPv6 address carries (a NAT64 or 6to4 form of a link-local address is not public)."""
+    if not ip.is_global:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        return all(carried.is_global for carried in embedded_v4(ip))
+    return True
 
 
 class NetworkRefused(OSError):
@@ -104,7 +132,7 @@ class Fence:
             self.lookups += 1
         elif event in REVERSE_LOOKUPS:
             raise NetworkRefused("a reverse lookup was refused")
-        elif event == "socket.connect":
+        elif event == "socket.connect" or (event in SENDS and args[1] is not None):
             self.check_connect(args[1])
 
     def check_connect(self, address: Any) -> None:
@@ -116,7 +144,7 @@ class Fence:
             raise NetworkRefused(
                 "a connection to something that is not an address was refused"
             ) from None
-        if not ip.is_global:
+        if not public(ip):
             raise NetworkRefused("a connection to a local or private address was refused")
         if self.lookups == 0:
             raise NetworkRefused("a connection with no allowed host looked up was refused")
