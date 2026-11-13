@@ -41,6 +41,38 @@ The script therefore starts the same module with `runpy.run_module`, after putti
 A SIGTERM (the termination signal) sent to the script, which Slurm does at the time limit or on cancel, is passed on to the launcher, which passes it to the container's whole process group; the script still writes `tapisjob.exitcode` afterwards.
 If no usable Python is found, or `_tapisExecSystemOutputDir` is unset, the script exits 13 with a message on stderr.
 
+## Outside Tapis and SLURM
+
+A runner (a program that claims jobs from NEMAR and runs them on a host with neither Tapis nor SLURM) starts the launcher with the line `tapisjob_app.sh` uses, from the directory that holds the `nemar_launch` package and the `schema` directory next to it:
+
+```bash
+python3 -I -S -c 'import runpy, sys; sys.path.insert(0, sys.argv[1]); runpy.run_module("nemar_launch", run_name="__main__", alter_sys=True)' <launcher directory>
+```
+
+The launcher reads a runner's variables only where the Tapis or SLURM one is unset, so a launch under Tapis is read exactly as before (`settings.read_settings`, the one place the environment is read for where the launcher runs):
+
+| What | Read from, in this order |
+|---|---|
+| the output directory | `_tapisExecSystemOutputDir`, else `NEMAR_OUTPUT_DIR`; neither is exit 13 with a message on stderr, before anything is created |
+| the deadline | `SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`: seconds since the epoch, digits only; a value that is not that is the same as none, and the next variable is tried |
+| scratch | `SLURM_TMPDIR`, else `NEMAR_SCRATCH_DIR`, else `TMPDIR`, else the system's temporary directory |
+| the job id in provenance | `SLURM_JOB_ID`; unset, `slurm_job_id` is null, and nothing about the runner is written into provenance |
+
+**The lease.**
+When `NEMAR_LEASE_ID` is set, it must be exactly 32 lowercase hexadecimal digits, and the bundle, outputs and outputs-complete calls to NEMAR carry it as `X-Compute-Lease` beside the job token.
+The storage addresses those calls return never get it.
+A set value of any other shape (an empty one, uppercase, a trailing newline) ends the launch at the start: exit 13, `runtime_error` with detail `invalid_spec`, the four launcher files written, and nothing fetched, run or uploaded, because the lease is what authorizes a runner's upload and a malformed one cannot be sent.
+The value is never logged.
+
+**Limits.**
+With `NEMAR_ENFORCE_LIMITS=1` (exactly that) the container runtime is given its own limits: `--cpus <NEMAR_CPUS>`, and `--memory <NEMAR_MEMORY_MB>M` when `NEMAR_MEMORY_MB` is set, right after `--pwd /work`.
+`NEMAR_CPUS` is a whole number from 1 to 9999 and `NEMAR_MEMORY_MB` a whole number of at least 1; the launch specification carries neither, so the runner passes them.
+Enforcement asked for without a usable `NEMAR_CPUS`, or with a `NEMAR_MEMORY_MB` that is set and unusable, fails closed like a malformed lease.
+With the variable unset or anything else, the command line is byte for byte what it is under Tapis.
+A runner sets it only after proving that the host lets the user's own processes apply those limits; the launcher does not check.
+
+None of these variables reaches the container (`run.HOST_PASSTHROUGH` is a short allowlist).
+
 ## The launch specification
 
 The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`.
@@ -136,7 +168,7 @@ A `command` runs as given, followed by `args`.
 
 ## Layout
 
-The output directory is `${_tapisExecSystemOutputDir}`, the directory Tapis archives.
+The output directory is `${_tapisExecSystemOutputDir}`, the directory Tapis archives (a runner's is `NEMAR_OUTPUT_DIR`).
 The launcher creates `work`, `work/outputs` and `launcher` itself, with `os.mkdir`.
 **If `work` or `launcher` already exists, whatever it is (a directory, a symlink), the launcher does not start**: it records `runtime_error` with detail `output_dir_not_empty`, writes nothing into the output directory, and uploads its files from memory only.
 A planted `work/tmp -> ..` or `launcher -> /` could otherwise lead a write or a bind mount out of the archived directory.
@@ -323,8 +355,10 @@ A signal death of the entry is reported as 128 plus the signal, as a shell does,
 | `NEMAR_HOST_PYTHON` | the application definition, optional | the host Python to use |
 | `NEMAR_LOCAL_DATASETS_ROOT` | the application definition, optional | root of NEMAR's own copy of datasets, `<root>/<id>/<version>/` |
 | `NEMAR_SIF_ROOT` | the application definition | the directory `image.sif` is looked up in; required |
-| `SLURM_TMPDIR`, `TMPDIR` | Slurm, the system | where scratch goes, in that order |
-| `SLURM_JOB_END_TIME`, `SLURM_JOB_ID` | Slurm | the time limit rule, and the job id in provenance |
+| `SLURM_TMPDIR`, `NEMAR_SCRATCH_DIR`, `TMPDIR` | Slurm, a runner, the system | where scratch goes, in that order |
+| `SLURM_JOB_END_TIME`, `NEMAR_JOB_END_TIME`, `SLURM_JOB_ID` | Slurm, a runner, Slurm | the time limit rule (the first valid of the two), and the job id in provenance |
+| `NEMAR_OUTPUT_DIR` | a runner | the output directory when Tapis's is unset |
+| `NEMAR_LEASE_ID`, `NEMAR_ENFORCE_LIMITS`, `NEMAR_CPUS`, `NEMAR_MEMORY_MB` | a runner, optional | the lease and the runtime limits ([Outside Tapis and SLURM](#outside-tapis-and-slurm)) |
 | `CUDA_VISIBLE_DEVICES` | Slurm | passed into the container for a GPU job when plain |
 
 Tapis archives `tapisjob.env` by default and the specification carries the job token, so the launcher never prints the specification, the token or a presigned address.
