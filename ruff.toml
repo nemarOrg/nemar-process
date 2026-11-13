@@ -7,8 +7,10 @@ extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev", ".nemar-cli-
 [per-file-target-version]
 "launcher/**" = "py39"
 "observer/**" = "py39"
+"runner/**" = "py39"
 "tests/launcher/**" = "py39"
 "tests/observer/**" = "py39"
+"tests/runner/**" = "py39"
 "tests/observer_support.py" = "py39"
 "tests/standin/**" = "py39"
 
@@ -31,6 +33,7 @@ ignore = [
 # (The pre-commit hook runs with --unsafe-fixes, which deletes a print the rule flags.)
 "launcher/**" = ["T201"]
 "observer/**" = ["T201"]
+"runner/**" = ["T201"]
 "recipes/nemar_process/cli.py" = ["T201"]
 
 [format]
