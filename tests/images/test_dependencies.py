@@ -93,6 +93,24 @@ def test_numpy_and_scipy_are_declared_and_left_to_the_lock():
         assert str(requirements[name].specifier) == ""
 
 
+def test_the_zarr_reader_is_pinned_to_a_full_commit_and_zarr_to_its_exact_version():
+    requirements = {str(canonicalize_name(r.name)): r for r in runtime_requirements()}
+    assert str(requirements["zarr"].specifier) == "==3.4.0"
+    reader = requirements["eegprep-lean"]
+    assert reader.extras == {"zarr"}
+    assert reader.url is not None
+    match = re.fullmatch(
+        r"git\+https://github\.com/sccn/eegprep@([0-9a-f]{40})#subdirectory=packages/eegprep-lean",
+        reader.url,
+    )
+    assert match, reader.url
+    locked = next(p for p in load_lock()["package"] if p["name"] == "eegprep-lean")
+    assert locked["source"]["git"].endswith("#" + match.group(1))
+    # the engine the records name is unchanged by the reader: eegprep stays 0.5.0
+    engine = next(p for p in load_lock()["package"] if p["name"] == "eegprep")
+    assert engine["version"] == "0.5.0"
+
+
 def test_the_signaljourney_validator_is_pinned_to_a_full_commit():
     requirement = next(
         r for r in runtime_requirements() if canonicalize_name(r.name) == "signaljourney-validator"
