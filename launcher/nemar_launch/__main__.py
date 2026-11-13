@@ -1,4 +1,5 @@
-"""The launcher's entry point (``tapisjob_app.sh`` starts it with ``python -I -S``).
+"""The launcher's entry point (``tapisjob_app.sh`` starts it with ``python -I -S``; a runner starts
+it the same way with the ``NEMAR_*`` variables of ``settings`` instead of Tapis's and SLURM's).
 
 One launch, in order: create the output directory's ``work`` and ``launcher`` (refusing to start if
 either already exists), read and validate the specification, fetch the code bundle, check the
@@ -39,7 +40,6 @@ from typing import Any
 
 from . import bundle, net, provenance, run, spec, stage, upload
 from .codes import (
-    ENV_OUTPUT_DIR,
     ENV_SLURM_JOB_ID,
     ENV_SPEC,
     MANIFEST_FILE,
@@ -53,6 +53,7 @@ from .codes import (
     exit_number,
 )
 from .provenance import Documents, Log
+from .settings import Settings, read_settings
 
 _SLURM_ID = re.compile(r"^[0-9A-Za-z_+.-]{1,64}$")
 
@@ -79,6 +80,8 @@ class Run:
         # True when no output may be uploaded: the full upload is skipped, the launcher files go
         # alone (an unreadable output, an over-limit result, a refused output directory).
         self.outputs_blocked = False
+        # The runner's lease on the job, sent with its bundle, outputs and complete calls.
+        self.lease: str | None = None
 
     def fail(self, failure: Failure) -> None:
         """Record a failure unless one already stands: the first failure wins."""
@@ -122,17 +125,18 @@ class Run:
         )
 
 
-def _scratch_base(env: Env) -> str:
-    return env.get("SLURM_TMPDIR") or env.get("TMPDIR") or tempfile.gettempdir()
-
-
 def _inside(child: str, parent: str) -> bool:
     child, parent = os.path.realpath(child), os.path.realpath(parent)
     return os.path.commonpath([child, parent]) == parent
 
 
 def _do_work(
-    state: Run, job: spec.Spec, env: Env, terminator: run.Terminator, sleep: net.Sleep
+    state: Run,
+    job: spec.Spec,
+    env: Env,
+    settings: Settings,
+    terminator: run.Terminator,
+    sleep: net.Sleep,
 ) -> None:
     """Fetch, stage and run. Raises ``Failure`` (or ``Stopped``) at the first phase that fails.
 
@@ -141,7 +145,7 @@ def _do_work(
     """
     log = state.log
     assert state.layout is not None
-    base = _scratch_base(env)
+    base = settings.scratch_base
     if _inside(base, state.out_dir):
         raise Failure(
             "runtime_error", "scratch_in_output", "scratch is inside the archived directory"
@@ -166,7 +170,7 @@ def _do_work(
         try:
             if job.bundle is not None:
                 code_dir, state.bundle_digest = bundle.fetch(
-                    job, scratch, sleep=sleep, log=log, stop=terminator.stop
+                    job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
                 )
         finally:
             state.phase("code_fetch", started)
@@ -189,7 +193,14 @@ def _do_work(
 
         binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
         run.check_bind_sources(binds)
-        argv = run.build_argv(runtime_path, job, sif, binds, run.cuda_visible_devices(job, env))
+        argv = run.build_argv(
+            runtime_path,
+            job,
+            sif,
+            binds,
+            run.cuda_visible_devices(job, env),
+            limits=settings.limits,
+        )
         started = time.monotonic()
         try:
             outcome = run.run_container(argv, env, state.layout.work, terminator, log)
@@ -236,7 +247,7 @@ def _upload(
 ) -> None:
     log = state.log
     outputs = state.layout.outputs if state.layout is not None else None
-    uploader = upload.Uploader(job, state.docs, log, sleep, terminator.stop, outputs)
+    uploader = upload.Uploader(job, state.docs, log, sleep, terminator.stop, outputs, state.lease)
     started = time.monotonic()
     only = state.outputs_blocked
     try:
@@ -272,9 +283,10 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
     """Run one launch; return the exit number. ``environ`` defaults to the process environment."""
     os.umask(0o077)
     env = Env(environ)
-    out_dir = env.get(ENV_OUTPUT_DIR)
+    settings = read_settings(env)
+    out_dir = settings.out_dir
     if not out_dir:
-        sys.stderr.write("nemar-launch: {} is not set\n".format(ENV_OUTPUT_DIR))
+        sys.stderr.write("nemar-launch: _tapisExecSystemOutputDir or NEMAR_OUTPUT_DIR is not set\n")
         return exit_number("runtime_error")
     refused: Failure | None = None
     layout: run.Layout | None = None
@@ -290,6 +302,7 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
     log = Log(layout.log_path if layout is not None else None)
     docs = Documents(layout.launcher if layout is not None else None, log)
     state = Run(out_dir, layout, log, docs)
+    state.lease = settings.lease
     terminator = run.Terminator()
     terminator.install()
     job: spec.Spec | None = None
@@ -297,6 +310,11 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         if refused is not None:
             state.fail(refused)
             state.outputs_blocked = True
+        if settings.problem is not None:
+            # A malformed lease or limit: nothing runs, and nothing is sent (the lease is what
+            # authorizes a runner's upload, and a malformed one cannot be sent), so the documents
+            # stay in the launcher directory for the runner to read.
+            state.fail(settings.problem)
         slurm_id = env.get(ENV_SLURM_JOB_ID)
         state.slurm_job_id = slurm_id if slurm_id and _SLURM_ID.match(slurm_id) else None
         raw = env.raw(ENV_SPEC)
@@ -326,17 +344,17 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
                 state.fail(
                     Failure("runtime_error", problem.detail, "the launch specification was refused")
                 )
-        if job is not None and refused is None:
+        if job is not None and refused is None and settings.problem is None:
             log.info("job {}: runtime {}".format(job.job_id, job.runtime))
             try:
-                _do_work(state, job, env, terminator, sleep)
+                _do_work(state, job, env, settings, terminator, sleep)
             except Failure as failure:
                 state.fail(failure)
             except Stopped:
                 state.fail(run.terminated_failure(terminator, env))
             except Exception as error:  # noqa: BLE001 - a launcher bug must still leave a record
                 state.fail(_unexpected("runtime_error", error, log))
-        _finish(state, job, env, terminator, sleep)
+        _finish(state, None if settings.problem else job, env, terminator, sleep)
     finally:
         terminator.restore()
         log.close()
