@@ -37,6 +37,25 @@ def pytest_ignore_collect(collection_path: Path, config) -> bool | None:
     return None
 
 
+def wants_network(expression: str) -> bool:
+    """Whether a ``-m`` expression selects the ``network`` tests (``-m network``, not ``-m "not network"``)."""
+    words = expression.replace("(", " ").replace(")", " ").split()
+    return any(
+        word == "network" and (position == 0 or words[position - 1] != "not")
+        for position, word in enumerate(words)
+    )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """The ``network`` tests read the public Zarr serving copy: they run only when asked for."""
+    if wants_network(config.getoption("-m") or ""):
+        return
+    skip = pytest.mark.skip(reason="reads the public Zarr serving copy: select with `-m network`")
+    for item in items:
+        if "network" in item.keywords:
+            item.add_marker(skip)
+
+
 def pytest_report_header(config) -> str | None:
     if RUNTIME or REQUIRE:
         return None

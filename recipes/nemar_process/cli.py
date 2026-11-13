@@ -5,13 +5,20 @@ directories into one, ``version``.
                               [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                               [--image-digest sha256:HEX] [--run-id ID]
                               [the recipe's own options, e.g. --time-budget-s N]
+    nemar-recipe run <zarr recipe> --zarr-base https://HOST --dataset-id ID --dataset-version TAG
+                              --source-commit SHA [--out DIR] [--recording STORE ...] [...]
     nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
     nemar-recipe version
 
 The command is an argument vector, so a launch specification names it without a shell. It reads only
-``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``); it opens no
-network connection. Standard error gets one line per recording, standard output one final JSON line
-with the counts (for people: NEMAR never parses a job's output).
+``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``). It opens no
+network connection, with one exception: a recipe whose input is ``zarr`` (``nemar-floor-zarr``)
+reads the dataset's Zarr serving copy over HTTPS from the hosts in the allowlist of
+``common/zarr_hosts.py`` only (the Zarr host and, after one redirect, the data bucket), refuses
+``--dataset-dir``, and holds nothing on disk. Standard error gets
+one line per recording, standard output one final JSON line with the counts (for people: NEMAR never
+parses a job's output); a zarr recipe's line also has ``processed``, ``too_large``,
+``read_failed``, ``convert_failed`` and ``other``, which add up to the stores found.
 
 Exit codes (the launcher records any non-zero one as ``runtime_error``, ``entry_failed``; its own
 numbers 10 to 16 are not used here):
@@ -25,7 +32,9 @@ numbers 10 to 16 are not used here):
     5  output_unusable: ``--out`` cannot be created or written, or already holds product files, or
        the dataset record cannot be written
     6  dataset_unreadable: ``--dataset-dir`` (or an ``--in``) is missing, not a directory, or cannot
-       be listed
+       be listed; for a zarr recipe, the serving copy was refused (``--zarr-base`` or the index's
+       ``data_base`` is off the allowlist, the index cannot be read, is malformed, or was built
+       from another commit than ``--source-commit``): nothing is written
     7  no_compatible_recording: recordings were found, every one was skipped for its format
        (``unsupported_format``: the recipe does not load it), and none succeeded (the record is
        written); a requested file that is not an EEG recording (a ``scans.tsv``, an ``.edf``
@@ -67,18 +76,32 @@ from types import MappingProxyType
 from typing import Any
 
 from nemar_process import sj
-from nemar_process.common import COMMON_VERSION, determinism, files, io, naming, records, table
+from nemar_process.common import (
+    COMMON_VERSION,
+    determinism,
+    files,
+    io,
+    naming,
+    records,
+    table,
+    zarr_hosts,
+    zarr_input,
+)
 from nemar_process.common.errors import (
+    CONVERT_FAILED,
     CUDA,
     DISK_ERROR,
     DUPLICATE_RECORDING,
     INTERNAL_ERROR,
     OUT_OF_MEMORY,
+    READ_FAILED,
     TIME_BUDGET,
+    TOO_LARGE,
     UNSUPPORTED_FORMAT,
     Code,
     EngineUnavailable,
     RecordingError,
+    RecordingSkipped,
     Status,
     is_cuda_out_of_memory,
 )
@@ -162,6 +185,7 @@ def add_options(run: argparse.ArgumentParser) -> None:
             default=None,
             choices=option.choices,
             help=option.help,
+            action="append" if option.repeatable else "store",
         )
 
 
@@ -180,13 +204,18 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="run a recipe on a dataset directory")
     run.add_argument("recipe", choices=sorted(REGISTRY))
-    run.add_argument("--dataset-dir", required=True, help="the dataset (read only)")
+    run.add_argument(
+        "--dataset-dir",
+        help="the dataset (read only); required, except for a recipe whose input is a Zarr "
+        "serving copy, which refuses it",
+    )
     run.add_argument("--out", help="the product directory (default: $NEMAR_OUT/product)")
     run.add_argument(
         "--recording",
         action="append",
         default=[],
-        help="a recording, relative to the dataset; repeatable",
+        help="a recording, relative to the dataset (for a zarr recipe: a store of the index); "
+        "repeatable",
     )
     add_identity(run)
     add_options(run)
@@ -367,6 +396,7 @@ def finalize(
         ignored_datatypes=ignored,
         started_utc=started_utc,
         finished_utc=determinism.utc_now(),
+        nemar_extra=recipe.dataset_extras(context),
     )
     problems = records.check(record, context.validator)
     if problems:
@@ -379,13 +409,16 @@ def finalize(
     )
 
 
-def result_line(recipe: Recipe, record: dict[str, Any], word: str) -> None:
+def result_line(
+    recipe: Recipe, record: dict[str, Any], word: str, extra: dict[str, int] | None = None
+) -> None:
     counts = record["extensions"]["nemar"]["counts"]
-    summary = {
+    summary: dict[str, Any] = {
         "recipe": recipe.id,
         "recipe_version": recipe.version,
         "counts": counts,
         "result": word,
+        **(extra or {}),
     }
     print(json.dumps(summary, sort_keys=True), flush=True)
 
@@ -475,6 +508,93 @@ def frozen(options: Mapping[str, Any]) -> MappingProxyType[str, Any]:
     return MappingProxyType(copy.deepcopy(dict(options)))
 
 
+def zarr_arguments(
+    recipe: Recipe,
+    args: argparse.Namespace,
+    options: Mapping[str, Any],
+    parser: argparse.ArgumentParser,
+) -> zarr_input.Attestation:
+    """What a zarr recipe needs from the command line, or a usage error (exit 2).
+
+    ``--dataset-dir`` is refused, and the origin, the dataset id, the version and the commit the
+    caller attests are required. The attestation is checked here, before any network is used.
+    """
+    if args.dataset_dir is not None:
+        parser.error(
+            "--dataset-dir is not an option of {}: it reads a Zarr serving copy".format(recipe.id)
+        )
+    named = (
+        ("--zarr-base", options.get("zarr_base")),
+        ("--dataset-id", args.dataset_id),
+        ("--dataset-version", args.dataset_version),
+        ("--source-commit", args.source_commit),
+    )
+    missing = [flag for flag, value in named if value is None]
+    if missing:
+        parser.error("{} requires {}".format(recipe.id, ", ".join(missing)))
+    try:
+        return zarr_input.attest(
+            args.source_commit,
+            options.get("tag_commit"),
+            options.get("commit_equivalence"),
+            options.get("commit_delta_paths", ()),
+        )
+    except ValueError as error:
+        parser.error(str(error))
+
+
+def open_source(
+    args: argparse.Namespace, options: Mapping[str, Any], attestation: zarr_input.Attestation
+) -> zarr_input.ZarrSource:
+    """Read the index and check it against the attestation, or raise ``SourceRefused``."""
+    source = zarr_input.ZarrSource(
+        options["zarr_base"], args.dataset_id, args.dataset_version, attestation
+    )
+    source.open()
+    return source
+
+
+def zarr_items(
+    source: zarr_input.ZarrSource, requested: list[str], parser: argparse.ArgumentParser
+) -> list[tuple[str, io.Recording | RecordingError]]:
+    """The stores a run goes through, by source path: every EEG store, or those ``--recording`` names."""
+    try:
+        stores = source.select(requested)
+    except ValueError as error:
+        parser.error(str(error))
+    items: list[tuple[str, io.Recording | RecordingError]] = []
+    for store in stores:
+        if source.producible(store.path):
+            items.append((store.path, source.recording(store)))
+        else:  # its products could not be named: a row, and nothing written
+            items.append((store.path, RecordingSkipped(UNSUPPORTED_FORMAT)))
+    return items
+
+
+def zarr_counts(rows: list[dict[str, Any]], discovered: int) -> dict[str, int]:
+    """What the final line of a zarr recipe adds: every store is in exactly one of these counts.
+
+    ``processed`` succeeded; ``too_large`` was skipped before any read; ``read_failed`` could not be
+    read; ``convert_failed`` was read and could not be turned into the floor's input; ``other`` is
+    everything else (the floor's own failures and skips, running out of memory), so that the five
+    add up to ``discovered``.
+    """
+    counts = {
+        "processed": sum(1 for row in rows if row["status"] == "succeeded"),
+        "too_large": sum(1 for row in rows if row["code"] == TOO_LARGE),
+        "read_failed": sum(1 for row in rows if row["code"] == READ_FAILED),
+        "convert_failed": sum(1 for row in rows if row["code"] == CONVERT_FAILED),
+    }
+    counts["other"] = discovered - sum(counts.values())
+    return counts
+
+
+def network_fence(recipe: Recipe) -> zarr_hosts.Fence:
+    """The socket-level fence of ``zarr_hosts``: the allowlist for a recipe whose input is ``zarr``,
+    and an empty one (no lookup, no connection at all) for every other recipe."""
+    return zarr_hosts.fence() if recipe.input == "zarr" else zarr_hosts.Fence(hosts=())
+
+
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     recipe = REGISTRY[args.recipe]
     options = option_values(recipe, args, parser)
@@ -485,12 +605,19 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         out = Path(os.environ["NEMAR_OUT"]) / "product"
     else:
         parser.error("--out is required when NEMAR_OUT is not set")
-    dataset_dir = Path(args.dataset_dir)
-    if not dataset_dir.is_dir():
-        print("the dataset directory is missing or not a directory", file=sys.stderr)
-        return EXIT_DATASET_UNREADABLE
+    attestation = None
+    if recipe.input == "zarr":
+        attestation = zarr_arguments(recipe, args, options, parser)
+        dataset_dir = Path(".")  # nothing is read from a directory
+    else:
+        if args.dataset_dir is None:
+            parser.error("the following arguments are required: --dataset-dir")
+        dataset_dir = Path(args.dataset_dir)
+        if not dataset_dir.is_dir():
+            print("the dataset directory is missing or not a directory", file=sys.stderr)
+            return EXIT_DATASET_UNREADABLE
     try:
-        identity = identity_of(args, dataset_dir)
+        identity = identity_of(args, dataset_dir if recipe.input == "bids" else None)
     except ValueError as error:
         parser.error(str(error))
     validator = (
@@ -500,6 +627,7 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         determinism.pinned_threads(recipe.threads_for(options)) as threads,
         quiet(),
         terminated_as_exit(),
+        network_fence(recipe),
     ):
         # before anything is created: an engine that cannot run writes nothing
         try:
@@ -519,22 +647,37 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         except Exception as error:  # noqa: BLE001
             print("engine_extra refused: {}".format(type(error).__name__), file=sys.stderr)
             return EXIT_INTERNAL
+        source = None
+        if attestation is not None:
+            # the one request that is not a recording's: a serving copy that does not match what the
+            # caller attests is refused here, before anything is created
+            try:
+                source = open_source(args, options, attestation)
+            except zarr_input.SourceRefused as error:
+                print("the Zarr serving copy was refused: {}".format(error), file=sys.stderr)
+                return EXIT_DATASET_UNREADABLE
+            # a store that is not one is a usage error, found while nothing is created
+            items = zarr_items(source, args.recording, parser)
+            ignored = source.ignored_modalities()
         try:
             prepare_out(out, recipe.label)
         except OutputUnusable as error:
             print("the output directory cannot be used: {}".format(error), file=sys.stderr)
             return EXIT_OUTPUT_UNUSABLE
         started = determinism.utc_now()
-        context = RunContext(dataset_dir, identity, engine, seeds, validator, frozen(options))
-        try:
-            items, owned = work_items(dataset_dir, args.recording)
-            ignored = io.ignored_datatypes(dataset_dir, owned)
-        except OSError as error:
-            print(
-                "the dataset directory cannot be read: {}".format(type(error).__name__),
-                file=sys.stderr,
-            )
-            return EXIT_DATASET_UNREADABLE
+        context = RunContext(
+            dataset_dir, identity, engine, seeds, validator, frozen(options), source=source
+        )
+        if source is None:
+            try:
+                items, owned = work_items(dataset_dir, args.recording)
+                ignored = io.ignored_datatypes(dataset_dir, owned)
+            except OSError as error:
+                print(
+                    "the dataset directory cannot be read: {}".format(type(error).__name__),
+                    file=sys.stderr,
+                )
+                return EXIT_DATASET_UNREADABLE
         seen: set[str] = set()
         try:
             with table.TableWriter(
@@ -558,7 +701,15 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
             )
             return EXIT_OUTPUT_UNUSABLE
     code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported, unfinished)
-    result_line(recipe, record, word)
+    extra = None
+    if source is not None:
+        extra = zarr_counts(
+            table.read_rows(
+                out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
+            ),
+            record["extensions"]["nemar"]["counts"]["discovered"],
+        )
+    result_line(recipe, record, word, extra)
     return code
 
 
@@ -730,6 +881,11 @@ def copy_file(source: Path, target: Path) -> None:
 
 def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     recipe = REGISTRY[args.recipe]
+    if recipe.input != "bids":
+        # the merged record would have no input of its own to state: the inputs' say where each read
+        parser.error(
+            "aggregate does not support {}: its input is not a dataset directory".format(recipe.id)
+        )
     out = Path(args.out)
     try:
         given = identity_of(args, None)
