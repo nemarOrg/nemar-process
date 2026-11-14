@@ -34,6 +34,7 @@ def rig(tmp_path):
         "arch": "amd64",
         "max_scratch_gb": 1,
         "launcher_dir": str(made.launcher),
+        "verify_images": False,  # the stand-in NEMAR is on loopback; test_verify_image.py has it on
     }
     made.document.update(document)
     write_private(made.config_file, json.dumps(document))

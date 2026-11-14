@@ -492,10 +492,11 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 |---|---|
 | `code_fetch_failed` | `unsafe_archive`, `archive_too_large`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `digest_mismatch`, `size_mismatch`, `content_missing`, `disk_error` |
 | `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error` |
-| `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
+| `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `image_unverified`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
 | `result_upload_failed` | `results_too_large`, `results_quota_exceeded`, `too_many_outputs`, `outputs_unreadable`, `bad_response`, `fetch_failed`, `incomplete_plan`, `upload_failed`, `outputs_refused`, `complete_refused`, `internal_error` |
 | `entry_not_found`, `out_of_memory`, `time_limit` | none |
 
+`image_unverified` is the runner's word and never the launcher's: a runner ends a job with it, without launching, when the image's signature does not verify ([runner.md](runner.md#the-image)); the table lists it because NEMAR declares it for the launcher's code `runtime_error`.
 A transport fault (a status, a timeout, a dropped connection, a refused redirect) is `fetch_failed`, and a Worker route's own refusal is `outputs_refused` or `complete_refused`; the exact word (`http_503`, `timeout`, the route's `code`) is kept in the log line only.
 The three results refusals `results_too_large`, `results_quota_exceeded` and `too_many_outputs` are recorded as the route named them.
 
