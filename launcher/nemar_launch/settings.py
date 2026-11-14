@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import time
 from typing import NamedTuple
 
 from .codes import (
@@ -39,6 +40,11 @@ from .codes import (
 _LEASE = re.compile(LEASE_ID_PATTERN)
 _RUNNER_LABEL = re.compile(RUNNER_LABEL_PATTERN)
 _EPOCH = re.compile(r"[0-9]+")
+# An end time earlier than this long before the launcher started is not an end time: "0" is all
+# ASCII digits and the start of the epoch, and the launcher enforces the end time itself, so it
+# would stop the container the moment it started. It is treated like a malformed value.
+END_TIME_FLOOR_SECONDS = 86400
+_STARTED = time.time()
 _CPUS = re.compile(r"[1-9][0-9]{0,3}")
 _MEMORY_MB = re.compile(r"[1-9][0-9]{0,8}")
 # The smallest `--memory` Docker and Podman accept, in megabytes.
@@ -67,11 +73,14 @@ def _refused(what: str) -> Failure:
 
 
 def _end_time(env: Env) -> float | None:
+    floor = _STARTED - END_TIME_FLOOR_SECONDS
     for name in (ENV_SLURM_END_TIME, ENV_RUNNER_END_TIME):
         raw = env.get(name)
         # ASCII digits only: `str.isdigit()` is also true for "\u00b2", which `float` refuses.
         if raw is not None and _EPOCH.fullmatch(raw.strip()) is not None:
-            return float(raw.strip())
+            value = float(raw.strip())
+            if value >= floor:  # an end time from before the launcher started is none
+                return value
     return None
 
 

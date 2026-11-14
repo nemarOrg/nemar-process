@@ -127,7 +127,9 @@ The readiness probe of [`doctor`](#doctor) runs `apptainer exec --containall --c
   A heartbeat that fails is retried and the job goes on, and the thread survives any error.
 - **Deadline.**
   SIGTERM to the process group at `NEMAR_JOB_END_TIME` plus 60 seconds, SIGKILL 30 seconds after any SIGTERM.
-  The wall clock is read once, when the job starts, and the deadline is kept on the monotonic clock: a step of the system clock cannot move it.
+  The launcher stops its own container at `NEMAR_JOB_END_TIME` itself (SIGTERM, and SIGKILL 10 seconds later), so the runner's signal 60 seconds after normally finds the container gone and is the backstop for a launcher that is stuck outside its container.
+  The wall clock is read once, when the job starts, and the runner's deadline is kept on the monotonic clock: a step of the system clock cannot move it.
+  The launcher's own timer acts first and reads the wall clock, for the end time and for its 10 seconds of grace: a step forward ends the job early, with `time_limit`, and a step backward delays the launcher's stop, which the runner's monotonic deadline plus its margin (or, under Tapis, the scheduler) still bounds.
   A signal is sent before the line that says so is logged, and the log never raises (a full disk or a closed pipe is counted in a dropped-lines counter), so a failing log cannot leave a job running.
 - **Memory.**
   Without enforced limits, a watchdog sums the resident memory of the whole process tree (from `ps`) every 10 seconds and sends SIGTERM above the job's `memory_mb`.
@@ -151,7 +153,16 @@ What is guaranteed, and what is not:
 - SIGHUP is handled exactly as SIGTERM.
 - After a normal end, a cancel, a lost lease or a deadline kill, the launcher's process group is sent SIGKILL (not the container, which is outside it: see above).
 
-What is not guaranteed: a process that calls `setsid` leaves the launcher's group and is not reached by a group signal; a launcher that dies abnormally (killed with SIGKILL, or a crash) orphans its container until the runner's container removal (Docker and Podman) or forever (Apptainer: no runner removes it), because the launcher has no deadline timer of its own until outline step L1; and the runner does not make itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) to hunt the descendants a job leaves behind, which is deferred to L1.
+What the launcher adds, for its own death (a SIGKILL, a crash, the runner's SIGKILL of its group): on Linux it starts its container child with `prctl(PR_SET_PDEATHSIG)`, SIGKILL under Apptainer, so that the starter dies with the launcher, and SIGTERM under Docker and Podman, so that the engine's client passes it to the container.
+It also stops its container itself at the job's end time, without waiting for a signal, and records `time_limit` ([the launcher](launcher.md#the-container)).
+Where the launcher cannot ask for the signal it logs `pdeathsig_unavailable` once and has no such guarantee.
+This repository's tests prove that the child is sent the signal when the launcher is killed, with the stand-in runtimes; what a real Apptainer or Docker then does with it is checked in the staging drills.
+
+What is not guaranteed:
+the kernel clears the parent-death signal on exec of any set-user-ID, set-group-ID or file-capability binary, so such a binary anywhere in the exec chain between the launcher and the container ends the guarantee for that container: a setuid-mode Apptainer install is one case (its starter is a set-user-ID binary), and an engine packaged with a set-user-ID helper, a snap-packaged one for example, is another; an Apptainer container is then orphaned as before, forever, since no runner removes it, and an engine's container stays only until the runner's container removal at the end of the job or at its next start, which bounds that case;
+under Docker and Podman the signal is a SIGTERM that nothing follows with a SIGKILL once the launcher is gone, and a client killed with SIGKILL passes nothing on at all, so an entry that is the first process of its container (process identifier 1) with no handler for SIGTERM stays until the runner removes the container, at the end of the job or at the runner's next start;
+a process that calls `setsid` leaves the launcher's group and is not reached by a group signal, though one that does so inside the container's namespace is still bounded by the container;
+and the runner does not make itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) to hunt the descendants a job leaves behind: that is not done, and no card tracks it yet.
 
 ### Containers (Docker and Podman)
 
