@@ -18,6 +18,7 @@ from typing import NamedTuple
 
 from .codes import (
     ENGINE_RUNTIMES,
+    ENV_ALLOWED_REGISTRIES,
     ENV_CONTAINER_RUNTIME,
     ENV_CPUS,
     ENV_ENFORCE_LIMITS,
@@ -99,6 +100,30 @@ def _limits(env: Env) -> tuple[Limits | None, Failure | None]:
     return Limits(int(cpus), None if memory is None else int(memory)), None
 
 
+def registry_entry_ok(entry: str) -> bool:
+    """An ``NEMAR_ALLOWED_REGISTRIES`` entry names a registry host: it holds a dot or a colon, or is
+    ``localhost``, and no ``/``, ``@`` or white space. A bare word (``myorg``) is a Docker Hub
+    namespace to Docker and a short name resolved through the search registries to Podman, so it is
+    refused rather than read as a host."""
+    if not entry or any(c in entry for c in "/@") or any(c.isspace() for c in entry):
+        return False
+    return "." in entry or ":" in entry or entry == "localhost"
+
+
+def _registries(env: Env) -> Failure | None:
+    """Under Docker or Podman every entry of a set ``NEMAR_ALLOWED_REGISTRIES`` must be a host (see
+    ``registry_entry_ok``); empty items between commas are dropped and an empty value allows none."""
+    if env.get(ENV_CONTAINER_RUNTIME) not in ENGINE_RUNTIMES:
+        return None
+    value = env.get(ENV_ALLOWED_REGISTRIES)
+    if value is None:
+        return None
+    entries = [item.strip() for item in value.split(",") if item.strip()]
+    if all(registry_entry_ok(entry) for entry in entries):
+        return None
+    return _refused("registry allowlist")
+
+
 def _runner_label(env: Env) -> tuple[str | None, Failure | None]:
     """Under Docker or Podman ``NEMAR_RUNNER_LABEL`` must be a runner registration id (it becomes the
     container label ``nemar.runner``); missing or malformed ends the launch at the start. Under
@@ -118,6 +143,7 @@ def read_settings(env: Env) -> Settings:
         lease, problem = None, _refused("lease id")
     limits, limits_problem = _limits(env)
     label, label_problem = _runner_label(env)
+    registries_problem = _registries(env)
     return Settings(
         out_dir=env.get(ENV_OUTPUT_DIR) or env.get(ENV_RUNNER_OUTPUT_DIR),
         end_time=_end_time(env),
@@ -130,5 +156,5 @@ def read_settings(env: Env) -> Settings:
         lease=lease,
         limits=limits,
         runner_label=label,
-        problem=problem or limits_problem or label_problem,
+        problem=problem or limits_problem or label_problem or registries_problem,
     )

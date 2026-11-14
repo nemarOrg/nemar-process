@@ -21,7 +21,7 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
         [podman: --userns=keep-id --pid=private --ipc=private --uts=private --cgroupns=private
                  --env-host=false --read-only-tmpfs=false --image-volume=ignore]
         --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
-        [docker: --entrypoint ""]  --no-healthcheck
+        [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
         --cpus <NEMAR_CPUS> --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
         --pids-limit 4096 --oom-score-adj=1000
         --mount type=bind,src=<host>,dst=/work  --mount type=bind,src=<host>,dst=/tmp
@@ -104,6 +104,11 @@ DEFAULT_REGISTRIES = ("ghcr.io",)
 JOB_LABEL = "nemar.job"
 # ... and the runner that started it (`NEMAR_RUNNER_LABEL`): a sweep selects on both.
 RUNNER_LABEL = "nemar.runner"
+# Engines refused for now: Podman's site-wide containers.conf `volumes` and `devices` and its
+# mounts.conf entries reach every container, and the launcher can neither disable nor detect them.
+# The Podman code paths and their tests stay, behind this refusal; a later step lifts it once those
+# entries have been inspected on a real rootless Podman host. Empty it to run them.
+UNSUPPORTED_ENGINES = ("podman",)
 _SCHEME = "docker://"
 _CONTROLLERS = ("cpu", "memory", "pids")
 
@@ -116,6 +121,16 @@ def selected(env: Env) -> str:
     if value in ENGINE_RUNTIMES:
         return value
     raise Failure("runtime_error", "image_missing", "the container runtime named is not supported")
+
+
+def refuse_unsupported(engine: str, log: Log | None = None) -> None:
+    """Before the engine binary is found, asked its version or anything else: an engine on
+    ``UNSUPPORTED_ENGINES`` ends the launch as ``runtime_unusable`` (the preflight's own refusal),
+    logged as ``<engine>_unsupported``. No engine call is made."""
+    if engine in UNSUPPORTED_ENGINES:
+        if log is not None:
+            log.error("{}_unsupported".format(engine))
+        raise _refused("runtime_unusable", "this engine is not supported yet")
 
 
 def image_reference(job: spec.Spec) -> str:
@@ -221,8 +236,13 @@ def build_argv(
     ]
     if engine == "docker":  # Podman's documentation does not say that an empty value resets it
         argv += ["--entrypoint", ""]
+    argv.append("--no-healthcheck")
+    if engine == "docker":
+        # No daemon-side copy of the job's standard output: without `--rm` a container whose launcher
+        # was killed stays (stopped) until the runner's sweep, and its log would stay with it. The
+        # attached `run` still streams the output to the launcher, and `container inspect` is unaffected.
+        argv.append("--log-driver=none")
     argv += [
-        "--no-healthcheck",
         "--cpus",
         str(limits.cpus),
         "--memory",
@@ -306,8 +326,10 @@ def _refused(detail: str, why: str) -> Failure:
 
 class Assessment(NamedTuple):
     """What an engine's ``info`` document says: ``mode`` is False for a mode that is refused (rootless
-    Docker), ``limits`` is False when a controller is missing, ``cpus`` is the engine's CPU count
-    (None when it does not say) and ``swap`` is False for a Docker daemon without swap accounting."""
+    Docker, Docker with user-namespace remapping), ``limits`` is False when a controller is missing
+    or the engine does not say its CPU count (a launch needs that number to check ``NEMAR_CPUS``),
+    ``cpus`` is the engine's CPU count (None when it does not say) and ``swap`` is False for a
+    Docker daemon without swap accounting."""
 
     mode: bool
     limits: bool
@@ -332,7 +354,11 @@ def assess(engine: str, info: dict[str, Any]) -> Assessment:
     """Read an ``info`` document (see ``preflight`` for what each part means)."""
     if engine == "docker":
         options = info.get("SecurityOptions") or []
-        rootless = any(isinstance(o, str) and "name=rootless" in o for o in options)
+        # Rootless and user-namespace remapping both map the user to a sub-user that cannot write
+        # the bind directories the launcher made.
+        rootless = any(
+            isinstance(o, str) and ("name=rootless" in o or "name=userns" in o) for o in options
+        )
         limits = all(info.get(key) is True for key in ("MemoryLimit", "CpuCfsQuota", "PidsLimit"))
         cpus = info.get("NCPU")
         swap = info.get("SwapLimit") is True
@@ -346,19 +372,21 @@ def assess(engine: str, info: dict[str, Any]) -> Assessment:
         swap = True
         mode = True
     count = cpus if isinstance(cpus, int) and not isinstance(cpus, bool) and cpus >= 1 else None
-    return Assessment(mode, limits, count, swap)
+    return Assessment(mode, limits and count is not None, count, swap)
 
 
 def engine_preflight(engine_path: str, engine_name: str) -> tuple[bool, bool]:
     """``(limits_enforceable, mode_accepted)`` for the engine at ``engine_path`` (``docker`` or
     ``podman``), for a runner's ``doctor``: a thin public wrapper over what ``preflight`` checks.
 
-    ``mode_accepted`` is False for rootless Docker and for a launcher running as root, the modes the
-    launcher refuses. It never raises: an engine that cannot be run, does not answer, or answers with
-    anything but the document asked for is ``(False, False)``. The only thing it runs is the engine's
+    ``limits_enforceable`` is False for a missing controller and for an engine that does not say its
+    CPU count. ``mode_accepted`` is False for rootless Docker, Docker with user-namespace remapping
+    and a launcher running as root, the modes the launcher refuses. It never raises: an engine that cannot be run, does not answer, or answers with
+    anything but the document asked for is ``(False, False)``; so is an engine on
+    ``UNSUPPORTED_ENGINES`` (Podman, for now), which is not run at all. The only thing it runs is the engine's
     read-only ``info``."""
     try:
-        if engine_name not in ENGINE_RUNTIMES:
+        if engine_name not in ENGINE_RUNTIMES or engine_name in UNSUPPORTED_ENGINES:
             return False, False
         status, output = _run(
             info_argv(engine_name, engine_path), Env(), INFO_SECONDS, capture=True
@@ -382,14 +410,15 @@ def preflight(
       restriction when that is not uid 0;
     * ``info`` answers: a dead daemon, an engine that cannot be started, or an answer that is not
       the document asked for is ``runtime_unusable``;
-    * Docker: not rootless (``SecurityOptions`` names ``rootless``: the user's sub-user cannot write
-      the bind directories), and ``MemoryLimit``, ``CpuCfsQuota`` and ``PidsLimit`` are all true;
+    * Docker: not rootless and without user-namespace remapping (``SecurityOptions`` names
+      ``rootless`` or ``userns``: the user's sub-user cannot write the bind directories), and ``MemoryLimit``, ``CpuCfsQuota`` and ``PidsLimit`` are all true;
       without a controller the daemon drops the flag with a warning and the job runs unlimited;
     * Podman: cgroup v2 with the ``cpu``, ``memory`` and ``pids`` controllers available to it (a
       rootless Podman on cgroup v1 ignores the limits);
     * ``NEMAR_CPUS`` is at most the engine's CPU count (above it the engine refuses to start, which
       the user would otherwise be charged for): ``invalid_spec``.
     """
+    refuse_unsupported(engine, log)
     if current_user()[0] == 0:
         raise _refused("runtime_unusable", "the launcher is running as root")
     status, output = _run(info_argv(engine, engine_path), env, INFO_SECONDS, stop, capture=True)
@@ -398,13 +427,12 @@ def preflight(
         raise _refused("runtime_unusable", "the engine did not answer")
     found = assess(engine, info)
     if not found.mode:
-        raise _refused("runtime_unusable", "rootless Docker is not supported")
+        raise _refused("runtime_unusable", "this Docker mode is not supported")
     if not found.limits:
         raise _refused("runtime_unusable", "the engine cannot enforce the limits")
     if not found.swap:
         log.warning("engine: no swap accounting, so the swap limit is not enforced")
-    if found.cpus is None:
-        raise _refused("runtime_unusable", "the engine did not say how many CPUs it has")
+    assert found.cpus is not None  # `assess` makes an unknown count a missing limit
     if limits.cpus > found.cpus:
         raise _refused("invalid_spec", "the CPU count to enforce exceeds the engine's")
     log.info("engine: can enforce cpu, memory and pids limits")

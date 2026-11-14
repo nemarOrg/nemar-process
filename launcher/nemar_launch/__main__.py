@@ -163,6 +163,7 @@ def _do_work(
         os.mkdir(tmp_dir, 0o700)
 
         engine = runtime.selected(env)
+        runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
         sif = ""
         if engine == runtime.APPTAINER:
             runtime_name, runtime_path = run.find_runtime(env)

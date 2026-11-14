@@ -489,6 +489,42 @@ def prepare_layout(out_dir: str) -> Layout:
 # ---- signals --------------------------------------------------------------------------------------
 
 
+_WAITID = getattr(os, "waitid", None)
+
+
+def has_exited(child: subprocess.Popen[bytes]) -> bool:
+    """Whether ``child`` has exited, WITHOUT reaping it where the system allows (``waitid`` with
+    ``WNOWAIT``, on Linux): a reaped child's process id is free for another process to take, and the
+    group kill that follows must not be able to hit a stranger. Where there is no ``waitid`` (macOS,
+    which only a developer's machine is) it falls back to ``poll``, which reaps."""
+    if _WAITID is not None:
+        try:
+            return _WAITID(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:  # already reaped elsewhere
+            return True
+    return child.poll() is not None
+
+
+def wait_for_exit(child: subprocess.Popen[bytes], timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for ``child`` to exit, without reaping it (see ``has_exited``)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if has_exited(child):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def end_group(child: subprocess.Popen[bytes]) -> int:
+    """Kill whatever is left in ``child``'s session (its own children), THEN reap ``child``: its
+    process id, which is the group's, is still ours while the group is signalled. Returns the
+    child's wait status."""
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(child.pid, signal.SIGKILL)
+    return child.wait()
+
+
 class Terminator:
     """Records a SIGTERM, passes it to the container, and asks running phases to stop."""
 
@@ -508,7 +544,7 @@ class Terminator:
         """Pass the SIGTERM to the container's whole process group (it was started in a session of
         its own, so the group is the container and everything in it, and nothing of ours)."""
         child = self.child
-        if child is not None and child.poll() is None:
+        if child is not None and not has_exited(child):
             with contextlib.suppress(OSError, ProcessLookupError):
                 os.killpg(child.pid, signal.SIGTERM)
 
@@ -614,30 +650,22 @@ def run_container(
     terminator.attach(child)
     killed = False
     try:
-        while True:
-            try:
-                status = child.wait(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                received = terminator.received
-                if (
-                    received is not None
-                    and not killed
-                    and time.time() - received >= TERM_GRACE_SECONDS
-                ):
-                    killed = True
-                    log.warning(
-                        "the container did not stop {} s after SIGTERM; killing it".format(
-                            TERM_GRACE_SECONDS
-                        )
+        while not wait_for_exit(child, 0.2):
+            received = terminator.received
+            if received is not None and not killed and time.time() - received >= TERM_GRACE_SECONDS:
+                killed = True
+                log.warning(
+                    "the container did not stop {} s after SIGTERM; killing it".format(
+                        TERM_GRACE_SECONDS
                     )
-                    with contextlib.suppress(OSError, ProcessLookupError):
-                        os.killpg(child.pid, signal.SIGKILL)
+                )
+                with contextlib.suppress(OSError, ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
     finally:
         terminator.detach()
-    # Whatever is left in the group (the entry's own children) goes with it.
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(child.pid, signal.SIGKILL)
+    # Whatever is left in the group (the entry's own children) goes with it, before the child is
+    # reaped (its process id is the group's, and must not be free for a stranger to take).
+    status = end_group(child)
     code = 128 - status if status < 0 else status
     log.info("run: the container exited with {}".format(code))
     if terminator.received is not None:
