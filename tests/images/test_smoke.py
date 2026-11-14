@@ -8,6 +8,8 @@ test runs the real `smoke.py` in the lock's own environment (see `conftest.runti
 from __future__ import annotations
 
 import copy
+import importlib.metadata
+import importlib.util
 import json
 import os
 import subprocess
@@ -51,8 +53,21 @@ def test_the_expectation_names_every_package_the_issue_pins():
     assert expected["eegprep"] == {PINNED_EEGPREP_VERSION}
     assert expected["mne"] == {"1.13.2"}
     assert expected["pamica"] == {"0.4.0"}
-    for name in ("numpy", "scipy", "torch", "signaljourney-validator", "python-picard", "pybids"):
+    for name in ("numpy", "scipy", "torch", "signaljourney", "python-picard", "pybids"):
         assert expected[name], name
+    assert expected["signaljourney"] == {"0.2.0"}
+
+
+def test_smoke_names_the_validators_distribution_as_pypi_does():
+    """The import is `signaljourney_validator`, the distribution is `signalJourney`."""
+    spec = importlib.util.spec_from_file_location("smoke_under_test", SMOKE)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.IMPORTS["signaljourney_validator"] == "signalJourney"
+    assert importlib.metadata.version(module.IMPORTS["signaljourney_validator"]) == "0.2.0"
+    assert importlib.util.find_spec("signaljourney_validator") is not None
 
 
 def test_a_document_that_matches_the_declaration_passes():

@@ -2,13 +2,13 @@
 
 A record is data: ``build_recording_record`` turns the resolved plan (``plan.py``), the files the
 recording produced (with their size and SHA-256) and the identity of the run into a document that
-validates against the vendored schema; ``build_dataset_record`` does the same for the recordings
+validates against the schema packaged with the validator; ``build_dataset_record`` does the same for the recordings
 table. Both are recipe-agnostic: a recipe supplies its description, the steps of its dataset-level
 record and the distributions to summarize (``recipe.py``).
 
 What the schema cannot say goes in ``extensions.nemar`` (docs/upstream.md; signalJourney/signalJourney#7 to #9): the
 checksum of every output file (``outputTargets`` has no checksum field), the identity of the run,
-the engine, the plan hash. The vendored validator checks neither timestamps nor non-finite numbers
+the engine, the plan hash. The PyPI validator checks neither timestamps nor non-finite numbers
 nor references, so ``check`` does (``TIMESTAMP``; the writer refuses NaN; ``references_problems``).
 """
 
@@ -35,7 +35,7 @@ SJ_VERSION = "0.1.0"
 SCHEMA_VERSION = "0.1.0"
 IN_MEMORY_FORMAT = "EEGLAB EEG dict (float64)"
 
-# The date-time format the vendored validator does not check (signalJourney/signalJourney#9).
+# The date-time format the PyPI validator does not check (signalJourney/signalJourney#9).
 TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 # The dataset record is at most 256 KB; rows are added while it stays at or under the budget, and
@@ -233,7 +233,7 @@ def content_sha256(record: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(stripped).encode("utf-8")).hexdigest()
 
 
-# ---- checks the vendored validator does not make ----------------------------------------------
+# ---- checks the PyPI validator does not make ----------------------------------------------
 
 
 def timestamp_problems(record: Mapping[str, Any]) -> list[str]:

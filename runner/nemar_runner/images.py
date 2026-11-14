@@ -1,11 +1,13 @@
 """The container image of a job, and what the runner can prove about the runtime.
 
-Apptainer runs `<sif_root>/<hex>.sif`, named by the image digest (`docs/images.md`). The operator
-places the file; the runner never pulls unless `sif_pull` is on (development only). A pull is from
-`oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>` into a hidden, per-process `.part` name and
-then renamed into place under a lock held across runner processes, so a half-written image is never
-run and two jobs for the same image never pull it twice. Docker and Podman pull by digest inside the
-launcher, so the runner does nothing for them.
+Apptainer runs `<sif_root>/<hex>.sif`, named by the image digest (`docs/images.md`). With
+`verify_images` on (the default) the file is used only if it hashes to the layer of the SIF artifact
+whose signature `verify.py` checked, and a missing file is pulled (`sif_pull`, on by default) by the
+digest of that signed artifact, never by a tag, into a hidden, per-process `.part` name, hashed, and then
+renamed into place under a lock held across runner processes, so a half-written or unsigned image is
+never run and two jobs for the same image never pull it twice. With `verify_images` off (a loopback
+development stack only) the old rule stands: the pull is by the mutable tag and nothing is checked.
+Docker and Podman pull by digest inside the launcher, after `verify.py` has checked that digest.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import stat
@@ -20,7 +23,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Generator
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from .config import Config, Tuning
 from .logs import Log
@@ -50,6 +53,44 @@ class ImageError(Exception):
 
 class Interrupted(Exception):
     """The job was stopped (cancelled, lease lost, runner stopping) while the image was pulled."""
+
+
+class Unverified(Exception):
+    """The image cannot be shown to be the one the workflow signed. ``reason`` is one of the fixed words
+    of the `image_unverified` log line (`verify.REASONS`); ``why`` is an optional second word for the
+    log; ``stderr`` is what cosign said, for a test to show on failure, never logged."""
+
+    def __init__(self, reason: str, why: str | None = None, stderr: bytes = b"") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.why = why
+        self.stderr = stderr
+
+
+class SifProof(NamedTuple):
+    """What a verified signature of the SIF artifact gives the runner: the artifact's manifest digest
+    (the one cosign named) and the digest of its one layer, the SIF file itself (both `sha256:<hex>`)."""
+
+    manifest: str
+    layer: str
+
+
+_CHUNK_BYTES = 1024 * 1024
+
+
+def file_sha256(path: str, interrupted: Callable[[], str | None]) -> str:
+    """The SHA-256 of a file, as hex, read a megabyte at a time; ``Interrupted`` when the job is
+    stopped while it reads (an image is hundreds of megabytes)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            reason = interrupted()
+            if reason is not None:
+                raise Interrupted(reason)
+            chunk = handle.read(_CHUNK_BYTES)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
 
 
 def trusted_which(name: str, tuning: Tuning) -> tuple[str | None, str | None]:
@@ -140,6 +181,14 @@ def sif_path(config: Config, digest_hex: str) -> str:
     return os.path.join(config.sif_root, digest_hex + ".sif")
 
 
+def _present(path: str) -> bool:
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def _layer_hex(proof: SifProof) -> str:
+    return proof.layer[len("sha256:") :]
+
+
 def ensure_sif(
     config: Config,
     tuning: Tuning,
@@ -151,29 +200,49 @@ def ensure_sif(
     home: str,
     run_process: RunProcess,
     interrupted: Callable[[], str | None],
+    prove: Callable[[], SifProof] | None = None,
 ) -> str:
-    """The path of the image file. With `sif_pull` false (the default) a missing file is an
-    ``ImageError``: the runner never pulls, the operator places and verifies the image. With it true
-    the file is pulled first (docs/runner.md: by the mutable tag, with no digest or signature check).
-    ``Interrupted`` when the job is stopped while it waits or pulls."""
+    """The path of the image file.
+
+    ``prove`` is None when verification is off: the file is used as it is, and with `sif_pull` true a
+    missing one is pulled by the mutable tag with no check (a loopback development stack only).
+
+    With ``prove`` (verification on) it returns the proof of the signed SIF artifact (``verify.py``),
+    and then a file that is already there is used only if it hashes to the proof's layer, and one that
+    is not is refused as ``Unverified("layer_mismatch")`` and left alone: the runner never deletes or
+    replaces an image it did not write. A missing file is pulled by the manifest digest the signature
+    named, and renamed into place only if the part file hashes to that layer.
+
+    With `sif_pull` false a missing file is an ``ImageError`` before anything is verified.
+    ``Interrupted`` when the job is stopped while it waits, verifies, hashes or pulls."""
     final = sif_path(config, digest_hex)
-    if os.path.isfile(final) and os.path.getsize(final) > 0:
-        return final
+    if _present(final):
+        if prove is None:
+            return final
+        return _checked(final, prove(), interrupted)
     if not config.sif_pull:
         raise ImageError("the image file is not in sif_root and sif_pull is off")
     with locks.hold(config.sif_root, digest_hex, interrupted):
-        if os.path.isfile(final) and os.path.getsize(final) > 0:
-            return final  # another job or runner pulled it while this one waited
+        if _present(final):
+            if prove is None:
+                return final  # another job or runner pulled it while this one waited
+            return _checked(final, prove(), interrupted)
         binary = runtime_binary(config, tuning)
         if binary is None:
             raise ImageError("no container runtime on the launch PATH")
+        # the signature comes first: nothing is pulled that was not signed
+        proof = prove() if prove is not None else None
         # the lock is held, so any other part file of this image is a dead run's
         for stale in glob.glob(
             os.path.join(glob.escape(config.sif_root), ".{}.sif.*.part".format(digest_hex))
         ):
             _remove(stale)
         part = os.path.join(config.sif_root, ".{}.sif.{}.part".format(digest_hex, os.getpid()))
-        argv = [binary, "pull", part, "{}:sha256-{}".format(SIF_REPOSITORY, digest_hex)]
+        if proof is not None:
+            source = "{}@{}".format(SIF_REPOSITORY, proof.manifest)
+        else:
+            source = "{}:sha256-{}".format(SIF_REPOSITORY, digest_hex)
+        argv = [binary, "pull", part, source]
         cache = os.path.join(scratch, "runtime-cache")
         temporary = os.path.join(scratch, "runtime-tmp")
         os.makedirs(cache, mode=0o700, exist_ok=True)
@@ -194,12 +263,21 @@ def ensure_sif(
                 raise ImageError("the image pull failed")
             if not os.path.isfile(part) or os.path.getsize(part) == 0:
                 raise ImageError("the image pull wrote nothing")
+            if proof is not None and file_sha256(part, interrupted) != _layer_hex(proof):
+                raise Unverified("layer_mismatch", "pulled")
             os.replace(part, final)
         except BaseException:
             _remove(part)
             raise
         log.info("image_pull_finished", job=job_id, image=digest_hex[:12])
         return final
+
+
+def _checked(path: str, proof: SifProof, interrupted: Callable[[], str | None]) -> str:
+    """``path`` if it hashes to the proof's layer, else ``Unverified``."""
+    if file_sha256(path, interrupted) != _layer_hex(proof):
+        raise Unverified("layer_mismatch", "placed")
+    return path
 
 
 def _remove(path: str) -> None:

@@ -1,7 +1,6 @@
 """Recipes hold no numerics: a missing signal-processing step is added to eegprep, never written here.
 
-An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_process/` (the vendored
-signalJourney schema excepted) that fails on:
+An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_process/` that fails on:
 
 * an import of, or a reference to, a signal-processing library or module (`scipy.signal`,
   `scipy.fft`, `scipy.linalg`, `numpy.fft`, scikit-learn, torch, pamica, MNE-Python);
@@ -163,9 +162,7 @@ def scan(source: str) -> list[str]:
 
 
 def package_files():
-    return sorted(
-        path for path in PACKAGE.rglob("*.py") if "_vendor" not in path.relative_to(PACKAGE).parts
-    )
+    return sorted(PACKAGE.rglob("*.py"))
 
 
 def test_no_file_of_the_recipes_package_writes_signal_processing():
@@ -177,10 +174,9 @@ def test_no_file_of_the_recipes_package_writes_signal_processing():
     assert {name: problems for name, problems in found.items() if problems} == {}
 
 
-def test_the_scan_covers_the_validator_wrapper_and_skips_the_vendored_schema():
+def test_the_scan_covers_the_validator_wrapper():
     names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
     assert "sj.py" in names
-    assert not [name for name in names if name.startswith("_vendor")]
 
 
 def test_the_scan_covers_the_zarr_recipe_and_its_input_layer():

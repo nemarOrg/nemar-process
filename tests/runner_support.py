@@ -33,7 +33,7 @@ from typing import Any
 
 from nemar_runner import contract
 from nemar_runner.agent import Agent
-from nemar_runner.config import Config, Tuning
+from nemar_runner.config import Availability, Config, Tuning
 from nemar_runner.logs import Log
 from server import Request, Response, StandinServer
 
@@ -387,8 +387,12 @@ class Rig:
         runtime: str = "apptainer",
         launcher: Path | None = None,
         sif_pull: bool = False,
+        verify_images: bool = False,
     ) -> None:
         self.sif_pull = sif_pull
+        # off by default: the stand-in NEMAR is on loopback, which is the one place the runner allows it
+        # (docs/runner.md, "The image"); the signature tests turn it on
+        self.verify_images = verify_images
         self.tmp = tmp
         self.routes = RunnerRoutes()
         self.server = StandinServer(self.routes).start()
@@ -411,7 +415,7 @@ class Rig:
         self.config = self.make_config(runtime=runtime)
         # the launch PATH is the bin directory alone: a runtime on the host (CI has Apptainer in /usr/bin)
         # must never be found by a test that did not install one
-        self.tuning = fast(launch_path=str(self.bin))
+        self.tuning = fast(launch_path=str(self.bin), lower_priority=False)
         self.log = Log(str(self.root / "runner.log"), stream=self.stream)
         self.stream.owner = self.log
 
@@ -428,6 +432,9 @@ class Rig:
             "launcher_dir": str(self.launcher),
             "default_job_memory_mb": 512 if self.runtime in ("docker", "podman") else None,
             "sif_pull": self.sif_pull,
+            # a test that is not about the host's room does not depend on how busy the host is
+            "availability": Availability(enabled=False),
+            "verify_images": self.verify_images,
         }
         values.update(changes)
         return Config(**values)

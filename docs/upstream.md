@@ -7,24 +7,26 @@ Abbreviations used here: JavaScript Object Notation (JSON), Python Package Index
 
 ## signalJourney
 
-**The packaging issue:** [signalJourney/signalJourney#6](https://github.com/signalJourney/signalJourney/issues/6), "Publish the validator to PyPI with the schema packaged" (filed 2026-11-04).
+**The packaging issue:** [signalJourney/signalJourney#6](https://github.com/signalJourney/signalJourney/issues/6), "Publish the validator to PyPI with the schema packaged" (filed 2026-11-04, released as `signalJourney` 0.2.0 on 2026-11-14).
 
-The validator is not on PyPI, and it looks for its schema relative to its own source tree, so an installed copy cannot find one.
-Until that is fixed upstream, this repository does two things:
+The release is a wheel that packages its schema.
+`Validator()` loads that schema through `importlib.resources`, raises `SchemaResolutionError` at construction for a `$ref` it cannot resolve, and logs on the logger `signaljourney_validator` instead of printing.
+This repository therefore does two things:
 
-1. installs the validator from a pinned commit, `signaljourney-validator @ git+https://github.com/signalJourney/signalJourney@<commit>`, declared once in the dependency group `signaljourney` of `pyproject.toml` and shared by the `dev` and `runtime` groups;
-2. vendors that commit's `schema/` directory into `recipes/nemar_process/_vendor/signalJourney/schema/`, with the upstream `LICENSE` (BSD 3-Clause) and a `SOURCE` file naming the repository, the full commit and a digest of the copied tree, and points the validator at it: `nemar_process.sj.validator()` returns `Validator(schema_dir=<the vendored directory>)`.
+1. installs the release, `signalJourney==0.2.0`, declared once in the dependency group `signaljourney` of `pyproject.toml` and shared by the `dev` and `runtime` groups (the distribution is `signalJourney`, the import package is `signaljourney_validator`, the command is `signaljourney-validate`);
+2. keeps no copy of the schema and pins its tree digest instead: `recipes/nemar_process/sj.py` holds the constant `SIGNALJOURNEY_SCHEMA_TREE_SHA256`, the digest of the 37 files of `signaljourney_validator/schema/` in that release (`nemar_process.sj.tree_sha256`: the lines `<path> NUL <file sha256> LF`, in the order of the paths' components, hashed again).
 
-`validator()` refuses to start when the vendored directory holds no schema version, because the validator's own fallback for an empty directory is the directory beside its source, which would validate against a schema this repository never reviewed.
-It also captures the validator's progress lines instead of printing them, and fails if the validator reports an unresolvable `$ref`.
+`nemar_process.sj.validator()` computes the digest of the installed schema before it builds the validator, and raises `RuntimeError` when it differs from the constant or when the validator names no schema version, before any record is validated.
+A record is therefore never validated against a schema this repository has not reviewed, whatever the lock or the environment holds.
+It never prints: the validator's progress goes to its logger.
 
-Two tests keep the copy honest.
-`tests/images/test_sj.py` recomputes the digest of the vendored tree and compares it with `SOURCE`, so no file can change without the record changing.
-In CI a second test compares every vendored file with a fresh checkout of signalJourney at the recorded commit (`NEMAR_SIGNALJOURNEY_DIR`, required there by `NEMAR_REQUIRE_SIGNALJOURNEY=1`); locally it runs when a checkout sits beside this one.
+`tests/images/test_sj.py` pins all of it: the installed release is 0.2.0, the constant is the digest of the installed schema, a constant changed by one character refuses to start, and a changed, added, removed or renamed file is a different digest.
+The same file compares the two example records of `tests/fixtures/sj/` with the release's own, byte for byte.
+The constant was first recorded for the copy of commit 169c3261 that this release replaced, and the 37 files of the release are byte for byte the same as that copy, so no byte of the schema changed with the move.
 
 ### What the `nemar-floor` recipe needed from signalJourney
 
-The recipe's records validate against the vendored schema, and three gaps in it are filed (phase 3, 2026-11-04).
+The recipe's records validate against the packaged schema, and three gaps in it are filed (phase 3, 2026-11-04).
 Each is worked around inside the recipe, and the workaround is named beside the code.
 
 | Issue | Gap | The workaround here |
@@ -33,20 +35,23 @@ Each is worked around inside the recipe, and the workaround is named beside the 
 | [signalJourney/signalJourney#8](https://github.com/signalJourney/signalJourney/issues/8) | the `nemar` extension namespace is an empty open object | `extensions.nemar` has two profiles, `recording` and `dataset` (see [recipes.md](recipes.md)) |
 | [signalJourney/signalJourney#9](https://github.com/signalJourney/signalJourney/issues/9) | the validator accepts malformed timestamps, non-finite numbers and dangling references | `records.check` tests them (timestamps, references) and the writer refuses NaN and infinity |
 
-### Moving the commit
+### Moving the release
 
 ```bash
-SJ=/path/to/signalJourney               # a checkout that contains the new commit
-uv run python scripts/vendor_signaljourney.py --source "$SJ" --commit <new commit>
-# change the commit in the `signaljourney` group of pyproject.toml, then:
+# 1. change the pin in the `signaljourney` group of pyproject.toml, then:
 uv lock
-uv run python scripts/vendor_signaljourney.py --source "$SJ" --check
+uv sync --frozen
+# 2. recompute the digest of the schema the new release packages:
+PYTHONPATH=recipes uv run python -c "import importlib.resources as r; from nemar_process.sj import tree_sha256; print(tree_sha256(r.files('signaljourney_validator') / 'schema'))"
+# 3. review what changed in the schema, in a checkout of signalJourney (tags v<old> and v<new>):
+git diff v<old> v<new> -- src/signaljourney_validator/schema
+# 4. change SIGNALJOURNEY_SCHEMA_TREE_SHA256 in recipes/nemar_process/sj.py to the digest of step 2, then:
 uv run pytest tests/images
 ```
 
-The two commits (the group's and `SOURCE`'s) are compared by `tests/images/test_dependencies.py`.
-Re-copy `tests/fixtures/sj/` from the new `schema/examples/` if the examples changed.
-When upstream publishes a release with the schema packaged, drop the vendored copy, depend on the release and delete `scripts/vendor_signaljourney.py`.
+The pin, the lock, the reviewed schema difference and the constant move in the same pull request.
+`uv lock` also rewrites the version line of `nemar-process` itself (`0.1.1-dev3` as `0.1.1.dev3`), which only the release bot changes (`docs/release.md`): put that one line back as it was.
+A changed schema can change what a record needs, so look at `tests/recipes` (every record still validates) before the constant moves, and re-copy `tests/fixtures/sj/` from the new `schema/examples/` if the examples changed.
 
 ## eegprep
 

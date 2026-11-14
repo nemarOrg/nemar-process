@@ -1234,7 +1234,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pyyaml" },
     { name = "ruff" },
-    { name = "signaljourney-validator" },
+    { name = "signaljourney" },
     { name = "ty" },
 ]
 runtime = [
@@ -1244,12 +1244,12 @@ runtime = [
     { name = "numpy" },
     { name = "pamica" },
     { name = "scipy" },
-    { name = "signaljourney-validator" },
+    { name = "signaljourney" },
     { name = "threadpoolctl" },
     { name = "zarr" },
 ]
 signaljourney = [
-    { name = "signaljourney-validator" },
+    { name = "signaljourney" },
 ]
 
 [package.metadata]
@@ -1266,7 +1266,7 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.17" },
-    { name = "signaljourney-validator", git = "https://github.com/signalJourney/signalJourney?rev=169c3261d044039c359bab7e121e78157a4f5af9" },
+    { name = "signaljourney", specifier = "==0.2.0" },
     { name = "ty", specifier = ">=0.0.89" },
 ]
 runtime = [
@@ -1276,11 +1276,11 @@ runtime = [
     { name = "numpy" },
     { name = "pamica", specifier = "==0.4.0" },
     { name = "scipy" },
-    { name = "signaljourney-validator", git = "https://github.com/signalJourney/signalJourney?rev=169c3261d044039c359bab7e121e78157a4f5af9" },
+    { name = "signaljourney", specifier = "==0.2.0" },
     { name = "threadpoolctl" },
     { name = "zarr", specifier = "==3.4.0" },
 ]
-signaljourney = [{ name = "signaljourney-validator", git = "https://github.com/signalJourney/signalJourney?rev=169c3261d044039c359bab7e121e78157a4f5af9" }]
+signaljourney = [{ name = "signaljourney", specifier = "==0.2.0" }]
 
 [[package]]
 name = "networkx"
@@ -2162,12 +2162,16 @@ wheels = [
 ]
 
 [[package]]
-name = "signaljourney-validator"
-version = "0.0.1"
-source = { git = "https://github.com/signalJourney/signalJourney?rev=169c3261d044039c359bab7e121e78157a4f5af9#169c3261d044039c359bab7e121e78157a4f5af9" }
+name = "signaljourney"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "jsonschema" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3f/93/5626ddcff06000e5f1674a888954b0863d10200d3a46685834585ceda6bc/signaljourney-0.2.0.tar.gz", hash = "sha256:6914852b3fec77741609c020b0dd617264821e80b4ee8d1cc1368ee8fe2eeabf", size = 44727, upload-time = "2026-11-14T14:12:02.521Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/34/75afa44e8695272db12f8fa98c36442a2c7cd6b7a1c0ac65aca8843dcf3e/signaljourney-0.2.0-py3-none-any.whl", hash = "sha256:0419e90d40fddf6771bd3992fc578fbe1343954e9ba0c813f46c2d8dcc866d6e", size = 61146, upload-time = "2026-11-14T14:12:01.064Z" },
 ]
 
 [[package]]

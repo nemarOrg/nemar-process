@@ -5,7 +5,7 @@ outside an image it is a source run: ``build_info`` reads one file and makes no 
 tests pin the three builds, the two combinations that are refused, the engine stamp's optional
 engine versions, and the contract every registered recipe keeps: the recording and dataset records
 carry ``extensions.nemar.process``, the image digest beside its tag, the recipe and the engine
-versions, and the vendored validator accepts them.
+versions, and the signalJourney validator of the PyPI release accepts them.
 """
 
 from __future__ import annotations
@@ -348,7 +348,7 @@ def test_both_records_name_the_build_the_image_the_recipe_and_the_engine(product
 
 
 @pytest.mark.parametrize(("recipe_id", "kind"), VARIANTS)
-def test_the_vendored_validator_accepts_both_records(products, recipe_id, kind):
+def test_the_pypi_validator_accepts_both_records(products, recipe_id, kind):
     validator = sj.validator()
     for document in documents(products[(recipe_id, kind)], recipe_id, kind):
         assert records.check(document, validator) == []
