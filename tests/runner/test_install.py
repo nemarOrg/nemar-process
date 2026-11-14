@@ -812,6 +812,26 @@ def test_a_relative_configuration_path_is_written_into_a_unit_as_an_absolute_one
     assert "--config config.json" not in run
 
 
+@pytest.mark.parametrize("trouble", ["a file in the way", "a directory in the way"])
+def test_a_file_system_error_while_writing_units_is_a_fixed_word_and_exit_1(env, tmp_path, trouble):
+    env.publish("0.1.0")
+    units = tmp_path / "units"
+    if trouble == "a file in the way":
+        units = tmp_path / "a-file"
+        units.write_text("", encoding="utf-8")
+        units = units / "units"  # the units directory cannot be made under a file
+    else:
+        (units / "nemar-runner.service").mkdir(parents=True)  # the rename lands on a directory
+    args = parse(
+        "install", "--version", "0.1.0", "--prefix", str(env.prefix), "--write-units",
+        "--units-dir", str(units), "--cosign-path", str(env.cosign.path),
+    )  # fmt: skip
+    out, err = io.StringIO(), io.StringIO()
+    assert install.command(args, str(tmp_path / "c.json"), out, err, env.source) == 1
+    assert err.getvalue() == "nemar-runner install: failed: filesystem_error\n"
+    assert out.getvalue() == ""
+
+
 def test_a_prefix_or_a_configuration_that_cannot_be_written_into_a_unit_is_refused(env, tmp_path):
     env.publish("0.1.0")
     env.install("0.1.0")

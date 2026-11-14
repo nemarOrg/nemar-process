@@ -803,3 +803,7 @@ def command(
     except InstallError as error:
         err.write("nemar-runner {}: refused: {}\n".format(args.command, error))
         return EXIT_FAILED
+    except OSError:
+        # the unit directory cannot be made, a file is in the way: no path or message is printed
+        err.write("nemar-runner {}: failed: filesystem_error\n".format(args.command))
+        return EXIT_FAILED
