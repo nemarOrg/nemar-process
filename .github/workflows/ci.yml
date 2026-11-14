@@ -155,7 +155,9 @@ jobs:
     # Apptainer container built here (DM-18, gate G3). The other jobs deselect this marker; here neither a
     # missing Apptainer, a missing image nor a missing checkout may skip (NEMAR_REQUIRE_APPTAINER).
     name: runner against the local stack (real routes, real Apptainer)
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 like the other Apptainer jobs: the pinned .deb installs there and the job sets no sysctl,
+    # as none of them does.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       NEMAR_REQUIRE_APPTAINER: "1"
@@ -204,7 +206,12 @@ jobs:
       - name: Build the tiny image into a SIF
         run: |
           set -euo pipefail
-          docker build -t tiny:ci tests/images/tiny-recipe
+          for attempt in 1 2 3; do
+            docker build -t tiny:ci tests/images/tiny-recipe && break
+            echo "docker build attempt $attempt failed" >&2
+            [ "$attempt" = 3 ] && exit 1
+            sleep 10
+          done
           id=$(docker inspect --format '{{.Id}}' tiny:ci)
           hex=${id#sha256:}
           if ! [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
@@ -212,7 +219,12 @@ jobs:
             exit 1
           fi
           mkdir -p "$NEMAR_E2E_SIF_DIR"
-          apptainer build "$NEMAR_E2E_SIF_DIR/${hex}.sif" docker-daemon://tiny:ci
+          for attempt in 1 2 3; do
+            apptainer build --force "$NEMAR_E2E_SIF_DIR/${hex}.sif" docker-daemon://tiny:ci && break
+            echo "apptainer build attempt $attempt failed" >&2
+            [ "$attempt" = 3 ] && exit 1
+            sleep 10
+          done
           ls -l "$NEMAR_E2E_SIF_DIR"
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
