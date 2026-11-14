@@ -259,6 +259,17 @@ def test_an_installed_version_that_group_or_others_can_write_is_not_switched_to(
     refused("version_untrusted", env.install, "0.1.0")
 
 
+def test_an_installed_version_that_is_not_whole_is_not_switched_to(env):
+    env.publish("0.1.0")
+    env.publish("0.1.1")
+    env.install("0.1.0")
+    env.install("0.1.1")
+    # what a delete that stopped half way could leave under a version's name
+    (env.prefix / "versions" / "0.1.0" / "runner" / "nemar_runner" / "__main__.py").unlink()
+    refused("bundle_refused", env.install, "0.1.0")
+    assert install.read_current(str(env.prefix)) == "0.1.1"
+
+
 @pytest.mark.parametrize(
     "version", ["0.1", "1.2.3.4", "1.2.3-rc1", "v1.2.3", "../1.2.3", "", "1.2.x"]
 )
@@ -561,6 +572,7 @@ def test_older_versions_beyond_the_newest_two_are_removed(env):
         env.install(version)
     assert env.versions() == ["0.1.2", "0.1.3"]
     assert install.read_current(str(env.prefix)) == "0.1.3"
+    assert list((env.prefix / ".staging").iterdir()) == []  # what was removed is gone, not parked
 
 
 def test_a_version_a_runner_is_using_is_never_removed(env):

@@ -221,14 +221,17 @@ def tree_problem(directory: str) -> str | None:
         return "is not a directory"
     if info.st_uid != os.getuid() or info.st_mode & 0o022:
         return "is not the user's alone"
-    for here, names, files in os.walk(directory, followlinks=False):
-        for name in [*names, *files]:
-            path = os.path.join(here, name)
-            sub = os.lstat(path)
-            if stat.S_ISLNK(sub.st_mode):
-                return "{} is a link".format(os.path.relpath(path, directory))
-            if sub.st_uid != os.getuid() or sub.st_mode & 0o022:
-                return "{} is not the user's alone".format(os.path.relpath(path, directory))
+    try:
+        for here, names, files in os.walk(directory, followlinks=False):
+            for name in [*names, *files]:
+                path = os.path.join(here, name)
+                sub = os.lstat(path)
+                if stat.S_ISLNK(sub.st_mode):
+                    return "{} is a link".format(os.path.relpath(path, directory))
+                if sub.st_uid != os.getuid() or sub.st_mode & 0o022:
+                    return "{} is not the user's alone".format(os.path.relpath(path, directory))
+    except OSError:
+        return "cannot be read"
     return None
 
 
@@ -579,8 +582,14 @@ def prune(prefix: str, keep: set[str]) -> list[str]:
         if fd is None:
             continue
         try:
-            shutil.rmtree(os.path.join(prefix, "versions", version), ignore_errors=True)
+            # out of `versions/` in one rename, so a delete that stops half way never leaves a
+            # version directory that looks installed
+            gone = os.path.join(prefix, ".staging", "removed-{}-{}".format(version, os.getpid()))
+            os.rename(os.path.join(prefix, "versions", version), gone)
+            shutil.rmtree(gone, ignore_errors=True)
             removed.append(version)
+        except OSError:
+            pass
         finally:
             os.close(fd)
             with contextlib.suppress(OSError):
@@ -624,7 +633,6 @@ def install(
     cosign_path: str | None = None,
     tuning: Tuning | None = None,
     write_units: tuple[str, str] | None = None,
-    out: TextIO | None = None,
 ) -> str:
     """Install ``version`` under ``prefix`` and make it current; returns the word for what happened.
 
@@ -644,6 +652,7 @@ def install(
             problem = tree_problem(target)
             if problem is not None:
                 raise InstallError("version_untrusted", "versions/{} {}".format(version, problem))
+            check_layout(target, version)  # a whole version, not what a stopped delete left
             word = "already_installed"
         else:
             cosign = find_cosign(cosign_path, tuning)
