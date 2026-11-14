@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import sys
 import threading
@@ -520,10 +521,45 @@ def test_apptainer_doctor_has_no_engine_lines(tmp_path):
         rig.close()
 
 
-def test_the_real_launcher_preflight_is_called_when_the_launcher_has_one(tmp_path):
-    """Against the REAL `nemar_launch.runtime.engine_preflight`, not a stub: skipped only while the
-    launcher on this branch's base does not have the function (nemar-process PR #21), so that once it
-    does nothing silently keeps using the stub."""
+def test_doctor_gets_its_two_engine_lines_from_the_real_launcher_preflight(tmp_path):
+    """Against the REAL `nemar_launch.runtime.engine_preflight` of this checkout (no stub, no skip). The
+    engine is the launcher's own stand-in `docker`, which answers `info` the way a healthy rootful
+    daemon does."""
+    import fake_docker
+
+    rig = make_rig(tmp_path, "docker")
+    try:
+        rig.launcher = ROOT / "launcher"
+        fake_docker.install(str(rig.bin), str(rig.bin / "fake-docker.rec"), name="docker")
+        status, answers, _ = diagnose(rig, "docker")
+        if os.getuid() == 0:
+            assert answers["engine mode accepted"] == "no"  # the launcher refuses to run as root
+            return
+        assert answers["engine limits enforceable"] == "yes"
+        assert answers["engine mode accepted"] == "yes"
+        assert status == 0
+    finally:
+        rig.close()
+
+
+def test_the_real_preflight_says_no_when_the_engine_does_not_answer_as_asked(tmp_path):
+    import fake_docker
+
+    rig = make_rig(tmp_path, "docker")
+    try:
+        rig.launcher = ROOT / "launcher"
+        fake_docker.install(str(rig.bin), str(rig.bin / "fake-docker.rec"), name="docker")
+        (rig.bin / "fake-docker.rec.info").write_text("this is not the document asked for")
+        status, answers, text = diagnose(rig, "docker")
+        assert answers["engine limits enforceable"] == "no"
+        assert answers["engine mode accepted"] == "no"
+        assert status == 1
+        assert "the launcher has no engine preflight" not in text  # it ran, and said no
+    finally:
+        rig.close()
+
+
+def test_the_runners_call_matches_the_launchers_signature():
     import inspect
 
     sys.path.insert(0, str(ROOT / "launcher"))
@@ -531,27 +567,12 @@ def test_the_real_launcher_preflight_is_called_when_the_launcher_has_one(tmp_pat
         import importlib
 
         runtime = importlib.import_module("nemar_launch.runtime")
-    except ImportError:
-        pytest.skip("the launcher on this base has no runtime module yet (PR #21)")
     finally:
         sys.path.remove(str(ROOT / "launcher"))
-    function = getattr(runtime, "engine_preflight", None)
-    if function is None:
-        pytest.skip("the launcher on this base has no engine_preflight yet (PR #21)")
-    assert list(inspect.signature(function).parameters) == ["engine_path", "engine_name"]
-    rig = make_rig(tmp_path, "docker")
-    try:
-        rig.launcher = ROOT / "launcher"
-        status, answers, text = diagnose(rig, "docker")
-        # whatever the stand-in engine answers, the lines come from the real function and are not the
-        # "did not run" fallbacks
-        assert "the launcher has no engine preflight" not in text
-        assert "the preflight did not run" not in text
-        assert answers["engine limits enforceable"] in ("yes", "no")
-        assert answers["engine mode accepted"] in ("yes", "no")
-        assert status in (0, 1)
-    finally:
-        rig.close()
+    assert list(inspect.signature(runtime.engine_preflight).parameters) == [
+        "engine_path",
+        "engine_name",
+    ]
 
 
 def test_each_listed_container_is_inspected_before_it_is_removed(tmp_path):
@@ -604,5 +625,48 @@ def test_a_container_that_cannot_be_inspected_is_not_removed(tmp_path):
         agent.release()
         assert remaining(rig) == [A]
         assert not [c for c in engine_calls(rig) if c[:1] == ["rm"]]
+    finally:
+        rig.close()
+
+
+def test_doctor_does_not_run_the_launchers_code_when_launcher_dir_is_not_trusted(tmp_path):
+    rig = make_rig(tmp_path, "docker")
+    try:
+        called = tmp_path / "preflight-called"
+        (rig.launcher / "nemar_launch" / "runtime.py").write_text(
+            "def engine_preflight(engine_path, engine_name):\n"
+            "    open({!r}, 'w').write('x')\n"
+            "    return (True, True)\n".format(str(called))
+        )
+        (rig.launcher / "nemar_launch" / "runtime.py").chmod(0o666)  # group and others can write it
+        status, answers, _ = diagnose(rig, "docker")
+        assert answers["launcher_dir trusted"] == "no"
+        assert answers["engine limits enforceable"] == "no"
+        assert answers["engine mode accepted"] == "no"
+        assert status == 1
+        assert not called.exists()  # the untrusted code was never imported
+    finally:
+        rig.close()
+
+
+def test_doctor_does_not_run_the_launchers_code_when_python_is_not_trusted(tmp_path):
+    rig = make_rig(tmp_path, "docker")
+    try:
+        called = tmp_path / "preflight-called"
+        write_preflight(rig.launcher, True, True)
+        (rig.launcher / "nemar_launch" / "runtime.py").write_text(
+            "def engine_preflight(engine_path, engine_name):\n"
+            "    open({!r}, 'w').write('x')\n"
+            "    return (True, True)\n".format(str(called))
+        )
+        rig.bin.chmod(0o777)
+        try:
+            status, answers, _ = diagnose(rig, "docker")
+        finally:
+            rig.bin.chmod(0o755)
+        assert answers["launcher python"] == "no"
+        assert answers["engine mode accepted"] == "no"
+        assert status == 1
+        assert not called.exists()
     finally:
         rig.close()

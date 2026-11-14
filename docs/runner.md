@@ -57,7 +57,8 @@ Nothing else that runs jobs, or that you do not trust, may run as that account.
 
 **What it will not run.**
 At start the runner also refuses a `launcher_dir` with any file or directory that is a link, is owned by someone other than the user or root, or that group or others can write; a `sif_root` that is not the user's own directory or that group or others can write; and a `python3` on the launch PATH (the first of `/usr/local/bin:/usr/bin:/bin`) that, or whose directory, group or others can write, that is owned by someone else, or that is older than Python 3.9.
-Engine helpers (`ps`, `rm`, `--version`, the preflight) run with `PATH` and `LANG` only, so the engine's default socket is the one used; a rootless engine, a non-default `DOCKER_HOST` or `XDG_RUNTIME_DIR` is unsupported (the launcher does not support a rootless daemon either).
+Every directory of the launch PATH up to the one holding `python3` (and the runtime) must be the user's or root's and not writable by group or others, the `python3` path is resolved once at start and pinned for every job, and the runtime binary gets the same check.
+Engine helpers (`ps`, `inspect`, `rm`, `--version`, the preflight) run with `PATH` and `LANG` only, so the engine's default socket is the one used; a rootless engine, a non-default `DOCKER_HOST` or `XDG_RUNTIME_DIR` is unsupported (the launcher does not support a rootless daemon either).
 
 ## What a job gets
 
@@ -66,8 +67,9 @@ Nothing is shared between jobs.
 The directory is deleted in a `finally`, whatever happened, and only then is the job completed, so the completion's `scratch_discarded` is what happened.
 The log line is `scratch_discarded` with the job id and the bytes the directory held.
 The deletion walks the tree by directory descriptor and never follows a link, so a directory swapped for a link while it runs cannot steer it out of the tree.
-When the runner starts it stops what a dead run left (see [When the runner dies](#when-the-runner-dies)) and then deletes every leftover under `<root>/jobs/` and `<root>/pids/` and logs each job directory (`leftover_deleted`).
-A claim of a job id that this runner is still running is skipped (`duplicate_claim_skipped`).
+The launcher's recorded pid, group and start time are believed only when the record file and the `pids` directory are the user's own and not writable by others (a link is never followed), the group is the pid's own, `getpgid` agrees, the start time matches and the boot id is the same.
+When the runner starts, first of all (before any trust check or call to NEMAR can refuse the start), it stops what a dead run left (see [When the runner dies](#when-the-runner-dies)) and then deletes every leftover under `<root>/jobs/` and `<root>/pids/` and logs each job directory (`leftover_deleted`).
+A claim of a job id that this runner still has a run of (a second lease of it) is not dropped, because each claim spends one of the job's three: the new run waits, bounded, for the old one to end (`duplicate_claim_waiting`) and then goes ahead, or is given up (`duplicate_claim_abandoned`).
 One runner per `root`: a second one is refused while the first holds `<root>/runner.lock`.
 
 ### The launcher's environment
@@ -135,7 +137,8 @@ The readiness probe of [`doctor`](#doctor) runs `apptainer exec --containall --c
   A heartbeat answer with `cancel` set: SIGTERM, 30 seconds, SIGKILL, then the job is completed.
 - **Lost lease.**
   A heartbeat answer of `lease_lost` or `job_not_claimed` (HTTP 409 and 404), or of `runner_unknown` (the runner was revoked): the same stop, then the directory is deleted and nothing is completed.
-- **After the process exits** the whole process group is sent SIGKILL, and whatever goes wrong while supervising (any exception) also ends in SIGKILL to the group.
+- **After the process exits** the launcher's process group is sent SIGKILL. The launcher always starts its container in a session of its own, outside that group, so the group signal does not reach a container; the container is ended by the launcher (it forwards SIGTERM and kills it after its own ten seconds) or, under Docker and Podman, by the runner's container removal.
+- **When supervising itself fails** (any exception in the runner), the runner sends SIGTERM first, waits as long as the launcher's own grace for its container (ten seconds plus a margin), and only then SIGKILL to the launcher's group: a SIGKILL alone would orphan the container.
 
 ### When the runner dies
 
@@ -146,9 +149,9 @@ What is guaranteed, and what is not:
 - Each launcher's pid, process-group id and start time (field 22 of `/proc/<pid>/stat`, the `ps` start time elsewhere) go into `<root>/pids/<job id>.json` before the heartbeat starts and are deleted when the job ends.
   When the runner starts it sends SIGTERM, and 30 seconds later SIGKILL, to every recorded group whose leader still has the recorded start time (a reused pid is left alone); then it removes this runner's labeled containers; only then it deletes the leftover job directories and pid files.
 - SIGHUP is handled exactly as SIGTERM.
-- After a normal end, a cancel, a lost lease or a deadline kill, the process group is sent SIGKILL.
+- After a normal end, a cancel, a lost lease or a deadline kill, the launcher's process group is sent SIGKILL (not the container, which is outside it: see above).
 
-What is not guaranteed: a job that leaves the launcher's process group (a process that calls `setsid`) is not reached by a group signal, and the launcher has no deadline timer of its own, so a launcher that is alive but whose runner is gone keeps running until the next runner start or the kernel's death signal (outline step L1 gives the launcher a timer).
+What is not guaranteed: a process that calls `setsid` leaves the launcher's group and is not reached by a group signal; a launcher that dies abnormally (killed with SIGKILL, or a crash) orphans its container until the runner's container removal (Docker and Podman) or forever (Apptainer: no runner removes it), because the launcher has no deadline timer of its own until outline step L1; and the runner does not make itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) to hunt the descendants a job leaves behind, which is deferred to L1.
 
 ### Containers (Docker and Podman)
 
@@ -159,6 +162,9 @@ Each removal is logged as `container_removed` with the job id (none, for the sta
 Without the registration id nothing is removed.
 Ids the engine prints are checked to be hexadecimal before they reach `rm`; a failing engine is logged (`container_cleanup_failed`) and never stops the job's completion.
 Under Apptainer nothing is done.
+Each container `ps` lists is inspected and removed only if its labels, read back, include every one asked for, so an engine that ORs repeated `--filter label=` cannot get another runner's container removed.
+Run ONE runner process per registration: two processes on one registration (with different roots) share the label and remove each other's containers at start.
+The launcher refuses Podman for now (`podman_unsupported`), so `doctor` answers no on both engine lines under it.
 
 ### Usage
 
@@ -186,6 +192,7 @@ Redirects are never followed, so a credential cannot be sent elsewhere.
 
 JSON lines, one object per line, to `<root>/runner.log` (mode 0600) and to standard error.
 A line holds job ids, counts, fixed words and exception class names: never the secret, a token, a lease, a presigned address, a launch value, or anything the job or the launcher wrote.
+Lines go through a bounded queue to a writer thread, so a standard error or file that blocks drops lines (counted) and never stalls the supervisor.
 Every string field also passes a redaction of those shapes, as a second line of defense.
 
 ## `doctor`
@@ -205,7 +212,7 @@ One line each, `<check>: yes` or `no`, with a fixed phrase after a no:
 | `egress to api_base` | the host answers HTTP |
 | `token exchange` | the secret buys a token |
 | `limits` (Apptainer only) | `apptainer exec --memory 64M --cpus 1 <an image in sif_root> true` works, which proves cgroup delegation |
-| `engine limits enforceable`, `engine mode accepted` (Docker and Podman only) | the two answers of the launcher's own engine preflight (`nemar_launch.runtime.engine_preflight(engine_path, engine_name)`, called in a child process run as the launcher is), so `doctor` and the launcher cannot disagree about an engine; rootless Docker without enforceable limits answers no |
+| `engine limits enforceable`, `engine mode accepted` (Docker and Podman only; asked only when `launcher`, `launcher_dir trusted` and `launcher python` are yes, because the preflight imports the launcher's code) | the two answers of the launcher's own engine preflight (`nemar_launch.runtime.engine_preflight(engine_path, engine_name)`, called in a child process run as the launcher is), so `doctor` and the launcher cannot disagree about an engine; rootless Docker without enforceable limits answers no |
 
 Exit 0 only if every line but the Apptainer `limits` line is yes: a host that cannot enforce limits still runs jobs, with the watchdog.
 `run` and `once` run the same probe the first time an image is available and set `NEMAR_ENFORCE_LIMITS` from it; Docker and Podman are never claimed, because the launcher owns their flags and checks them with the preflight.

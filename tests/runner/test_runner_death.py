@@ -205,19 +205,28 @@ def test_the_launcher_is_recorded_before_its_heartbeat_and_the_record_goes_with_
 
 def orphan(tmp_path, ignore_term=False):
     """A process group that no runner of this test owns: a child in a session of its own whose parent
-    has exited. Returns its pid."""
-    code = "import time{}; time.sleep(600)".format(
-        "; import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN)" if ignore_term else ""
-    )
+    has exited. Returns its pid, once the child has set up what it was asked to (a handler that
+    ignores SIGTERM is installed BEFORE it says it is ready: a runner that starts earlier would have
+    its SIGTERM kill it, and the SIGKILL branch would never run)."""
+    import uuid
+
+    ready = tmp_path / "ready-{}".format(uuid.uuid4().hex)
+    code = (
+        "import signal, time; "
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_term else "")
+        + "open({!r}, 'w').write('ready'); time.sleep(600)"
+    ).format(str(ready))
     spawner = (
         "import subprocess, sys; "
-        "p = subprocess.Popen([sys.executable, '-c', {!r}], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "p = subprocess.Popen([sys.executable, '-c', {!r}], start_new_session=True, "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
         "print(p.pid)"
     ).format(code)
     done = subprocess.run(
         [sys.executable, "-c", spawner], capture_output=True, text=True, check=True
     )
     pid = int(done.stdout.strip())
+    wait_for(ready.exists, 10, "the orphan to be ready")
     wait_for(lambda: pids.process_start(pid), 5, "the orphan to exist")
     return pid
 
@@ -395,3 +404,203 @@ def test_the_pdeathsig_hook_exists_exactly_where_it_can(tmp_path):
     hook = job.pdeathsig_hook()
     assert (hook is not None) == LINUX
     time.sleep(0)
+
+
+# ---- a record is believed only when it is what was written ------------------------------------------------------
+
+
+def write_record(rig, name, document):
+    directory = rig.root / "pids"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    path = directory / (name + ".json")
+    path.write_text(json.dumps(document))
+    path.chmod(0o600)
+    return path
+
+
+def test_a_record_whose_pgid_is_not_its_pid_never_kills_that_group(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        mine, other = orphan(tmp_path), orphan(tmp_path)  # two live groups of their own
+        document = {
+            "pid": mine,
+            "pgid": other,
+            "start": pids.process_start(mine),
+            "boot": pids.boot_id(),
+        }
+        write_record(rig, job_id(7), document)
+        try:
+            agent = rig.agent()
+            agent.release()
+            assert alive(mine)
+            assert alive(other)  # the group a doctored record named is not touched
+            assert rig.events("recorded_pid_not_ours")[0]["job"] == job_id(7)
+        finally:
+            for pid in (mine, other):
+                os.killpg(pid, signal.SIGKILL)
+    finally:
+        rig.close()
+
+
+def test_a_record_that_names_a_pgid_the_pid_does_not_lead_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        leader = orphan(tmp_path)
+        # the pid is a live process of this test, in the TEST's group, not the leader of the group named
+        document = {
+            "pid": os.getpid(),
+            "pgid": leader,
+            "start": pids.process_start(os.getpid()),
+            "boot": pids.boot_id(),
+        }
+        write_record(rig, job_id(7), document)
+        try:
+            agent = rig.agent()
+            agent.release()
+            assert alive(leader)
+            assert alive(os.getpid())
+        finally:
+            os.killpg(leader, signal.SIGKILL)
+    finally:
+        rig.close()
+
+
+def test_a_record_from_another_boot_is_not_believed(tmp_path):
+    if not pids.boot_id():
+        pytest.skip("this system has no boot id (a Linux file)")
+    rig = Rig(tmp_path)
+    try:
+        pid = orphan(tmp_path)
+        document = {
+            "pid": pid,
+            "pgid": pid,
+            "start": pids.process_start(pid),
+            "boot": "another-boot",
+        }
+        write_record(rig, job_id(7), document)
+        try:
+            agent = rig.agent()
+            agent.release()
+            assert alive(pid)
+        finally:
+            os.killpg(pid, signal.SIGKILL)
+    finally:
+        rig.close()
+
+
+def test_a_record_that_is_a_link_or_that_others_can_write_is_not_believed(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        pid = orphan(tmp_path)
+        good = {"pid": pid, "pgid": pid, "start": pids.process_start(pid), "boot": pids.boot_id()}
+        real = tmp_path / "real-record.json"
+        real.write_text(json.dumps(good))
+        real.chmod(0o600)
+        (rig.root / "pids").mkdir(mode=0o700)
+        (rig.root / "pids" / (job_id(6) + ".json")).symlink_to(real)  # never followed
+        loose = write_record(rig, job_id(7), good)
+        loose.chmod(0o666)  # anyone could have written it
+        try:
+            agent = rig.agent()
+            agent.release()
+            assert alive(pid)
+            assert {e["job"] for e in rig.events("pid_record_refused")} == {job_id(6), job_id(7)}
+        finally:
+            os.killpg(pid, signal.SIGKILL)
+    finally:
+        rig.close()
+
+
+def test_a_pid_directory_that_others_can_write_is_not_believed(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        pid = orphan(tmp_path)
+        write_record(
+            rig,
+            job_id(7),
+            {"pid": pid, "pgid": pid, "start": pids.process_start(pid), "boot": pids.boot_id()},
+        )
+        (rig.root / "pids").chmod(0o777)
+        try:
+            agent = rig.agent()
+            agent.release()
+            assert alive(pid)
+            assert rig.events("pid_directory_untrusted")
+        finally:
+            os.killpg(pid, signal.SIGKILL)
+    finally:
+        rig.close()
+
+
+def test_the_record_a_runner_writes_carries_the_boot_id_and_is_private(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        (rig.root / "pids").mkdir(mode=0o700)
+        assert pids.write(str(rig.root), job_id(1), os.getpid(), os.getpid())
+        path = rig.root / "pids" / (job_id(1) + ".json")
+        assert json.loads(path.read_text())["boot"] == pids.boot_id()
+        assert path.stat().st_mode & 0o777 == 0o600
+        link_target = tmp_path / "target"
+        link_target.write_text("keep")
+        (rig.root / "pids" / (".{}.tmp".format(job_id(2)))).symlink_to(link_target)
+        assert pids.write(
+            str(rig.root), job_id(2), os.getpid(), os.getpid()
+        )  # a planted temp is replaced
+        assert link_target.read_text() == "keep"  # and was never written through
+    finally:
+        rig.close()
+
+
+def test_the_dead_runs_launchers_are_stopped_even_when_the_start_then_refuses(tmp_path):
+    """A refusal below (here: NEMAR cannot be reached for the registration id) must not leave the dead
+    run's launcher running: the recorded groups are stopped right after the lock is taken."""
+    from nemar_runner.config import ConfigError
+    from server import Response
+
+    rig = Rig(tmp_path, runtime="docker", launcher=make_launcher(tmp_path / "launcher", "pass"))
+    try:
+        rig.sif_root.mkdir()
+        install_engine(rig, "docker")
+        pid = orphan(tmp_path)
+        assert pids.write(str(rig.root), job_id(7), pid, pid)
+        rig.routes.on_me = lambda: Response.json_body(503, {"error": "overloaded"})
+        with pytest.raises(ConfigError, match="registration id"):
+            rig.agent()
+        assert not alive(pid)
+    finally:
+        rig.close()
+
+
+def test_the_dead_runs_launchers_are_stopped_even_when_a_trust_check_refuses(tmp_path):
+    from nemar_runner.config import ConfigError
+
+    rig = Rig(tmp_path)
+    try:
+        rig.sif_root.mkdir()
+        pid = orphan(tmp_path)
+        assert pids.write(str(rig.root), job_id(7), pid, pid)
+        rig.sif_root.chmod(0o777)
+        with pytest.raises(ConfigError, match="sif_root"):
+            rig.agent()
+        assert not alive(pid)
+    finally:
+        rig.sif_root.chmod(0o755)
+        rig.close()
+
+
+@pytest.mark.skipif(not LINUX, reason="PR_SET_PDEATHSIG is a Linux prctl")
+def test_the_death_hook_ends_a_child_whose_parent_is_not_the_one_that_forked():
+    from nemar_runner import job
+
+    for forking, expected in ((os.getpid(), 0), (os.getpid() + 1, 1)):
+        hook = job.pdeathsig_hook(parent=forking)
+        assert hook is not None
+        child = os.fork()
+        if child == 0:  # in the child: the parent is the test process
+            try:
+                hook()
+            except BaseException:  # noqa: BLE001 - the child reports any failure by its status
+                os._exit(99)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.WEXITSTATUS(status) == expected

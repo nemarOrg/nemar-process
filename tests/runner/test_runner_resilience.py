@@ -227,6 +227,7 @@ def test_a_second_lease_that_cannot_wait_for_the_first_is_abandoned_not_run(tmp_
         thread = threading.Thread(target=agent.run_forever)
         thread.start()
         wait_for(lambda: rig.events("duplicate_claim_abandoned"), 15, "the wait to give up")
+        time.sleep(1.0)  # a run that was wrongly allowed to go ahead would have started by now
         assert len(rig.events("job_started")) == 1
         agent.stop.set()
         thread.join(30)
@@ -786,3 +787,63 @@ def test_a_full_queue_drops_lines_and_counts_them_instead_of_blocking(tmp_path):
         log.info("burst", n=index)
     assert time.monotonic() - started < 5  # the caller never waited for the stream
     assert log.dropped >= 400
+
+
+# ---- the launch PATH is trusted as a whole, and python3 is pinned ----------------------------------------------
+
+
+def two_directory_rig(tmp_path):
+    rig = build(tmp_path)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (second / "python3").symlink_to(sys.executable)
+    rig.tuning = retune(rig.tuning, launch_path=str(first) + os.pathsep + str(second))
+    return rig, first, second
+
+
+def test_a_writable_directory_ahead_of_python_on_the_launch_path_refuses_the_start(tmp_path):
+    rig, first, _second = two_directory_rig(tmp_path)
+    try:
+        first.chmod(0o777)  # anyone could put a python3 here that shadows the real one
+        with pytest.raises(
+            ConfigError, match="a launch PATH directory can be written by group or others"
+        ):
+            rig.agent()
+    finally:
+        first.chmod(0o755)
+        rig.close()
+
+
+def test_python_is_pinned_at_start_and_a_later_shadow_is_never_run(tmp_path):
+    rig, first, second = two_directory_rig(tmp_path)
+    try:
+        agent = rig.agent()
+        assert agent.python == str(second / "python3")
+        marker = tmp_path / "shadow-ran"
+        shadow = first / "python3"  # appears AFTER the start, earlier on the PATH
+        shadow.write_text("#!/bin/sh\ntouch {}\nexit 1\n".format(marker))
+        shadow.chmod(0o755)
+        rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
+        agent.run_once()
+        agent.release()
+        assert not marker.exists()
+        assert (
+            rig.routes.bodies("complete")[0]["exit_number"] == 0
+        )  # the pinned python ran the launcher
+    finally:
+        rig.close()
+
+
+def test_a_runtime_in_a_writable_directory_is_not_used(tmp_path):
+    rig = build(tmp_path)
+    try:
+        rig.install("apptainer", "#!/bin/sh\nexit 0\n")
+        from nemar_runner import images
+
+        assert images.runtime_binary(rig.config, rig.tuning) == str(rig.bin / "apptainer")
+        rig.bin.chmod(0o777)
+        assert images.runtime_binary(rig.config, rig.tuning) is None
+    finally:
+        rig.bin.chmod(0o755)
+        rig.close()
