@@ -1311,10 +1311,12 @@ def test_stopping_the_runner_while_cosign_runs_ends_cosign_and_the_job(docker_wo
     agent = docker_world.rig.agent(docker_world.tuning())
     thread = threading.Thread(target=agent.run_forever)
     thread.start()
-    wait_for(lambda: verifications(docker_world.bin), 10, "cosign to start")
-    agent.stop.set()
-    thread.join(15)
-    agent.release()
+    try:
+        wait_for(lambda: verifications(docker_world.bin), 10, "cosign to start")
+    finally:
+        agent.stop.set()  # whatever happened, the runner stops: a thread left running hangs the file
+        thread.join(15)
+        agent.release()
     [done] = docker_world.rig.routes.bodies("complete")
     assert (done["exit_number"], done["launcher_detail"]) == (13, "terminated")
     assert not docker_world.marker.exists()
