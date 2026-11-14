@@ -24,6 +24,7 @@ dev = [
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
     "pyyaml>=6.0",
     "ruff>=0.17",
     "ty>=0.0.89",
@@ -85,10 +86,10 @@ explicit = true
 minversion = "8.0"
 testpaths = ["tests"]
 # `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `observer` holds the
-# stdlib-only program `observe`; `recipes` holds the package `nemar_process`; `tests/standin` holds
+# stdlib-only program `observe`; `runner` holds the stdlib-only package `nemar_runner`; `recipes` holds the package `nemar_process`; `tests/standin` holds
 # the stdlib HTTP stand-ins. None is installed, so all go on the path here, which also makes
 # `uv run --no-project --python 3.9 --with pytest pytest tests/launcher tests/observer` work.
-pythonpath = ["launcher", "observer", "recipes", "scripts", "tests/standin", "tests"]
+pythonpath = ["launcher", "observer", "runner", "recipes", "scripts", "tests/standin", "tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
@@ -98,7 +99,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["launcher", "recipes", "scripts"]
+source = ["launcher", "runner", "recipes", "scripts"]
 omit = ["launcher/schema/*"]
 # The launcher also runs as a child process of the tests (signals, the shell wrapper); count those.
 patch = ["subprocess"]
@@ -110,10 +111,10 @@ skip_covered = true
 [tool.ty.environment]
 python-version = "3.12"
 # The launcher package, the observer, the zip builders and the stand-ins are imported by name, not installed.
-extra-paths = ["launcher", "observer", "recipes", "scripts", "tests/standin", "tests"]
+extra-paths = ["launcher", "observer", "runner", "recipes", "scripts", "tests/standin", "tests"]
 
 [tool.ty.src]
-include = ["images", "launcher", "observer", "recipes", "scripts", "tests"]
+include = ["images", "launcher", "observer", "runner", "recipes", "scripts", "tests"]
 
 # The runtime image's packages (eegprep, NumPy, torch, threadpoolctl) are installed in the runtime
 # environment, not in the development one, so the files that run only there import them unresolved

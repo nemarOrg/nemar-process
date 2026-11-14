@@ -7,8 +7,10 @@ extend-exclude = ["tests/fixtures", ".nemar-cli", ".nemar-cli-dev", ".nemar-cli-
 [per-file-target-version]
 "launcher/**" = "py39"
 "observer/**" = "py39"
+"runner/**" = "py39"
 "tests/launcher/**" = "py39"
 "tests/observer/**" = "py39"
+"tests/runner/**" = "py39"
 "tests/observer_support.py" = "py39"
 "tests/standin/**" = "py39"
 
