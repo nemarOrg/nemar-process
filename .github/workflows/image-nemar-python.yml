@@ -566,5 +566,21 @@ jobs:
             cuda_digest="$(jq -r .image.digest "$cuda")"
             gh release create "$TAG" --title "nemar-python ${VERSION} (cpu, cuda)" --notes "Runtime images ghcr.io/nemarorg/nemar-python@${cpu_digest} (cpu) and ghcr.io/nemarorg/nemar-python@${cuda_digest} (cuda). See docs/images.md for how to verify them."
           fi
-          # no overwrite flag: a digest file is the record of a release, and a second upload must fail
-          gh release upload "$TAG" "$cpu" "$cuda"
+          # No overwrite flag: a digest file is the record of a release and is never replaced. A re-run
+          # after a partial upload skips a file that is already attached and byte for byte the same
+          # (compared by SHA-256), uploads the one that is missing, and fails on a file that is
+          # attached and differs.
+          for file in "$cpu" "$cuda"; do
+            attached="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            if grep -Fxq -- "$file" <<< "$attached"; then
+              remote="$(gh release download "$TAG" --pattern "$file" --output - | sha256sum | cut -d' ' -f1)"
+              mine="$(sha256sum "$file" | cut -d' ' -f1)"
+              if [ "$remote" != "$mine" ]; then
+                echo "::error::${file} is already attached to ${TAG} and differs from this run's file: it is never replaced"
+                exit 1
+              fi
+              echo "${file} is already attached and identical: nothing to upload"
+              continue
+            fi
+            gh release upload "$TAG" "$file"
+          done

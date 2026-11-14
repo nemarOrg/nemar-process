@@ -536,7 +536,10 @@ def test_the_release_attaches_both_records_and_replaces_neither():
     (download,) = [s for s in release["steps"] if "actions/download-artifact" in s.get("uses", "")]
     assert download["with"] == {"pattern": "nemar-python-digests-*", "merge-multiple": True}
     commands = step_commands(release)
-    assert 'gh release upload "$TAG" "$cpu" "$cuda"' in commands
+    # a file at a time: an existing identical asset is skipped, a differing one fails, none replaced
+    assert 'for file in "$cpu" "$cuda"; do' in commands
+    assert 'gh release upload "$TAG" "$file"' in commands
+    assert '[ "$remote" != "$mine" ]' in commands
     assert "nemar-python-${VERSION}-cpu-digests.json" in commands
     assert "nemar-python-${VERSION}-cuda-digests.json" in commands
     assert "--clobber" not in commands

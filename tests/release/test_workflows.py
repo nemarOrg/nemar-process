@@ -323,6 +323,14 @@ def test_the_publish_guard_if_and_version_step_are_the_bases_text_whatever_the_f
     assert set(version) == {"name", "id", "env", "run"}
 
 
+def test_the_image_workflow_cannot_be_called_by_another_workflow():
+    # a `workflow_call` trigger would let a caller run the publish and sign jobs under its own ref and
+    # inputs; the image workflow starts only on a pull request, a version tag and a manual dispatch
+    on = triggers(load(IMAGE_WORKFLOW.name))
+    assert "workflow_call" not in on
+    assert set(on) == {"pull_request", "push", "workflow_dispatch"}
+
+
 def test_the_flavor_matrix_never_widens_who_can_publish_or_sign():
     workflow = load(IMAGE_WORKFLOW.name)
     # the trigger, the default permission, the three jobs' privileges and the release condition
