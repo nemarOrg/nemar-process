@@ -20,7 +20,7 @@ The ICLabel weights check belongs to a later phase.
 | torch, `cpu` flavor | as resolved, from the CPU index only | extra `cpu`, `[tool.uv.sources]`, `uv.lock` |
 | torch, `cuda` flavor | `2.12.1`, built for CUDA 12.9, from the `cu129` index only | extra `cuda`, `[tool.uv.sources]`, `uv.lock` |
 | `amica15`, pAMICA's native AMICA binary | pAMICA release `v0.4.0` (the release pamica 0.4.0 resolves), `amica15-linux-x64`, checked by SHA-256 | both Dockerfiles, `scripts/check_smoke_pins.py` (see "The native AMICA binary") |
-| `libgomp1` (the OpenMP runtime the binary links) | `14.2.0-19`, from the base's dated apt snapshot | both Dockerfiles |
+| `libgomp1` (the OpenMP runtime the binary links) | `14.2.0-19`, the version the live trixie archive served when it was pinned | both Dockerfiles |
 | the signalJourney validator | commit `169c3261d044` | the same, with the schema vendored (see [upstream.md](upstream.md)) |
 
 There is no MATLAB, no Octave and no `eeglab` extra of eegprep in the image or the lock: that extra installs `oct2py`, an Octave bridge.
@@ -64,7 +64,8 @@ The launcher does not hash the file, so only its name ties it to the digest; the
 GHCR names are lowercase (`nemarorg`).
 The tags `<version>-cpu` and `<version>-cuda` exist so that people can find an image; neither is ever a reference.
 Only the CPU flavor publishes a SIF.
-For the CUDA flavor a GPU host builds one from the verified OCI digest (`apptainer build <hex>.sif docker://ghcr.io/nemarorg/nemar-python@sha256:<hex>`) and names it `<hex>.sif`, the same rule, and the record's `launch_image` already carries that name.
+The CUDA flavor publishes none, and none may be built by hand: the runner runs a SIF only if it is the layer of the signed SIF artifact, so a SIF built on a host is refused.
+The CUDA flavor therefore runs under Docker or Podman, where the runner verifies its digest with cosign, and the runner refuses it under Apptainer (`image_unverified`) until CI publishes and signs a CUDA SIF artifact, which a later change must add.
 
 ### Installing the SIF (the CPU flavor)
 
@@ -179,7 +180,8 @@ Never use an unsigned tag: take only a digest that `cosign verify` accepted.
 - If only `release` failed, re-run it; it fails rather than replace an existing asset.
 
 There is one digest file per flavor, `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json`, and each holds the image digest and reference, the SHA-256 of `uv.lock`, the Python, eegprep, pamica and torch versions, the native binary's SHA-256 (`amica15`) and the SHA-256 reading of the CPU fit (`cpu_fit_sha256`, see "The smoke test"), the source commit, the run's address, and `launch_image`, the `image` object of a launch specification for this release.
-The CPU file also holds the SIF's artifact digest, reference, file name and file hash; its `sif` is `null` in the CUDA file, which instead holds `cuda`, torch's CUDA build and the GPU architectures it lists (`arch_list`).
+The CPU file also holds the SIF's artifact digest, reference, file name and file hash.
+In the CUDA file `sif` and `launch_image` are `null` (no SIF exists for it, so no file is named, and `sif_note` says so); it instead holds `cuda`, torch's CUDA build and the GPU architectures it lists (`arch_list`).
 
 ## The two flavors
 
@@ -192,7 +194,7 @@ The runner fixes an image by the claim's digest before it chooses the device, an
 So the CUDA flavor must run the CPU engine correctly with no GPU visible, and that path is the default, not an exception.
 Its smoke test therefore runs the way such a job runs, `docker run --env NVIDIA_VISIBLE_DEVICES=void <image> python /opt/smoke.py --no-gpu`, on a hosted runner that has no GPU: `torch.cuda.is_available()` must be false, and a 5-iteration pAMICA fit by the PyTorch engine on the CPU in float64 must run.
 The same smoke test prints the GPU architectures this torch was compiled for on a line `CUDA_ARCH_LIST ...` and in the document, and the CUDA flavor's digest file records them.
-`torch.cuda.get_arch_list()` is what answers on a GPU host, but it returns an empty list whenever no GPU is visible (it asks `is_available()` first), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
+`torch.cuda.get_arch_list()` is what answers on a GPU host, but in torch 2.12 it returns an empty list whenever no GPU is visible (it asks `is_available()` first; the locked 2.15.0 asks `_is_compiled()` instead), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
 Whether a workstation's driver runs CUDA 12.9 wheels is not shown by any of this; the operator's preflight on that machine prints the driver and the GPU.
 
 Both flavors print `CPUFIT sha256=<hex>`: the SHA-256 of that CPU fit's 4 by 4 unmixing matrix, written with `format(x, ".17g")` in row-major order, one value per line.
@@ -204,7 +206,8 @@ A CPU reference for the CUDA flavor is therefore taken from the CUDA image itsel
 Both images carry pAMICA's Linux binary `amica15` at `/opt/amica/amica15` (mode 0755, owned by root), with the hex digest it was checked against in `/opt/amica/amica15.sha256`.
 The builder stage downloads `https://github.com/sccn/pAMICA/releases/download/v0.4.0/amica15-linux-x64`, which is the release pamica 0.4.0 resolves, and refuses to continue unless its SHA-256 is the pinned one; only then is it installed, and the final stage copies the verified file.
 The digest is written in three places (the two Dockerfiles and `scripts/check_smoke_pins.py`), and a test keeps them equal and keeps the release in the URL equal to the pamica pin.
-The binary needs GLIBC_2.38 (the Debian trixie base has glibc 2.41), the libraries `libm.so.6` and `libmvec.so.1` (both part of glibc) and `libgomp.so.1`, the OpenMP runtime, which the slim base does not have; the final stage therefore installs `libgomp1` at the version the base's dated apt snapshot serves, `14.2.0-19`, with `--no-install-recommends` and the package lists removed.
+The binary needs GLIBC_2.38 (the Debian trixie base has glibc 2.41), the libraries `libm.so.6` and `libmvec.so.1` (both part of glibc) and `libgomp.so.1`, the OpenMP runtime, which the slim base does not have; the final stage therefore installs `libgomp1` at `14.2.0-19`, with `--no-install-recommends` and the package lists removed.
+That is the version the live trixie archive served when it was pinned: the base's apt sources point at the live archive (a snapshot date in its `debian.sources` is only a comment), so the pin is not reproducible forever, the step fails closed when the archive has moved on, and the pin is bumped together with the base digest.
 The smoke test runs `ldd` on the binary and fails on any library listed as not found, so a missing library is named by the first smoke run rather than discovered by a job.
 It is a Linux x86-64 binary, so it runs only in these images and in CI, never on a developer's machine.
 
