@@ -837,6 +837,12 @@ def test_the_runner_page_shows_the_identity_the_priority_lines_and_the_tag_famil
         assert line in page, line
     assert "nemar-runner-vX.Y.Z" in page
     assert "self_update" in page
+    assert "--certificate-github-workflow-repository nemarOrg/nemar-process" in page
+    assert "--certificate-github-workflow-trigger push" in page
+    assert "update_switch_off" in page
+    assert "bypasses the signed launcher" in page
+    assert '"self_update": false' in page  # a rollback needs it
+    assert "never rewrites the unit files" in page
     release = (ROOT / "docs" / "release.md").read_text(encoding="utf-8")
     assert "nemar-runner-v" in release
     assert "runner-release.yml" in release

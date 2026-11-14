@@ -263,7 +263,7 @@ The tag in the certificate is any release tag, so the installer also requires th
 cd runner && python3 -m nemar_runner install --version X.Y.Z --prefix <prefix> --write-units
 ```
 
-`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign from the launch PATH, or from `--cosign-path` or the configuration's `cosign_path`; it sees only `PATH`, `LANG` and a `HOME` inside the prefix, so it uses none of the account's proxy settings or credentials), and refuses on any failure: nothing is unpacked, written or switched.
+`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign is the file `--cosign-path` names when it is given and otherwise `cosign` on the launch PATH; `install` does not read the configuration, so the configuration's `cosign_path` is for `self-update` alone; cosign sees only `PATH`, `LANG` and a `HOME` inside the prefix, so it uses none of the account's proxy settings or credentials), and refuses on any failure: nothing is unpacked, written or switched.
 Only then it unpacks the bytes it verified into `<prefix>/versions/X.Y.Z/` and writes `<prefix>/current` (through a temporary name and a rename).
 Unpacking accepts plain files and directories under `runner/`, `launcher/` and `deploy/` and nothing else: a link, a device, an absolute name, a `..` component, a duplicate or an oversized file refuses the whole bundle.
 Files are mode 0600 (0700 where the archive marks them executable) and directories 0700, so the tree passes the checks the runner makes of `launcher_dir`.
@@ -279,14 +279,21 @@ The checkout `install` is run from is trusted to run the installer and nothing m
 
 The prefix must be a directory of the account's own that group and others cannot write, and so must the directories under it.
 `install` removes versions older than the newest two, but never the one `current` names, the one it has just installed, or one a running runner holds the lock of, so a version that is running is never deleted.
-Installing a version that is already there downloads nothing and only switches `current` (a rollback is `install --version <older>`).
-`--write-units` also writes the three unit files below into `~/.config/systemd/user/` (or `--units-dir`), with the prefix and the configuration path filled in; it enables and starts nothing.
+Installing a version that is already there downloads nothing and only switches `current`.
+A rollback is `install --version <older>` **and** `"self_update": false` in the configuration: the next run of the timer would otherwise install the newer release again.
+Turn `self_update` back on once a fixed release exists.
+`--write-units` also writes the three unit files below into `~/.config/systemd/user/` (or `--units-dir`), with the prefix and the configuration path (made absolute first) filled in; it enables and starts nothing.
+`self-update` never rewrites the unit files: a release that changes them reaches a workstation only when its account's owner runs `install --write-units` again.
 
 The daily `self-update` (the timer below) lists the repository's releases, takes the highest `nemar-runner-v*` that is newer than `current`, is not a draft or a prerelease and has both files, and installs it as `install` does.
 It never restarts anything.
 The running runner switches itself: between claims, when `<prefix>/current` names a version other than its own and it holds no job, it logs `update_pending from=<a> to=<b>` and exits 0, and systemd starts the version `current` names (`boot.py` reads it).
 While an update is waiting for a job to end the runner claims nothing new, so a busy runner does reach an idle moment, and the job it holds is never interrupted.
+The switch applies only to a runner that runs the code `install` put under the configured prefix (its package is `<install_prefix>/versions/<its version>/runner/nemar_runner`); a runner started from a checkout, or from a prefix other than the configuration's `install_prefix`, logs `update_switch_off` once and keeps claiming, because it could never become the version `current` names and would otherwise exit at every start.
 `once` and `doctor` are not affected.
+
+`self-update` takes the highest release of the tag family, so a release that carries a higher version and both files stops every workstation from updating until it is deleted: a signature is still required, so it installs nothing, but each daily run then refuses (`verify_failed`) and the update is blocked.
+The remedy is to delete that release from the repository's releases; who can create the tag, and so such a release, is the owner's tag rule on `nemar-runner-v*` ([release.md](release.md#what-the-repository-owner-sets)).
 
 ### The units
 
@@ -312,6 +319,9 @@ A container started by the Docker daemon is not a child of the runner and does n
 
 ### A configuration for the service
 
+Leave `launcher_dir` out of a service's configuration.
+Without it the launcher is the one in the same signed bundle (`<prefix>/versions/X.Y.Z/launcher`); a `launcher_dir` that is set names a directory the runner trusts as it is, so it bypasses the signed launcher.
+
 ```json
 {
   "api_base": "https://api.nemar.org",
@@ -331,13 +341,13 @@ A container started by the Docker daemon is not a child of the runner and does n
 |---|---|
 | `install_prefix` | optional: where `install` put the runner; the running runner watches `<install_prefix>/current` (absent: it never switches versions). It must be the user's own directory that group and others cannot write, or the runner will not start |
 | `self_update` | optional boolean, default `true`: `false` turns the daily update off, so `self-update` does nothing and asks GitHub nothing; this is the opt-out for a machine of another institution, which then updates by `install --version X.Y.Z` when its owner decides |
-| `cosign_path` | optional absolute path of the cosign binary the installer uses when there is none on the launch PATH; it must not be a link, its directory and the file must be the user's or root's and not writable by group or others |
+| `cosign_path` | optional absolute path of the cosign binary that `self-update` verifies with; when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and without it `self-update` looks on the launch PATH; `install` ignores this key and takes `--cosign-path` instead. It must not be a link, and its directory and the file must be the user's or root's and not writable by group or others |
 
 ### What the account's owner does
 
 Neither step needs more than a few minutes, and neither is done from this repository.
 
-- Install cosign for the account (a user-local, pinned, checksum-verified binary), and name it in `cosign_path` if it is not on the launch PATH.
+- Install cosign for the account (a user-local, pinned, checksum-verified binary), and name it in `cosign_path` for `self-update` and with `--cosign-path` for `install` if it is not on the launch PATH.
 - Enable lingering, so a user service runs with nobody logged in: `loginctl enable-linger <account>` (needs root, once).
 - As the account: `systemctl --user daemon-reload && systemctl --user enable --now nemar-runner.service nemar-runner-update.timer`; the log is `journalctl --user -u nemar-runner.service`.
 
