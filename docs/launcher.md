@@ -7,7 +7,7 @@ The node holds no storage credential.
 
 Nothing the container writes is trusted: NEMAR accounts for a job from what the launcher records, outside the container.
 
-Abbreviations used here: JavaScript Object Notation (JSON), American Standard Code for Information Interchange (ASCII), Secure Hash Algorithm 256 (SHA-256), Hypertext Transfer Protocol (HTTP) and its secure form (HTTPS), application programming interface (API), Uniform Resource Locator (URL), process identifier (PID), Singularity Image Format (SIF), graphics processing unit (GPU), comma-separated values (CSV), continuous integration (CI), out of memory (OOM), Unicode Transformation Format (UTF-8, UTF-16), Request for Comments (RFC), null character (NUL).
+Abbreviations used here: JavaScript Object Notation (JSON), American Standard Code for Information Interchange (ASCII), Secure Hash Algorithm 256 (SHA-256), Hypertext Transfer Protocol (HTTP) and its secure form (HTTPS), application programming interface (API), Uniform Resource Locator (URL), process identifier (PID), Singularity Image Format (SIF), graphics processing unit (GPU), comma-separated values (CSV), continuous integration (CI), out of memory (OOM), Unicode Transformation Format (UTF-8, UTF-16), Request for Comments (RFC), null character (NUL), parent-death signal (PDEATHSIG, the Linux `prctl` option `PR_SET_PDEATHSIG`).
 Cloudflare R2 object storage is called R2.
 
 ## Contents of the zip
@@ -39,6 +39,7 @@ The script:
 The script therefore starts the same module with `runpy.run_module`, after putting `lib/` on the path.
 
 A SIGTERM (the termination signal) sent to the script, which Slurm does at the time limit or on cancel, is passed on to the launcher, which passes it to the container's whole process group; the script still writes `tapisjob.exitcode` afterwards.
+The launcher does not wait for that signal at the time limit: it stops the container itself when the job's end time comes (see [The container](#the-container)).
 If no usable Python is found, or `_tapisExecSystemOutputDir` is unset, the script exits 13 with a message on stderr.
 
 ## Outside Tapis and SLURM
@@ -54,7 +55,7 @@ The launcher reads a runner's variables only where the Tapis or SLURM one is uns
 | What | Read from, in this order |
 |---|---|
 | the output directory | `_tapisExecSystemOutputDir`, else `NEMAR_OUTPUT_DIR`; neither is exit 13 with a message on stderr, before anything is created |
-| the deadline | `SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`: seconds since the epoch, ASCII digits 0 to 9 only (a superscript or any other script's digit is not one); a value that is not that is the same as none, and the next variable is tried |
+| the deadline | `SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`: seconds since the epoch, ASCII digits 0 to 9 only (a superscript or any other script's digit is not one); a value that is not that is the same as none, and the next variable is tried; when it comes while the container runs, the launcher stops the container itself |
 | scratch | `SLURM_TMPDIR`, else `NEMAR_SCRATCH_DIR`, else `TMPDIR`, else the system's temporary directory |
 | the job id in provenance | `SLURM_JOB_ID`; unset, `slurm_job_id` is null, and nothing about the runner is written into provenance |
 
@@ -351,6 +352,18 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
 - `/code` and `/data/<id>` are read-only.
 - The container is started in a session of its own, with `oom_score_adj` raised to 1000, so the kernel's OOM killer ends the entry rather than the launcher that has to record it.
   After a SIGTERM the container gets 10 seconds to stop, and the whole process group is then killed (a process that is PID 1 of its namespace ignores a SIGTERM it has no handler for); whatever the entry left running in the group is killed when the container exits.
+- **The launcher enforces the end time itself.**
+  While the container runs, the launcher compares the clock with the end time (`SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`) every 0.2 seconds.
+  When the time has come and no SIGTERM has been received, it logs `deadline reached; stopping the container`, records that moment as the moment of a SIGTERM, sets the stop event and sends SIGTERM to the container's session; the 10 seconds above then end in a SIGKILL of the whole group.
+  The record is the one a SIGTERM at the time limit always made, `time_limit` (exit 15), so a job ends the same way whether the scheduler or the runner signals it first, last or never; a SIGTERM that arrived earlier keeps its own moment.
+  A job that finishes before its end time is not touched, and neither is one that finishes in the instant the time comes.
+  The check is for the container only: a launcher that is past the container (finalizing or uploading) is bounded by the scheduler or the runner, as before.
+- **The container follows the launcher's death (Linux).**
+  The container child is started with `prctl(PR_SET_PDEATHSIG)` (through `ctypes`, as the runner starts the launcher), so the kernel signals it when the launcher dies, SIGKILL of the launcher or a crash included.
+  The signal is SIGKILL under Apptainer (the death of the starter ends the container's namespace) and SIGTERM under Docker and Podman (the engine's client passes it to the container).
+  After the call the child checks that its parent is still the launcher that forked it, and exits with status 1 at once if it is not (the launcher died before the call, which the kernel's signal cannot cover).
+  The signal follows the thread that created the child, so the container is started from the main thread, the thread that lives as long as the launcher, and a start from any other thread is refused as a launcher bug (`internal_error`).
+  Where the call does not exist (another system, no `ctypes`) or the kernel refuses it, the log says `pdeathsig_unavailable` once and the container starts without it: the guarantee is then the one of [When the runner dies](runner.md#when-the-runner-dies).
 - Exit status 255 is `entry_failed` like any other non-zero status, and is charged: the runtime's own fatal exit and an entry that exits 255 (or `-1`) cannot be told apart once user code could have run, and refunding it would let any entry refund itself. `runtime_unusable` is only for a runtime binary that cannot be started and for a preflight that failed, both before any user code.
 
 The entry's standard output and error go to Tapis's `tapisjob.out`; the launcher's own log goes to `launcher/launcher.log` and to standard error.
@@ -430,7 +443,7 @@ Once the specification parsed, however a phase ends, **including an unexpected e
 - the exit number is 0, or 10 to 16 for the first failure.
 - an unexpected error is `runtime_error` (or `result_upload_failed` during the upload) with detail `internal_error`, and only the exception's class name is logged.
 
-Not guaranteed: a specification that does not parse has no API address, so nothing is uploaded (the three files are still written); a refused output directory gets no file written into it; a launcher killed with SIGKILL (the kill signal, which no program can catch), or a node that dies, leaves what it had written and nothing else.
+Not guaranteed: a specification that does not parse has no API address, so nothing is uploaded (the three files are still written); a refused output directory gets no file written into it; a launcher killed with SIGKILL (the kill signal, which no program can catch), or a node that dies, leaves what it had written and nothing else (its container, on Linux, is ended by the kernel: see [The container](#the-container)).
 A SIGTERM that arrives after the container exited is still recorded: the record never says success for a job Slurm terminated, and once the stop event is set no further output upload starts.
 
 ## Upload
@@ -461,7 +474,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 | 12 | `entry_not_found` | the entry is not a file in the bundle |
 | 13 | `runtime_error` | the entry exited non-zero; an unsupported runtime or invalid specification; the output directory, bind sources, PID namespace, runtime or image refused; an output that cannot be read; a SIGTERM before the time limit |
 | 14 | `out_of_memory` | exit status 137 (SIGKILL) |
-| 15 | `time_limit` | a SIGTERM at or after `SLURM_JOB_END_TIME` minus 120 seconds |
+| 15 | `time_limit` | a SIGTERM at or after the end time (`SLURM_JOB_END_TIME`, else `NEMAR_JOB_END_TIME`) minus 120 seconds, or the end time itself reached while the container runs |
 | 16 | `result_upload_failed` | the upload failed or the results were over a limit, and nothing failed earlier |
 
 **Every detail the launcher can emit is a declared word**, listed per code in `codes.LAUNCHER_DETAILS` and shared with nemar-cli (`LAUNCHER_DETAILS` in `shared/compute-state.ts`), so NEMAR decides who pays from a table:

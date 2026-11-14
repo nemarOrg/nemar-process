@@ -127,6 +127,7 @@ The readiness probe of [`doctor`](#doctor) runs `apptainer exec --containall --c
   A heartbeat that fails is retried and the job goes on, and the thread survives any error.
 - **Deadline.**
   SIGTERM to the process group at `NEMAR_JOB_END_TIME` plus 60 seconds, SIGKILL 30 seconds after any SIGTERM.
+  The launcher stops its own container at `NEMAR_JOB_END_TIME` itself (SIGTERM, and SIGKILL 10 seconds later), so the runner's signal 60 seconds after finds the container gone and is the backstop for a launcher that is stuck outside its container.
   The wall clock is read once, when the job starts, and the deadline is kept on the monotonic clock: a step of the system clock cannot move it.
   A signal is sent before the line that says so is logged, and the log never raises (a full disk or a closed pipe is counted in a dropped-lines counter), so a failing log cannot leave a job running.
 - **Memory.**
@@ -151,7 +152,11 @@ What is guaranteed, and what is not:
 - SIGHUP is handled exactly as SIGTERM.
 - After a normal end, a cancel, a lost lease or a deadline kill, the launcher's process group is sent SIGKILL (not the container, which is outside it: see above).
 
-What is not guaranteed: a process that calls `setsid` leaves the launcher's group and is not reached by a group signal; a launcher that dies abnormally (killed with SIGKILL, or a crash) orphans its container until the runner's container removal (Docker and Podman) or forever (Apptainer: no runner removes it), because the launcher has no deadline timer of its own until outline step L1; and the runner does not make itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) to hunt the descendants a job leaves behind, which is deferred to L1.
+What the launcher adds, for its own death (a SIGKILL, a crash, the runner's SIGKILL of its group): on Linux the launcher starts its container with `prctl(PR_SET_PDEATHSIG)`, SIGKILL under Apptainer (the death of the starter ends the container's namespace) and SIGTERM under Docker and Podman (the engine's client passes it to the container), so a dead launcher no longer orphans a running container under Apptainer, where no runner removes one.
+It also stops its container itself at the job's end time, without any signal, and records `time_limit` ([the launcher](launcher.md#the-container)).
+Where the launcher cannot ask for the signal it logs `pdeathsig_unavailable` once and has no such guarantee.
+
+What is not guaranteed: under Docker and Podman a client killed with SIGKILL has no chance to pass anything on, so its container stays until the runner removes it at the end of the job or at the runner's next start; a process that calls `setsid` leaves the launcher's group and is not reached by a group signal, though one that does so inside the container's namespace is still bounded by the container; and the runner does not make itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) to hunt the descendants a job leaves behind.
 
 ### Containers (Docker and Podman)
 
