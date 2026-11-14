@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nemar-process"
-version = "0.1.0"
+version = "0.1.1-dev1"
 description = "NEMAR's processing repository: the launcher, runtime images, recipes and Tapis definitions."
 readme = "README.md"
 license = { file = "LICENSE" }
