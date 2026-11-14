@@ -29,6 +29,9 @@ EXIT_REFUSED = 3  # the Worker will not serve this runner: revoked, outdated, wr
 
 
 class Agent:
+    # The class of a job's thread. It is the real one; a test swaps it for a thread that cannot start.
+    thread_class: type[threading.Thread] = threading.Thread
+
     def __init__(
         self,
         config: Config,
@@ -237,10 +240,16 @@ class Agent:
                     job.lease_id
                 )  # whatever happened, its memory is no longer promised
 
-        thread = threading.Thread(target=work, name="job-{}-{}".format(job.id, job.lease_id[:8]))
+        thread = self.thread_class(target=work, name="job-{}-{}".format(job.id, job.lease_id[:8]))
         self._threads[job.lease_id] = thread
         self._latest[job.id] = thread
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            # the job's run never began, so nothing else would end its ledger entry (and a leaked one
+            # holds memory against every later claim): end it here, and let the failure through
+            self.gate.release(job.lease_id)
+            raise
 
     def wait_for_jobs(self) -> None:
         for thread in list(self._threads.values()):

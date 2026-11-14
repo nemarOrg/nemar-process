@@ -32,6 +32,7 @@ from runner_support import (
     job_id,
     make_launcher,
     retune,
+    spec_text,
     wait_for,
     write_private,
 )
@@ -741,6 +742,9 @@ def test_a_job_that_finds_the_host_busy_waits_then_is_abandoned_inside_the_lease
         assert gave_up["mem_available_mb"] == SHORT_MB
         assert [e["reason"] for e in rig.events("job_not_completed")] == ["abandoned"]
         assert rig.events("job_started") == []
+        assert nothing_held(
+            agent
+        )  # an abandoned job's entry is gone, or no claim would ever go again
     finally:
         rig.close()
 
@@ -818,6 +822,7 @@ def test_a_host_that_has_room_again_during_the_wait_starts_the_job_exactly_once(
         [resumed] = rig.events("start_resumed")
         assert (resumed["job"], resumed["after"]) == (job_id(1), "memory")
         assert rig.routes.bodies("heartbeat")[0]["phase"] == "started"
+        assert nothing_held(agent)  # a job that ran and completed is released, not left to settle
         # and no backoff: a claim goes straight out
         agent2 = prepared(rig)
         try:
@@ -852,6 +857,7 @@ def test_the_wait_is_over_at_once_when_the_runner_is_told_to_stop(tmp_path):
             "terminated",
         )
         assert rig.routes.count("heartbeat") == 0
+        assert nothing_held(agent)  # a job refused during the wait is released too
     finally:
         rig.close()
 
@@ -1053,6 +1059,44 @@ def test_a_claim_size_that_is_set_is_the_whole_claim_and_drops_no_slot(rig):
     assert [body["free_slots"] for body in rig.routes.bodies("claim")] == [2]
 
 
+def nothing_held(agent) -> bool:
+    """No memory is held for any job (at the default 120 seconds to settle, so only a release ends it)."""
+    return agent.gate.claim_check(2).held_mb == 0
+
+
+def test_a_job_refused_before_it_starts_is_released(rig):
+    refused = claim_job(1, spec=spec_text(job_id(2)))  # a launch value for another job
+    agent = prepared(rig)
+    rig.routes.claims.append({"jobs": [refused], "min_runner_version": "0.1.0"})
+    try:
+        assert agent.run_once() == EXIT_OK
+        assert rig.routes.bodies("complete")[0]["launcher_detail"] == "invalid_spec"
+        assert rig.events("job_started") == []
+        assert nothing_held(agent)
+    finally:
+        agent.release()
+
+
+class FailingThread(threading.Thread):
+    """A thread the operating system cannot start (a process or memory limit reached)."""
+
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+
+def test_a_job_thread_that_cannot_start_leaves_nothing_held_and_the_failure_goes_through(rig):
+    agent = prepared(rig)
+    agent.thread_class = FailingThread
+    rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
+    try:
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            agent.claim_once()
+        assert nothing_held(agent)
+        assert agent.running() == 0
+    finally:
+        agent.release()
+
+
 def waiting_launcher(tmp_path):
     """A launcher that notes it started and stays until the file `go` exists."""
     marker, go = tmp_path / "started", tmp_path / "go"
@@ -1090,6 +1134,7 @@ def test_of_two_jobs_that_start_together_with_room_for_one_exactly_one_starts(tm
         assert (gave_up["reason"], gave_up["held_mb"]) == ("memory", JOB_MB)
         assert agent.gate.backoff_remaining() > 0  # into the backoff
         assert rig.routes.count("complete") == 1  # the abandoned one is left to expire
+        assert nothing_held(agent)  # the one that ran and the one that gave up both left the ledger
     finally:
         rig.close()
 
