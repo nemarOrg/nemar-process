@@ -289,6 +289,25 @@ def test_the_cpus_are_the_ones_this_process_may_run_on():
     assert availability.cpu_count() == max(1, expected or 1)
 
 
+def test_a_reader_between_the_two_writes_sees_the_old_host_whole(tmp_path):
+    proc = Proc(tmp_path / "proc")
+    proc.set(available_mb=5000, load=1.0)
+    first_new = proc._versions / str(proc._count + 1) / "meminfo"
+    writer = threading.Thread(
+        target=lambda: proc.set(available_mb=100, load=9.0, pause=0.6), name="writer"
+    )
+    writer.start()
+    try:
+        wait_for(first_new.exists, what="the first of the two writes")
+        # the new memory is written, the new load is not, and nothing is published yet
+        assert availability.read_memory(str(proc.dir)) == (5000, 65536)
+        assert availability.read_load(str(proc.dir)) == 1.0
+    finally:
+        writer.join(10)
+    assert availability.read_memory(str(proc.dir)) == (100, 65536)
+    assert availability.read_load(str(proc.dir)) == 9.0
+
+
 # ---- the thresholds -----------------------------------------------------------------------------------------
 
 
