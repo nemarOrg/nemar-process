@@ -83,7 +83,11 @@ def smoke_facts(smoke: dict, flavor: str) -> dict:
             isinstance(arch_list, list) and arch_list and all(isinstance(a, str) for a in arch_list)
         ):
             raise ValueError("the smoke document of the CUDA flavor lists no GPU architecture")
-        facts["cuda"] = {"torch_cuda": torch.get("cuda"), "arch_list": arch_list}
+        facts["cuda"] = {
+            "torch_cuda": torch.get("cuda"),
+            "arch_list": arch_list,
+            "arch_source": torch.get("arch_source"),
+        }
     return facts
 
 

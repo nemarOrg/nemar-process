@@ -37,7 +37,12 @@ CUDA_SMOKE = {
     **SMOKE,
     "flavor": "cuda",
     "distributions": {**SMOKE["distributions"], "torch": "2.12.1+cu129"},
-    "torch": {"version": "2.12.1+cu129", "cuda": "12.9", "arch_list": ARCHS},
+    "torch": {
+        "version": "2.12.1+cu129",
+        "cuda": "12.9",
+        "arch_list": ARCHS,
+        "arch_source": "torch._C._cuda_getArchFlags",
+    },
 }
 
 
@@ -192,7 +197,11 @@ def test_the_cuda_record_is_of_the_cuda_tag_lists_the_architectures_and_has_no_s
     assert made["flavor"] == "cuda"
     assert made["image"]["tag"] == "0.1.0-cuda"
     assert made["image"]["reference"] == "ghcr.io/nemarorg/nemar-python@" + IMAGE
-    assert made["cuda"] == {"torch_cuda": "12.9", "arch_list": ARCHS}
+    assert made["cuda"] == {
+        "torch_cuda": "12.9",
+        "arch_list": ARCHS,
+        "arch_source": "torch._C._cuda_getArchFlags",
+    }
     assert made["sif"] is None  # a GPU host builds one from the verified digest
     # the image object a launch specification names is still valid: the file name is the digest's
     assert made["launch_image"]["sif"] == "ab" * 32 + ".sif"
