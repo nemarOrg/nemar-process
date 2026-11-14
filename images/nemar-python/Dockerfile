@@ -1,8 +1,10 @@
 # nemar-python, CPU flavor: Python 3.12 with eegprep, MNE-Python, NumPy, SciPy, pamica (CPU) and the
 # signalJourney validator, installed from the committed root lock (uv.lock) and nothing else.
 #
-# Build from the repository root:
-#   docker build -f images/nemar-python/Dockerfile .
+# Build from the repository root; the build names itself (a dev build for anything that is not a
+# release, see "The build" below), and a build that does not is refused:
+#   docker build -f images/nemar-python/Dockerfile \
+#     --build-arg NEMAR_PROCESS_VERSION=<X.Y.Z-devN> --build-arg NEMAR_PROCESS_COMMIT=<40 hex digits> .
 #   docker run --rm <image> python /opt/smoke.py
 #
 # Every base is a digest: a tag moves, a digest does not. Bump a digest together with its tag in the
@@ -61,12 +63,20 @@ RUN printf '%s\n' '#!/opt/venv/bin/python' 'from nemar_process.cli import main' 
 # ---- final: the runtime image -----------------------------------------------------------------
 FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS final
 
-ARG SOURCE_COMMIT=unknown
+# The build. The defaults make an unnamed build impossible: the version and the commit are empty, so
+# the RUN step below refuses, and the build is `dev` unless the publish job says `release`. The
+# version, the commit and the build are written into /opt/nemar/build.json, which every record reads
+# (nemar_process.common.build), and mirrored in the labels.
+ARG NEMAR_PROCESS_VERSION=
+ARG NEMAR_PROCESS_COMMIT=
+ARG NEMAR_PROCESS_BUILD=dev
 ARG LOCK_SHA256=unverified
 LABEL org.opencontainers.image.title="nemar-python" \
       org.opencontainers.image.description="NEMAR runtime image, CPU flavor: Python 3.12, eegprep, MNE-Python, pamica, signalJourney validator" \
       org.opencontainers.image.source="https://github.com/nemarOrg/nemar-process" \
-      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.version="${NEMAR_PROCESS_VERSION}" \
+      org.opencontainers.image.revision="${NEMAR_PROCESS_COMMIT}" \
+      io.nemar.build="${NEMAR_PROCESS_BUILD}" \
       io.nemar.lock-sha256="${LOCK_SHA256}" \
       io.nemar.flavor="cpu"
 
@@ -78,6 +88,11 @@ RUN groupadd --system --gid 10001 nemar \
     && useradd --system --uid 10001 --gid nemar --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin nemar
 
 COPY --from=builder /opt/venv /opt/venv
+
+# The build file, written as root into a directory the job's user cannot change. The writer refuses an
+# empty version or commit, a build that is not release or dev, a release whose version has a -devN
+# suffix and a dev build whose version has none (nemar_process.common.build).
+RUN /opt/venv/bin/python -m nemar_process.common.build write /opt/nemar/build.json
 COPY images/nemar-python/smoke.py /opt/smoke.py
 COPY tests/fixtures/smoke/ /opt/smoke-fixture/
 
