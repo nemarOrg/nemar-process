@@ -197,6 +197,7 @@ Also the owner's, before the first release:
 ## Changing it
 
 Edit `pyproject.toml`, run `uv lock`, and run the tests; never edit `uv.lock` by hand.
+The one exception is the project's own version, which only the release bot changes, and in both files at once (`docs/release.md`); a pull request never touches it.
 The tests that guard the declaration are in `tests/images/`:
 
 ```bash

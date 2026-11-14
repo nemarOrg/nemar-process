@@ -62,7 +62,8 @@ The environment value `NEMAR_LAUNCH_SPEC` is the base64url encoding of the docum
 
 ### Never hand-bump a version, never set a secret, never touch production
 
-Versions are owned by the release process.
+Versions are owned by the release process: the release bot (`.github/workflows/auto-bump-dev.yml`, `auto-tag.yml`, `sync-dev.yml`; [`docs/release.md`](docs/release.md)) changes them and a person or an implementer never does, in a feature pull request or any other, and `bump-validator` fails a pull request that tries.
+The only manual bump is an administrator's direct push of `scripts/bump_version.py` to cut a minor or major version, or to release a hotfix.
 Worker secrets, Tapis registrations and cloud buckets are the owner's.
 
 ## Tooling is fixed
@@ -92,7 +93,9 @@ uv run --no-project --python 3.9 --with pytest pytest tests/observer   # the obs
 ## Workflow
 
 Work in a git worktree, never the primary checkout: `git worktree add <path> -b feature/<issue>-<slug> origin/<epic branch>`.
-Phase branches squash-merge into the epic branch; the epic branch merges into `main` once, after the end-to-end check.
+Phase branches squash-merge into the epic branch.
+Feature and epic branches are based on `dev` and merge into `dev` (the bot adds a `-devN` bump to each push there); a release is a pull request from `dev` into `main`, merged with a merge commit, after which the bot tags `vX.Y.Z` and syncs `dev` (`docs/release.md`).
+The repository has no `dev` branch until the owner has set it up; until then epic branches still merge into `main`.
 Commits are atomic, short (under 50 characters), without emojis and without AI or co-author attribution.
 Pull request bodies keep each paragraph on one line.
 Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.md`.
@@ -104,9 +107,9 @@ Decisions that bind this repository are recorded as `docs/decisions/NNNN-title.m
 | `launcher/` | `tapisjob_app.sh`, the stdlib-only `nemar_launch` package, the schema copy |
 | `images/nemar-python/` | the CPU runtime image: `Dockerfile` (every base a digest) and `smoke.py` |
 | `recipes/nemar_process/` | the recipes package: `sj.py` (the validator) with the vendored signalJourney schema in `_vendor/`, `common/` (loader, naming, the resolved plan, measurements, records, files), `nemar_floor/` (the first recipe), and the `nemar-recipe` command (`cli.py`, `recipes.py`) |
-| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `gen_wire_cases.ts` (bun; the table of wire cases, from nemar-cli's contract), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image and the recipes: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `make_eeg_fixture_manifest.py` (`--check`), `vendor_signaljourney.py` |
+| `scripts/` | `build_launcher_zip.py` and `build_observer_zip.py` (deterministic zips, `--check`), `derive_tapis_schemas.py` (`--check`), `gen_wire_cases.ts` (bun; the table of wire cases, from nemar-cli's contract), `register.py` (dry run by default) with `tapis_policy.py` (the invariants it and the tests share), and for the image and the recipes: `check_smoke_pins.py`, `make_image_digests.py`, `make_smoke_fixture.py`, `make_eeg_fixture_manifest.py` (`--check`), `vendor_signaljourney.py`, and for releases `bump_version.py` (the only writer of the version; `--show`, `--check-*`) and `sync_dev_merge.py` |
 | `tests/` | `launcher/`, `images/`, `deploy/`, `observer/`, `recipes/` (the recipe tests; they need the `runtime` environment) and `e2e/` (the launch end to end) tests, `standin/` HTTP and command stand-ins, `fixtures/` (`dataset/`, `smoke/`, `sj/`, `eeg/` the real recording), `launcher/fixtures/wire_cases.json` (the table of wire cases), `contract/` pins |
 | `docs/` | `launcher.md` (spec, layout, codes, environment), `images.md` (the image, digests, verifying), `recipes.md` (the recipes and `nemar-recipe`: steps, files, records, exit codes), `operator.md` (the Tapis definitions and the observer: what the operator supplies and does), `upstream.md`, `contracts.md`, `unverified.md` |
-| `.github/workflows/` | `ci.yml`; `image-nemar-python.yml` (build, sign and release the image) |
+| `.github/workflows/` | `ci.yml` (every job, plus `actionlint` over all workflows); `image-nemar-python.yml` (build, sign and release the image); the release automation: `auto-bump-dev.yml` (the `-devN` bump on `dev`), `auto-tag.yml` (strip, tag, release on `main`), `sync-dev.yml` (`main` back into `dev` after a tag), `bump-validator.yml` (pull requests never change the version), `release-gate.yml` (the stricter set for pull requests into `main`) |
 | `deploy/tapis/` | the application and system definitions (placeholders only), `example.env`, `released-versions.json` (the ledger of released zip digests), the vendored Tapis OpenAPI files and the schemas derived from them |
 | `observer/` | `observe.py` (stdlib, Python 3.9) and its entry script |
