@@ -33,7 +33,6 @@ ignore = [
 # (The pre-commit hook runs with --unsafe-fixes, which deletes a print the rule flags.)
 "launcher/**" = ["T201"]
 "observer/**" = ["T201"]
-"runner/**" = ["T201"]
 "recipes/nemar_process/cli.py" = ["T201"]
 
 [format]
