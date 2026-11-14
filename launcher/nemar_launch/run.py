@@ -775,7 +775,7 @@ def run_container(
         while not wait_for_exit(child, 0.2):
             now = time.time()
             if ends is not None and terminator.received is None and now >= ends:
-                # Nobody has signalled the launcher, and the job's time is up: the launcher is what
+                # Nobody has signaled the launcher, and the job's time is up: the launcher is what
                 # stops the container, exactly as the SIGTERM the scheduler or the runner would send
                 # (the same record, the same grace), so the end time does not depend on either.
                 log.warning("deadline reached; stopping the container")

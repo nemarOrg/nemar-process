@@ -47,7 +47,7 @@ def last_beat(rig) -> float:
 
 
 @pytest.mark.parametrize("variable", ["NEMAR_JOB_END_TIME", "SLURM_JOB_END_TIME"])
-def test_the_launcher_stops_the_container_at_the_end_time_without_being_signalled(rig, variable):
+def test_the_launcher_stops_the_container_at_the_end_time_without_being_signaled(rig, variable):
     end = int(time.time()) + 3
     launch = rig.launch(beating_job(rig, end, ignore_term=False), **{variable: str(end)})
     assert launch.exit == 15, launch.log
