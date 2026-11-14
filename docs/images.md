@@ -191,7 +191,8 @@ A flavor for V100 nodes, with an older torch, is a later HPC GPU run and is not 
 The runner fixes an image by the claim's digest before it chooses the device, and on a shared workstation it keeps a job off the GPU whenever the GPU is not idle.
 So the CUDA flavor must run the CPU engine correctly with no GPU visible, and that path is the default, not an exception.
 Its smoke test therefore runs the way such a job runs, `docker run --env NVIDIA_VISIBLE_DEVICES=void <image> python /opt/smoke.py --no-gpu`, on a hosted runner that has no GPU: `torch.cuda.is_available()` must be false, and a 5-iteration pAMICA fit by the PyTorch engine on the CPU in float64 must run.
-The same smoke test prints `torch.cuda.get_arch_list()` (the GPU architectures this torch was compiled for) on a line `CUDA_ARCH_LIST ...` and in the document, and the CUDA flavor's digest file records it.
+The same smoke test prints the GPU architectures this torch was compiled for on a line `CUDA_ARCH_LIST ...` and in the document, and the CUDA flavor's digest file records them.
+`torch.cuda.get_arch_list()` is what answers on a GPU host, but it returns an empty list whenever no GPU is visible (it asks `is_available()` first), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
 Whether a workstation's driver runs CUDA 12.9 wheels is not shown by any of this; the operator's preflight on that machine prints the driver and the GPU.
 
 Both flavors print `CPUFIT sha256=<hex>`: the SHA-256 of that CPU fit's 4 by 4 unmixing matrix, written with `format(x, ".17g")` in row-major order, one value per line.

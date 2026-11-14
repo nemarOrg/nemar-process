@@ -328,12 +328,29 @@ def native_binary() -> dict:
     }
 
 
+def compiled_arch_list(torch) -> tuple[list[str], str]:
+    """The GPU architectures this torch was compiled for, and which call said so.
+
+    ``torch.cuda.get_arch_list()`` returns an empty list whenever no GPU is visible (it asks
+    ``is_available()`` first), and the smoke test of the CUDA flavor runs with none. The list is a
+    compile-time string that needs no device, which ``torch._C._cuda_getArchFlags()`` returns, so
+    that private call is the fallback and the document says which one answered.
+    """
+    public = list(torch.cuda.get_arch_list())
+    if public:
+        return public, "torch.cuda.get_arch_list"
+    flags = getattr(torch._C, "_cuda_getArchFlags", lambda: None)()
+    if isinstance(flags, str) and flags.split():
+        return flags.split(), "torch._C._cuda_getArchFlags"
+    return [], "none"
+
+
 def cuda_build(flavor: str | None) -> dict:
     """What torch says about CUDA; the CUDA flavor must be the 12.9 build, and its architectures are listed."""
     import torch
 
     built = torch.version.cuda
-    arch_list = list(torch.cuda.get_arch_list())
+    arch_list, arch_source = compiled_arch_list(torch)
     if flavor == "cuda":
         if not (built or "").startswith(CUDA_SERIES):
             fail("the CUDA flavor's torch is built for CUDA {}, not {}".format(built, CUDA_SERIES))
@@ -345,6 +362,7 @@ def cuda_build(flavor: str | None) -> dict:
         "cuda": built,
         "cuda_available": bool(torch.cuda.is_available()),
         "arch_list": arch_list,
+        "arch_source": arch_source,
     }
 
 

@@ -558,6 +558,40 @@ def test_the_cuda_flavor_is_refused_by_a_torch_that_is_not_the_cuda_12_9_build(r
     assert json.loads(done.stdout) == []  # the CPU flavor reports no architecture
 
 
+def test_the_architecture_list_falls_back_to_the_compile_time_string_when_no_gpu_is_visible(
+    runtime_python,
+):
+    """`torch.cuda.get_arch_list()` is empty with no GPU visible (torch checks is_available first); the
+    compile-time list is behind `torch._C._cuda_getArchFlags()`. The stand-ins here model those two
+    documented behaviors of torch, an external library; the real answer is the CUDA job's."""
+    done = probe(
+        runtime_python,
+        """
+import types
+def torch_with(public, private):
+    cuda = types.SimpleNamespace(get_arch_list=lambda: public)
+    c = types.SimpleNamespace() if private is False else types.SimpleNamespace(_cuda_getArchFlags=lambda: private)
+    return types.SimpleNamespace(cuda=cuda, _C=c)
+cases = {
+    "public": torch_with(["sm_80"], "sm_90"),
+    "private": torch_with([], "sm_75 sm_80 sm_90 compute_90"),
+    "none": torch_with([], None),
+    "empty": torch_with([], ""),
+    "cpu build": torch_with([], False),
+}
+print(json.dumps({name: smoke.compiled_arch_list(t) for name, t in cases.items()}))
+""",
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert json.loads(done.stdout) == {
+        "public": [["sm_80"], "torch.cuda.get_arch_list"],
+        "private": [["sm_75", "sm_80", "sm_90", "compute_90"], "torch._C._cuda_getArchFlags"],
+        "none": [[], "none"],
+        "empty": [[], "none"],
+        "cpu build": [[], "none"],
+    }
+
+
 def make_ldd(directory, output: str, code: int = 0):
     """A stand-in for the system `ldd`, which a host without glibc does not have: it prints `output`."""
     script = directory / "ldd"
