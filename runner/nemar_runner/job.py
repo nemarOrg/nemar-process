@@ -7,6 +7,10 @@ The steps, each with its own way to stop:
 2. a heartbeat thread starts and renews the lease every 60 seconds, and wakes at once when the
    launcher has written `out/launcher/result.json` to say `uploading`;
 3. the image is made available (an Apptainer pull when the file is absent);
+   then, on a host other people share, the job waits for room (`availability.py`): the host's free
+   memory, load, scratch and a `pause` file are checked again, every `poll_seconds`, until they leave
+   room or until `lease_abandon_seconds` after the claim, when the job is left to expire like a pull
+   that outlasted the lease, and the runner backs off from claiming;
 4. the launcher runs in a new process group with an environment built from nothing but the card's
    keys; the supervisor reaps it with `os.wait4` (so usage is measured by the kernel), sends SIGTERM
    at the deadline (`NEMAR_JOB_END_TIME` plus 60 s), on a cancel, on a lost lease, when the runner is
@@ -32,7 +36,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from . import containers, contract, images, pids, scratch, usage, wire
+from . import availability, containers, contract, images, pids, scratch, usage, wire
 from .api import Api, ApiError
 from .config import ENGINES, Config, Tuning
 from .logs import Log
@@ -262,9 +266,11 @@ class JobRunner:
         stop: threading.Event,
         runner_label: str | None = None,
         python: str | None = None,
+        gate: availability.Gate | None = None,
     ) -> None:
         self.runner_label = runner_label
         self.python = python  # pinned at the runner's start; looked up again only when not given
+        self.gate = gate  # the host's room for this job, asked before it starts; None asks nothing
         self._began = time.monotonic()
         self.job, self.config, self.tuning = job, config, tuning
         self.api, self.log, self.locks, self.limits, self.stop = api, log, locks, limits, stop
@@ -421,6 +427,10 @@ class JobRunner:
                 # The image stays where it is.
                 self.log.warn("claim_abandoned_during_pull", job=job.id)
                 return Outcome(0, None, None, usage.ZERO, False, abandoned=True)
+        if self.gate is not None and self.config.availability.enabled:
+            abandoned = self._await_room(term_at)
+            if abandoned is not None:
+                return abandoned
         enforce = sif is not None and self.limits.proven(sif, dirs.home)
         env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label)
         argv = [
@@ -482,6 +492,44 @@ class JobRunner:
             max_rss_mb=measured.max_rss_mb,
         )
         return Outcome(number, code, detail, measured, partial, lease_lost=why == "lease_lost")
+
+    def _await_room(self, term_at: float) -> Outcome | None:
+        """Wait, inside the lease, until the host has room for this job: None to go on (room, or a
+        stop that the caller turns into a refusal), or the abandoned outcome.
+
+        The same rules as before a claim, for the job's own memory, but not the backoff. While they
+        fail the check is repeated every `poll_seconds`, until `lease_abandon_seconds` after the claim
+        (or the job's own deadline, if that comes first): then no heartbeat has been sent and none will
+        be, the lease runs out and the Worker releases the claim, as for a pull that outlasted the lease;
+        and the runner backs off from claiming for `backoff_seconds`, so one busy host never spends a
+        job's three claims in a row."""
+        job, gate, tuning = self.job, self.gate, self.tuning
+        assert gate is not None
+        memory = effective_memory_mb(job, self.config)
+        verdict = gate.start_check(memory)
+        waiting = None
+        while not verdict.idle:
+            if verdict.reason != waiting:
+                waiting = verdict.reason
+                self.log.warn(
+                    "start_waiting", job=job.id, reason=verdict.reason, **verdict.fields()
+                )
+            now = time.monotonic()
+            if self._stop_reason() is not None:
+                return None  # `_launch` refuses a stopped job right after this
+            if now - self._began >= tuning.lease_abandon_seconds or now >= term_at:
+                self.log.warn(
+                    "claim_abandoned", job=job.id, reason=verdict.reason, **verdict.fields()
+                )
+                gate.start_backoff()
+                return Outcome(0, None, None, usage.ZERO, False, abandoned=True)
+            self.stop.wait(
+                max(0.0, min(tuning.poll_seconds, self._began + tuning.lease_abandon_seconds - now))
+            )
+            verdict = gate.start_check(memory)
+        if waiting is not None:
+            self.log.info("start_resumed", job=job.id, after=waiting)
+        return None
 
     def _after_spawn(
         self, proc: subprocess.Popen[bytes], dirs: scratch.JobDirs, enforce: bool

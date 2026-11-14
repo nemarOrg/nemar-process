@@ -340,6 +340,7 @@ def cli_runner(tmp_path):
         "arch": "amd64",
         "max_scratch_gb": 1,
         "launcher_dir": str(rig.launcher),
+        "availability": {"enabled": False},  # this test is not about the host's room
     }
     write_private(rig.config_file, json.dumps(document))
     rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})

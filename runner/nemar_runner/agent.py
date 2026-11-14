@@ -1,9 +1,11 @@
 """The claim loop: `run` polls while a slot is free, `once` claims once and waits for its jobs.
 
 A claim asks for as many jobs as there are free slots and is refused (nothing is run) when the
-answer holds more, or is malformed, or comes from a Worker that wants a newer runner. Free space is
-checked first: below `max_scratch_gb` under `root`, the runner does not claim. Each claimed job runs in
-a thread of its own through `JobRunner`.
+answer holds more, or is malformed, or comes from a Worker that wants a newer runner. The host is
+checked first (`availability.py`): without free space under `root`, free memory, a load that leaves
+room for the people who share the machine, or while a `pause` file exists or a backoff runs, the runner
+sends no claim at all, so the Worker counts nothing. Each claimed job runs in a thread of its own
+through `JobRunner`.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 import threading
 import time
 
-from . import __version__, containers, contract, images, pids, scratch
+from . import __version__, availability, containers, contract, images, pids, scratch
 from .api import Api, ApiError
 from .config import ENGINES, Config, ConfigError, Tuning
 from .job import JobRunner
@@ -23,8 +25,6 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_CONFIG = 2
 EXIT_REFUSED = 3  # the Worker will not serve this runner: revoked, outdated, wrong protocol
-
-_GIB = 1024**3
 
 
 class Agent:
@@ -44,6 +44,8 @@ class Agent:
         self.stop = threading.Event()
         self.locks = images.PullLocks()
         self.limits = images.Limits(config, self.tuning, log)
+        self.gate = availability.Gate(config, self.tuning)
+        self._skipping: str | None = None  # why the last claim was declined, until one is sent
         self._threads: dict[str, threading.Thread] = {}  # by lease id
         self._latest: dict[str, threading.Thread] = {}  # the newest run of each job id
         self._states: dict[str, str | None] = {}
@@ -131,11 +133,19 @@ class Agent:
             del self._latest[job_id]
 
     def room_for_a_claim(self) -> bool:
-        free = scratch.free_bytes(self.config.root)
-        if free < self.config.max_scratch_gb * _GIB:
-            self.log.warn("claim_skipped", reason="low_disk", free_gb=free // _GIB)
-            return False
-        return True
+        """Whether the host has room now (`availability.Gate.claim_check`). A decline is logged as
+        `claim_skipped` with the reason and the readings, once each time the reason changes rather than on
+        every poll, and sends nothing to NEMAR."""
+        verdict = self.gate.claim_check()
+        if verdict.idle:
+            if self._skipping is not None:
+                self.log.info("claim_resumed", after=self._skipping)
+                self._skipping = None
+            return True
+        if verdict.reason != self._skipping:
+            self._skipping = verdict.reason
+            self.log.warn("claim_skipped", reason=verdict.reason, **verdict.fields())
+        return False
 
     def claim_once(self) -> list[contract.ClaimedJob]:
         """One claim for the free slots, and the jobs started from it. Raises ``ApiError``.
@@ -169,6 +179,7 @@ class Agent:
             self.stop,
             self.runner_label,
             self.python,
+            self.gate,
         )
 
         previous = self._latest.get(job.id)

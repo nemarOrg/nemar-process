@@ -28,7 +28,15 @@ CONFIG_KEYS = (
     "arch",
     "max_scratch_gb",
 )
-OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb", "sif_pull")
+OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb", "sif_pull", "availability")
+AVAILABILITY_KEYS = (
+    "enabled",
+    "max_load_per_core",
+    "reserve_memory_mb",
+    "claim_memory_mb",
+    "backoff_seconds",
+    "reservation_dirs",
+)
 ENGINES = ("docker", "podman")
 
 # What a job's launcher is run with: no PATH of the user's, so the launcher and the container
@@ -44,6 +52,27 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class Availability:
+    """When the runner claims, on a workstation other people use (docs/runner.md, "Sharing a
+    workstation"). A key left out of the `availability` object has the value below; None is a value
+    worked out from the host when it is used.
+
+    ``enabled`` False turns off everything but the free-scratch rule (`max_scratch_gb`): no memory,
+    load or pause rule, no check before a claimed job starts, no backoff.
+    ``reserve_memory_mb`` None is the larger of 8192 and a tenth of the host's memory.
+    ``claim_memory_mb`` None is `default_job_memory_mb` when it is set, else 4096.
+    ``reservation_dirs`` () is no directory; `load_config` fills in the `reservations` directory
+    beside the configuration file when the key is absent."""
+
+    enabled: bool = True
+    max_load_per_core: float = 0.9
+    reserve_memory_mb: int | None = None
+    claim_memory_mb: int | None = None
+    backoff_seconds: float = 1800.0
+    reservation_dirs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     api_base: str
     secret_file: str
@@ -56,6 +85,7 @@ class Config:
     launcher_dir: str
     default_job_memory_mb: int | None = None
     sif_pull: bool = False
+    availability: Availability = Availability()
 
 
 @dataclass(frozen=True)
@@ -81,6 +111,8 @@ class Tuning:
     retry_cap_seconds: float = 60.0
     token_margin_seconds: float = 60.0
     launch_path: str = LAUNCH_PATH
+    # Where the host's memory and load are read from: only a test points it at files it wrote.
+    proc_root: str = "/proc"
 
 
 def default_config_path(environ: dict[str, str] | None = None) -> str:
@@ -164,6 +196,58 @@ def _int(value: Any, key: str, low: int, high: int) -> int:
     return value
 
 
+def _number(value: Any, key: str, low: float, high: float) -> float:
+    """A whole or decimal number above ``low`` (a zero is refused) and at most ``high``."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError("{} must be a number".format(key))
+    if not low < value <= high:
+        raise ConfigError("{} must be above {} and at most {}".format(key, low, high))
+    return float(value)
+
+
+def default_reservation_dir(config_path: str) -> str:
+    """The `reservations` directory beside the configuration file."""
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), "reservations")
+
+
+def _availability(value: Any, config_path: str) -> Availability:
+    """The `availability` object: its keys are checked as the top level's are (an unknown key is
+    refused, and the message names the key, never a value)."""
+    if not isinstance(value, dict):
+        raise ConfigError("availability must be an object")
+    unknown = sorted(set(value) - set(AVAILABILITY_KEYS))
+    if unknown:
+        raise ConfigError("unknown availability key {}".format(str(unknown[0])[:40]))
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("availability enabled must be true or false")
+    reserve = value.get("reserve_memory_mb")
+    if reserve is not None:
+        reserve = _int(reserve, "availability reserve_memory_mb", 0, 16_777_216)
+    claim = value.get("claim_memory_mb")
+    if claim is not None:
+        claim = _int(claim, "availability claim_memory_mb", 1, 16_777_216)
+    directories = value.get("reservation_dirs")
+    if directories is None:
+        paths = (default_reservation_dir(config_path),)
+    elif not isinstance(directories, list) or len(directories) > 16:
+        raise ConfigError("availability reservation_dirs must be a list of at most 16 paths")
+    else:
+        paths = tuple(_path(item, "availability reservation_dirs") for item in directories)
+    return Availability(
+        enabled=enabled,
+        max_load_per_core=_number(
+            value.get("max_load_per_core", 0.9), "availability max_load_per_core", 0, 1024
+        ),
+        reserve_memory_mb=reserve,
+        claim_memory_mb=claim,
+        backoff_seconds=float(
+            _int(value.get("backoff_seconds", 1800), "availability backoff_seconds", 1, 604_800)
+        ),
+        reservation_dirs=paths,
+    )
+
+
 def default_launcher_dir() -> str:
     """The `launcher` directory beside this package's repository, when run from a checkout."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -212,6 +296,7 @@ def load_config(path: str) -> Config:
     sif_pull = document.get("sif_pull", False)
     if not isinstance(sif_pull, bool):
         raise ConfigError("sif_pull must be true or false")
+    availability = _availability(document.get("availability", {}), path)
     config = Config(
         api_base=_api_base(document["api_base"]),
         secret_file=_path(document["secret_file"], "secret_file"),
@@ -224,6 +309,7 @@ def load_config(path: str) -> Config:
         launcher_dir=_path(document.get("launcher_dir", default_launcher_dir()), "launcher_dir"),
         default_job_memory_mb=default_memory,
         sif_pull=sif_pull,
+        availability=availability,
     )
     problem = root_problem(config.root)
     if problem is not None:

@@ -33,7 +33,7 @@ from typing import Any
 
 from nemar_runner import contract
 from nemar_runner.agent import Agent
-from nemar_runner.config import Config, Tuning
+from nemar_runner.config import Availability, Config, Tuning
 from nemar_runner.logs import Log
 from server import Request, Response, StandinServer
 
@@ -428,6 +428,8 @@ class Rig:
             "launcher_dir": str(self.launcher),
             "default_job_memory_mb": 512 if self.runtime in ("docker", "podman") else None,
             "sif_pull": self.sif_pull,
+            # a test that is not about the host's room does not depend on how busy the host is
+            "availability": Availability(enabled=False),
         }
         values.update(changes)
         return Config(**values)
