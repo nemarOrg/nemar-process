@@ -518,10 +518,10 @@ class JobRunner:
             if self._stop_reason() is not None:
                 return None  # `_launch` refuses a stopped job right after this
             if now - self._began >= tuning.lease_abandon_seconds or now >= term_at:
+                gate.start_backoff()  # first, so no claim can slip out between the line and the backoff
                 self.log.warn(
                     "claim_abandoned", job=job.id, reason=verdict.reason, **verdict.fields()
                 )
-                gate.start_backoff()
                 return Outcome(0, None, None, usage.ZERO, False, abandoned=True)
             self.stop.wait(
                 max(0.0, min(tuning.poll_seconds, self._began + tuning.lease_abandon_seconds - now))
