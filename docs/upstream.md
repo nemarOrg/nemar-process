@@ -76,7 +76,7 @@ Public wording only: "a processing pipeline wants X".
 | [sccn/eegprep#541](https://github.com/sccn/eegprep/issues/541) | the cleaning steps differ in whether they mutate their input or return a copy | every step rebinds its working copy and never relies on the answer |
 | [sccn/eegprep#561](https://github.com/sccn/eegprep/issues/561) | `pop_loadbv` and `pop_loadset` read the file a header names wherever it is: an absolute path, a `..` or a sub-directory for a BrainVision `DataFile` or `MarkerFile`, an absolute `data` or `datfile` for a set | `common/headers.py` reads the header first and refuses any recording that names a file other than its own companions, or whose files lead outside the dataset directory through a link (`load_failed`, detail `external_reference`); `tests/recipes/test_headers.py` pins what eegprep alone does, so a fix upstream shows |
 
-### The Zarr reader (`nemar-floor-zarr`, 2026-11-13)
+### The Zarr reader (`nemar-floor --input zarr`, 2026-11-13)
 
 The recipe reads the serving copy with eegprep-lean from the head of sccn/eegprep#616, installed from a pinned commit (see [recipes.md](recipes.md)).
 The first pinned commit refused the unit the live index uses for microvolts, the micro sign (`µV`), so every real store failed; the recipe renamed the label to `uV` until the commit 14ba46e8 of that pull request accepted the micro sign and the Greek mu.

@@ -1,7 +1,7 @@
 # The recipes and `nemar-recipe`
 
 A recipe is a short, fixed sequence of eegprep calls that annotates every electroencephalography (EEG) recording of a dataset and writes what it decided as state files and a signalJourney record.
-The first recipe is `nemar-floor`; `nemar-floor-zarr` runs the same steps on NEMAR's Zarr serving copy.
+The first recipe is `nemar-floor`, which reads a dataset directory (`--input bids`, the default) or NEMAR's Zarr serving copy (`--input zarr`): one recipe, one name, one version and one set of steps, with the input an argument.
 The command that runs recipes is `nemar-recipe` (`python -m nemar_process` outside the image).
 
 Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), Hypertext Transfer Protocol Secure (HTTPS), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), mebibyte (MiB, 1,048,576 bytes), megabyte (MB, 10^6 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
@@ -18,18 +18,21 @@ nemar-recipe run <recipe> --dataset-dir DIR [--out DIR] [--recording PATH ...]
                           [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                           [--image-digest sha256:HEX] [--run-id ID]
                           [the options the recipe declares, such as --time-budget-s N]
-nemar-recipe run <zarr recipe> --zarr-base https://HOST --dataset-id ID --dataset-version TAG
-                          --source-commit SHA [--out DIR] [--recording STORE ...]
-                          [--image-digest sha256:HEX] [--run-id ID] [the attestation options]
+nemar-recipe run <recipe> --input zarr --zarr-base https://HOST --dataset-id ID
+                          --dataset-version TAG --source-commit SHA [--out DIR]
+                          [--recording STORE ...] [--image-digest sha256:HEX] [--run-id ID]
+                          [the attestation options]
 nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
 nemar-recipe version
 ```
 
 - `--dataset-dir` is the directory the launcher mounts read-only (`/data/<id>`).
   The command never writes there; a test makes the tree read-only and runs it.
-  It is required, except for a recipe whose input is `zarr` (below), which refuses it (exit 2).
-- The command opens no network connection, with one exception: a recipe whose input is `zarr` may open HTTPS connections only to the hosts of a fixed list of host pairs, one per NEMAR environment, written in code (`recipes/nemar_process/common/zarr_hosts.py`: `ZARR_HOST_PAIRS`, each Zarr host with the public data bucket its reads redirect to, with the serving contract of nemar-cli as their source).
-  Every other recipe opens none, and its run is fenced to enforce that.
+  It is required, except with `--input zarr` (below), which refuses it (exit 2).
+  `--input bids|zarr` says what a recipe that reads more than one input reads (default `bids`); a recipe that reads one input does not declare it, and the command refuses it for that recipe (exit 2).
+  `nemar-recipe version` prints, besides the versions, `inputs`: the inputs each recipe reads (`{"nemar-floor": ["bids", "zarr"]}`).
+- The command opens no network connection, with one exception: a recipe run with `--input zarr` may open HTTPS connections only to the hosts of a fixed list of host pairs, one per NEMAR environment, written in code (`recipes/nemar_process/common/zarr_hosts.py`: `ZARR_HOST_PAIRS`, each Zarr host with the public data bucket its reads redirect to, with the serving contract of nemar-cli as their source).
+  Every other run opens none (the floor on a dataset directory included), and it is fenced to enforce that.
   The rule and its tests are described with the recipe below.
 - `--recording` selects recordings by path relative to the dataset directory and is repeatable.
   A path that is not a file is one `failed` row with the code `file_not_found`, and the run goes on.
@@ -58,7 +61,7 @@ nemar-recipe version
   It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
 - A recipe can declare options of its own (`Recipe.options`), such as `--time-budget-s N` or the choice of a decomposition engine.
   The command accepts a flag only for a recipe that declares it (exit 2 for any other), fills in the default of one that is not given, and hands the values to the recipe's hooks and to `run_recording` (`RunContext.options`).
-  The floor declares none; `nemar-floor-zarr` declares four (below).
+  The floor declares `--input`, and its Zarr input four more (below); a flag of the Zarr input is refused with `--input bids` (exit 2), as it would be for a recipe that never declared it.
   An option can be repeatable (`Option.repeatable`): its value is the tuple of what was given.
 - `--time-budget-s N` (a recipe lists it in `options`) keeps a run inside a number of seconds.
   The clock starts when the command starts.
@@ -360,16 +363,19 @@ Floats were not compared across hosts, and no other architecture was run.
 Observed on the reference machine (macOS arm64): no flat channel, bad channels `O1` and `T6`, 40 bad segments, 49.4043 percent good samples, 90.4762 percent good channels, a drift kernel of 1,005 samples, line noise 0.072 dB at 50 Hz and 7.480 dB at 60 Hz.
 The window step removes about half of the samples at eegprep's defaults on this recording; the floor annotates only, so nothing is lost.
 
-## `nemar-floor-zarr` 1.0.0: the floor on the Zarr serving copy
+## `nemar-floor --input zarr`: the floor on the Zarr serving copy
 
-`nemar-recipe run nemar-floor-zarr --out DIR --dataset-id ID --dataset-version TAG --source-commit SHA --image-digest sha256:HEX --zarr-base https://zarr.nemar.org` runs the floor's steps, unchanged, on every EEG store of a dataset's Zarr serving copy, read whole over HTTPS, with nothing downloaded to disk.
+`nemar-recipe run nemar-floor --input zarr --out DIR --dataset-id ID --dataset-version TAG --source-commit SHA --image-digest sha256:HEX --zarr-base https://zarr.nemar.org` runs the floor's steps, unchanged, on every EEG store of a dataset's Zarr serving copy, read whole over HTTPS, with nothing downloaded to disk.
 The input is the serving copy (EEG resampled to 250 Hz at most, 16-bit), not the archived recordings, and every record says so (`extensions.nemar.input.profile` is `serving`).
-It exists under this name until the floor and this recipe converge into one `nemar-floor` with the input kind as an argument.
+It is the same recipe as the floor on a dataset directory: `pipelineInfo.name` is `nemar-floor`, the version is `1.0.0` for both inputs (a record of the directory input is the same bytes it was before the input became an argument, and no record of this name existed for the Zarr input), and the product label is `nemarfloor`.
+`nemar-floor-zarr` was this input's name until the two converged: `nemar-recipe run nemar-floor-zarr ...` (and `aggregate`) now prints the one line `nemar-floor-zarr is now: nemar-floor --input zarr` and exits 2, and runs nothing.
+A published image that predates the change (`0.1.0-cpu`) still has the old name and not the argument.
 
-- **Input kind.** A recipe declares `input`, `"bids"` (the default) or `"zarr"`.
-  For `zarr`, `--dataset-dir` is refused and `--zarr-base` (an `https://` origin that is exactly the Zarr host of one NEMAR environment) and `--dataset-id`, `--dataset-version` and `--source-commit` are required (exit 2); `aggregate` is not offered, because a merged record would have no input of its own to state.
+- **Input kind.** A recipe value has an `input`, `"bids"` (the default) or `"zarr"`, and a recipe that reads more than one lists the others as `variants` (`Recipe.reading`): the floor is one registry entry, `nemar-floor`, whose Zarr variant has its own options, load step and hooks and the floor's name, version and label (the command refuses a variant that does not).
+  `--input zarr` chooses it.
+  For `zarr`, `--dataset-dir` is refused and `--zarr-base` (an `https://` origin that is exactly the Zarr host of one NEMAR environment) and `--dataset-id`, `--dataset-version` and `--source-commit` are required (exit 2); `aggregate` is not offered (`aggregate nemar-floor --input zarr` is exit 2), because a merged record would have no input of its own to state.
 - **The chain is the floor's.** Per store the recipe reads the level-0 recording in physical units with eegprep-lean (`load_recording`, then `to_eeg`), runs `eegprep.eeg_checkset` and the floor's `process` and `write_product` with the floor's parameters.
-  The files are the floor's, under the label `nemarfloorzarr`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloorzarr_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloorzarr_recordings.tsv` and `desc-nemarfloorzarr_signalJourney.json` for the dataset.
+  The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv` and `desc-nemarfloor_signalJourney.json` for the dataset.
   Nothing is written outside `--out`, and there is no cache directory.
   The serving copy carries no electrode coordinates and no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
   The unit is passed to eegprep-lean's `to_eeg` as the serving copy states it (`uV`, and the micro sign and the Greek mu that real indexes use, which eegprep-lean accepts from sccn/eegprep#616's commit 14ba46e8); a unit that is not a voltage makes the store `convert_failed`.
@@ -407,15 +413,15 @@ It exists under this name until the floor and this recipe converge into one `nem
   An audit hook sees only the interpreter's own calls: a subprocess, `ctypes` or a native extension is out of its reach, and the real boundary against them is the network policy of the container the job runs in (launch specification v2 and the runner's container, R3 and R4 of the plan), not this hook.
   An audit hook cannot be removed from a process: it is installed once, does nothing while no run is open, and the tests that need a stand-in on the loopback address switch the fence off for the run and show the fence itself in a child process.
   A recipe that reads a directory runs inside a fence with an empty allowlist, so it can neither look up nor connect to anything (a test makes its preflight hook try both).
-  The tests (`test_floor_zarr_hosts.py`) cover each refusal above, a redirect from the Zarr host to the data host that succeeds, and the records' `hosts_contacted`; `test_floor_zarr_pairs.py` covers each pair accepted, each crossed combination refused, a base that is not exactly a Zarr host (a port, a path, a user name, upper case), the fence over both pairs, and a run on the staging pair; `test_floor_zarr_network.py` builds its allowed set from the code's constants and runs inside the fence against the live hosts.
+  The tests (`test_floor_input_zarr_hosts.py`) cover each refusal above, a redirect from the Zarr host to the data host that succeeds, and the records' `hosts_contacted`; `test_floor_input_zarr_pairs.py` covers each pair accepted, each crossed combination refused, a base that is not exactly a Zarr host (a port, a path, a user name, upper case), the fence over both pairs, and a run on the staging pair; `test_floor_input_zarr_network.py` builds its allowed set from the code's constants and runs inside the fence against the live hosts.
 - **The image.** The `runtime` group holds `zarr==3.4.0` and `eegprep-lean[zarr]` at a commit of sccn/eegprep (the head of sccn/eegprep#616, unmerged, at 14ba46e8da5340cd7ae6adb644cda24fb3f5e483).
   The pin must move to the merge commit, or to the release, when that pull request merges: the head commit is on a branch that can be deleted or rewritten, and nothing else keeps it reachable.
   `scripts/validate_signaljourney.py FILE` checks a file against the vendored schema (exit 0 when valid, 1 with the validator's messages).
 
-The tests: `tests/recipes/test_floor_zarr_args.py` (arguments, attestation), `test_floor_zarr.py` (a local stand-in for the serving copy: real Zarr stores over real HTTP, redirecting from the Zarr host to the data host the way production does, with the one function that touches the network, `fetch_https`, answered by it), `test_floor_zarr_hosts.py` (the network rule and the index checks), `test_floor_zarr_pairs.py` (the host pairs), and `test_floor_zarr_network.py`, which reads the public serving copy of the demo dataset and runs only with `-m network`:
+The tests: `tests/recipes/test_floor_input_zarr_args.py` (arguments, the input option, the old name, attestation), `test_floor_input_zarr.py` (a local stand-in for the serving copy: real Zarr stores over real HTTP, redirecting from the Zarr host to the data host the way production does, with the one function that touches the network, `fetch_https`, answered by it), `test_floor_input_zarr_hosts.py` (the network rule and the index checks), `test_floor_input_zarr_pairs.py` (the host pairs), and `test_floor_input_zarr_network.py`, which reads the public serving copy of the demo dataset and runs only with `-m network`:
 
 ```bash
-uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_zarr_network.py -m network -q
+uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_input_zarr_network.py -m network -q
 ```
 
 ## Known limits
