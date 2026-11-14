@@ -140,8 +140,8 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
   The launcher's `finally` removes the container without a log line of its own.
   After the run it reads `State.OOMKilled`, then removes the container and its anonymous volumes with `rm --force --volumes`, whatever happened to the engine's client process: killing a client does not stop its container.
   Docker is given `--log-driver=none`, so the daemon keeps no copy of the job's standard output for a stopped container that waits for that sweep; the attached `run` still streams the output to the launcher, and the `State.OOMKilled` read is unaffected (the end-to-end test checks both).
-  A SIGKILL of the launcher itself leaves a rootful container running, outside the job's own control group, until something removes it; the label is how.
-  On Linux the kernel sends the engine's client a SIGTERM at that moment, which the client passes on, but nothing follows it with a SIGKILL, so a container whose entry does not stop on SIGTERM stays too.
+  A SIGKILL of the launcher itself can leave a rootful container running, outside the job's own control group, until something removes it; the label is how.
+  On Linux the kernel sends the engine's client a SIGTERM at that moment, which the client passes on, so only a container whose entry does not stop on SIGTERM stays (nothing follows the SIGTERM with a SIGKILL).
   The runner's start sweep removes containers by both labels (a container of its own, `nemar.runner`, whose job, `nemar.job`, is no longer running), so one runner never removes another's containers on a shared daemon.
 - An exit status of 137 is `out_of_memory` only when `OOMKilled` is true.
   When the engine says it is not (a SIGKILL of the entry's own, an operator), it is the ordinary `runtime_error` with detail `entry_failed`, the entry's exit code recorded as 137.
@@ -370,7 +370,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
   Where the call does not exist (another system, no `ctypes`) or the kernel refuses it, the log says `pdeathsig_unavailable` once and the container starts without it.
   What the tests prove is that the child gets the signal when the launcher is killed, with the stand-in runtimes, in which the child is the entry itself; what a real runtime then does with it is checked in the staging drills, not by this repository's tests.
   Two residuals are known.
-  With a setuid-mode Apptainer install the starter is a set-user-ID binary, and `prctl(2)` clears the parent-death signal on exec of such a binary, so those containers are orphaned as before.
+  With a setuid-mode Apptainer install the starter is a set-user-ID binary, and `prctl(2)` clears the parent-death signal on exec of such a binary, so those containers are orphaned as before (the general rule, which covers an engine installed through a set-user-ID helper too, is in [When the runner dies](runner.md#when-the-runner-dies)).
   Under Docker and Podman the signal is a SIGTERM, and nothing follows it with a SIGKILL once the launcher is gone, so an entry that is PID 1 of its container with no handler for SIGTERM stays running until the runner removes the container (at the job's end or at the runner's next start).
   The guarantee where the signal is unavailable is the one of [When the runner dies](runner.md#when-the-runner-dies).
 - Exit status 255 is `entry_failed` like any other non-zero status, and is charged: the runtime's own fatal exit and an entry that exits 255 (or `-1`) cannot be told apart once user code could have run, and refunding it would let any entry refund itself. `runtime_unusable` is only for a runtime binary that cannot be started and for a preflight that failed, both before any user code.
