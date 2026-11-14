@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nemar_process.common import files, naming
+from nemar_process.common import build, files, naming
 from nemar_process.common import plan as plans
 from nemar_process.common.determinism import canonical_json, rounded, utc_now
 from nemar_process.common.errors import TIME_BUDGET
@@ -131,6 +131,16 @@ def _processing_steps(
     return steps
 
 
+def provenance() -> tuple[dict[str, Any], str | None]:
+    """What ``extensions.nemar`` says about the build: its ``process`` block and the image's tag.
+
+    Read from the image's build file (``common/build.py``), so the version, the commit and the tag
+    are the image's own and never an argument a caller can give.
+    """
+    info = build.build_info()
+    return dict(info), build.image_tag(info)
+
+
 def build_recording_record(
     recipe: RecipeInfo,
     plan: plans.Plan,
@@ -149,6 +159,7 @@ def build_recording_record(
     one the record already has is refused.
     """
     identity = context.identity
+    process, tag = provenance()
     record = {
         "sj_version": SJ_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -178,7 +189,8 @@ def build_recording_record(
                 },
                 "inputs": inputs,
                 "engine": context.engine,
-                "image": {"digest": identity.image_digest},
+                "process": process,
+                "image": {"digest": identity.image_digest, "tag": tag},
                 "seeds": context.seeds,
                 "rules": plan.rules,
                 "skipped_steps": plan.skipped,
@@ -416,12 +428,16 @@ def build_dataset_record(
     started_utc: str,
     finished_utc: str,
     nemar_extra: Mapping[str, Any] | None = None,
+    built_by: tuple[dict[str, Any] | None, str | None] | None = None,
 ) -> dict[str, Any]:
     """The dataset-level record: counts, distributions, plan variants, the report envelope, rows.
 
     ``rows`` are the typed rows of the recordings table; ``table_info`` is the table file's
     ``location``, ``sha256`` and ``size``. The record is at most 256 KB: rows are added in path order
     while it stays within the budget and the rest are counted in ``rows_truncated``.
+
+    ``built_by`` is the ``process`` block and the image tag of the run that made the rows, when
+    that was not this process (the aggregate); None means this process made them.
     """
     identity = context.identity
     counts = {"discovered": len(rows)}
@@ -457,6 +473,7 @@ def build_dataset_record(
         "records_truncated": len(problems) - len(listed),
     }
     cells = [_row_cells(recipe, row) for row in rows]
+    process, tag = provenance() if built_by is None else built_by
     nemar: dict[str, Any] = {
         "profile": "dataset",
         "recipe": {"id": recipe.id, "version": recipe.version},
@@ -466,7 +483,8 @@ def build_dataset_record(
             "source_commit": identity.source_commit,
         },
         "engine": context.engine,
-        "image": {"digest": identity.image_digest},
+        "process": process,
+        "image": {"digest": identity.image_digest, "tag": tag},
         "seeds": context.seeds,
         "counts": counts,
         "plan_hashes": dict(sorted(hashes.items())),

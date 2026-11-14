@@ -196,7 +196,7 @@ def test_the_record_names_the_pipeline_and_the_run(record, nemar):
         "source_commit": "0123456789abcdef0123456789abcdef01234567",
     }
     assert nemar["recording"] == {"path": RECORDING, "datatype": "eeg", "format": "edf"}
-    assert nemar["image"] == {"digest": "sha256:" + "b" * 64}
+    assert nemar["image"] == {"digest": "sha256:" + "b" * 64, "tag": None}
     assert nemar["seeds"] == {"clean_channels.ransac": 5489}
     assert nemar["run_id"] == "run-under-test"
     assert nemar["rules"] == ["signal-channels-typed", "locations-usable"]

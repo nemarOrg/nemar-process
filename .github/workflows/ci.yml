@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: ["main", "feature/**"]
+    branches: ["main", "dev", "feature/**"]
   pull_request:
 
 permissions:
@@ -37,6 +37,23 @@ jobs:
       - run: uv run ty check
       # The launcher and the observer must stay on the Python 3.9 floor.
       - run: uv run ty check --python-version 3.9 launcher observer
+
+  actionlint:
+    # Every workflow in the repository, including the release workflows (docs/release.md), which the
+    # `images` job's tests do not read.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+      - run: actionlint -color=false .github/workflows/*.yml
 
   launcher:
     name: launcher (python ${{ matrix.python }})
