@@ -377,12 +377,14 @@ def finalize(
     context: RunContext,
     ignored: dict[str, int],
     started_utc: str,
+    built_by: tuple[dict[str, Any] | None, str | None] | None = None,
 ) -> tuple[dict[str, Any], int, int]:
     """Build and write the dataset record from the table in ``out``.
 
     Returns the record, how many of the recordings in the table were skipped for their format, and
     how many were left out by the time budget, which with the counts in the record tell the exit
-    code apart (``exit_for``).
+    code apart (``exit_for``). ``built_by`` is the build of the rows when they were made elsewhere
+    (the aggregate); a run states its own.
     """
     label = recipe.label
     table_path = out / naming.dataset_path(label, "recordings", "tsv")
@@ -397,6 +399,7 @@ def finalize(
         started_utc=started_utc,
         finished_utc=determinism.utc_now(),
         nemar_extra=recipe.dataset_extras(context),
+        built_by=built_by,
     )
     problems = records.check(record, context.validator)
     if problems:
@@ -763,10 +766,20 @@ class ProductInput:
     dataset_version: str | None
     source_commit: str | None
     image_digest: str | None
+    image_tag: str | None
+    process: dict[str, Any] | None  # the nemar-process build; None for a record that predates it
     recipe: dict[str, Any]
     engine: dict[str, Any]
     seeds: dict[str, Any]
     files: dict[str, Path]  # relative path -> where it is; neither the table nor the record
+
+
+def process_of(nemar: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The ``process`` block of a dataset record; None where the record has none."""
+    process = nemar.get("process")
+    if process is not None and not isinstance(process, dict):
+        raise ValueError("a process block is an object")
+    return process
 
 
 def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: str) -> ProductInput:
@@ -800,6 +813,8 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
             dataset_version=dataset["version"],
             source_commit=dataset["source_commit"],
             image_digest=nemar["image"]["digest"],
+            image_tag=nemar["image"].get("tag"),
+            process=process_of(nemar),
             recipe={"id": nemar["recipe"]["id"], "version": nemar["recipe"]["version"]},
             engine=engine,
             seeds=dict(nemar["seeds"]),
@@ -904,6 +919,12 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
             )
         engine = shared("engine", [item.engine for item in inputs])
         seeds = shared("seeds", [item.seeds for item in inputs])
+        # the merged rows were made by the inputs' build, never by the one that merges them: a dev
+        # build's rows are not recorded as a release's because a release image ran the merge
+        built_by = (
+            shared("nemar-process build", [item.process for item in inputs]),
+            shared("image tag", [item.image_tag for item in inputs]),
+        )
     except InputUnusable as error:
         print(error, file=sys.stderr)
         return EXIT_DATASET_UNREADABLE
@@ -940,7 +961,7 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 for path in sorted(merged):
                     writer.append(merged[path])
             record, unsupported, unfinished = finalize(
-                recipe, staging, context, dict(sorted(ignored.items())), started
+                recipe, staging, context, dict(sorted(ignored.items())), started, built_by
             )
             files.move_into_place(staging, out, [*sorted(targets), table_name, record_name])
     except InputUnusable as error:
