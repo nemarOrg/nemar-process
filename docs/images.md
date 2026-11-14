@@ -132,6 +132,8 @@ A manual dispatch runs it from `main` only, with the version as an input; it att
 A version is published once: a second run for the same version stops at the existing `<version>-cpu` tag.
 The version is the tag or the input, and the `publish` job refuses it unless it is also the `[project].version` of `pyproject.toml` at the built commit, has no `-devN` suffix, and the git tag `v<version>` exists and points at that commit.
 The image tag, the git tag and the version every record names are therefore one version.
+At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0.
+No image can pass the version step until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
 To publish image `X.Y.Z` after `main` has moved past `vX.Y.Z`, push the tag `image-nemar-python-vX.Y.Z` on the `vX.Y.Z` commit (a dispatch from `main` would build the newer commit and be refused).
 The tag trigger, the "not on `main`" guard, the signing identity and the job permissions are unchanged by this check, so existing signatures stay valid: the identity names the workflow path and the ref, not the file's content.
 
@@ -145,7 +147,7 @@ No text in a reply is searched, so an error that merely contains "404", "unknown
 
 The image is built with three build arguments: `NEMAR_PROCESS_VERSION`, `NEMAR_PROCESS_COMMIT` and `NEMAR_PROCESS_BUILD`.
 They are written at build time into `/opt/nemar/build.json` (by `python -m nemar_process.common.build write`, as root, into a directory the job's user cannot change) and mirrored as labels.
-Only the `publish` job passes `release`; the `test` job passes `dev`, with the `pyproject.toml` version (a release version gets the suffix `-dev0`) and the checked-out commit.
+Only the `publish` job passes `release`; the `test` job passes `dev`, with the `pyproject.toml` version (a release version gets the suffix `-dev0`, and a version that is neither a release nor a dev version is refused) and the checked-out commit.
 The defaults are an empty version, an empty commit and `dev`, so a plain `docker build` without the version and commit is refused rather than named.
 The writer, and the reader (`nemar_process.common.build.build_info`), refuse a `release` whose version has a `-devN` suffix, a `dev` whose version has none, a commit that is not 40 lowercase hexadecimal digits, and any `build` other than `release` or `dev`.
 Outside an image there is no file and the run is a `source` run: the `pyproject.toml` version beside the package and no commit.
@@ -188,6 +190,7 @@ The first image is published from `main` (a manual dispatch, or a version tag on
 
 ## What is not verified
 
+- **The git tag the version step needs does not exist yet.** At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0, so the `publish` job refuses every version until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
 - **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.

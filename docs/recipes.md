@@ -284,8 +284,10 @@ Both records state the nemar-process build that made them, in `extensions.nemar`
 - the recipe's id and version (also `pipelineInfo.name` and `pipelineInfo.version`) and the engine versions, now including `torch` and `pamica` when installed.
 
 The image carries `/opt/nemar/build.json`; `nemar_process.common.build.build_info()` reads it with no network call, refuses a file that contradicts itself (a `release` with a `-devN` version, a `dev` without one), and never takes an unreadable file for a source run.
-A refusal ends the run before anything is written (exit 1, the message `engine_extra refused: BuildRefused`, the engine stamp being where the file is first read).
+A refusal ends the run before anything is written (exit 1, with the message `the build file was refused: ` and the part that is wrong, never a path or a value; the engine stamp is where the file is first read).
+A symbolic link at the build path, or a file that is not UTF-8 text, is refused the same way; a project file that is not nemar-process's is not read for the source version.
 `aggregate` runs no step, so it states the build of its inputs, which must agree, and not the build that merges them; a record that predates the block merges as a null `process`.
+Every input's `process` block and `image.tag` are checked by the rules the writer and the reader apply (a release is `X.Y.Z`, a dev build `X.Y.Z-devN`, the tag of a release is `<version>-cpu` and any other build has none, a source block has no commit and no tag), and an input that fails is refused by its position (`input 2 states a build that is not one`, exit 6) before anything is merged.
 `tests/recipes/test_provenance_contract.py` runs every registered recipe on the repository's fixtures and checks both documents.
 
 ### The resolved plan and `plan_hash`

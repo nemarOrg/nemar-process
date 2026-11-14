@@ -40,9 +40,15 @@ def tag(world: World, name: str, sha: str) -> None:
     world.git("push", "-q", "origin", f"refs/tags/{name}", cwd=work)
 
 
-def publish(world: World, sha: str, *, via: str, version: str):
-    """The publish job's two steps at `sha`, started by an image tag or by a dispatch."""
+def publish(world: World, sha: str, *, via: str, version: str, local_branch: str | None = None):
+    """The publish job's two steps at `sha`, started by an image tag or by a dispatch.
+
+    `local_branch` makes a local branch of that name at `sha` in the clone first, as a checkout
+    that has one would.
+    """
     work = world.clone(detach=sha)
+    if local_branch is not None:
+        world.git("branch", local_branch, sha, cwd=work)
     if via == "tag":
         context = {
             "github.ref_type": "tag",
@@ -122,10 +128,10 @@ def test_a_dev_version_cannot_be_asked_for(released):
 def test_a_branch_of_the_same_name_as_the_tag_does_not_stand_in_for_it(tmp_path):
     world = World(tmp_path)
     sha = world.commit("main", version="1.2.3", text="the release\n")
-    other = world.clone()
-    world.git("push", "-q", "origin", f"{sha}:refs/heads/v1.2.3", cwd=other)
-    outcome = publish(world, sha, via="dispatch", version="1.2.3")
+    # the branch is local to the clone, so a bare `v1.2.3` resolves to it and to nothing else
+    outcome = publish(world, sha, via="dispatch", version="1.2.3", local_branch="v1.2.3")
     assert refused_at(outcome, VERSION)
+    assert "the git tag v1.2.3 must exist and point at" in outcome.log
 
 
 def test_a_commit_that_is_not_on_main_is_still_refused_before_the_version_is_read(tmp_path):

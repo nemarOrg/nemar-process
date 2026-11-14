@@ -40,7 +40,8 @@ WORKDIR /build
 COPY pyproject.toml uv.lock .python-version ./
 
 # When the build is given the lock's hash it must be the hash of the lock that was copied; without
-# one the check is skipped (a plain `docker build` still works) and the label says "unverified".
+# one the check is skipped and the label says "unverified". The build still has to name itself: a
+# build without the version and the commit is refused further down, in the final stage.
 ARG LOCK_SHA256=unverified
 RUN if [ "$LOCK_SHA256" != "unverified" ]; then echo "$LOCK_SHA256  uv.lock" | sha256sum --check --strict -; fi
 

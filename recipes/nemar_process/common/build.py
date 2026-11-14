@@ -35,6 +35,8 @@ PYPROJECT = Path(__file__).resolve().parents[3] / "pyproject.toml"
 
 # What an image can be: the file never says ``source``, which is the absence of a file.
 IMAGE_BUILDS = ("release", "dev")
+# The project the source version is read from: another project's pyproject.toml is not ours.
+PROJECT_NAME = "nemar-process"
 KEYS = ("version", "commit", "build")
 RELEASE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 DEV_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-dev[0-9]+")
@@ -66,11 +68,18 @@ def check(version: Any, commit: Any, build: Any) -> dict[str, str]:
 
 
 def project_version(path: Path | None = None) -> str | None:
-    """``[project].version`` of the working tree's ``pyproject.toml``; None where there is none."""
+    """``[project].version`` of the working tree's ``pyproject.toml``; None where there is none.
+
+    None too where the file is another project's (a package copied somewhere else would otherwise
+    record the version of whatever project happens to sit three directories up).
+    """
     try:
         document = tomllib.loads((path or PYPROJECT).read_text(encoding="utf-8"))
+        name = document["project"]["name"]
         version = document["project"]["version"]
     except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if name != PROJECT_NAME:
         return None
     return version if isinstance(version, str) else None
 
@@ -78,14 +87,20 @@ def project_version(path: Path | None = None) -> str | None:
 def build_info(path: Path | None = None) -> dict[str, str | None]:
     """The build this process runs in: ``{"version", "commit", "build"}``.
 
-    A missing file is a source run. A file that is there must be exactly the three fields, valid and
-    consistent, or ``BuildRefused``. Reads one local file; never touches the network.
+    Nothing at the path is a source run. Anything there must be a regular file holding exactly the
+    three fields, valid and consistent, or ``BuildRefused``: a symbolic link (dangling or not) is
+    refused, never taken for an absent file, and so is text that is not UTF-8. Reads one local file;
+    never touches the network.
     """
     target = BUILD_FILE if path is None else path
+    if not os.path.lexists(target):
+        return {"version": project_version(), "commit": None, "build": "source"}
+    if target.is_symlink():
+        raise BuildRefused("the build file is a symbolic link")
     try:
         text = target.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {"version": project_version(), "commit": None, "build": "source"}
+    except UnicodeDecodeError as error:
+        raise BuildRefused("the build file is not UTF-8 text") from error
     except OSError as error:
         raise BuildRefused(
             "the build file cannot be read ({})".format(type(error).__name__)
@@ -97,6 +112,32 @@ def build_info(path: Path | None = None) -> dict[str, str | None]:
     if not isinstance(document, dict) or sorted(document) != sorted(KEYS):
         raise BuildRefused("the build file has exactly the keys {}".format(", ".join(KEYS)))
     return dict(check(document["version"], document["commit"], document["build"]))
+
+
+def check_recorded(process: Any, tag: Any) -> None:
+    """Refuse a ``process`` block and image tag, read from a record, that no run could have written.
+
+    The aggregate states the build of the rows it merges, so what it copies is checked by the rules
+    the writer and the reader apply: a ``release`` or ``dev`` block passes ``check`` (a release is
+    ``X.Y.Z`` and a dev build ``X.Y.Z-devN``, with a commit) and its tag is exactly ``image_tag``; a
+    ``source`` block has the three keys, no commit and no tag; a record that predates the block
+    (``process`` None) has no tag either. Raises ``BuildRefused``, whose message holds no value.
+    """
+    if process is None:
+        if tag is not None:
+            raise BuildRefused("an image tag without a build")
+        return
+    if not isinstance(process, dict) or sorted(process) != sorted(KEYS):
+        raise BuildRefused("the build has exactly the keys {}".format(", ".join(KEYS)))
+    if process["build"] == "source":
+        version = process["version"]
+        if process["commit"] is not None or not (version is None or isinstance(version, str)):
+            raise BuildRefused("a source build has a text version or none, and no commit")
+        expected = None
+    else:
+        expected = image_tag(check(process["version"], process["commit"], process["build"]))
+    if tag != expected:
+        raise BuildRefused("the image tag is not the one this build was published under")
 
 
 def image_tag(info: Mapping[str, Any]) -> str | None:

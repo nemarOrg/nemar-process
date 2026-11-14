@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import io as stdlib_io
 import json
+import shutil
 import socket
 import subprocess
 import sys
@@ -109,6 +110,43 @@ def test_a_file_that_cannot_be_read_is_refused_and_never_taken_for_a_source_run(
 def test_a_directory_in_place_of_the_file_is_refused(tmp_path):
     with pytest.raises(build.BuildRefused):
         build.build_info(tmp_path)
+
+
+def test_a_build_file_that_is_not_utf8_text_is_refused_by_name_not_by_a_raw_decode_error(tmp_path):
+    path = tmp_path / "build.json"
+    path.write_bytes(b'\xff\xfe{"version": "1.2.3"}')
+    with pytest.raises(build.BuildRefused, match="UTF-8"):
+        build.build_info(path)
+
+
+def test_a_dangling_symbolic_link_at_the_build_path_is_refused_not_taken_for_a_source_run(tmp_path):
+    path = tmp_path / "build.json"
+    path.symlink_to(tmp_path / "nowhere.json")
+    with pytest.raises(build.BuildRefused, match="symbolic link"):
+        build.build_info(path)
+
+
+def test_a_symbolic_link_to_a_valid_build_file_is_refused_too(tmp_path):
+    target = write(tmp_path / "real.json")
+    path = tmp_path / "build.json"
+    path.symlink_to(target)
+    with pytest.raises(build.BuildRefused, match="symbolic link"):
+        build.build_info(path)
+
+
+def test_a_project_file_of_another_name_gives_no_source_version(tmp_path, monkeypatch):
+    other = tmp_path / "pyproject.toml"
+    other.write_text('[project]\nname = "another-project"\nversion = "9.9.9"\n', encoding="utf-8")
+    ours = tmp_path / "ours.toml"
+    ours.write_text('[project]\nname = "nemar-process"\nversion = "3.4.5"\n', encoding="utf-8")
+    assert build.project_version(other) is None
+    assert build.project_version(ours) == "3.4.5"
+    monkeypatch.setattr(build, "PYPROJECT", other)
+    assert build.build_info(tmp_path / "absent.json") == {
+        "version": None,
+        "commit": None,
+        "build": "source",
+    }
 
 
 def test_reading_the_build_makes_no_network_call(tmp_path, monkeypatch):
@@ -410,3 +448,122 @@ def test_chunks_made_by_different_builds_are_not_merged(multi, cli, tmp_path, mo
     assert code == 6
     assert "the inputs disagree about the nemar-process build" in err
     assert not out.exists()
+
+
+# ---- the aggregate refuses a build no run could have written ----------------------------------
+
+
+@pytest.fixture(scope="module")
+def chunks(multi, tmp_path_factory):
+    """Two chunks made under a dev build and two under a release: (kind, chunk) to directory."""
+    base = tmp_path_factory.mktemp("honest")
+    made = {}
+    patch = pytest.MonkeyPatch()
+    try:
+        for kind, fields in (("dev", {"version": "1.2.4-dev2", "build": "dev"}), ("release", {})):
+            patch.setattr(build, "BUILD_FILE", write(base / (kind + ".json"), **fields))
+            for key, recording in (("a", CHUNK_A), ("b", CHUNK_B)):
+                out = base / "{}-{}".format(kind, key)
+                arguments = ["run", "nemar-floor", "--dataset-dir", str(multi), "--out", str(out)]
+                arguments += [*IDENTITY, "--recording", recording]
+                with contextlib.redirect_stdout(stdlib_io.StringIO()):
+                    assert cli.main(arguments) == 0
+                made[kind, key] = out
+    finally:
+        patch.undo()
+    return made
+
+
+def edited(source: Path, destination: Path, change) -> Path:
+    """A copy of a product directory whose dataset record `change` has edited (`extensions.nemar`)."""
+    shutil.copytree(source, destination)
+    path = destination / MERGED
+    record = json.loads(path.read_text("utf-8"))
+    change(record["extensions"]["nemar"])
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return destination
+
+
+def set_process(**fields):
+    return lambda nemar: nemar["process"].update(fields)
+
+
+SOURCE = {"version": "0.1.0", "commit": None, "build": "source"}
+FORGED = {
+    "a release block with a dev version, and a tag nobody published": (
+        "dev",
+        lambda nemar: (
+            nemar["process"].update(build="release"),
+            nemar["image"].update(tag="9.9.9-cpu"),
+        ),
+    ),
+    "a release block with a dev version": ("dev", set_process(build="release")),
+    "a dev block without a dev suffix": ("dev", set_process(version="1.2.4")),
+    "a release block with a short commit": ("release", set_process(commit="abc")),
+    "a release block with an unknown build word": ("release", set_process(build="prod")),
+    "a tag that is not the release's": (
+        "release",
+        lambda nemar: nemar["image"].update(tag="9.9.9-cpu"),
+    ),
+    "a release without its tag": ("release", lambda nemar: nemar["image"].update(tag=None)),
+    "a tag on a dev build": ("dev", lambda nemar: nemar["image"].update(tag="1.2.4-dev2-cpu")),
+    "a source block with an extra field": (
+        "dev",
+        lambda nemar: nemar.update(process={**SOURCE, "extra": "x"}),
+    ),
+    "a source block with a commit": (
+        "dev",
+        lambda nemar: nemar.update(process={**SOURCE, "commit": COMMIT}),
+    ),
+    "a source block with a tag": (
+        "dev",
+        lambda nemar: (nemar.update(process=dict(SOURCE)), nemar["image"].update(tag="0.1.0-cpu")),
+    ),
+    "a tag without a build": (
+        "dev",
+        lambda nemar: (nemar.pop("process"), nemar["image"].update(tag="1.2.4-dev2-cpu")),
+    ),
+    "a build that is not an object": ("dev", lambda nemar: nemar.update(process="release")),
+}
+
+
+@pytest.mark.parametrize("position", [1, 2])
+@pytest.mark.parametrize("forged", sorted(FORGED))
+def test_a_chunk_that_states_a_build_no_run_could_have_written_is_refused_by_position(
+    chunks, cli, tmp_path, forged, position
+):
+    kind, change = FORGED[forged]
+    honest = [chunks[kind, "a"], chunks[kind, "b"]]
+    honest[position - 1] = edited(honest[position - 1], tmp_path / "forged", change)
+    out = tmp_path / "merged"
+    code, _, err = merge(cli, out, *honest)
+    assert code == 6, err
+    assert "input {} states a build that is not one".format(position) in err
+    for leaked in ("9.9.9", "1.2.4", str(tmp_path)):
+        assert leaked not in err
+    assert not out.exists()
+
+
+def test_honest_chunks_of_one_build_still_merge_after_the_check(chunks, cli, tmp_path):
+    same = [edited(chunks["dev", key], tmp_path / key, lambda nemar: None) for key in ("a", "b")]
+    out = tmp_path / "merged"
+    code, _, err = merge(cli, out, *same)
+    assert code == 0, err
+    nemar = json.loads((out / MERGED).read_text("utf-8"))["extensions"]["nemar"]
+    assert nemar["process"] == {"version": "1.2.4-dev2", "commit": COMMIT, "build": "dev"}
+    assert nemar["image"]["tag"] is None
+
+
+def test_a_contradicting_build_file_is_named_and_is_not_called_an_engine_extra(
+    cli, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        build, "BUILD_FILE", write(tmp_path / "build.json", version="1.2.3-dev1", build="release")
+    )
+    out = tmp_path / "product"
+    code, _, err = cli("run", "nemar-floor", "--dataset-dir", DATASET, "--out", out, *IDENTITY)
+    assert code == 1
+    assert err.strip() == "the build file was refused: the version of a release build is X.Y.Z"
+    assert "engine_extra" not in err
+    assert "1.2.3-dev1" not in err
+    assert str(tmp_path) not in err

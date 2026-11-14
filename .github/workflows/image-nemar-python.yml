@@ -78,7 +78,8 @@ jobs:
         run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # The image built here is never published, so it is a dev build whatever the version file says:
-      # a release version gets the suffix -dev0, and the test below reads it from a record.
+      # a release version gets the suffix -dev0, one already ending in -devN is kept, anything else is
+      # refused here (the Dockerfile would refuse it too), and the test below reads it from a record.
       - name: Name the dev build
         id: devbuild
         run: |
@@ -88,6 +89,10 @@ jobs:
             *-dev[0-9]*) version="$base" ;;
             *) version="${base}-dev0" ;;
           esac
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev[0-9]+$ ]]; then
+            echo "::error::pyproject.toml has a version that is neither X.Y.Z nor X.Y.Z-devN"
+            exit 1
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Build the image (nothing is pushed)
