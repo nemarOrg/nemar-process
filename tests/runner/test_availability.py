@@ -70,20 +70,37 @@ class Proc:
         self._put("loadavg", "{:.2f} 0.10 0.10 1/200 4242\n".format(load))
 
 
-def settings(**changes) -> Availability:
-    values = {
-        "enabled": True,
-        "reserve_memory_mb": RESERVE_MB,
-        "claim_memory_mb": CLAIM_MB,
-        "reservation_dirs": (),
-    }
-    values.update(changes)
-    return Availability(**values)  # type: ignore[arg-type]
+def settings(
+    enabled: bool = True,
+    max_load_per_core: float = 0.9,
+    reserve_memory_mb: int | None = RESERVE_MB,
+    claim_memory_mb: int | None = CLAIM_MB,
+    backoff_seconds: float = 1800.0,
+    reservation_dirs: tuple[str, ...] = (),
+) -> Availability:
+    return Availability(
+        enabled=enabled,
+        max_load_per_core=max_load_per_core,
+        reserve_memory_mb=reserve_memory_mb,
+        claim_memory_mb=claim_memory_mb,
+        backoff_seconds=backoff_seconds,
+        reservation_dirs=reservation_dirs,
+    )
 
 
-def new_rig(tmp_path, launcher) -> Rig:
+DEFAULTS = Availability()
+
+
+class HostRig(Rig):
+    """A rig with a `/proc`-style directory the test rewrites and a reservation directory."""
+
+    proc: Proc
+    reservations: Path
+
+
+def new_rig(tmp_path, launcher) -> HostRig:
     """A rig with an image, a `/proc`-style directory with room, and a reservation directory."""
-    made = Rig(tmp_path, launcher=launcher)
+    made = HostRig(tmp_path, launcher=launcher)
     made.sif_root.mkdir()
     (made.sif_root / SIF).write_bytes(b"sif")
     made.proc = Proc(tmp_path / "proc")
@@ -109,23 +126,45 @@ def prepared(rig, availability_settings=None, **tuning):
     return rig.agent(tuning=rig.tuning, config=config)
 
 
-def gate_for(tmp_path, proc, **changes) -> availability.Gate:
-    """A gate over a root and a `/proc`-style directory, with no runner around it."""
-    root = tmp_path / "gate-root"
+def build_gate(
+    root: Path,
+    proc_root: str,
+    availability_settings: Availability = DEFAULTS,
+    max_scratch_gb: int = 1,
+    default_job_memory_mb: int | None = None,
+) -> availability.Gate:
+    """A gate over a root and a directory in `/proc`'s format, with no runner around it."""
     root.mkdir(exist_ok=True)
-    values = {
-        "api_base": "http://127.0.0.1:1",
-        "secret_file": "/x",
-        "root": str(root),
-        "sif_root": "/x",
-        "runtime": "apptainer",
-        "slots": 1,
-        "arch": "amd64",
-        "max_scratch_gb": 1,
-        "launcher_dir": "/x",
-    }
-    values.update(changes)
-    return availability.Gate(Config(**values), Tuning(proc_root=str(proc.dir)))  # type: ignore[arg-type]
+    config = Config(
+        api_base="http://127.0.0.1:1",
+        secret_file="/x",
+        root=str(root),
+        sif_root="/x",
+        runtime="apptainer",
+        slots=1,
+        arch="amd64",
+        max_scratch_gb=max_scratch_gb,
+        launcher_dir="/x",
+        default_job_memory_mb=default_job_memory_mb,
+        availability=availability_settings,
+    )
+    return availability.Gate(config, Tuning(proc_root=proc_root))
+
+
+def gate_for(
+    tmp_path: Path,
+    proc: Proc,
+    availability_settings: Availability = DEFAULTS,
+    max_scratch_gb: int = 1,
+    default_job_memory_mb: int | None = None,
+) -> availability.Gate:
+    return build_gate(
+        tmp_path / "gate-root",
+        str(proc.dir),
+        availability_settings,
+        max_scratch_gb,
+        default_job_memory_mb,
+    )
 
 
 # ---- the readings -------------------------------------------------------------------------------------------
@@ -220,7 +259,7 @@ def test_the_cpus_are_the_ones_this_process_may_run_on():
 
 def test_memory_must_leave_the_reserve_and_the_claim_exactly(tmp_path):
     proc = Proc(tmp_path / "proc")
-    gate = gate_for(tmp_path, proc, availability=settings())
+    gate = gate_for(tmp_path, proc, availability_settings=settings())
     proc.set(available_mb=RESERVE_MB + CLAIM_MB)
     assert gate.claim_check().reason is None
     proc.set(available_mb=RESERVE_MB + CLAIM_MB - 1)
@@ -233,7 +272,10 @@ def test_memory_must_leave_the_reserve_and_the_claim_exactly(tmp_path):
 def test_the_reserve_is_a_tenth_of_the_memory_and_never_under_8_gib(tmp_path):
     proc = Proc(tmp_path / "proc")
     gate = gate_for(
-        tmp_path, proc, availability=Availability(claim_memory_mb=CLAIM_MB), max_scratch_gb=1
+        tmp_path,
+        proc,
+        availability_settings=Availability(claim_memory_mb=CLAIM_MB),
+        max_scratch_gb=1,
     )
     proc.set(total_mb=16384, available_mb=8192 + CLAIM_MB)  # a tenth is 1.6 GiB: 8 GiB it is
     assert gate.claim_check().reason is None
@@ -249,7 +291,10 @@ def test_the_reserve_is_a_tenth_of_the_memory_and_never_under_8_gib(tmp_path):
 def test_the_claim_size_is_the_setting_then_the_default_job_memory_then_4096(tmp_path):
     proc = Proc(tmp_path / "proc")
     both = gate_for(
-        tmp_path, proc, availability=Availability(claim_memory_mb=3000), default_job_memory_mb=999
+        tmp_path,
+        proc,
+        availability_settings=Availability(claim_memory_mb=3000),
+        default_job_memory_mb=999,
     )
     assert both.claim_memory_mb() == 3000
     assert gate_for(tmp_path, proc, default_job_memory_mb=999).claim_memory_mb() == 999
@@ -258,7 +303,7 @@ def test_the_claim_size_is_the_setting_then_the_default_job_memory_then_4096(tmp
 
 def test_load_is_per_cpu_and_the_limit_itself_is_allowed(tmp_path):
     proc = Proc(tmp_path / "proc")
-    gate = gate_for(tmp_path, proc, availability=settings(max_load_per_core=1.0))
+    gate = gate_for(tmp_path, proc, availability_settings=settings(max_load_per_core=1.0))
     proc.set(load=0.5 * CPUS)
     assert gate.claim_check().reason is None
     proc.set(load=1.0 * CPUS)
@@ -273,7 +318,7 @@ def test_load_is_per_cpu_and_the_limit_itself_is_allowed(tmp_path):
 
 def test_a_reading_that_cannot_be_taken_counts_as_busy(tmp_path):
     proc = Proc(tmp_path / "proc")
-    gate = gate_for(tmp_path, proc, availability=settings())
+    gate = gate_for(tmp_path, proc, availability_settings=settings())
     (proc.dir / "meminfo").write_text("MemTotal: 1024 kB\n")  # no MemAvailable
     assert gate.claim_check().reason == "memory_unknown"
     proc.set()
@@ -292,7 +337,7 @@ def test_scratch_is_always_checked_and_comes_before_memory_and_load(tmp_path):
         gate = gate_for(
             tmp_path,
             proc,
-            availability=settings(enabled=enabled),
+            availability_settings=settings(enabled=enabled),
             max_scratch_gb=1_000_000,  # a petabyte of free space is never there
         )
         assert gate.claim_check().reason == "scratch"
@@ -305,7 +350,9 @@ def test_a_disabled_check_keeps_only_the_scratch_rule(tmp_path):
     (pause_dir / "pause").write_text("")
     proc.set(available_mb=1, load=999.0)
     gate = gate_for(
-        tmp_path, proc, availability=settings(enabled=False, reservation_dirs=(str(pause_dir),))
+        tmp_path,
+        proc,
+        availability_settings=settings(enabled=False, reservation_dirs=(str(pause_dir),)),
     )
     gate.start_backoff()
     assert gate.claim_check().reason is None  # no memory, load, pause or backoff rule
@@ -320,19 +367,7 @@ def test_thresholds_set_from_the_real_readings_decide_idle_and_busy(tmp_path):
     assert available is not None
 
     def real_gate(**changes):
-        base = {
-            "api_base": "http://127.0.0.1:1",
-            "secret_file": "/x",
-            "root": str(root),
-            "sif_root": "/x",
-            "runtime": "apptainer",
-            "slots": 1,
-            "arch": "amd64",
-            "max_scratch_gb": 1,
-            "launcher_dir": "/x",
-        }
-        base["availability"] = Availability(**changes)
-        return availability.Gate(Config(**base), Tuning())  # type: ignore[arg-type]
+        return build_gate(root, "/proc", Availability(**changes))
 
     # a reserve of nothing, a claim of one megabyte and a load limit no host reaches: room
     room = real_gate(reserve_memory_mb=0, claim_memory_mb=1, max_load_per_core=1024.0)
