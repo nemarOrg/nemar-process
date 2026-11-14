@@ -72,6 +72,7 @@ CUDA_SERIES = "12.9"  # the CUDA flavor's torch is built for CUDA 12.9 (docs/ima
 FIT_SEED = 5489
 FIT_SHAPE = (4, 2000)  # channels, samples: the matrix both fits use
 FIT_ITERATIONS = 5
+FIT_DTYPE = "float64"  # the dtype of the CPU fit, a torch attribute name
 
 
 def normalize(name: str) -> str:
@@ -260,16 +261,22 @@ def cpu_fit() -> dict:
     from pamica import AMICATorchNG
 
     channels = FIT_SHAPE[0]
-    model = AMICATorchNG(n_channels=channels, device="cpu", dtype=torch.float64, seed=FIT_SEED)
+    model = AMICATorchNG(
+        n_channels=channels, device="cpu", dtype=getattr(torch, FIT_DTYPE), seed=FIT_SEED
+    )
     model.fit(fit_matrix(), max_iter=FIT_ITERATIONS, verbose=False)
-    unmixing = np.asarray(model.get_unmixing_matrix(), dtype=np.float64)
+    unmixing = np.asarray(model.get_unmixing_matrix())
+    # the dtype the fit really ran in, read before anything is converted: a fit that quietly ran in
+    # float32 must not be reported (or hashed) as float64
+    if str(unmixing.dtype) != FIT_DTYPE:
+        fail("the CPU fit returned a {} unmixing matrix, not {}".format(unmixing.dtype, FIT_DTYPE))
     if unmixing.shape != (channels, channels) or not np.isfinite(unmixing).all():
         fail("the CPU fit did not return a finite {0}x{0} unmixing matrix".format(channels))
     digest = unmixing_digest(unmixing)
     note("CPUFIT sha256=" + digest)
     return {
         "device": "cpu",
-        "dtype": "float64",
+        "dtype": str(unmixing.dtype),
         "iterations": FIT_ITERATIONS,
         "unmixing_shape": list(unmixing.shape),
         "sha256": digest,
@@ -331,9 +338,9 @@ def native_binary() -> dict:
 def compiled_arch_list(torch) -> tuple[list[str], str]:
     """The GPU architectures this torch was compiled for, and which call said so.
 
-    ``torch.cuda.get_arch_list()`` returns an empty list whenever no GPU is visible (it asks
-    ``is_available()`` first), and the smoke test of the CUDA flavor runs with none. The list is a
-    compile-time string that needs no device, which ``torch._C._cuda_getArchFlags()`` returns, so
+    ``torch.cuda.get_arch_list()`` returns an empty list whenever no GPU is visible (in torch 2.12 it
+    asks ``is_available()`` first), and the smoke test of the CUDA flavor runs with none. The list is
+    a compile-time string that needs no device, which ``torch._C._cuda_getArchFlags()`` returns, so
     that private call is the fallback and the document says which one answered.
     """
     public = list(torch.cuda.get_arch_list())
@@ -355,7 +362,15 @@ def cuda_build(flavor: str | None) -> dict:
         if not (built or "").startswith(CUDA_SERIES):
             fail("the CUDA flavor's torch is built for CUDA {}, not {}".format(built, CUDA_SERIES))
         if not arch_list:
-            fail("the CUDA flavor's torch lists no GPU architecture")
+            fail(
+                "the CUDA flavor's torch lists no GPU architecture: arch_source is {!r}, "
+                "torch.cuda.get_arch_list() returned [] and torch._C._cuda_getArchFlags() {}".format(
+                    arch_source,
+                    "returned nothing"
+                    if hasattr(torch._C, "_cuda_getArchFlags")
+                    else "is not in this torch (the private call is gone)",
+                )
+            )
         note("CUDA_ARCH_LIST " + " ".join(arch_list))
     return {
         "version": torch.__version__,

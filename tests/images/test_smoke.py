@@ -485,6 +485,30 @@ print(json.dumps({"first": first, "same": first == second}))
     assert done.stderr.count("CPUFIT sha256=" + fit["sha256"]) == 2
 
 
+def test_a_cpu_fit_that_ran_in_float32_is_refused_not_reported_as_float64(runtime_python, tmp_path):
+    # the real smoke ran in float64: its reading says so
+    done = probe(runtime_python, "print(json.dumps(smoke.cpu_fit()))")
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert json.loads(done.stdout)["dtype"] == "float64"
+    # the mutation: the one line that asks for float64 asks for torch.float32 instead
+    source = SMOKE.read_text(encoding="utf-8")
+    asked = "dtype=getattr(torch, FIT_DTYPE)"
+    assert source.count(asked) == 1
+    mutated = tmp_path / "smoke_float32.py"
+    mutated.write_text(source.replace(asked, "dtype=torch.float32"), encoding="utf-8")
+    done = subprocess.run(
+        [str(runtime_python), "-c", PROBE + "smoke.cpu_fit()", str(mutated)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+        env=clean_env(PYTHONPATH=str(RECIPES), PYTHONHASHSEED="0"),
+    )
+    assert done.returncode != 0
+    assert "float32 unmixing matrix, not float64" in done.stderr
+    assert "CPUFIT" not in done.stderr  # nothing was hashed or reported
+
+
 def run_smoke(runtime_python, smoke_fixture, *arguments: str):
     return subprocess.run(
         [str(runtime_python), str(SMOKE), "--fixture", str(smoke_fixture), *arguments],
@@ -590,6 +614,23 @@ print(json.dumps({name: smoke.compiled_arch_list(t) for name, t in cases.items()
         "empty": [[], "none"],
         "cpu build": [[], "none"],
     }
+
+
+def test_when_neither_architecture_call_answers_the_failure_names_the_source_and_both_calls(
+    runtime_python,
+):
+    # a CUDA 12.9 claim on a torch with no architecture list (the lock's CPU torch has none, and its
+    # private call is absent): the message must show that nothing answered, so a vanished call is seen
+    done = probe(
+        runtime_python,
+        'import torch\ntorch.version.cuda = "12.9"\nsmoke.cuda_build("cuda")',
+    )
+    assert done.returncode != 0
+    assert "smoke test failed: the CUDA flavor's torch lists no GPU architecture" in done.stderr
+    assert "arch_source is 'none'" in done.stderr
+    assert "torch.cuda.get_arch_list() returned []" in done.stderr
+    assert "torch._C._cuda_getArchFlags()" in done.stderr
+    assert "the private call is gone" in done.stderr
 
 
 def make_ldd(directory, output: str, code: int = 0):
