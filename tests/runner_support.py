@@ -411,7 +411,7 @@ class Rig:
         self.config = self.make_config(runtime=runtime)
         # the launch PATH is the bin directory alone: a runtime on the host (CI has Apptainer in /usr/bin)
         # must never be found by a test that did not install one
-        self.tuning = fast(launch_path=str(self.bin))
+        self.tuning = fast(launch_path=str(self.bin), lower_priority=False)
         self.log = Log(str(self.root / "runner.log"), stream=self.stream)
         self.stream.owner = self.log
 

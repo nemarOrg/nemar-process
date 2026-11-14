@@ -113,6 +113,9 @@ class Tuning:
     launch_path: str = LAUNCH_PATH
     # Where the host's memory and load are read from: only a test points it at files it wrote.
     proc_root: str = "/proc"
+    # False leaves this process's own priority alone: only a test that runs the runner inside the
+    # test process sets it (the lowered priority cannot be raised again, and would last the session).
+    lower_priority: bool = True
 
 
 def default_config_path(environ: dict[str, str] | None = None) -> str:

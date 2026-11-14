@@ -66,7 +66,7 @@ EVERYTHING_BUT_LIMITS = {
 
 
 # printed and answered yes or no, but never part of the exit status
-INFORMATIONAL = {"limits", "availability"}
+INFORMATIONAL = {"limits", "availability", "priority"}
 
 
 def test_a_healthy_host_says_yes_to_everything_and_exits_zero(rig):

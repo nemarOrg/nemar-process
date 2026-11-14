@@ -1,8 +1,8 @@
 """`nemar-runner doctor`: what this host can and cannot do, one line each, yes or no.
 
-Exit 0 only when every check but `limits` and `availability` is yes: a host that cannot
+Exit 0 only when every check but `limits`, `availability` and `priority` is yes: a host that cannot
 enforce limits still runs jobs (the watchdog stands in for the container runtime's memory limit), a host
-that is busy right now still can, and a host that fails any other check
+that is busy right now or cannot lower its own priority still can, and a host that fails any other check
 cannot. Nothing printed is a secret, a token or a value of the configuration beyond a fixed phrase.
 """
 
@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from typing import TextIO
 
-from . import __version__, availability, images, scratch
+from . import __version__, availability, images, priority, scratch
 from .api import Api, ApiError
 from .config import (
     ENGINES,
@@ -29,7 +29,7 @@ from .logs import Log
 
 Check = tuple[str, bool, str]
 # yes or no, and printed, but not part of the exit status (they say how the host is, not whether it works)
-INFORMATIONAL = ("limits", "availability")
+INFORMATIONAL = ("limits", "availability", "priority")
 
 
 def _line(name: str, ok: bool, note: str) -> str:
@@ -184,6 +184,8 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
         )
     else:
         add("availability", False, "no configuration")
+    done = priority.probe(tuning)
+    add("priority", done, "" if done else "niceness 19 or the idle I/O class could not be set")
 
     for name, ok, note in checks:
         out.write(_line(name, ok, note) + "\n")

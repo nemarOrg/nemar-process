@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from . import __version__, availability, containers, contract, images, pids, scratch
+from . import __version__, availability, containers, contract, images, pids, priority, scratch
 from .api import Api, ApiError
 from .config import ENGINES, Config, ConfigError, Tuning
 from .job import JobRunner
@@ -73,6 +73,7 @@ class Agent:
             os.close(fd)
             raise ConfigError("another runner holds this root") from None
         self._lock_fd = fd
+        self._lower_priority()  # before anything is started, so that every child inherits it
         try:
             pids.kill_recorded(root, self.log, self.tuning)
             self._refuse_untrusted()
@@ -90,6 +91,17 @@ class Agent:
             arch=self.config.arch,
             leftovers=removed,
         )
+
+    def _lower_priority(self) -> None:
+        """Niceness 19 and the idle I/O class for this thread and so for every process the runner starts
+        (`priority.py`). A part that cannot be applied is logged and the runner goes on."""
+        if not self.tuning.lower_priority:
+            return
+        result = priority.lower(self.tuning)
+        if result.nice and result.io:
+            self.log.info("priority_set", nice=priority.NICE, io_class="idle")
+        else:
+            self.log.warn("priority_unavailable", nice=result.nice, io_idle=result.io)
 
     def _refuse_untrusted(self) -> None:
         os.makedirs(self.config.sif_root, mode=0o700, exist_ok=True)
