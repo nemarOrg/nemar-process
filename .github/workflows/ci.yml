@@ -252,29 +252,14 @@ jobs:
         run: uv run --frozen pytest tests/e2e/test_runner_stack.py -q -rs
 
   images:
-    # The runtime image's declaration, lock, vendored schema, smoke fixture, Dockerfile and workflows.
+    # The runtime image's declaration, lock, signalJourney schema digest, smoke fixture, Dockerfile and workflows.
     # The image itself is built and smoke-tested by image-nemar-python.yml.
     runs-on: ubuntu-24.04
     env:
-      # In CI neither the workflow linter nor the comparison with signalJourney may be skipped unnoticed.
+      # In CI the workflow linter may not be skipped unnoticed.
       NEMAR_REQUIRE_ACTIONLINT: "1"
-      NEMAR_REQUIRE_SIGNALJOURNEY: "1"
-      NEMAR_SIGNALJOURNEY_DIR: ${{ github.workspace }}/.signaljourney
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Read the vendored signalJourney commit
-        id: sj
-        run: |
-          echo "ref=$(sed -n 's/^commit: //p' recipes/nemar_process/_vendor/signalJourney/SOURCE)" >> "$GITHUB_OUTPUT"
-
-      - name: Check out signalJourney at that commit (the vendored copy is compared with it)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: signalJourney/signalJourney
-          ref: ${{ steps.sj.outputs.ref }}
-          path: .signaljourney
-          fetch-depth: 1
 
       - name: Install actionlint
         run: |
