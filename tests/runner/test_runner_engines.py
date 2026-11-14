@@ -458,6 +458,7 @@ def diagnose(rig, runtime):
         "max_scratch_gb": 1,
         "launcher_dir": str(rig.launcher),
         "default_job_memory_mb": 512,
+        "verify_images": False,  # the stand-in NEMAR is on loopback
     }
     write_private(rig.config_file, json.dumps(document))
     out = io.StringIO()

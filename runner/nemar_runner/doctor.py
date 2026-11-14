@@ -7,12 +7,15 @@ cannot. Nothing printed is a secret, a token or a value of the configuration bey
 
 from __future__ import annotations
 
+import io
 import os
+import re
 import shutil
 import tempfile
+from collections.abc import Callable
 from typing import TextIO
 
-from . import __version__, images, scratch
+from . import __version__, images, scratch, verify
 from .api import Api, ApiError
 from .config import (
     ENGINES,
@@ -24,6 +27,7 @@ from .config import (
     read_secret,
     root_problem,
 )
+from .install import InstallError, find_cosign
 from .logs import Log
 
 Check = tuple[str, bool, str]
@@ -53,6 +57,67 @@ def _writable_dir(path: str) -> str | None:
 
 
 GATES_FOR_PREFLIGHT = ("launcher", "launcher_dir trusted", "launcher python")
+_SIF_NAME = re.compile(r"([0-9a-f]{64})\.sif")
+
+
+def _signature_checks(
+    config: Config, tuning: Tuning, add: Callable[[str, bool, str], bool]
+) -> None:
+    """`cosign` (found, trusted, version 3 or newer) and, under Apptainer, `signature <hex>` for each
+    image file in `sif_root`: cosign verified the SIF artifact and the file hashes to its signed layer.
+    The cache is not asked: this is the check that says whether the next job's would pass."""
+    usable = False
+    try:
+        binary = find_cosign(config.cosign_path, tuning)
+    except InstallError as error:
+        add("cosign", False, str(error))
+    else:
+        try:
+            home = verify.cosign_home(config)
+        except images.Unverified:
+            home = None
+        version = verify.cosign_version(binary, tuning, home) if home is not None else None
+        major = verify.version_major(version) if version else None
+        if home is None:
+            add("cosign", False, "the runner's cosign directory under root is not usable")
+        elif version is None or major is None:
+            add("cosign", False, "does not say its version")
+        elif major < 3:
+            add("cosign", False, "{} is older than 3".format(version))
+        else:
+            usable = add("cosign", True, version)
+    if config.runtime != "apptainer":
+        return  # an engine's images are not files the runner can see
+    try:
+        names = sorted(n for n in os.listdir(config.sif_root) if _SIF_NAME.fullmatch(n))
+    except OSError:
+        return
+    if not names:
+        return
+    log = Log(None, stream=io.StringIO())  # the verifier's lines are not doctor's output
+    try:
+        verifier = verify.Verifier(config, tuning, log)
+        for name in names:
+            digest = name[: -len(".sif")]
+            if not usable:
+                add("signature " + digest, False, "no usable cosign")
+                continue
+            add("signature " + digest, *_signature(verifier, config, digest))
+    finally:
+        log.close()
+
+
+def _signature(verifier: verify.Verifier, config: Config, digest: str) -> tuple[bool, str]:
+    try:
+        proof = verifier.sif_proof("doctor", digest, lambda: None, use_cache=False)
+        found = images.file_sha256(images.sif_path(config, digest), lambda: None)
+    except images.Unverified as error:
+        return False, error.reason + (", " + error.why if error.why else "")
+    except OSError:
+        return False, "the file cannot be read"
+    if "sha256:" + found != proof.layer:
+        return False, "layer_mismatch"
+    return True, ""
 
 
 def checks_ok(checks: list[Check], name: str) -> bool:
@@ -125,6 +190,9 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
             "sif_root writable",
         ):
             add(name, False, "no configuration")
+
+    if config is not None and config.verify_images:
+        _signature_checks(config, tuning, add)
 
     reachable = False
     if config is not None:

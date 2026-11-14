@@ -13,7 +13,7 @@ import os
 import threading
 import time
 
-from . import __version__, containers, contract, images, pids, scratch
+from . import __version__, containers, contract, images, pids, scratch, verify
 from .api import Api, ApiError
 from .config import ENGINES, Config, ConfigError, Tuning
 from .install import read_current
@@ -45,6 +45,7 @@ class Agent:
         self.stop = threading.Event()
         self.locks = images.PullLocks()
         self.limits = images.Limits(config, self.tuning, log)
+        self.verifier = verify.Verifier(config, self.tuning, log)
         self._threads: dict[str, threading.Thread] = {}  # by lease id
         self._latest: dict[str, threading.Thread] = {}  # the newest run of each job id
         self._states: dict[str, str | None] = {}
@@ -108,6 +109,10 @@ class Agent:
         if problem is not None:
             raise ConfigError(problem)
         self.python = images.resolve_python(self.tuning)
+        if self.config.verify_images:
+            problem = verify.start_problem(self.config, self.tuning)
+            if problem is not None:
+                raise ConfigError(problem)
         if self.config.install_prefix is not None:
             problem = images.dir_problem(self.config.install_prefix)
             if problem is not None:
@@ -180,6 +185,7 @@ class Agent:
             self.stop,
             self.runner_label,
             self.python,
+            self.verifier,
         )
 
         previous = self._latest.get(job.id)
