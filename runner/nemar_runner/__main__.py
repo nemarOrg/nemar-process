@@ -57,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, stopping)
     signal.signal(signal.SIGINT, stopping)
+    signal.signal(signal.SIGHUP, stopping)  # a closed terminal or session stops it like SIGTERM
     try:
         return agent.run_once() if args.command == "once" else agent.run_forever()
     finally:

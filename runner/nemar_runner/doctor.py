@@ -105,16 +105,22 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
             version is not None,
             version or "not found or not working on {}".format(tuning.launch_path),
         )
-        python = shutil.which("python3", path=tuning.launch_path)
-        add(
-            "launcher python", python is not None, "" if python else "no python3 on the launch PATH"
-        )
+        problem = images.python_problem(tuning)
+        add("launcher python", problem is None, problem or "")
         have = os.path.isfile(os.path.join(config.launcher_dir, "nemar_launch", "__main__.py"))
         add("launcher", have, "" if have else "no nemar_launch package in launcher_dir")
+        problem = images.tree_problem(config.launcher_dir)
+        add("launcher_dir trusted", problem is None, problem or "")
         problem = _writable_dir(config.sif_root)
         add("sif_root writable", problem is None, problem or "")
     else:
-        for name in ("runtime", "launcher python", "launcher", "sif_root writable"):
+        for name in (
+            "runtime",
+            "launcher python",
+            "launcher",
+            "launcher_dir trusted",
+            "sif_root writable",
+        ):
             add(name, False, "no configuration")
 
     reachable = False

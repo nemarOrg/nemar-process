@@ -10,7 +10,6 @@ Errors carry a status and the Worker's one fixed word (`{"error": <word>}`), nev
 
 from __future__ import annotations
 
-import calendar
 import http.client
 import json
 import socket
@@ -24,14 +23,10 @@ from . import __version__, contract
 from .config import Config, Tuning
 from .logs import Log
 
-# Words after which a runner can only stop: its secret is not (or no longer) accepted, or it is too
-# old for the Worker (a 426).
-FATAL_WORDS = (
-    "runner_unknown",
-    "runner_credential_not_accepted",
-    "runner_outdated",
-    "protocol_unsupported",
-)
+# Words after which a runner can only stop: its secret is not (or no longer) accepted.
+FATAL_WORDS = ("runner_unknown", "runner_credential_not_accepted")
+# Words (a 426) after which a runner must stop claiming but lets the jobs it holds finish.
+DRAIN_WORDS = ("runner_outdated", "protocol_unsupported")
 # A job whose lease the Worker no longer honors: stop it, and do not complete it.
 LEASE_WORDS = ("lease_lost", "job_not_claimed")
 
@@ -58,6 +53,10 @@ class ApiError(Exception):
         return self.word in FATAL_WORDS
 
     @property
+    def drain(self) -> bool:
+        return self.word in DRAIN_WORDS
+
+    @property
     def lease_lost(self) -> bool:
         return self.word in LEASE_WORDS or self.word == "runner_unknown"
 
@@ -71,12 +70,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def parse_timestamp(text: str) -> float:
-    """Seconds since the epoch of a UTC timestamp the contract's pattern accepts."""
-    whole = calendar.timegm(time.strptime(text[:19], "%Y-%m-%dT%H:%M:%S"))
-    if len(text) > 20 and text[19] == ".":
-        digits = text[20:-1]
-        return whole + float("0." + digits)
-    return float(whole)
+    """Seconds since the epoch of a UTC timestamp the contract's reader accepted."""
+    return contract.timestamp_seconds(text)
 
 
 class Api:
@@ -90,6 +85,7 @@ class Api:
         self.version = version
         self._opener = urllib.request.build_opener(_NoRedirect())
         self._lock = threading.Lock()
+        self._exchange_lock = threading.Lock()  # one exchange at a time, however many jobs ask
         self._token: str | None = None
         self._expires = 0.0
 
@@ -159,21 +155,39 @@ class Api:
             self._token, self._expires = token, expires
         return token
 
-    def _access(self) -> str:
+    def _valid_token(self) -> str | None:
         with self._lock:
             token, expires = self._token, self._expires
         if token is not None and time.time() < expires - self._tuning.token_margin_seconds:
             return token
-        return self.exchange()
+        return None
+
+    def _access(self) -> str:
+        token = self._valid_token()
+        if token is not None:
+            return token
+        with self._exchange_lock:
+            return self._valid_token() or self.exchange()  # another thread may have just done it
+
+    def _renew_after(self, refused: str) -> str:
+        """A new token after NEMAR refused ``refused``; one exchange, shared by every thread that saw
+        the same refusal."""
+        with self._exchange_lock:
+            with self._lock:
+                current = self._token
+            if current is not None and current != refused and self._valid_token() is not None:
+                return current
+            return self.exchange()
 
     def _authed(self, path: str, body: dict[str, Any], limit: int) -> Any:
+        token = self._access()
         try:
-            return self._send(path, body, self._access(), limit)
+            return self._send(path, body, token, limit)
         except ApiError as error:
             if error.status != 401 or error.word != "runner_token_expired":
                 raise
         self._log.info("token_renewed_after_expiry")
-        return self._send(path, body, self.exchange(), limit)
+        return self._send(path, body, self._renew_after(token), limit)
 
     # ---- the routes ---------------------------------------------------------------------------------
 
@@ -189,6 +203,26 @@ class Api:
             return True
         except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
             return False
+
+    def me(self) -> str:
+        """The runner's registration id (`rnr_` and 24 hex), from `GET /compute/runners/me`."""
+        token = self._access()
+        try:
+            answer = self._send("/compute/runners/me", None, token, _SMALL_MAX_BYTES, method="GET")
+        except ApiError as error:
+            if error.status != 401 or error.word != "runner_token_expired":
+                raise
+            answer = self._send(
+                "/compute/runners/me",
+                None,
+                self._renew_after(token),
+                _SMALL_MAX_BYTES,
+                method="GET",
+            )
+        try:
+            return contract.read_me_response(answer)
+        except contract.BadAnswer as error:
+            raise ApiError("bad_response") from error
 
     def claim(
         self, free_slots: int, runtimes: list[str], arch: str

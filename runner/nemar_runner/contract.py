@@ -13,6 +13,8 @@ keys. Nothing here reads a clock, a file or a network.
 
 from __future__ import annotations
 
+import calendar
+import datetime
 import re
 from typing import Any
 
@@ -23,6 +25,7 @@ LEASE_HEADER = "X-Compute-Lease"
 SECRET_PREFIX = "nmr_"  # noqa: S105 - the prefix of a secret, not one
 ACCESS_PREFIX = "nmra_"
 HEARTBEAT_SECONDS = 60
+LEASE_SECONDS = 600
 ACCESS_TOKEN_SECONDS = 900
 MAX_FREE_SLOTS = 32
 VERSION_MAX = 32
@@ -47,6 +50,7 @@ SECRET_RE = re.compile(r"nmr_[0-9a-f]{64}")
 ACCESS_TOKEN_RE = re.compile(r"nmra_[0-9a-f]{64}")
 JOB_ID_RE = re.compile(r"job_[0-9a-f]{24}")
 LEASE_ID_RE = re.compile(r"[0-9a-f]{32}")
+RUNNER_ID_RE = re.compile(r"rnr_[0-9a-f]{24}")
 WORD_RE = re.compile(r"[a-z0-9_]{1,64}")
 TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
 # The schema's pattern for a version, word for word; SEMVER_PARTS reads the same text into its parts.
@@ -106,6 +110,32 @@ def _key(body: dict[str, Any], name: str, where: str) -> Any:
     return body[name]
 
 
+def timestamp_seconds(text: str) -> float:
+    """Seconds since the epoch of a timestamp of the contract's shape, or ``ValueError`` when the
+    calendar says no (the schema checks the shape only: `2026-02-30T00:00:00Z` passes it)."""
+    moment = datetime.datetime(
+        int(text[0:4]),
+        int(text[5:7]),
+        int(text[8:10]),
+        int(text[11:13]),
+        int(text[14:16]),
+        int(text[17:19]),
+    )
+    seconds = float(calendar.timegm(moment.timetuple()))
+    if len(text) > 20 and text[19] == ".":
+        seconds += float("0." + text[20:-1])
+    return seconds
+
+
+def _timestamp(value: Any, where: str) -> str:
+    text = _text(value, TIMESTAMP_RE, where)
+    try:
+        timestamp_seconds(text)
+    except ValueError:
+        raise BadAnswer(where) from None
+    return text
+
+
 def version_text(value: Any, where: str) -> str:
     return _text(value, SEMVER_RE, where, VERSION_MAX)
 
@@ -135,14 +165,14 @@ def read_token_response(body: Any) -> tuple[str, str]:
     """``(access_token, expires_at)`` of an exchange answer."""
     top = _object(body, "token")
     token = _text(_key(top, "access_token", "token"), ACCESS_TOKEN_RE, "token.access_token")
-    expires = _text(_key(top, "expires_at", "token"), TIMESTAMP_RE, "token.expires_at")
+    expires = _timestamp(_key(top, "expires_at", "token"), "token.expires_at")
     return token, expires
 
 
 def read_heartbeat_response(body: Any) -> bool:
     """Whether the runner is to stop the job (the answer's `cancel`)."""
     top = _object(body, "heartbeat")
-    _text(_key(top, "lease_expires_at", "heartbeat"), TIMESTAMP_RE, "heartbeat.lease_expires_at")
+    _timestamp(_key(top, "lease_expires_at", "heartbeat"), "heartbeat.lease_expires_at")
     cancel = _key(top, "cancel", "heartbeat")
     if not isinstance(cancel, bool):
         raise BadAnswer("heartbeat.cancel")
@@ -153,6 +183,13 @@ def read_complete_response(body: Any) -> str:
     """The state the job is in after a completion."""
     top = _object(body, "complete")
     return _text(_key(top, "state", "complete"), WORD_RE, "complete.state")
+
+
+def read_me_response(body: Any) -> str:
+    """The runner's registration id from `GET /compute/runners/me` (`runner_id`, else `id`)."""
+    top = _object(body, "me")
+    value = top["runner_id"] if "runner_id" in top else _key(top, "id", "me")
+    return _text(value, RUNNER_ID_RE, "me.runner_id")
 
 
 class ClaimedJob:
@@ -198,7 +235,7 @@ def _read_job(raw: Any, where: str, claimed_at: float) -> ClaimedJob:
         _key(image, "digest", where + ".image"), IMAGE_DIGEST_RE, where + ".image.digest"
     )
     sif = _text(_key(image, "sif", where + ".image"), SIF_FILE_RE, where + ".image.sif")
-    _text(_key(job, "lease_expires_at", where), TIMESTAMP_RE, where + ".lease_expires_at")
+    _timestamp(_key(job, "lease_expires_at", where), where + ".lease_expires_at")
     cores = _key(job, "cores", where)
     memory = _key(job, "memory_mb", where)
     gpus = _key(job, "gpus", where)

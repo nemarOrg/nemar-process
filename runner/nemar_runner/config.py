@@ -28,7 +28,7 @@ CONFIG_KEYS = (
     "arch",
     "max_scratch_gb",
 )
-OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb")
+OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb", "sif_pull")
 ENGINES = ("docker", "podman")
 
 # What a job's launcher is run with: no PATH of the user's, so the launcher and the container
@@ -55,6 +55,7 @@ class Config:
     max_scratch_gb: int
     launcher_dir: str
     default_job_memory_mb: int | None = None
+    sif_pull: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,8 @@ class Tuning:
     deadline_grace_seconds: float = 60.0
     kill_grace_seconds: float = 30.0
     pull_timeout_seconds: float = 3600.0
+    # a job whose image took longer than the lease less a minute is left to expire, not started
+    lease_abandon_seconds: float = float(contract.LEASE_SECONDS - 60)
     probe_timeout_seconds: float = 120.0
     http_timeout_seconds: float = 30.0
     complete_attempts: int = 6
@@ -203,6 +206,9 @@ def load_config(path: str) -> Config:
         raise ConfigError("default_job_memory_mb is required when runtime is {}".format(runtime))
     if default_memory is not None:
         default_memory = _int(default_memory, "default_job_memory_mb", 1, 16_777_216)
+    sif_pull = document.get("sif_pull", False)
+    if not isinstance(sif_pull, bool):
+        raise ConfigError("sif_pull must be true or false")
     config = Config(
         api_base=_api_base(document["api_base"]),
         secret_file=_path(document["secret_file"], "secret_file"),
@@ -214,6 +220,7 @@ def load_config(path: str) -> Config:
         max_scratch_gb=_int(document["max_scratch_gb"], "max_scratch_gb", 1, 1_000_000),
         launcher_dir=_path(document.get("launcher_dir", default_launcher_dir()), "launcher_dir"),
         default_job_memory_mb=default_memory,
+        sif_pull=sif_pull,
     )
     problem = root_problem(config.root)
     if problem is not None:

@@ -1,19 +1,26 @@
 """The container image of a job, and what the runner can prove about the runtime.
 
-Apptainer runs `<sif_root>/<hex>.sif`, named by the image digest (`docs/images.md`). A missing file
-is pulled once, from `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, into a hidden `.part`
-name and then renamed into place, so a half-written image is never run and two jobs for the same
-image never pull it twice. Docker and Podman pull by digest inside the launcher, so the runner does
-nothing for them.
+Apptainer runs `<sif_root>/<hex>.sif`, named by the image digest (`docs/images.md`). The operator
+places the file; the runner never pulls unless `sif_pull` is on (development only). A pull is from
+`oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>` into a hidden, per-process `.part` name and
+then renamed into place under a lock held across runner processes, so a half-written image is never
+run and two jobs for the same image never pull it twice. Docker and Podman pull by digest inside the
+launcher, so the runner does nothing for them.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import glob
 import json
 import os
 import shutil
+import stat
 import subprocess
 import threading
+import time
+from collections.abc import Generator
 from typing import Callable
 
 from .config import Config, Tuning
@@ -23,7 +30,19 @@ SIF_REPOSITORY = "oras://ghcr.io/nemarorg/nemar-python-sif"
 
 # The command the runner uses to prove cgroup delegation (docs/runner.md): a container that is given
 # a memory and a CPU limit and does nothing.
-PROBE_FLAGS = ("--memory", "64M", "--cpus", "1")
+# The same isolation the launcher gives a job (`--containall --cleanenv --no-home --no-mount
+# bind-paths`), so the image never runs with the host's home directory or environment.
+PROBE_FLAGS = (
+    "--containall",
+    "--cleanenv",
+    "--no-home",
+    "--no-mount",
+    "bind-paths",
+    "--memory",
+    "64M",
+    "--cpus",
+    "1",
+)
 
 
 class ImageError(Exception):
@@ -64,15 +83,29 @@ def runtime_version(binary: str, tuning: Tuning) -> str | None:
 
 
 class PullLocks:
-    """One lock per image, so concurrent jobs for one image pull it once."""
+    """One lock per image file, held across jobs AND runner processes (an advisory `flock` on a file
+    beside the image), so concurrent jobs for one image pull it once and one runner can never publish
+    another's partial file. Waiting for it is interruptible."""
 
-    def __init__(self) -> None:
-        self._guard = threading.Lock()
-        self._locks: dict[str, threading.Lock] = {}
-
-    def get(self, key: str) -> threading.Lock:
-        with self._guard:
-            return self._locks.setdefault(key, threading.Lock())
+    @contextlib.contextmanager
+    def hold(
+        self, sif_root: str, digest_hex: str, interrupted: Callable[[], str | None]
+    ) -> Generator[None, None, None]:
+        path = os.path.join(sif_root, ".{}.sif.lock".format(digest_hex))
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    reason = interrupted()
+                    if reason is not None:
+                        raise Interrupted(reason) from None
+                    time.sleep(0.05)
+            yield
+        finally:
+            os.close(fd)  # closing the descriptor releases the lock
 
 
 # A process runner: argv, environment, a label for the log -> exit status (raises Interrupted when
@@ -94,17 +127,29 @@ def ensure_sif(
     scratch: str,
     home: str,
     run_process: RunProcess,
+    interrupted: Callable[[], str | None],
 ) -> str:
-    """The path of the image file, pulling it first when it is absent. ``ImageError`` on a failed pull."""
+    """The path of the image file. With `sif_pull` false (the default) a missing file is an
+    ``ImageError``: the runner never pulls, the operator places and verifies the image. With it true
+    the file is pulled first (docs/runner.md: by the mutable tag, with no digest or signature check).
+    ``Interrupted`` when the job is stopped while it waits or pulls."""
     final = sif_path(config, digest_hex)
-    with locks.get(digest_hex):
+    if os.path.isfile(final) and os.path.getsize(final) > 0:
+        return final
+    if not config.sif_pull:
+        raise ImageError("the image file is not in sif_root and sif_pull is off")
+    with locks.hold(config.sif_root, digest_hex, interrupted):
         if os.path.isfile(final) and os.path.getsize(final) > 0:
-            return final
+            return final  # another job or runner pulled it while this one waited
         binary = runtime_binary(config, tuning)
         if binary is None:
             raise ImageError("no container runtime on the launch PATH")
-        part = os.path.join(config.sif_root, ".{}.sif.part".format(digest_hex))
-        _remove(part)
+        # the lock is held, so any other part file of this image is a dead run's
+        for stale in glob.glob(
+            os.path.join(glob.escape(config.sif_root), ".{}.sif.*.part".format(digest_hex))
+        ):
+            _remove(stale)
+        part = os.path.join(config.sif_root, ".{}.sif.{}.part".format(digest_hex, os.getpid()))
         argv = [binary, "pull", part, "{}:sha256-{}".format(SIF_REPOSITORY, digest_hex)]
         cache = os.path.join(scratch, "runtime-cache")
         temporary = os.path.join(scratch, "runtime-tmp")
@@ -154,7 +199,7 @@ def first_sif(sif_root: str) -> str | None:
 
 
 def probe_limits(binary: str, sif: str, tuning: Tuning, home: str) -> bool:
-    """Whether `<runtime> exec --memory 64M --cpus 1 <sif> true` works for this user: the proof that
+    """Whether `<runtime> exec <isolation flags> --memory 64M --cpus 1 <sif> true` works for this user: the proof that
     cgroup delegation lets the runtime apply a job's limits, and so that `NEMAR_ENFORCE_LIMITS=1`
     is honest."""
     argv = [binary, "exec", *PROBE_FLAGS, sif, "true"]
@@ -242,3 +287,91 @@ def engine_preflight(
     except (ValueError, TypeError):
         return False, False, "the preflight gave no answer"
     return limits is True, mode is True, ""
+
+
+def _unsafe_path(path: str) -> str | None:
+    """Why ``path`` (a file or a directory) cannot be trusted to run as the user, or None: written
+    by group or others, or owned by neither the user nor root."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return "cannot be read"
+    if info.st_uid not in (0, os.getuid()):
+        return "is owned by someone else"
+    if info.st_mode & 0o022:
+        return "can be written by group or others"
+    return None
+
+
+def resolve_python(tuning: Tuning) -> str | None:
+    """The `python3` the launcher is started with: the first on the launch PATH."""
+    return shutil.which("python3", path=tuning.launch_path)
+
+
+def python_problem(tuning: Tuning) -> str | None:
+    """Why the launch PATH's `python3` cannot start the launcher, or None: it is missing, it or its
+    directory can be written by group or others (the launcher would run whatever they put there), or
+    it is older than Python 3.9."""
+    python = resolve_python(tuning)
+    if python is None:
+        return "no python3 on the launch PATH"
+    real = os.path.realpath(python)
+    for path in (real, os.path.dirname(real)):
+        problem = _unsafe_path(path)
+        if problem is not None:
+            return "python3 {}".format(problem)
+    try:
+        done = subprocess.run(
+            [
+                python,
+                "-I",
+                "-S",
+                "-c",
+                "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)",
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            env={"PATH": tuning.launch_path, "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "python3 does not run"
+    return None if done.returncode == 0 else "python3 is older than 3.9"
+
+
+def tree_problem(directory: str) -> str | None:
+    """Why a directory of code (`launcher_dir`) cannot be trusted, or None: it, or anything under it,
+    is owned by someone else (neither the user nor root), can be written by group or others, or is a link."""
+    problem = _unsafe_path(directory)
+    if problem is not None:
+        return "the directory {}".format(problem)
+    for here, names, files in os.walk(directory, followlinks=False):
+        for name in [*names, *files]:
+            path = os.path.join(here, name)
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                return "{} is a link".format(os.path.relpath(path, directory))
+            if info.st_uid not in (0, os.getuid()):
+                return "{} is owned by someone else".format(os.path.relpath(path, directory))
+            if info.st_mode & 0o022:
+                return "{} can be written by group or others".format(
+                    os.path.relpath(path, directory)
+                )
+    return None
+
+
+def dir_problem(path: str) -> str | None:
+    """Why `sif_root` (images the runner will run) cannot be trusted, or None: it is not the user's
+    own directory, or group or others can write to it."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return "does not exist"
+    if not stat.S_ISDIR(info.st_mode):
+        return "is not a directory"
+    if info.st_uid != os.getuid():
+        return "is not owned by the user"
+    if info.st_mode & 0o022:
+        return "can be written by group or others"
+    return None

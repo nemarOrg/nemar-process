@@ -44,6 +44,7 @@ class Log:
     """Appends one JSON object per line. Safe to share between threads."""
 
     def __init__(self, path: str | None, stream: IO[str] | None = None) -> None:
+        self.dropped = 0  # lines a failing file or stream could not take
         self._lock = threading.Lock()
         self._fd: int | None = None
         self._stream = sys.stderr if stream is None else stream
@@ -52,18 +53,30 @@ class Log:
             self._fd = os.open(path, flags, 0o600)
 
     def event(self, level: str, event: str, **fields: Any) -> None:
-        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
-        record = {"ts": stamp, "level": level, "event": event}
-        record.update({name: _plain(value) for name, value in fields.items()})
-        line = json.dumps(record, sort_keys=False, ensure_ascii=True) + "\n"
-        with self._lock:
-            if self._fd is not None:
-                os.write(self._fd, line.encode("ascii"))
+        """Write one line. NEVER raises: a log that cannot be written (a full disk, a closed pipe, a
+        field that cannot be shown) is counted in ``dropped`` and the program goes on, because a job's
+        supervision must not depend on its log."""
+        try:
+            stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+            record = {"ts": stamp, "level": level, "event": event}
+            record.update({name: _plain(value) for name, value in fields.items()})
+            line = json.dumps(record, sort_keys=False, ensure_ascii=True) + "\n"
+            with self._lock:
+                self._write(line)
+        except Exception:  # noqa: BLE001 - see the docstring
+            self.dropped += 1
+
+    def _write(self, line: str) -> None:
+        if self._fd is not None:
             try:
-                self._stream.write(line)
-                self._stream.flush()
-            except (OSError, ValueError):
-                pass  # a closed standard error must not end a job
+                os.write(self._fd, line.encode("ascii"))
+            except OSError:
+                self.dropped += 1
+        try:
+            self._stream.write(line)
+            self._stream.flush()
+        except (OSError, ValueError):
+            self.dropped += 1
 
     def info(self, event: str, **fields: Any) -> None:
         self.event("info", event, **fields)
@@ -77,5 +90,8 @@ class Log:
     def close(self) -> None:
         with self._lock:
             if self._fd is not None:
-                os.close(self._fd)
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    self.dropped += 1
                 self._fd = None

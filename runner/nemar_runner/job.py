@@ -24,15 +24,15 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from . import containers, contract, images, scratch, usage, wire
+from . import containers, contract, images, pids, scratch, usage, wire
 from .api import Api, ApiError
 from .config import ENGINES, Config, Tuning
 from .logs import Log
@@ -54,6 +54,7 @@ class Outcome(NamedTuple):
     usage: usage.Usage
     usage_partial: bool
     lease_lost: bool = False
+    abandoned: bool = False  # not started, not to be completed: its lease is left to expire
 
 
 def refusal(detail: str, code: str = "runtime_error") -> Outcome:
@@ -77,6 +78,7 @@ def launch_environment(
     config: Config,
     tuning: Tuning,
     enforce: bool,
+    runner_label: str | None = None,
 ) -> dict[str, str]:
     """The launcher's whole environment: these keys and no others (docs/runner.md)."""
     end_time = int(job.claimed_at) + job.minutes * 60
@@ -94,6 +96,8 @@ def launch_environment(
         "PATH": tuning.launch_path,
         "LANG": "C.UTF-8",
     }
+    if config.runtime in ENGINES and runner_label is not None:
+        env["NEMAR_RUNNER_LABEL"] = runner_label  # labels every container the launcher starts
     memory = effective_memory_mb(job, config)
     if memory is not None:
         env["NEMAR_MEMORY_MB"] = str(memory)
@@ -120,15 +124,35 @@ def read_result(path: str) -> tuple[str | None, str | None]:
     if not isinstance(document, dict):
         return None, None
     code, detail = document.get("failure_code"), document.get("detail")
-    if code is not None and code not in contract.FAILURE_CODES:
-        return None, None
-    if code is None:
+    if code not in contract.FAILURE_CODES:  # None (no failure) is not a code either
         return None, None
     if detail is not None and (
         not isinstance(detail, str) or contract.WORD_RE.fullmatch(detail) is None
     ):
         return None, None
     return code, detail
+
+
+def pdeathsig_hook() -> Callable[[], None] | None:
+    """A function for `Popen(preexec_fn=...)` that asks the kernel to send the child SIGTERM when its
+    parent thread dies (Linux `prctl(PR_SET_PDEATHSIG)`, through `ctypes`), or None where that is not
+    available. The launcher forwards SIGTERM to its container, so a runner that is killed does not
+    leave a job running unwatched. The signal follows the thread that started the child, which is
+    the job's own thread, alive for as long as the job runs."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except (ImportError, OSError, AttributeError):
+        return None
+    pr_set_pdeathsig, term = 1, int(signal.SIGTERM)
+
+    def hook() -> None:
+        prctl(pr_set_pdeathsig, term, 0, 0, 0)
+
+    return hook
 
 
 def completion_body(job: contract.ClaimedJob, outcome: Outcome, discarded: bool) -> dict[str, Any]:
@@ -217,26 +241,44 @@ class JobRunner:
         locks: images.PullLocks,
         limits: images.Limits,
         stop: threading.Event,
+        runner_label: str | None = None,
     ) -> None:
+        self.runner_label = runner_label
+        self._began = time.monotonic()
         self.job, self.config, self.tuning = job, config, tuning
         self.api, self.log, self.locks, self.limits, self.stop = api, log, locks, limits, stop
         self.cancel = threading.Event()
         self.lease_lost = threading.Event()
         self._usage = usage.ZERO
+        self._heartbeat: Heartbeat | None = None
+
+    @property
+    def directory(self) -> str:
+        """The job's directory, named by the job and the lease, so a run can only ever touch its own."""
+        return scratch.job_path(self.config.root, self.job.id, self.job.lease_id)
 
     # ---- the whole life of the job ------------------------------------------------------------------
 
     def run(self) -> str | None:
-        """Run the job and complete it. The state NEMAR answered, or None (a lost lease, or no answer)."""
+        """Run the job and complete it. The state NEMAR answered, or None (a lost lease, or no answer).
+
+        The heartbeat keeps the lease until the completion is sent or given up: removing containers,
+        deleting the directory and retrying the completion can outlast the 600 second lease."""
         job = self.job
         self.log.info(
             "job_claimed", job=job.id, minutes=job.minutes, cores=job.cores, memory_mb=job.memory_mb
         )
-        outcome: Outcome | None = None
-        discarded, held = False, 0
-        dirs: scratch.JobDirs | None = None
         try:
-            dirs = scratch.make_job_dirs(self.config.root, job.id)
+            return self._run()
+        finally:
+            if self._heartbeat is not None:
+                self._heartbeat.finish()
+
+    def _run(self) -> str | None:
+        job = self.job
+        outcome: Outcome | None = None
+        try:
+            dirs = scratch.make_job_dirs(self.config.root, job.id, job.lease_id)
             outcome = self._execute(dirs)
         except Exception as error:  # noqa: BLE001 - whatever fails, the directory goes and the job ends
             self.log.error("job_internal_error", job=job.id, error=type(error).__name__)
@@ -248,9 +290,17 @@ class JobRunner:
                 self.config.runtime != "apptainer",
             )
         finally:
-            containers.remove_job_containers(self.config, self.tuning, self.log, job.id)
-            discarded, held = scratch.discard(scratch.job_path(self.config.root, job.id))
+            pids.remove(self.config.root, job.id)
+            containers.remove_job_containers(
+                self.config, self.tuning, self.log, job.id, self.runner_label
+            )
+            discarded, held = scratch.discard(self.directory)
             self.log.info("scratch_discarded", job=job.id, bytes=held, discarded=discarded)
+        if self._heartbeat is not None:
+            self._heartbeat.uploading()  # the launcher is done: what is left is reporting
+        if outcome is not None and outcome.abandoned:
+            self.log.warn("job_not_completed", job=job.id, reason="abandoned")
+            return None
         if outcome is None or outcome.lease_lost or self.lease_lost.is_set():
             self.log.warn("job_not_completed", job=job.id, reason="lease_lost")
             return None
@@ -275,12 +325,7 @@ class JobRunner:
         if problem is not None:
             self.log.warn("launch_value_refused", job=job.id, reason=problem)
             return refusal("invalid_spec")
-        heartbeat = Heartbeat(self.api, job, self.log, self.tuning, self.cancel, self.lease_lost)
-        heartbeat.start()
-        try:
-            return self._launch(dirs, heartbeat)
-        finally:
-            heartbeat.finish()
+        return self._launch(dirs)
 
     def _spec_problem(self) -> str | None:
         """Why the claim's launch value cannot run, as a fixed word, or None. The decoded text holds the
@@ -317,9 +362,15 @@ class JobRunner:
     def _end_time(self) -> int:
         return int(self.job.claimed_at) + self.job.minutes * 60
 
-    def _launch(self, dirs: scratch.JobDirs, heartbeat: Heartbeat) -> Outcome:
+    def _term_deadline(self) -> float:
+        """When the job is to be terminated, on the MONOTONIC clock: the wall clock is read once, here,
+        and a later step of the system clock (NTP, a person) cannot move the deadline."""
+        remaining = self._end_time() + self.tuning.deadline_grace_seconds - time.time()
+        return time.monotonic() + remaining
+
+    def _launch(self, dirs: scratch.JobDirs) -> Outcome:
         job, config, tuning = self.job, self.config, self.tuning
-        term_at = self._end_time() + tuning.deadline_grace_seconds
+        term_at = self._term_deadline()
         sif: str | None = None
         if config.runtime == "apptainer":
             try:
@@ -332,9 +383,8 @@ class JobRunner:
                     job.id,
                     dirs.scratch,
                     dirs.home,
-                    lambda argv, env, label: self._run_helper(
-                        argv, env, label, dirs, term_at, heartbeat
-                    ),
+                    lambda argv, env, label: self._run_helper(argv, env, label, dirs, term_at),
+                    lambda: self._interrupt(term_at),
                 )
             except images.Interrupted as stopped:
                 if self.lease_lost.is_set():
@@ -344,14 +394,30 @@ class JobRunner:
             except images.ImageError as error:
                 self.log.error("image_unavailable", job=job.id, reason=str(error))
                 return refusal("image_missing")
+            if time.monotonic() - self._began > tuning.lease_abandon_seconds:
+                # No heartbeat has been sent (none exists before the launcher), so the lease is
+                # about to run out or has: leave it to expire so the job waits again, unstarted.
+                # The image stays where it is.
+                self.log.warn("claim_abandoned_during_pull", job=job.id)
+                return Outcome(0, None, None, usage.ZERO, False, abandoned=True)
         enforce = sif is not None and self.limits.proven(sif, dirs.home)
-        env = launch_environment(job, dirs, config, tuning, enforce)
-        argv = [self._python(), "-I", "-S", "-c", BOOT, config.launcher_dir]
+        env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label)
+        argv = [
+            images.resolve_python(tuning) or sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            BOOT,
+            config.launcher_dir,
+        ]
         reason = self._stop_reason()
         if reason is not None:  # stopped while the image was being made: do not start
             if reason == "lease_lost":
                 return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
             return refusal("terminated")
+        death = pdeathsig_hook()
+        if death is None:
+            self.log.warn("pdeathsig_unavailable", job=job.id)
         proc = subprocess.Popen(
             argv,
             env=env,
@@ -361,8 +427,15 @@ class JobRunner:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
+            preexec_fn=death,
         )
-        self.log.info("job_started", job=job.id, pid=proc.pid, enforce_limits=enforce)
+        try:
+            self._after_spawn(proc, dirs, enforce)
+        except BaseException:
+            self._signal_group(proc, signal.SIGKILL)
+            raise
+        heartbeat = self._heartbeat
+        assert heartbeat is not None
         result_path = os.path.join(dirs.out, RESULT_RELATIVE)
         memory_watch = None if enforce else effective_memory_mb(job, config)
         if config.runtime in ENGINES and job.memory_mb is None:
@@ -389,8 +462,23 @@ class JobRunner:
         )
         return Outcome(number, code, detail, measured, partial, lease_lost=why == "lease_lost")
 
-    def _python(self) -> str:
-        return shutil.which("python3", path=self.tuning.launch_path) or sys.executable
+    def _after_spawn(
+        self, proc: subprocess.Popen[bytes], dirs: scratch.JobDirs, enforce: bool
+    ) -> None:
+        """Record the launcher (so a dead runner's launcher is found and stopped), then start the
+        heartbeat: `started` goes out at once, and never before the launcher exists."""
+        job = self.job
+        if not pids.write(self.config.root, job.id, proc.pid, proc.pid):
+            self.log.warn("pid_record_failed", job=job.id)
+        self._heartbeat = Heartbeat(
+            self.api, job, self.log, self.tuning, self.cancel, self.lease_lost
+        )
+        self._heartbeat.start()
+        self.log.info("job_started", job=job.id, pid=proc.pid, enforce_limits=enforce)
+
+    def _interrupt(self, term_at: float) -> str | None:
+        """Why waiting for the image must stop (the stop reasons, or the job's own deadline)."""
+        return self._stop_reason() or ("deadline" if time.monotonic() >= term_at else None)
 
     def _run_helper(
         self,
@@ -399,10 +487,9 @@ class JobRunner:
         label: str,
         dirs: scratch.JobDirs,
         job_term_at: float,
-        heartbeat: Heartbeat,
     ) -> int:
         """Run a helper process (an image pull) under the same supervision as the launcher."""
-        term_at = min(job_term_at, time.time() + self.tuning.pull_timeout_seconds)
+        term_at = min(job_term_at, time.monotonic() + self.tuning.pull_timeout_seconds)
         proc = subprocess.Popen(
             argv,
             env=env,
@@ -413,7 +500,7 @@ class JobRunner:
             start_new_session=True,
             close_fds=True,
         )
-        status, _rusage, _wall, why = self._supervise(proc, term_at, None, None, heartbeat)
+        status, _rusage, _wall, why = self._supervise(proc, term_at, None, None, None)
         if why in ("lease_lost", "cancelled", "runner_stopping"):
             raise images.Interrupted(why)
         self.log.info(
@@ -435,8 +522,29 @@ class JobRunner:
         result_path: str | None,
         heartbeat: Heartbeat | None,
     ) -> tuple[int, Any, float, str | None]:
-        """Wait for ``proc`` and its group, acting on the deadline, a cancel, a lost lease, a stop and
-        memory. ``(wait status, rusage, wall seconds, why it was terminated or None)``."""
+        """Wait for ``proc`` and its group, acting on the deadline (``term_at``, monotonic), a cancel, a
+        lost lease, a stop and memory. ``(wait status, rusage, wall seconds, why it was terminated or
+        None)``.
+
+        A signal is sent BEFORE the line that says so is logged, and whatever goes wrong in here (any
+        exception, even one the log could not raise) the process group is sent SIGKILL on the way out:
+        a job is never left running with nothing watching it."""
+        try:
+            return self._watch(proc, term_at, memory_mb, result_path, heartbeat)
+        except BaseException:
+            self._signal_group(proc, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError, OSError):
+                os.wait4(proc.pid, 0)  # reap it: no zombie is left behind either
+            raise
+
+    def _watch(
+        self,
+        proc: subprocess.Popen[bytes],
+        term_at: float,
+        memory_mb: int | None,
+        result_path: str | None,
+        heartbeat: Heartbeat | None,
+    ) -> tuple[int, Any, float, str | None]:
         tuning = self.tuning
         started = time.monotonic()
         term_sent: float | None = None
@@ -462,7 +570,7 @@ class JobRunner:
                 heartbeat.uploading()
             if term_sent is None:
                 reason = self._stop_reason()
-                if reason is None and time.time() >= term_at:
+                if reason is None and now >= term_at:
                     reason = "deadline"
                 if reason is None and memory_mb is not None and now >= next_watch:
                     next_watch = now + tuning.watchdog_seconds
@@ -471,12 +579,12 @@ class JobRunner:
                         reason = "memory"
                 if reason is not None:
                     why, term_sent = reason, now
+                    self._signal_group(proc, signal.SIGTERM)  # signal first, log after
                     self.log.warn("terminating", job=self.job.id, reason=reason)
-                    self._signal_group(proc, signal.SIGTERM)
             elif not killed and now - term_sent >= tuning.kill_grace_seconds:
                 killed = True
-                self.log.warn("killing", job=self.job.id, reason=why)
                 self._signal_group(proc, signal.SIGKILL)
+                self.log.warn("killing", job=self.job.id, reason=why)
             time.sleep(tuning.tick_seconds)
         wall = time.monotonic() - started
         self._signal_group(proc, signal.SIGKILL)  # nothing of the job outlives it

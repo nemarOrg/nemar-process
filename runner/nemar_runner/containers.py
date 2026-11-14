@@ -1,10 +1,12 @@
 """Containers a job leaves behind under Docker or Podman.
 
-The launcher labels every container `nemar.job=<job id>`. When a job ends, however it ends (a lost
-lease, a cancel, a deadline kill, any exit of the launcher), the runner lists the containers with that
-label and removes them with their volumes; when the runner starts it does the same for every
-container with the label `nemar.job`, which a dead run of this account left. Under Apptainer nothing
-is done. A failure to list or remove is logged and never stops the job's completion.
+The launcher labels every container `nemar.job=<job id>` and `nemar.runner=<runner id>` (the
+runner's registration id, which the runner passes as `NEMAR_RUNNER_LABEL`). When a job ends, however
+it ends (a lost lease, a cancel, a deadline kill, any exit of the launcher), the runner lists the
+containers that carry BOTH labels for that job and removes them with their volumes; when the runner
+starts it does the same for every container with this runner's label and any `nemar.job`, which a dead
+run of this runner left. A container of another runner, on a daemon the runners share, is never
+listed. Under Apptainer nothing is done. A failure to list or remove is logged and never stops the job's completion.
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ from . import images
 from .config import ENGINES, Config, Tuning
 from .logs import Log
 
-LABEL = "nemar.job"
+JOB_LABEL = "nemar.job"
+RUNNER_LABEL = "nemar.runner"
 _ID = re.compile(r"[0-9a-f]{12,64}")
 _TIMEOUT_SECONDS = 120
 
@@ -36,17 +39,20 @@ def _run(argv: list[str], tuning: Tuning) -> subprocess.CompletedProcess[bytes] 
 
 
 def remove_matching(
-    config: Config, tuning: Tuning, log: Log, label_filter: str, job_id: str | None
+    config: Config, tuning: Tuning, log: Log, filters: list[str], job_id: str | None
 ) -> int:
-    """`<engine> ps -aq --filter label=<filter>` then `<engine> rm --force --volumes <ids>`; how many
-    containers were listed and removed. ``job_id`` only names the log lines."""
+    """`<engine> ps -aq --filter label=... [--filter label=...]` then `<engine> rm --force --volumes
+    <ids>`; how many containers were listed and removed. ``job_id`` only names the log lines."""
     if config.runtime not in ENGINES:
         return 0
     binary = images.runtime_binary(config, tuning)
     if binary is None:
         log.warn("container_cleanup_failed", job=job_id, reason="no_engine")
         return 0
-    listed = _run([binary, "ps", "-aq", "--filter", "label=" + label_filter], tuning)
+    argv = [binary, "ps", "-aq"]
+    for item in filters:
+        argv += ["--filter", "label=" + item]
+    listed = _run(argv, tuning)
     if listed is None or listed.returncode != 0:
         log.warn("container_cleanup_failed", job=job_id, reason="ps_failed")
         return 0
@@ -62,10 +68,24 @@ def remove_matching(
     return len(ids)
 
 
-def remove_job_containers(config: Config, tuning: Tuning, log: Log, job_id: str) -> int:
-    return remove_matching(config, tuning, log, "{}={}".format(LABEL, job_id), job_id)
+def remove_job_containers(
+    config: Config, tuning: Tuning, log: Log, job_id: str, runner_label: str | None
+) -> int:
+    if config.runtime not in ENGINES:
+        return 0
+    if runner_label is None:  # without the runner's id nothing can be told apart: remove nothing
+        log.warn("container_cleanup_failed", job=job_id, reason="no_runner_label")
+        return 0
+    filters = ["{}={}".format(RUNNER_LABEL, runner_label), "{}={}".format(JOB_LABEL, job_id)]
+    return remove_matching(config, tuning, log, filters, job_id)
 
 
-def sweep_all(config: Config, tuning: Tuning, log: Log) -> int:
-    """At start: every container of this account that the launcher labeled, from a dead run."""
-    return remove_matching(config, tuning, log, LABEL, None)
+def sweep_all(config: Config, tuning: Tuning, log: Log, runner_label: str | None) -> int:
+    """At start: every container of THIS runner that the launcher labeled, from a dead run."""
+    if config.runtime not in ENGINES:
+        return 0
+    if runner_label is None:
+        log.warn("container_cleanup_failed", job=None, reason="no_runner_label")
+        return 0
+    filters = ["{}={}".format(RUNNER_LABEL, runner_label), JOB_LABEL]
+    return remove_matching(config, tuning, log, filters, None)
