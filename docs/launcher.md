@@ -77,9 +77,17 @@ None of these variables reaches the container (`run.HOST_PASSTHROUGH` is a short
 
 ## Docker and Podman
 
-With `NEMAR_CONTAINER_RUNTIME=docker` or `podman` the launcher runs the same image digest through that engine instead of Apptainer, for a host that has one of them and no Apptainer.
+With `NEMAR_CONTAINER_RUNTIME=docker` the launcher runs the same image digest through Docker instead of Apptainer, for a host that has a rootful Docker daemon and no Apptainer.
+Docker is the supported second engine.
 Unset or `apptainer` is the path described everywhere else on this page, byte for byte unchanged.
 Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing`, before anything is fetched.
+
+**Podman is unsupported until it is verified.**
+`NEMAR_CONTAINER_RUNTIME=podman` is refused before the binary is looked for, asked its version or anything else: exit 13, `runtime_error` with detail `runtime_unusable` (the preflight's own refusal, no new word), and the log line `podman_unsupported`.
+`runtime.engine_preflight('podman', ...)` answers `(False, False)` without running the binary.
+The reason: Podman's site-wide `containers.conf` entries for `volumes` and `devices`, and its `mounts.conf` entries, reach every container, and the launcher can neither disable them nor detect them.
+The Podman flags, checks and tests below stay in the code behind that refusal (`runtime.UNSUPPORTED_ENGINES`), and a later step lifts it once those entries have been inspected on a real rootless Podman host; the Podman parts of this page describe that code, not something that runs today.
+On a shared host, where only rootless engines are allowed, rootless Docker is refused and Podman is unsupported, so Apptainer is the only engine there today.
 
 ### Before anything runs
 
@@ -88,7 +96,7 @@ Each of these ends the launch at the start, before the bundle is fetched or user
 - The launcher is not root: the container runs as the launcher's own user, and "not root" only holds when that user is not uid 0.
   Detail `runtime_unusable`.
 - The engine answers `info`: a dead daemon, a binary that cannot start, or an answer that is not the document asked for is `runtime_unusable` (never `image_missing`); a cancel ends the call at once.
-- Docker is not rootless (`SecurityOptions` names `rootless`; there `--user <uid>:<gid>` maps to a sub-user that cannot write the bind directories): `runtime_unusable`.
+- Docker is not rootless and has no user-namespace remapping (`SecurityOptions` names `rootless` or `userns`; in both the launcher's `--user <uid>:<gid>` maps to a sub-user that cannot write the bind directories): `runtime_unusable`.
 - The engine can enforce the limits.
   Docker reports `MemoryLimit`, `CpuCfsQuota` and `PidsLimit` as true; a daemon without a controller discards the flag with a warning and the job would run unlimited.
   Podman reports cgroup v2 with the `cpu`, `memory` and `pids` controllers available to it; a rootless Podman on cgroup v1 ignores the limits.
@@ -101,6 +109,8 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Under Apptainer it is not read.
 - The image's registry, everything before the first `/` of the reference, is on `NEMAR_ALLOWED_REGISTRIES` by exact match (a port included).
   The variable is comma-separated; unset it is `ghcr.io` only, and set but empty it allows none.
+  Each entry must be a host: it holds a dot or a colon, or is `localhost`, and has no `/`, `@` or white space.
+  A bare word such as `myorg` is a Docker Hub namespace to Docker and a short name resolved through search registries to Podman, so it ends the launch at the start with exit 13 and detail `invalid_spec`.
   A loopback address, an IP literal, a name with user information and a bare Docker Hub name are refused unless named.
   Detail `image_missing`.
 - The image is present or can be pulled, and its configuration declares no `VOLUME`: an image volume is a writable mount outside the declared binds.
@@ -110,7 +120,9 @@ Each of these ends the launch at the start, before the bundle is fetched or user
 ### For a runner's doctor
 
 `runtime.engine_preflight(engine_path, engine_name)` returns `(limits_enforceable, mode_accepted)` and never raises: an engine that cannot be run, does not answer, or answers with something else is `(False, False)`.
-`mode_accepted` is False for rootless Docker and for a launcher running as root.
+`limits_enforceable` is False for a missing controller and for an engine that does not say its CPU count (a launch needs that number to check `NEMAR_CPUS`).
+`mode_accepted` is False for rootless Docker, for Docker with user-namespace remapping and for a launcher running as root.
+Podman answers `(False, False)` without being run.
 It runs only the engine's read-only `info`; the launcher's own checks are the same code.
 
 ### What differs from the Apptainer path
@@ -121,10 +133,12 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
   A missing or unusable `NEMAR_CPUS`, a missing or unusable `NEMAR_MEMORY_MB`, or a memory below Docker's minimum of 6 MB ends the launch at the start with exit 13 and detail `invalid_spec`.
   The launch specification carries neither value.
   `--cpus` is `NEMAR_CPUS`, `--memory` and `--memory-swap` are `NEMAR_MEMORY_MB` followed by `m` (no swap beyond the memory), and `--pids-limit` is a fixed 4096, far above what an EEG recipe's thread pools need and far below a fork bomb.
+- When the container's client exits, the launcher kills whatever is left in its process group before it reaps the client (`waitid` with `WNOWAIT` on Linux), so the group id cannot have been reused when the kill is sent.
 - The container is named `nemar-launch-<random>`, carries the labels `nemar.job=<job id>` and `nemar.runner=<NEMAR_RUNNER_LABEL>`, and has no `--rm`.
   The launcher logs the name, in one line, `container: named <name>`; the labels are the two above and are not logged separately.
   The launcher's `finally` removes the container without a log line of its own.
   After the run it reads `State.OOMKilled`, then removes the container and its anonymous volumes with `rm --force --volumes`, whatever happened to the engine's client process: killing a client does not stop its container.
+  Docker is given `--log-driver=none`, so the daemon keeps no copy of the job's standard output for a stopped container that waits for that sweep; the attached `run` still streams the output to the launcher, and the `State.OOMKilled` read is unaffected (the end-to-end test checks both).
   A SIGKILL of the launcher itself leaves a rootful container running, outside the job's own control group, until something removes it; the label is how.
   The runner's start sweep removes containers by both labels (a container of its own, `nemar.runner`, whose job, `nemar.job`, is no longer running), so one runner never removes another's containers on a shared daemon.
 - An exit status of 137 is `out_of_memory` only when `OOMKilled` is true.
@@ -146,7 +160,7 @@ run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --
     [podman: --userns=keep-id --pid=private --ipc=private --uts=private --cgroupns=private
              --env-host=false --read-only-tmpfs=false --image-volume=ignore]
     --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
-    [docker: --entrypoint ""]  --no-healthcheck
+    [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
     --cpus <NEMAR_CPUS> --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
     --pids-limit 4096 --oom-score-adj=1000
     --mount type=bind,src=<out>/work,dst=/work  --mount type=bind,src=<scratch>/tmp,dst=/tmp
@@ -183,12 +197,13 @@ Residuals, stated plainly:
 - The default bridge network keeps traffic between containers on the same host on, and the demo recipe needs egress to reach its registry and NEMAR.
   A dedicated network with inter-container communication off (`--opt com.docker.network.bridge.enable_icc=false`) is the alternative if a host runs other containers next to the launcher's.
 - Podman on SELinux: a bind mount may need relabeling (`:z` or `:Z` in a volume, `relabel=` in a mount) for the container to read it; this is unverified and not done.
-- Rootless Docker is refused, not supported.
-- Podman is untested against a real engine: CI runs Docker only (`NEMAR_TEST_ENGINE=podman` runs the same end-to-end test against Podman where one is installed).
+- Rootless Docker, and Docker with user-namespace remapping, are refused, not supported; so a shared host that allows only rootless engines has Apptainer only.
+- Podman is refused (see the top of this section); its code is untested against a real engine: CI runs Docker only.
 
 ### Tests
 
 `tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a duplicate mount point).
+`tests/launcher/test_runtime_podman_refused.py` shows Podman failing closed with a stand-in `podman` on `PATH` recording no call, and `tests/launcher/test_group_kill.py` the group kill with a real child and grandchild.
 `tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`.
 It skips where there is no usable daemon and fails in the CI job that sets `NEMAR_REQUIRE_DOCKER=1`.
 
@@ -476,7 +491,7 @@ A signal death of the entry is reported as 128 plus the signal, as a shell does,
 | `NEMAR_SIF_ROOT` | the application definition | the directory `image.sif` is looked up in; required, except under Docker or Podman |
 | `NEMAR_RUNNER_LABEL` | a runner, required under Docker or Podman | the runner's registration id (`rnr_` and 24 lowercase hexadecimal digits), put on every container as `nemar.runner`; ignored under Apptainer ([Docker and Podman](#docker-and-podman)) |
 | `NEMAR_ALLOWED_REGISTRIES` | a runner, optional | under Docker or Podman, the registries an image may come from, comma-separated; unset is `ghcr.io` only ([Docker and Podman](#docker-and-podman)) |
-| `NEMAR_CONTAINER_RUNTIME` | a runner, optional | `docker` or `podman` runs the image through that engine; unset or `apptainer` is the Apptainer path ([Docker and Podman](#docker-and-podman)) |
+| `NEMAR_CONTAINER_RUNTIME` | a runner, optional | `docker` runs the image through Docker (`podman` is refused for now); unset or `apptainer` is the Apptainer path ([Docker and Podman](#docker-and-podman)) |
 | `SLURM_TMPDIR`, `NEMAR_SCRATCH_DIR`, `TMPDIR` | Slurm, a runner, the system | where scratch goes, in that order |
 | `SLURM_JOB_END_TIME`, `NEMAR_JOB_END_TIME`, `SLURM_JOB_ID` | Slurm, a runner, Slurm | the time limit rule (the first valid of the two), and the job id in provenance |
 | `NEMAR_OUTPUT_DIR` | a runner | the output directory when Tapis's is unset |
