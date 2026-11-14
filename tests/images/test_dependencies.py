@@ -9,11 +9,14 @@ pins in `pyproject.toml`.
 
 from __future__ import annotations
 
+import ast
 import re
+import shlex
 import subprocess
 import tomllib
 from urllib.parse import unquote
 
+import yaml
 from check_smoke_pins import NO_MATLAB, forbidden_names
 from image_support import clean_env, uv_binary
 from packaging.markers import Marker
@@ -220,20 +223,125 @@ def test_the_cuda_extra_installs_torch_2_12_1_for_cuda_12_9_and_the_cuda_12_libr
     assert installed["pamica"] == "0.4.0"
 
 
+FLAVOR_EXTRAS = ("cpu", "cuda")
+
+
+def unflavored_runtime_commands(commands: list[list[str]]) -> list[str]:
+    """The commands (argument vectors) that select ``--group runtime`` and no ``--extra cpu|cuda``."""
+    bad = []
+    for argv in commands:
+        group = any(
+            argv[i : i + 2] == ["--group", "runtime"] or argv[i] == "--group=runtime"
+            for i in range(len(argv))
+        )
+        if not group:
+            continue
+        flavored = any(
+            (argv[i] == "--extra" and i + 1 < len(argv) and argv[i + 1] in FLAVOR_EXTRAS)
+            or argv[i] in {"--extra=" + e for e in FLAVOR_EXTRAS}
+            for i in range(len(argv))
+        )
+        if not flavored:
+            bad.append(" ".join(argv))
+    return bad
+
+
+def shell_commands(text: str) -> list[list[str]]:
+    """Argument vectors of the commands in shell text: continuation lines are joined, and a line is
+    split at ``&&``, ``||``, ``;`` and ``|`` into its commands, each split as a shell would."""
+    joined = re.sub(r"\\\n\s*", " ", text)
+    commands = []
+    for line in joined.splitlines():
+        for part in re.split(r"&&|\|\||;|\|", line):
+            try:
+                argv = shlex.split(part)
+            except ValueError:
+                argv = part.split()  # prose with a stray quote: split on blanks instead
+            if argv:
+                commands.append(argv)
+    return commands
+
+
+def list_commands(source: str) -> list[list[str]]:
+    """Argument vectors written as Python lists of strings (``["uv", "sync", ...]``)."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.List):
+            items = [e.value if isinstance(e, ast.Constant) else "<value>" for e in node.elts]
+            if all(isinstance(i, str) for i in items):
+                found.append(items)
+    return found
+
+
+def markdown_commands(text: str) -> list[list[str]]:
+    """The commands in a Markdown file: the code spans and the fenced blocks."""
+    spans = re.findall(r"`([^`\n]+)`", text) + re.findall(r"```[^\n]*\n(.*?)```", text, re.S)
+    return [argv for span in spans for argv in shell_commands(span)]
+
+
+def runtime_sync_commands() -> list[tuple[str, list[str]]]:
+    """Every command in the repository's Dockerfiles, workflows, Markdown and test conftest that
+    mentions the runtime group, with the file it is in."""
+    found = []
+    for path in sorted((ROOT / "images" / "nemar-python").glob("Dockerfile*")):
+        text = path.read_text(encoding="utf-8")
+        found += [(path.name, argv) for argv in shell_commands(text)]
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job in document["jobs"].values():
+            for step in job["steps"]:
+                found += [(path.name, argv) for argv in shell_commands(step.get("run", ""))]
+    for path in [*sorted((ROOT / "docs").glob("*.md")), ROOT / "AGENTS.md"]:
+        found += [(path.name, argv) for argv in markdown_commands(path.read_text(encoding="utf-8"))]
+    conftest = ROOT / "tests" / "images" / "conftest.py"
+    found += [(conftest.name, argv) for argv in list_commands(conftest.read_text(encoding="utf-8"))]
+    # a command that installs or runs through uv (prose that merely names the flag is not one)
+    uv = [(n, a) for n, a in found if "uv" in a or {"sync", "run"} & set(a)]
+    return [(name, argv) for name, argv in uv if "runtime" in argv or "--group=runtime" in argv]
+
+
 def test_every_runtime_sync_names_a_flavor():
     """`--group runtime` without `--extra cpu` or `--extra cuda` would install torch from PyPI."""
-    sources = [ROOT / "images" / "nemar-python" / "Dockerfile"]
-    sources += [ROOT / "images" / "nemar-python" / "Dockerfile.cuda"]
-    sources += sorted((ROOT / ".github" / "workflows").glob("*.yml"))
-    sources += [ROOT / "tests" / "images" / "conftest.py"]
-    found = 0
-    for path in sources:
-        text = path.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if "--group runtime" in line and "uv " in line:
-                found += 1
-                assert re.search(r"--extra (cpu|cuda)\b", line), (path.name, line.strip())
-    assert found >= 4
+    commands = runtime_sync_commands()
+    # the places that exist today are all seen: both Dockerfiles, the workflows, the docs, the fixture
+    seen = {name for name, _ in commands}
+    assert {
+        "Dockerfile",
+        "Dockerfile.cuda",
+        "image-nemar-python.yml",
+        "ci.yml",
+        "conftest.py",
+    } <= seen
+    assert "images.md" in seen
+    for name, argv in commands:
+        assert unflavored_runtime_commands([argv]) == [], name
+
+
+def test_the_flavor_scan_reads_continuation_lines_and_argument_lists():
+    # a flavor on the next line of a continued command counts, and a missing one is found
+    continued = "uv sync --frozen --no-dev \\\n    --group runtime \\\n    --extra cuda\n"
+    assert unflavored_runtime_commands(shell_commands(continued)) == []
+    assert unflavored_runtime_commands(shell_commands(continued.replace("--extra cuda", ""))) != []
+    assert unflavored_runtime_commands(shell_commands("uv run --group runtime pytest")) != []
+    assert (
+        unflavored_runtime_commands(shell_commands("uv run --group=runtime --extra=cpu pytest"))
+        == []
+    )
+    assert (
+        unflavored_runtime_commands(shell_commands("a && uv sync --group runtime --extra rocm"))
+        != []
+    )
+    # an argument list, as the conftest writes the command
+    listed = 'command = ["uv", "sync", "--group", "runtime", "--extra", "cpu"]'
+    assert unflavored_runtime_commands(list_commands(listed)) == []
+    no_extra = 'command = ["uv", "sync", "--group", "runtime"]'
+    assert unflavored_runtime_commands(list_commands(no_extra)) != []
+    # and the real conftest, with the flavor removed from its list, is caught
+    conftest = (ROOT / "tests" / "images" / "conftest.py").read_text(encoding="utf-8")
+    assert unflavored_runtime_commands(list_commands(conftest)) == []
+    stripped = re.sub(r'\s*"--extra",\s*"cpu",', "", conftest)
+    assert stripped != conftest
+    assert unflavored_runtime_commands(list_commands(stripped)) != []
 
 
 def test_the_locked_torch_meets_pamicas_floor():
