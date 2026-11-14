@@ -25,13 +25,21 @@ from runner_support import (
     claimed,
     job_dir,
     job_id,
+    lease_id,
     make_launcher,
+    retune,
     wait_for,
 )
 from server import Response
 from test_runner_images import FAKE_RUNTIME, RECORD, calls
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def stamp(line):
+    import datetime
+
+    return datetime.datetime.fromisoformat(line["ts"]).timestamp()
 
 
 def build(tmp_path, body="pass", **kwargs):
@@ -82,6 +90,7 @@ def test_a_log_that_cannot_be_written_never_leaves_the_launcher_running(tmp_path
             int(pid_path.read_text())
         )  # the cancel killed it though no line could be logged
         assert rig.routes.count("complete") == 1
+        rig.log.flush()
         assert rig.log.dropped > 0
         assert not job_dir(rig, 1).exists()
     finally:
@@ -96,6 +105,7 @@ def test_a_log_never_raises_whatever_it_is_given(tmp_path):
     os.close(log._fd)
     log._fd = 99_999  # a descriptor that is not open
     log.info("still_fine", thing=object())
+    log.flush()
     log.close()
     log.info("after_close")
     assert log.dropped >= 1
@@ -175,8 +185,8 @@ def test_a_failure_inside_the_supervisor_still_kills_the_group(tmp_path):
 # ---- one job id is never run twice at once ------------------------------------------------------------------------
 
 
-def test_a_second_claim_of_a_job_that_is_still_running_is_skipped(tmp_path):
-    body = "time.sleep(1.5)\nwrite_result()\n"
+def test_a_second_lease_of_a_job_still_running_waits_for_the_first_and_then_runs(tmp_path):
+    body = "time.sleep(1.2)\nwrite_result()\n"
     rig = build(tmp_path, body)
     try:
         again = claim_job(1)
@@ -186,14 +196,41 @@ def test_a_second_claim_of_a_job_that_is_still_running_is_skipped(tmp_path):
         agent = rig.agent()
         thread = threading.Thread(target=agent.run_forever)
         thread.start()
-        wait_for(lambda: rig.events("duplicate_claim_skipped"), 10, "the duplicate to be skipped")
+        wait_for(lambda: rig.events("duplicate_claim_waiting"), 10, "the second lease to wait")
         assert job_dir(rig, 1).exists()  # the live run's directory was not touched
-        wait_for(lambda: rig.routes.count("complete") == 1, 20, "the first run to complete")
+        assert len(rig.events("job_started")) == 1  # never two runs at once
+        wait_for(lambda: rig.routes.count("complete") == 2, 30, "both leases to complete")
         agent.stop.set()
         thread.join(15)
         agent.release()
-        assert rig.routes.count("complete") == 1
+        leases = sorted(b["lease_id"] for b in rig.routes.bodies("complete"))
+        assert leases == sorted([lease_id(1), "f" * 32])  # each claim got its completion
+        first_done, second_start = (
+            stamp(rig.events("job_completed")[0]),
+            stamp(rig.events("job_started")[1]),
+        )
+        assert second_start >= first_done
+        assert rig.events("duplicate_claim_abandoned") == []
+    finally:
+        rig.close()
+
+
+def test_a_second_lease_that_cannot_wait_for_the_first_is_abandoned_not_run(tmp_path):
+    rig = build(tmp_path, "time.sleep(30)\n")
+    try:
+        rig.tuning = retune(rig.tuning, duplicate_join_seconds=0.4)
+        again = claim_job(1)
+        again["lease_id"] = "f" * 32
+        rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
+        rig.routes.claims.append({"jobs": [again], "min_runner_version": "0.1.0"})
+        agent = rig.agent()
+        thread = threading.Thread(target=agent.run_forever)
+        thread.start()
+        wait_for(lambda: rig.events("duplicate_claim_abandoned"), 15, "the wait to give up")
         assert len(rig.events("job_started")) == 1
+        agent.stop.set()
+        thread.join(30)
+        agent.release()
     finally:
         rig.close()
 
@@ -272,7 +309,9 @@ def test_a_python_in_a_directory_others_can_write_is_refused_at_start(tmp_path):
         shim.write_text('#!/bin/sh\nexec {} "$@"\n'.format(sys.executable))
         shim.chmod(0o755)
         rig.bin.chmod(0o777)
-        with pytest.raises(ConfigError, match="python3 can be written by group or others"):
+        with pytest.raises(
+            ConfigError, match="a launch PATH directory can be written by group or others"
+        ):
             rig.agent()
     finally:
         rig.bin.chmod(0o755)
@@ -611,3 +650,139 @@ def test_a_very_deep_tree_is_reported_not_crashed_on(tmp_path):
     gone, _ = scratch.discard(str(tree))
     assert gone in (True, False)  # no exception, and the answer is honest
     assert gone == (not tree.exists())
+
+
+# ---- a failure while supervising must reach the container too ---------------------------------------------------
+
+
+# The real launcher starts its container in a session of its own, outside its group, and on SIGTERM
+# forwards the signal to it. This stand-in does exactly that.
+CONTAINER_SHAPED = (
+    "import subprocess\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],"
+    " start_new_session=True)\n"
+    "open({!r}, 'w').write(str(child.pid))\n"
+    "def forward(signum, frame):\n"
+    "    child.terminate()\n"
+    "    sys.exit(143)\n"
+    "signal.signal(signal.SIGTERM, forward)\n"
+    "time.sleep(600)\n"
+)
+
+
+def test_a_fault_in_the_supervisor_also_ends_a_container_outside_the_group(tmp_path):
+    pid_path = tmp_path / "container.pid"
+    rig = build(tmp_path, CONTAINER_SHAPED.format(str(pid_path)))
+    try:
+        rig.tuning = retune(rig.tuning, exception_grace_seconds=5.0)
+        agent = rig.agent()
+        runner = job.JobRunner(
+            claimed(claim_job(1)), rig.config, rig.tuning, agent.api, rig.log, agent.locks,
+            agent.limits, agent.stop,
+        )  # fmt: skip
+
+        def explode(proc, *args):
+            wait_for(lambda: pid_path.exists(), 10, "the container pid")
+            raise RuntimeError("unplanned")
+
+        runner._watch = explode  # ty: ignore[invalid-assignment]  # fault injection
+        started = time.monotonic()
+        state = runner.run()
+        agent.release()
+        assert state == "finished"
+        container = int(pid_path.read_text())
+        wait_for(lambda: not alive(container), 5, "the container to be gone")
+        assert time.monotonic() - started < 5  # the launcher obeyed SIGTERM: no wait for the grace
+        assert rig.routes.bodies("complete")[0]["launcher_detail"] == "internal_error"
+    finally:
+        rig.close()
+
+
+def test_the_exception_path_escalates_to_sigkill_after_the_grace(tmp_path):
+    pid_path = tmp_path / "pid"
+    body = "open({!r}, 'w').write(str(os.getpid()))\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(600)\n".format(
+        str(pid_path)
+    )
+    rig = build(tmp_path, body)
+    try:
+        rig.tuning = retune(rig.tuning, exception_grace_seconds=0.8)
+        agent = rig.agent()
+        runner = job.JobRunner(
+            claimed(claim_job(1)), rig.config, rig.tuning, agent.api, rig.log, agent.locks,
+            agent.limits, agent.stop,
+        )  # fmt: skip
+
+        def explode(proc, *args):
+            wait_for(lambda: pid_path.exists() and pid_path.read_text(), 10, "the pid")
+            time.sleep(0.3)  # the launcher has installed its handler
+            raise RuntimeError("unplanned")
+
+        runner._watch = explode  # ty: ignore[invalid-assignment]  # fault injection
+        started = time.monotonic()
+        runner.run()
+        agent.release()
+        assert not alive(int(pid_path.read_text()))
+        assert time.monotonic() - started >= 0.8  # it was given the grace first
+    finally:
+        rig.close()
+
+
+# ---- a stderr that blocks cannot hold the kill back ---------------------------------------------------------------
+
+
+def test_a_standard_error_nobody_reads_cannot_stall_the_kill(tmp_path):
+    from nemar_runner.logs import Log
+
+    pid_path = tmp_path / "pid"
+    body = "open({!r}, 'w').write(str(os.getpid()))\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(600)\n".format(
+        str(pid_path)
+    )
+    rig = build(tmp_path, body)
+    read_end, write_end = os.pipe()
+    os.set_blocking(write_end, False)
+    try:
+        while True:  # fill the pipe: from now on a write to it blocks
+            os.write(write_end, b"x" * 4096)
+    except BlockingIOError:
+        pass
+    os.set_blocking(write_end, True)
+    stalled = os.fdopen(write_end, "w")
+    try:
+        rig.log.close()
+        rig.log = Log(str(rig.root / "runner.log"), stream=stalled)
+        rig.routes.on_heartbeat = lambda b, n: {
+            "lease_expires_at": "2030-01-01T00:00:00Z",
+            "cancel": n >= 2,
+        }
+        rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
+        agent = rig.agent()
+        started = time.monotonic()
+        thread = threading.Thread(target=agent.run_once)
+        thread.start()
+        thread.join(30)
+        assert not thread.is_alive(), "the supervisor was frozen by a blocked standard error"
+        agent.release()
+        assert time.monotonic() - started < 20
+        assert not alive(int(pid_path.read_text()))
+        assert rig.routes.bodies("complete")[0]["exit_number"] == 137  # SIGKILL after the grace
+    finally:
+        os.close(read_end)  # the writer thread gets EPIPE and ends
+        rig.close()
+
+
+def test_a_full_queue_drops_lines_and_counts_them_instead_of_blocking(tmp_path):
+    import io
+
+    from nemar_runner.logs import Log
+
+    class Stuck(io.StringIO):
+        def write(self, text):
+            time.sleep(60)
+            return len(text)
+
+    log = Log(None, stream=Stuck())
+    started = time.monotonic()
+    for index in range(Log.QUEUE_LINES + 500):
+        log.info("burst", n=index)
+    assert time.monotonic() - started < 5  # the caller never waited for the stream
+    assert log.dropped >= 400

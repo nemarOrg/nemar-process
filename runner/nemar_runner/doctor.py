@@ -52,6 +52,9 @@ def _writable_dir(path: str) -> str | None:
     return None
 
 
+GATES_FOR_PREFLIGHT = ("launcher", "launcher_dir trusted", "launcher python")
+
+
 def checks_ok(checks: list[Check], name: str) -> bool:
     return any(n == name and ok for n, ok, _ in checks)
 
@@ -103,7 +106,7 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
         add(
             "runtime {}".format(config.runtime),
             version is not None,
-            version or "not found or not working on {}".format(tuning.launch_path),
+            version or "not found, not trusted or not working on the launch PATH",
         )
         problem = images.python_problem(tuning)
         add("launcher python", problem is None, problem or "")
@@ -143,9 +146,14 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
 
     limits_ok, limits_note = False, "not checked"
     if config is not None and config.runtime in ENGINES:
-        python = shutil.which("python3", path=tuning.launch_path)
-        if binary is None or python is None or not checks_ok(checks, "launcher"):
-            limits_on, mode_on, note = False, False, "no engine, python or launcher to ask"
+        python = images.resolve_python(tuning)
+        if (
+            binary is None
+            or python is None
+            or not all(checks_ok(checks, name) for name in GATES_FOR_PREFLIGHT)
+        ):
+            # the preflight imports code from launcher_dir: never from one that is not trusted
+            limits_on, mode_on, note = False, False, "no engine, trusted python or trusted launcher"
         else:
             limits_on, mode_on, note = images.engine_preflight(config, binary, python, tuning)
         add("engine limits enforceable", limits_on, note)

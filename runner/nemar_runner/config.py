@@ -69,6 +69,9 @@ class Tuning:
     deadline_grace_seconds: float = 60.0
     kill_grace_seconds: float = 30.0
     pull_timeout_seconds: float = 3600.0
+    # after a fault in the supervisor: the launcher's own ten seconds for its container, and a margin
+    exception_grace_seconds: float = 15.0
+    duplicate_join_seconds: float = 60.0
     # a job whose image took longer than the lease less a minute is left to expire, not started
     lease_abandon_seconds: float = float(contract.LEASE_SECONDS - 60)
     probe_timeout_seconds: float = 120.0

@@ -70,8 +70,10 @@ def test_every_field_of_an_event_is_redacted_and_odd_values_are_named_by_type(tm
 
 def test_the_log_file_is_private_and_appended_to(tmp_path):
     path = tmp_path / "runner.log"
-    Log(str(path), stream=io.StringIO()).info("one")
-    Log(str(path), stream=io.StringIO()).info("two")
+    for name in ("one", "two"):
+        log = Log(str(path), stream=io.StringIO())
+        log.info(name)
+        log.close()
     assert path.stat().st_mode & 0o077 == 0
     assert [json.loads(line)["event"] for line in path.read_text().splitlines()] == ["one", "two"]
 

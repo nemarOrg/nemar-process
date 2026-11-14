@@ -88,7 +88,12 @@ def _open_dir(name: str, parent: int) -> int:
     if not loosened:
         if not stat.S_ISDIR(os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode):
             raise NotADirectoryError(name)
-        os.chmod(name, 0o700, dir_fd=parent)
+        try:
+            os.chmod(name, 0o700, dir_fd=parent, follow_symlinks=False)
+        except (
+            NotImplementedError
+        ):  # Linux has no `lchmod`; the O_PATH route above is the safe one there
+            os.chmod(name, 0o700, dir_fd=parent)
     return os.open(name, _DIR_FLAGS, dir_fd=parent)
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import os
 import threading
+import time
 
 from . import __version__, containers, contract, images, pids, scratch
 from .api import Api, ApiError
@@ -43,12 +44,14 @@ class Agent:
         self.stop = threading.Event()
         self.locks = images.PullLocks()
         self.limits = images.Limits(config, self.tuning, log)
-        self._threads: dict[str, threading.Thread] = {}
+        self._threads: dict[str, threading.Thread] = {}  # by lease id
+        self._latest: dict[str, threading.Thread] = {}  # the newest run of each job id
         self._states: dict[str, str | None] = {}
         self._lock_fd: int | None = None
         self.refused: str | None = None
         self.draining = False  # stop claiming, let the jobs held finish
         self.runner_label: str | None = None  # the registration id, under an engine only
+        self.python: str | None = None  # the launcher's python3, pinned at start
 
     # ---- start and stop -----------------------------------------------------------------------------
 
@@ -57,8 +60,9 @@ class Agent:
 
         Takes the root's lock (one runner per root); refuses a `launcher_dir`, a `sif_root` or a
         `python3` that someone else could change; under an engine reads the registration id that
-        labels the containers; then, in this order: stops every launcher a dead run recorded, removes
-        its labeled containers, and only then deletes the leftover job directories."""
+        labels the containers. In this order: stops every launcher a dead run recorded (first of all,
+        so that a refusal or an unreachable NEMAR below cannot leave one running), removes its labeled
+        containers, and only then deletes the leftover job directories."""
         root = self.config.root
         fd = os.open(os.path.join(root, "runner.lock"), os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -68,12 +72,12 @@ class Agent:
             raise ConfigError("another runner holds this root") from None
         self._lock_fd = fd
         try:
+            pids.kill_recorded(root, self.log, self.tuning)
             self._refuse_untrusted()
             self._identify()
         except BaseException:
             self.release()
             raise
-        pids.kill_recorded(root, self.log, self.tuning)
         containers.sweep_all(self.config, self.tuning, self.log, self.runner_label)
         removed = scratch.sweep_leftovers(root, self.log)
         self.log.info(
@@ -96,6 +100,7 @@ class Agent:
         problem = images.python_problem(self.tuning)
         if problem is not None:
             raise ConfigError(problem)
+        self.python = images.resolve_python(self.tuning)
 
     def _identify(self) -> None:
         """Under Docker or Podman: the registration id from NEMAR, which labels the containers the
@@ -120,8 +125,10 @@ class Agent:
         return len(self._threads)
 
     def _reap(self) -> None:
-        for job_id in [j for j, t in self._threads.items() if not t.is_alive()]:
-            del self._threads[job_id]
+        for lease in [j for j, t in self._threads.items() if not t.is_alive()]:
+            del self._threads[lease]
+        for job_id in [j for j, t in self._latest.items() if not t.is_alive()]:
+            del self._latest[job_id]
 
     def room_for_a_claim(self) -> bool:
         free = scratch.free_bytes(self.config.root)
@@ -146,10 +153,6 @@ class Agent:
             self.log.error("runner_outdated", version=self.version, needed=minimum)
         started = []
         for job in jobs:
-            alive = self._threads.get(job.id)
-            if alive is not None and alive.is_alive():
-                self.log.warn("duplicate_claim_skipped", job=job.id)
-                continue
             self._start(job)
             started.append(job)
         return started
@@ -165,13 +168,30 @@ class Agent:
             self.limits,
             self.stop,
             self.runner_label,
+            self.python,
         )
 
+        previous = self._latest.get(job.id)
+
         def work() -> None:
+            # a claim of a job this runner still has a run of (its lease expired, or the Worker leased
+            # it again): never two runs at once, but not a dropped claim either (each one spends one of
+            # the job's three): this run waits, bounded, for the old one to end, then goes ahead
+            if previous is not None and previous.is_alive():
+                self.log.warn("duplicate_claim_waiting", job=job.id)
+                deadline = time.monotonic() + self.tuning.duplicate_join_seconds
+                while (
+                    previous.is_alive() and not self.stop.is_set() and time.monotonic() < deadline
+                ):
+                    previous.join(0.1)
+                if previous.is_alive():
+                    self.log.warn("duplicate_claim_abandoned", job=job.id)
+                    return
             self._states[job.id] = runner.run()
 
-        thread = threading.Thread(target=work, name="job-" + job.id)
-        self._threads[job.id] = thread
+        thread = threading.Thread(target=work, name="job-{}-{}".format(job.id, job.lease_id[:8]))
+        self._threads[job.lease_id] = thread
+        self._latest[job.id] = thread
         thread.start()
 
     def wait_for_jobs(self) -> None:

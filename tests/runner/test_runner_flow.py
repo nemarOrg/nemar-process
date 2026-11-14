@@ -356,7 +356,8 @@ def _wire(text):
 def test_no_log_line_and_no_standard_error_holds_a_secret_a_token_or_the_launch_value(seen_rig):
     raw = claim_job(1)
     run_once(seen_rig, raw)
-    everything = (seen_rig.root / "runner.log").read_text(encoding="utf-8") + seen_rig.stream.text()
+    streamed = seen_rig.stream.text()  # flushes the log first
+    everything = (seen_rig.root / "runner.log").read_text(encoding="utf-8") + streamed
     assert everything
     assert SECRET not in everything
     assert "nmr_" not in everything

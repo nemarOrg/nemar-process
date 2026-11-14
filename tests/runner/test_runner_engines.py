@@ -54,9 +54,15 @@ elif argv[:2] == ["ps", "-aq"]:
     if os.path.exists(os.path.join(here, "ps.fail")):
         sys.exit(1)
     wanted = [argv[i + 1][len("label="):] for i, a in enumerate(argv) if a == "--filter"]
+    either = os.path.exists(os.path.join(here, "ps.or"))  # an engine that ORs repeated label filters
     for item in containers:
-        if all(matches(item["labels"], w) for w in wanted):
+        hits = [matches(item["labels"], w) for w in wanted]
+        if (any(hits) if either else all(hits)):
             print(item["id"])
+elif argv[:1] == ["inspect"]:
+    for item in containers:
+        if item["id"] == argv[-1]:
+            print(json.dumps(item["labels"]))
 elif argv[:1] == ["rm"]:
     if os.path.exists(os.path.join(here, "rm.fail")):
         sys.exit(1)
@@ -235,7 +241,8 @@ A, B, C = "a1" * 6, "b2" * 6, "c3" * 6
 
 
 def filtered(rig):
-    return [c for c in engine_calls(rig) if c[:1] != ["--version"]]
+    """The engine's calls but for `--version` and `inspect` (which has its own test)."""
+    return [c for c in engine_calls(rig) if c[:1] not in (["--version"], ["inspect"])]
 
 
 def test_after_a_lost_lease_only_this_runners_containers_of_the_job_are_removed(tmp_path):
@@ -543,5 +550,59 @@ def test_the_real_launcher_preflight_is_called_when_the_launcher_has_one(tmp_pat
         assert answers["engine limits enforceable"] in ("yes", "no")
         assert answers["engine mode accepted"] in ("yes", "no")
         assert status in (0, 1)
+    finally:
+        rig.close()
+
+
+def test_each_listed_container_is_inspected_before_it_is_removed(tmp_path):
+    rig = make_rig(tmp_path, "docker")
+    try:
+        put_containers(rig, (A, MINE, job_id(1)), (C, MINE, job_id(2)))
+        agent = rig.agent()
+        agent.release()
+        calls_ = [c for c in engine_calls(rig) if c[:1] != ["--version"]]
+        fmt = "{{json .Config.Labels}}"
+        assert calls_ == [
+            ["ps", "-aq", "--filter", "label=nemar.runner=" + MINE, "--filter", "label=nemar.job"],
+            ["inspect", "--format", fmt, A],
+            ["inspect", "--format", fmt, C],
+            ["rm", "--force", "--volumes", A, C],
+        ]
+    finally:
+        rig.close()
+
+
+def test_an_engine_that_ors_label_filters_cannot_get_another_runners_container_removed(tmp_path):
+    rig = make_rig(tmp_path, "docker")
+    try:
+        (rig.bin / "ps.or").write_text("")  # `ps` now lists a container that has EITHER label
+        put_containers(rig, (A, MINE, job_id(1)), (B, OTHER, job_id(1)), (C, OTHER, job_id(3)))
+        agent = rig.agent()
+        agent.release()
+        assert ["rm", "--force", "--volumes", A] in filtered(
+            rig
+        )  # B and C were listed, then refused
+        assert remaining(rig) == [B, C]
+    finally:
+        rig.close()
+
+
+def test_a_container_that_cannot_be_inspected_is_not_removed(tmp_path):
+    rig = make_rig(tmp_path, "docker")
+    try:
+        put_containers(rig, (A, MINE, job_id(1)))
+        rig.install(
+            "docker",
+            (rig.bin / "docker")
+            .read_text()
+            .replace(
+                'elif argv[:1] == ["inspect"]:',
+                'elif argv[:1] == ["inspect"]:\n    sys.exit(1)\nelif False:',
+            ),
+        )
+        agent = rig.agent()
+        agent.release()
+        assert remaining(rig) == [A]
+        assert not [c for c in engine_calls(rig) if c[:1] == ["rm"]]
     finally:
         rig.close()

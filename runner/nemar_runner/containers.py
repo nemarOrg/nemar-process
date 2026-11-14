@@ -11,6 +11,7 @@ listed. Under Apptainer nothing is done. A failure to list or remove is logged a
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 
@@ -38,6 +39,24 @@ def _run(argv: list[str], tuning: Tuning) -> subprocess.CompletedProcess[bytes] 
         return None
 
 
+def _carries(binary: str, container: str, filters: list[str], tuning: Tuning) -> bool:
+    """Whether the container really has every label of ``filters`` (`name` or `name=value`)."""
+    inspected = _run([binary, "inspect", "--format", "{{json .Config.Labels}}", container], tuning)
+    if inspected is None or inspected.returncode != 0:
+        return False
+    try:
+        labels = json.loads(inspected.stdout.decode("utf-8", "replace"))
+    except ValueError:
+        return False
+    if not isinstance(labels, dict):
+        return False
+    for item in filters:
+        name, sep, value = item.partition("=")
+        if name not in labels or (sep and labels[name] != value):
+            return False
+    return True
+
+
 def remove_matching(
     config: Config, tuning: Tuning, log: Log, filters: list[str], job_id: str | None
 ) -> int:
@@ -57,6 +76,9 @@ def remove_matching(
         log.warn("container_cleanup_failed", job=job_id, reason="ps_failed")
         return 0
     ids = [i for i in listed.stdout.decode("ascii", "replace").split() if _ID.fullmatch(i)]
+    # an older Podman may OR repeated `--filter label=` and list another runner's container: read
+    # each one's labels back and remove only those that carry every label asked for
+    ids = [i for i in ids if _carries(binary, i, filters, tuning)]
     if not ids:
         return 0
     removed = _run([binary, "rm", "--force", "--volumes", *ids], tuning)

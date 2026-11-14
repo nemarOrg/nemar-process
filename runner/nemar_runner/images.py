@@ -15,7 +15,6 @@ import fcntl
 import glob
 import json
 import os
-import shutil
 import stat
 import subprocess
 import threading
@@ -53,11 +52,35 @@ class Interrupted(Exception):
     """The job was stopped (cancelled, lease lost, runner stopping) while the image was pulled."""
 
 
+def trusted_which(name: str, tuning: Tuning) -> tuple[str | None, str | None]:
+    """``(path, None)`` for the first `name` on the launch PATH, or ``(None, why)``.
+
+    Every directory of the launch PATH up to and including the one that holds `name` must be owned by
+    the user or root and not writable by group or others (one that is would let someone put a program
+    ahead of it), and so must the program (after links) and the directory it really lives in."""
+    for directory in tuning.launch_path.split(os.pathsep):
+        if not directory or not os.path.isdir(directory):
+            continue
+        problem = _unsafe_path(directory)
+        if problem is not None:
+            return None, "a launch PATH directory {}".format(problem)
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            real = os.path.realpath(candidate)
+            for path in (real, os.path.dirname(real)):
+                problem = _unsafe_path(path)
+                if problem is not None:
+                    return None, "{} {}".format(name, problem)
+            return candidate, None
+    return None, "no {} on the launch PATH".format(name)
+
+
 def runtime_binary(config: Config, tuning: Tuning) -> str | None:
-    """The runtime's executable on the launch PATH, or None. Apptainer also answers to `singularity`."""
+    """The runtime's executable on the launch PATH, or None (absent or not trusted). Apptainer also
+    answers to `singularity`."""
     names = {"apptainer": ("apptainer", "singularity")}.get(config.runtime, (config.runtime,))
     for name in names:
-        found = shutil.which(name, path=tuning.launch_path)
+        found, _why = trusted_which(name, tuning)
         if found:
             return found
     return None
@@ -304,22 +327,17 @@ def _unsafe_path(path: str) -> str | None:
 
 
 def resolve_python(tuning: Tuning) -> str | None:
-    """The `python3` the launcher is started with: the first on the launch PATH."""
-    return shutil.which("python3", path=tuning.launch_path)
+    """The `python3` the launcher is started with: the first on the launch PATH, if it is trusted.
+    The agent pins this path at start and every job uses it."""
+    return trusted_which("python3", tuning)[0]
 
 
 def python_problem(tuning: Tuning) -> str | None:
-    """Why the launch PATH's `python3` cannot start the launcher, or None: it is missing, it or its
-    directory can be written by group or others (the launcher would run whatever they put there), or
-    it is older than Python 3.9."""
-    python = resolve_python(tuning)
+    """Why the launch PATH's `python3` cannot start the launcher, or None: it is missing, it or a
+    directory of the PATH is not trusted (see ``trusted_which``), or it is older than Python 3.9."""
+    python, why = trusted_which("python3", tuning)
     if python is None:
-        return "no python3 on the launch PATH"
-    real = os.path.realpath(python)
-    for path in (real, os.path.dirname(real)):
-        problem = _unsafe_path(path)
-        if problem is not None:
-            return "python3 {}".format(problem)
+        return why
     try:
         done = subprocess.run(
             [

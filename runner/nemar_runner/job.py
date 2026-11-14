@@ -133,12 +133,17 @@ def read_result(path: str) -> tuple[str | None, str | None]:
     return code, detail
 
 
-def pdeathsig_hook() -> Callable[[], None] | None:
+def pdeathsig_hook(parent: int | None = None) -> Callable[[], None] | None:
     """A function for `Popen(preexec_fn=...)` that asks the kernel to send the child SIGTERM when its
     parent thread dies (Linux `prctl(PR_SET_PDEATHSIG)`, through `ctypes`), or None where that is not
     available. The launcher forwards SIGTERM to its container, so a runner that is killed does not
     leave a job running unwatched. The signal follows the thread that started the child, which is
-    the job's own thread, alive for as long as the job runs."""
+    the job's own thread, alive for as long as the job runs.
+
+    ``parent`` is the runner's pid, taken BEFORE the fork (default: this process). The kernel's signal
+    only covers a parent that dies after the `prctl`, so the hook also checks that the parent is still
+    the one that forked, and ends the child at once if it is not; a failing `prctl` fails the spawn
+    rather than leaving a launcher without the guarantee."""
     if not sys.platform.startswith("linux"):
         return None
     try:
@@ -148,9 +153,13 @@ def pdeathsig_hook() -> Callable[[], None] | None:
     except (ImportError, OSError, AttributeError):
         return None
     pr_set_pdeathsig, term = 1, int(signal.SIGTERM)
+    forking = os.getpid() if parent is None else parent
 
     def hook() -> None:
-        prctl(pr_set_pdeathsig, term, 0, 0, 0)
+        if prctl(pr_set_pdeathsig, term, 0, 0, 0) != 0:
+            raise OSError("prctl(PR_SET_PDEATHSIG) failed")
+        if os.getppid() != forking:  # the runner died between the fork and the prctl
+            os._exit(1)
 
     return hook
 
@@ -213,13 +222,14 @@ class Heartbeat(threading.Thread):
             pause = self._tuning.heartbeat_seconds
             try:
                 if self._api.heartbeat(self._job.id, self._job.lease_id, phase):
-                    if not self._cancel.is_set():
+                    first = not self._cancel.is_set()
+                    self._cancel.set()  # act first, say so after
+                    if first:
                         self._log.info("cancel_requested", job=self._job.id)
-                    self._cancel.set()
             except ApiError as error:
                 if error.lease_lost:
-                    self._log.warn("lease_lost", job=self._job.id, **error.fields())
                     self._lease_lost.set()
+                    self._log.warn("lease_lost", job=self._job.id, **error.fields())
                     return
                 self._log.warn("heartbeat_failed", job=self._job.id, **error.fields())
                 pause = min(pause, 10.0)
@@ -242,8 +252,10 @@ class JobRunner:
         limits: images.Limits,
         stop: threading.Event,
         runner_label: str | None = None,
+        python: str | None = None,
     ) -> None:
         self.runner_label = runner_label
+        self.python = python  # pinned at the runner's start; looked up again only when not given
         self._began = time.monotonic()
         self.job, self.config, self.tuning = job, config, tuning
         self.api, self.log, self.locks, self.limits, self.stop = api, log, locks, limits, stop
@@ -403,7 +415,7 @@ class JobRunner:
         enforce = sif is not None and self.limits.proven(sif, dirs.home)
         env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label)
         argv = [
-            images.resolve_python(tuning) or sys.executable,
+            self.python or images.resolve_python(tuning) or sys.executable,
             "-I",
             "-S",
             "-c",
@@ -432,7 +444,7 @@ class JobRunner:
         try:
             self._after_spawn(proc, dirs, enforce)
         except BaseException:
-            self._signal_group(proc, signal.SIGKILL)
+            self._end_process(proc)
             raise
         heartbeat = self._heartbeat
         assert heartbeat is not None
@@ -532,10 +544,30 @@ class JobRunner:
         try:
             return self._watch(proc, term_at, memory_mb, result_path, heartbeat)
         except BaseException:
-            self._signal_group(proc, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError, OSError):
-                os.wait4(proc.pid, 0)  # reap it: no zombie is left behind either
+            self._end_process(proc)
             raise
+
+    def _end_process(self, proc: subprocess.Popen[bytes]) -> None:
+        """The way out when supervising itself fails: SIGTERM first and a wait (the launcher forwards it
+        to its container, which lives in a session of its own, outside this group, and gives it ten
+        seconds), then SIGKILL to the group, then reap. A SIGKILL alone would orphan the container."""
+        self._signal_group(proc, signal.SIGTERM)
+        deadline = time.monotonic() + self.tuning.exception_grace_seconds
+        reaped = False
+        while time.monotonic() < deadline:
+            try:
+                pid, _status, _rusage = os.wait4(proc.pid, os.WNOHANG)
+            except ChildProcessError:
+                reaped = True
+                break
+            if pid == proc.pid:
+                reaped = True
+                break
+            time.sleep(self.tuning.tick_seconds)
+        self._signal_group(proc, signal.SIGKILL)
+        if not reaped:
+            with contextlib.suppress(ChildProcessError, OSError):
+                os.wait4(proc.pid, 0)
 
     def _watch(
         self,

@@ -316,7 +316,11 @@ class RunnerRoutes:
 class StopStream(io.StringIO):
     """A text stream that keeps what was written, standing in for standard error."""
 
+    owner: Log | None = None
+
     def text(self) -> str:
+        if self.owner is not None:
+            self.owner.flush()  # lines reach the stream by way of the log's writer thread
         return self.getvalue()
 
 
@@ -388,6 +392,7 @@ class Rig:
         # must never be found by a test that did not install one
         self.tuning = fast(launch_path=str(self.bin))
         self.log = Log(str(self.root / "runner.log"), stream=self.stream)
+        self.stream.owner = self.log
 
     def make_config(self, **changes: Any) -> Config:
         values: dict[str, Any] = {
@@ -412,6 +417,7 @@ class Rig:
         return agent
 
     def log_lines(self) -> list[dict]:
+        self.log.flush()
         text = (self.root / "runner.log").read_text(encoding="utf-8")
         return [json.loads(line) for line in text.splitlines() if line]
 
