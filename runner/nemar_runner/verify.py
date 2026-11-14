@@ -155,11 +155,14 @@ def cosign_home(config: Config) -> str:
     """`<root>/cosign`, made 0700 if it is not there: cosign's `HOME`, and so where it keeps the Sigstore
     trust root it fetches the first time. Never a directory the user does not own."""
     path = os.path.join(config.root, "cosign")
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise Unverified("cosign_failed", "home_unsafe")
-    os.chmod(path, 0o700)
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise Unverified("cosign_failed", "home_unsafe")
+        os.chmod(path, 0o700)
+    except OSError:  # a plain file where the directory goes, a full disk, a permission
+        raise Unverified("cosign_failed", "home_unsafe") from None
     return path
 
 
@@ -457,9 +460,12 @@ class Verifier:
     def _cosign_version(self) -> str:
         if self._version is None:
             binary, _why = find_cosign(self._config.cosign_path, self._tuning)
-            found = (
-                cosign_version(binary, self._tuning, cosign_home(self._config)) if binary else None
-            )
+            found = None
+            if binary:
+                try:
+                    found = cosign_version(binary, self._tuning, cosign_home(self._config))
+                except Unverified:
+                    found = None
             self._version = found or "unknown"
         return self._version
 

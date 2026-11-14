@@ -70,9 +70,15 @@ def _signature_checks(
     if binary is None:
         add("cosign", False, why or "not found")
     else:
-        version = verify.cosign_version(binary, tuning, verify.cosign_home(config))
+        try:
+            home = verify.cosign_home(config)
+        except images.Unverified:
+            home = None
+        version = verify.cosign_version(binary, tuning, home) if home is not None else None
         major = verify.version_major(version) if version else None
-        if version is None or major is None:
+        if home is None:
+            add("cosign", False, "the runner's cosign directory under root is not usable")
+        elif version is None or major is None:
             add("cosign", False, "does not say its version")
         elif major < 3:
             add("cosign", False, "{} is older than 3".format(version))

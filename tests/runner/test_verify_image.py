@@ -800,6 +800,37 @@ def test_verification_off_runs_no_cosign_at_all(tmp_path):
         world.close()
 
 
+def test_a_cosign_home_that_is_a_plain_file_refuses_the_job_not_crashes_it(docker_world):
+    (docker_world.rig.root / "cosign").write_text("in the way", encoding="utf-8")
+    docker_world.run()
+    docker_world.refused("cosign_failed")
+    assert docker_world.rig.events("image_unverified")[0]["why"] == "home_unsafe"
+    assert docker_world.rig.events("job_internal_error") == []
+    assert calls(docker_world.bin) == []
+
+
+def test_a_cosign_home_that_is_a_link_refuses_the_job(docker_world):
+    elsewhere = docker_world.rig.tmp / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (docker_world.rig.root / "cosign").symlink_to(elsewhere)
+    docker_world.run()
+    docker_world.refused("cosign_failed")
+    assert docker_world.rig.events("image_unverified")[0]["why"] == "home_unsafe"
+    assert calls(docker_world.bin) == []
+
+
+def test_a_cosign_home_that_cannot_be_made_is_unverified_not_an_oserror(docker_world):
+    docker_world.rig.root.chmod(0o500)
+    try:
+        if os.access(docker_world.rig.root, os.W_OK):
+            pytest.skip("root can write anywhere")
+        with pytest.raises(images.Unverified) as caught:
+            verify.cosign_home(docker_world.rig.config)
+        assert (caught.value.reason, caught.value.why) == ("cosign_failed", "home_unsafe")
+    finally:
+        docker_world.rig.root.chmod(0o700)
+
+
 # ---- the cache -------------------------------------------------------------------------------------------
 
 
@@ -1354,6 +1385,16 @@ def test_doctor_says_no_to_an_image_when_cosign_is_unusable(doctor_world):
     place(doctor_world)
     (doctor_world.bin / "cosign").unlink()
     status, lines = diagnose(doctor_world)
+    assert lines["signature " + HEX].startswith("no")
+    assert status == 1
+
+
+def test_doctor_says_no_and_does_not_crash_when_the_cosign_directory_is_in_the_way(doctor_world):
+    (doctor_world.rig.root / "cosign").write_text("in the way", encoding="utf-8")
+    place(doctor_world)
+    status, lines = diagnose(doctor_world)
+    assert lines["cosign"].startswith("no")
+    assert "not usable" in lines["cosign"]
     assert lines["signature " + HEX].startswith("no")
     assert status == 1
 
