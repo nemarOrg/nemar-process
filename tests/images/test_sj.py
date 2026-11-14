@@ -8,6 +8,7 @@ until someone has reviewed the difference (docs/upstream.md).
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import importlib.resources
 import json
@@ -194,15 +195,10 @@ def test_the_validator_does_not_print_or_warn_while_it_loads(capsys, caplog):
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
-def test_a_validator_with_no_supported_version_is_refused(monkeypatch):
+def test_a_validator_with_no_supported_version_is_refused(monkeypatch, tmp_path):
     """The digest cannot match a schema that holds no version, so this guard is the second line.
-    A real `Validator` that answers with no version stands in for the case that cannot be built
-    (the library is outside this repository; the guard is ours)."""
-
-    class NoVersion(Validator):
-        def get_supported_versions(self) -> list[str]:
-            return []
-
-    monkeypatch.setattr(sj, "Validator", NoVersion)
+    A real `Validator` over an existing directory with no schema version answers with none."""
+    assert Validator(schema_dir=tmp_path).get_supported_versions() == []
+    monkeypatch.setattr(sj, "Validator", functools.partial(Validator, schema_dir=tmp_path))
     with pytest.raises(RuntimeError, match="no schema version"):
         sj.validator()
