@@ -28,7 +28,15 @@ CONFIG_KEYS = (
     "arch",
     "max_scratch_gb",
 )
-OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb", "sif_pull", "availability")
+OPTIONAL_KEYS = (
+    "launcher_dir",
+    "default_job_memory_mb",
+    "sif_pull",
+    "self_update",
+    "install_prefix",
+    "cosign_path",
+    "availability",
+)
 AVAILABILITY_KEYS = (
     "enabled",
     "max_load_per_core",
@@ -85,6 +93,14 @@ class Config:
     launcher_dir: str
     default_job_memory_mb: int | None = None
     sif_pull: bool = False
+    # The service install (docs/runner.md, "Running it as a service"): `self_update` is the opt-out of
+    # the daily signed update; `install_prefix` is where `nemar_runner install` put the runner, which
+    # the idle switch watches; `cosign_path` is the cosign binary `self-update` verifies with: when it
+    # is set it is used instead of any cosign on the launch PATH (it is not a fallback), and
+    # `install` ignores it and takes `--cosign-path`.
+    self_update: bool = True
+    install_prefix: str | None = None
+    cosign_path: str | None = None
     availability: Availability = Availability()
 
 
@@ -299,6 +315,15 @@ def load_config(path: str) -> Config:
     sif_pull = document.get("sif_pull", False)
     if not isinstance(sif_pull, bool):
         raise ConfigError("sif_pull must be true or false")
+    self_update = document.get("self_update", True)
+    if not isinstance(self_update, bool):
+        raise ConfigError("self_update must be true or false")
+    install_prefix = document.get("install_prefix")
+    if install_prefix is not None:
+        install_prefix = _path(install_prefix, "install_prefix")
+    cosign_path = document.get("cosign_path")
+    if cosign_path is not None:
+        cosign_path = _path(cosign_path, "cosign_path")
     availability = _availability(document.get("availability", {}), path)
     config = Config(
         api_base=_api_base(document["api_base"]),
@@ -312,6 +337,9 @@ def load_config(path: str) -> Config:
         launcher_dir=_path(document.get("launcher_dir", default_launcher_dir()), "launcher_dir"),
         default_job_memory_mb=default_memory,
         sif_pull=sif_pull,
+        self_update=self_update,
+        install_prefix=install_prefix,
+        cosign_path=cosign_path,
         availability=availability,
     )
     problem = root_problem(config.root)

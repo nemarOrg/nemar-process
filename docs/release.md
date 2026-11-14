@@ -19,7 +19,7 @@ The version lives in two places and nowhere else: `[project].version` in `pyproj
 The script edits both lines in place, so a bump is offline and exact, and `uv lock --check` stays green.
 
 The bump never touches the launcher's `__version__`, the runner's version, `RECIPE_VERSION`, `COMMON_VERSION` or any pin.
-Each of those is its own artifact with its own release or stamp: the launcher ships as a zip whose digest is recorded in `deploy/tapis/apps/nemar-launch.json` and released as `nemar-launch-v*`, the runtime image as `image-nemar-python-v*`.
+Each of those is its own artifact with its own release or stamp: the launcher ships as a zip whose digest is recorded in `deploy/tapis/apps/nemar-launch.json` and released as `nemar-launch-v*`, the runtime image as `image-nemar-python-v*`, and the runner (with the launcher it runs and its service files) as a signed bundle released as `nemar-runner-v*`.
 Bumping the launcher's version from here would change the zip and break its recorded digest.
 
 ## Who does what
@@ -30,6 +30,7 @@ Bumping the launcher's version from here would change the zip and break its reco
 | A merge to `main` changes `pyproject.toml` | `auto-tag.yml` | The bot strips `-devN`, pushes to `main`, tags `vX.Y.Z` (annotated), and creates the release with generated notes and no assets; a re-run creates the release if only the tag exists. A version that already has no suffix is tagged as it is. The `tag` job is skipped when the head commit is the bot's; the `bot-head` job then fails if that commit leaves `main` at a `-devN` version. |
 | A tag `vX.Y.Z` is pushed | `sync-dev.yml` | The bot checks that the tag is on `main` and names its commit's version, merges `main` into `dev` (`chore: sync dev with main after vX.Y.Z`; a conflict that is only the version lines is resolved to `main`'s side, any other is left to a person), then moves `dev` to `X.Y.(Z+1)-dev1` unless it is already past `X.Y.Z`. With no `dev` branch it logs a notice and stops. |
 | Any pull request (opened, updated, reopened, edited or retargeted) | `bump-validator.yml` | A release pull request (`dev` of this repository into `main`) must carry `X.Y.Z-devN` with `X.Y.Z` above the newest `vX.Y.Z` tag. Every other pull request must leave both version lines as they were where the branch left its base. |
+| A tag `nemar-runner-vX.Y.Z` is pushed | `runner-release.yml` | Three jobs. `build` refuses a commit that is not reachable from `main` and a tag whose `X.Y.Z` is not `nemar_runner.__version__` at that commit, checks that two builds are byte-identical, builds `nemar-runner-X.Y.Z.tar.gz`. `sign` (the only job with `id-token: write`, running no script of the repository) signs it with cosign keyless and verifies its own signature. `release` (the only job with `contents: write`) attaches the file and its `.sigstore.json` to the release of the tag, as a release that is not the repository's latest, and fails rather than replace a file that is already there. |
 | A pull request into `main` | `release-gate.yml` | `uv lock --check`, `actionlint` on every workflow, the `tests/release` suite, and the whole test suite as `ci.yml` splits it (everything but `tests/images`, then `tests/images`, then the recipes and the launch end to end in the `runtime` environment), with the Apptainer and runtime tests required. |
 | A push to `main`, `dev` or `feature/**`, or any pull request | `ci.yml` | The existing jobs, plus `actionlint` over every workflow. |
 
@@ -40,8 +41,13 @@ The job-level author check is what stops the bot's push from starting `auto-tag.
 ## Tags
 
 Release tags are exactly `vX.Y.Z`.
-They are disjoint from the image's tags (`image-nemar-python-v*`) and the launcher's (`nemar-launch-v*`): the sync workflow's trigger does not match those, and `tests/release/test_workflows.py` pins that no trigger in the repository matches another artifact's tag.
+They are disjoint from the image's tags (`image-nemar-python-v*`), the launcher's (`nemar-launch-v*`) and the runner's (`nemar-runner-vX.Y.Z`): the sync workflow's trigger does not match those, and `tests/release/test_workflows.py` pins that no trigger in the repository matches another artifact's tag.
 Publishing the runtime image stays a separate, deliberate dispatch of `image-nemar-python.yml`; a release here publishes nothing and attaches no files.
+
+The runner's tag is the exception to "versions are the bot's": its `X.Y.Z` is the runner's own version in `runner/nemar_runner/__init__.py`, which a person changes in a pull request (it is not the repository's version, and `bump-validator` does not look at it).
+To release the runner: merge the change that raises `__version__` into `main` through a release, then push `nemar-runner-vX.Y.Z` on that commit; `runner-release.yml` does the rest ([runner.md](runner.md#running-it-as-a-service) says what an installer then accepts).
+A tag on a commit that is not on `main`, or whose version disagrees, fails in the first job of the workflow and signs nothing.
+A pushed tag is never moved: to correct a release, raise the version and tag again.
 
 ## What a person does
 
@@ -99,6 +105,7 @@ So the protection below is load-bearing, not tidiness: branch protection on `dev
 - `main`: a pull request required, with the `ci.yml` jobs, `bump-validator` and `release-gate` required; **merge commits only** (no squash, no rebase); code owner review required.
 - `dev`: a pull request required, with the `ci.yml` jobs and `bump-validator` required; the machine account may bypass for the bump commits.
 - A tag rule on `v*` that only the machine account may create, update or delete.
+- A tag rule on `nemar-runner-v*` that only the owners may create, update or delete, and code owner review on `scripts/build_runner_bundle.py`, `deploy/runner/` and `runner/nemar_runner/install.py`: a workstation trusts a bundle that this workflow signed for such a tag, so who can push the tag and who can change what it builds are who can change what runs on a workstation.
   Whether releases are immutable, and the tag rulesets that go with them, are part of the owner items recorded on nemarOrg/nemar-process#9.
 
 Merging the pull request that introduced this automation does not tag anything, because it does not change `pyproject.toml`.

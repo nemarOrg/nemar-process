@@ -12,8 +12,10 @@ import shutil
 import subprocess
 
 import pytest
-from release_support import BOT_EMAIL, WORKFLOWS, load, triggers
+from nemar_runner import install
+from release_support import BOT_EMAIL, WORKFLOWS, load, run_steps, triggers
 from repo_paths import CI_WORKFLOW, IMAGE_WORKFLOW, ROOT
+from test_workflow_runs import World
 
 BOT_JOBS = {("auto-bump-dev.yml", "bump"), ("auto-tag.yml", "tag"), ("sync-dev.yml", "sync")}
 NEW = (
@@ -26,7 +28,14 @@ NEW = (
 EVERY = sorted(p.name for p in WORKFLOWS.glob("*.yml"))
 SHA_PIN = re.compile(r"^\s*(?:-\s+)?uses:\s+([\w./-]+)@([0-9a-f]{40})\s+#\s+v\d")
 SKIP_MARKERS = re.compile(r"skip[ -]ci|ci[ -]skip|no[ -]ci|skip[ -]actions|actions[ -]skip", re.I)
-OTHER_ARTIFACT_TAGS = ("image-nemar-python-v1.2.3", "nemar-launch-v0.1.0")
+RUNNER_WORKFLOW = "runner-release.yml"
+OTHER_ARTIFACT_TAGS = ("image-nemar-python-v1.2.3", "nemar-launch-v0.1.0", "nemar-runner-v0.1.0")
+# the workflow that releases each artifact: the only one whose tag trigger may match its tags
+TAG_OWNERS = {
+    "image-nemar-python-v1.2.3": IMAGE_WORKFLOW.name,
+    "nemar-launch-v0.1.0": None,
+    "nemar-runner-v0.1.0": RUNNER_WORKFLOW,
+}
 RELEASE_STEP = "Create the GitHub release if it does not exist"
 GUARD = f"github.event.head_commit.author.email != '{BOT_EMAIL}'"
 
@@ -144,12 +153,11 @@ def test_the_glob_reader_agrees_with_the_image_workflows_own_glob():
 
 
 @pytest.mark.parametrize("name", EVERY)
-def test_no_workflow_but_the_image_workflow_starts_on_the_other_artifacts_tags(name):
-    if name == IMAGE_WORKFLOW.name:
-        return
+def test_no_workflow_starts_on_the_tags_of_an_artifact_it_does_not_release(name):
     for glob in tag_globs(name):
         for tag in OTHER_ARTIFACT_TAGS:
-            assert not matches(glob, tag), (name, glob, tag)
+            if TAG_OWNERS[tag] != name:
+                assert not matches(glob, tag), (name, glob, tag)
 
 
 @pytest.mark.parametrize("name", EVERY)
@@ -270,6 +278,285 @@ def test_the_dev_build_version_is_a_dev_version_whatever_the_version_file_says()
     assert "*-dev[0-9]*" in step["run"]
 
 
+# the runner release workflow (S4) ----------------------------------------------------------------------
+
+RUNNER_GLOB = "nemar-runner-v[0-9]+.[0-9]+.[0-9]+"
+RUNNER_GUARD = "Refuse a commit that is not on main"
+RUNNER_VERSION = "Read the version from the tag and check it against the runner"
+WORKFLOW_PATH = "https://github.com/nemarOrg/nemar-process/.github/workflows/runner-release.yml"
+
+
+def runner_jobs() -> dict:
+    return load(RUNNER_WORKFLOW)["jobs"]
+
+
+def runner_commands(job: str) -> str:
+    return "\n".join(s.get("run", "") for s in runner_jobs()[job]["steps"])
+
+
+def test_the_runner_workflow_starts_only_on_a_pushed_runner_release_tag():
+    assert triggers(load(RUNNER_WORKFLOW)) == {"push": {"tags": [RUNNER_GLOB]}}
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "nemar-runner-v0.1.0",
+        "nemar-runner-v10.20.30",
+        "nemar-runner-v0.1",
+        "nemar-runner-v0.1.0.1",
+        "nemar-runner-v0.1.0-rc1",
+        "nemar-runner-v",
+        "nemar-runner-0.1.0",
+        "xnemar-runner-v0.1.0",
+        "nemar-runner-v0.1.0/x",
+        "v0.1.0",
+        "image-nemar-python-v0.1.0",
+        "nemar-launch-v0.1.0",
+    ],
+)
+def test_the_trigger_and_the_installers_identity_accept_the_same_tags(tag):
+    # the certificate of a run names `...runner-release.yml@refs/tags/<tag>`: the tags that start the
+    # workflow are exactly the tags the installer's identity accepts
+    (glob,) = tag_globs(RUNNER_WORKFLOW)
+    identity = f"{WORKFLOW_PATH}@refs/tags/{tag}"
+    assert matches(glob, tag) is bool(re.search(install.IDENTITY_REGEXP, identity)), tag
+
+
+def test_the_workflow_file_and_the_installers_constants_name_the_same_identity():
+    workflow = load(RUNNER_WORKFLOW)
+    assert workflow["env"]["SIGNING_IDENTITY"] == install.IDENTITY_REGEXP
+    assert workflow["env"]["OIDC_ISSUER"] == install.OIDC_ISSUER
+    assert workflow["env"]["SIGNING_REPOSITORY"] == install.WORKFLOW_REPOSITORY
+    assert workflow["env"]["SIGNING_TRIGGER"] == install.WORKFLOW_TRIGGER
+    # and the path inside the identity is this file
+    assert f".github/workflows/{RUNNER_WORKFLOW}".replace(".", r"\.") in install.IDENTITY_REGEXP
+    assert (WORKFLOWS / RUNNER_WORKFLOW).is_file()
+
+
+def test_only_the_signing_job_has_the_oidc_token_and_only_the_release_job_can_write_contents():
+    workflow = load(RUNNER_WORKFLOW)
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build", "sign", "release"}
+    assert "permissions" not in jobs["build"]  # the default: contents read
+    assert jobs["sign"]["permissions"] == {"contents": "read", "id-token": "write"}
+    assert jobs["release"]["permissions"] == {"contents": "write"}
+    for name, body in jobs.items():
+        grants = body.get("permissions", {})
+        assert (grants.get("id-token") == "write") is (name == "sign"), name
+        assert (grants.get("contents") == "write") is (name == "release"), name
+        assert set(grants) <= {"contents", "id-token"}, name
+
+
+def test_the_signing_job_runs_no_code_of_the_repository():
+    steps = runner_jobs()["sign"]["steps"]
+    assert not any("actions/checkout" in s.get("uses", "") for s in steps)
+    commands = runner_commands("sign")
+    for forbidden in ("scripts/", "uv ", "python", "bash ", "sh ", "git "):
+        assert forbidden not in commands, forbidden
+    uses = [s["uses"].split("@")[0] for s in steps if "uses" in s]
+    assert uses == [
+        "actions/download-artifact",
+        "sigstore/cosign-installer",
+        "actions/upload-artifact",
+    ]
+    for name in ("build", "release"):
+        assert "id-token" not in str(runner_jobs()[name]), name
+
+
+def test_the_signing_job_signs_the_built_file_and_checks_its_own_signature_against_the_identity():
+    commands = runner_commands("sign")
+    assert commands.index("cosign sign-blob") < commands.index("cosign verify-blob")
+    assert 'cosign sign-blob --bundle "${file}.sigstore.json" --yes "$file"' in commands
+    verify = commands[commands.index("cosign verify-blob") :]
+    assert '--bundle "${file}.sigstore.json"' in verify
+    assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in verify
+    assert '--certificate-oidc-issuer "$OIDC_ISSUER"' in verify
+    # the same two certificate fields the installer asks for
+    assert '--certificate-github-workflow-repository "$SIGNING_REPOSITORY"' in verify
+    assert '--certificate-github-workflow-trigger "$SIGNING_TRIGGER"' in verify
+    assert install.KEYLESS.flags[-4:] == (
+        "--certificate-github-workflow-repository",
+        "nemarOrg/nemar-process",
+        "--certificate-github-workflow-trigger",
+        "push",
+    )
+    assert "set -euo pipefail" in commands
+    built = next(
+        s for s in runner_jobs()["build"]["steps"] if "upload-artifact" in s.get("uses", "")
+    )
+    fetched = next(
+        s for s in runner_jobs()["sign"]["steps"] if "download-artifact" in s.get("uses", "")
+    )
+    assert built["with"]["name"] == fetched["with"]["name"]
+    assert runner_jobs()["sign"]["needs"] == "build"
+
+
+def test_the_signing_job_checks_that_cosign_refuses_a_wrong_workflow_repository():
+    steps = runner_jobs()["sign"]["steps"]
+    names = [s.get("name") for s in steps]
+    negative = "Check that cosign refuses a wrong workflow repository"
+    assert negative in names
+    # after the verification it contrasts with, and before anything is uploaded
+    assert names.index("Sign the bundle and verify the signature") < names.index(negative)
+    upload = next(i for i, s in enumerate(steps) if "upload-artifact" in s.get("uses", ""))
+    assert names.index(negative) < upload
+    run = steps[names.index(negative)]["run"]
+    assert "set -euo pipefail" in run
+    assert 'if cosign verify-blob "$file" --bundle "${file}.sigstore.json"' in run
+    assert '--certificate-github-workflow-repository "nemarOrg/not-nemar-process"' in run
+    # the rest of the command is the real one: only the repository is wrong
+    assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in run
+    assert '--certificate-oidc-issuer "$OIDC_ISSUER"' in run
+    assert '--certificate-github-workflow-trigger "$SIGNING_TRIGGER"' in run
+    assert install.WORKFLOW_REPOSITORY != "nemarOrg/not-nemar-process"
+    # a verification that succeeds fails the job
+    assert "; then" in run
+    assert "exit 1" in run
+    assert run.index("exit 1") > run.index("; then")
+
+
+def test_the_build_job_guards_come_first_and_the_bundle_is_built_with_the_script():
+    steps = runner_jobs()["build"]["steps"]
+    names = [s.get("name") for s in steps]
+    assert names.index(RUNNER_GUARD) < names.index(RUNNER_VERSION)
+    checkout = steps[0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"]["fetch-depth"] == 0  # main must be there to compare with
+    assert checkout["with"]["persist-credentials"] is False
+    guard = steps[names.index(RUNNER_GUARD)]["run"]
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in guard
+    assert "exit 1" in guard
+    version = steps[names.index(RUNNER_VERSION)]["run"]
+    assert 'git show "${GITHUB_SHA}:runner/nemar_runner/__init__.py"' in version
+    assert '[ "$runner" != "$version" ]' in version
+    assert "^[0-9]+\\.[0-9]+\\.[0-9]+$" in version
+    commands = runner_commands("build")
+    assert "uv run --no-project python scripts/build_runner_bundle.py --out dist/" in commands
+    assert "scripts/build_runner_bundle.py --check" in commands
+    assert commands.index("--check") < commands.index("--out dist/")
+    assert commands.index("exit 1") < commands.index("build_runner_bundle.py")
+
+
+def test_the_release_job_attaches_without_overwriting_and_leaves_latest_alone():
+    release = runner_jobs()["release"]
+    assert release["needs"] == ["build", "sign"]
+    assert not any("actions/checkout" in s.get("uses", "") for s in release["steps"])
+    commands = runner_commands("release")
+    assert "gh release upload" in commands
+    assert "--clobber" not in commands
+    assert "--latest=false" in commands
+    assert "--verify-tag" in commands
+    assert 'gh release upload "$TAG" "$file" "${file}.sigstore.json"' in commands
+    for other in ("build", "sign"):
+        assert not re.search(r"\bgh\s", runner_commands(other)), other
+    used = set(re.findall(r"secrets\.([A-Za-z_]+)", text(RUNNER_WORKFLOW)))
+    assert used == {"GITHUB_TOKEN"}
+
+
+def test_the_runner_workflow_names_no_other_artifacts_tags_in_a_command():
+    for job in runner_jobs():
+        commands = runner_commands(job)
+        assert "image-nemar-python-v" not in commands
+        assert "nemar-launch-v" not in commands
+
+
+def runner_prefix() -> dict:
+    """The build job cut to the two steps that decide whether a tag may be signed."""
+    steps = runner_jobs()["build"]["steps"]
+    chosen = [s for s in steps if s.get("name") in (RUNNER_GUARD, RUNNER_VERSION)]
+    assert [s["name"] for s in chosen] == [RUNNER_GUARD, RUNNER_VERSION]
+    return {"jobs": {"build": {"steps": chosen}}}
+
+
+def runner_release(world: World, sha: str, tag_name: str, ref_type: str = "tag"):
+    context = {"github.ref_type": ref_type, "github.ref_name": tag_name}
+    return run_steps(
+        runner_prefix(), "build", world.clone(detach=sha), context, world.env(GITHUB_SHA=sha)
+    )
+
+
+def runner_commit(
+    world: World, version: str, branch: str = "main", text: str = "a commit\n"
+) -> str:
+    init = f'"""the runner"""\n\n__version__ = "{version}"\n'
+    return world.commit(branch, text=text, files={"runner/nemar_runner/__init__.py": init})
+
+
+@pytest.fixture
+def runner_world(tmp_path) -> tuple[World, str]:
+    world = World(tmp_path)
+    return world, runner_commit(world, "0.3.1")
+
+
+def test_a_runner_tag_on_main_that_names_the_runners_version_is_built(runner_world):
+    world, sha = runner_world
+    outcome = runner_release(world, sha, "nemar-runner-v0.3.1")
+    assert outcome.failed is None, outcome.log
+    assert outcome.outputs["version"] == {"version": "0.3.1"}
+
+
+def test_a_runner_tag_on_a_commit_that_is_not_on_main_is_refused_before_the_version_is_read(
+    tmp_path,
+):
+    world = World(tmp_path)
+    runner_commit(world, "0.3.1")
+    side = runner_commit(world, "0.3.1", branch="topic", text="not on main\n")
+    outcome = runner_release(world, side, "nemar-runner-v0.3.1")
+    assert outcome.failed is not None
+    assert outcome.failed.name == RUNNER_GUARD
+    assert not outcome.ran(RUNNER_VERSION)
+    assert "is not reachable from main" in outcome.log
+
+
+@pytest.mark.parametrize(
+    "tag", ["nemar-runner-v0.3.2", "nemar-runner-v0.3.0", "nemar-runner-v1.0.0"]
+)
+def test_a_tag_that_disagrees_with_the_runners_version_signs_nothing(runner_world, tag):
+    world, sha = runner_world
+    outcome = runner_release(world, sha, tag)
+    assert outcome.failed is not None
+    assert outcome.failed.name == RUNNER_VERSION
+    assert "__version__ is '0.3.1'" in outcome.log
+    assert "version" not in outcome.outputs.get("version", {})
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "nemar-runner-v0.3",
+        "nemar-runner-v0.3.1-rc1",
+        "nemar-runner-v0.3.1.0",
+        "nemar-runner-vx.y.z",
+        "v0.3.1",
+        "nemar-runner-v",
+    ],
+)
+def test_a_tag_that_is_not_a_runner_release_tag_signs_nothing(runner_world, tag):
+    world, sha = runner_world
+    outcome = runner_release(world, sha, tag)
+    assert outcome.failed is not None
+    assert outcome.failed.name == RUNNER_VERSION
+
+
+def test_a_branch_is_not_a_release(runner_world):
+    world, sha = runner_world
+    outcome = runner_release(world, sha, "main", ref_type="branch")
+    assert outcome.failed is not None
+    assert "this workflow runs for a tag only" in outcome.log
+
+
+def test_a_runner_with_no_version_line_signs_nothing(tmp_path):
+    world = World(tmp_path)
+    sha = world.commit(
+        "main", text="no runner here\n", files={"runner/nemar_runner/__init__.py": "x = 1\n"}
+    )
+    outcome = runner_release(world, sha, "nemar-runner-v0.3.1")
+    assert outcome.failed is not None
+    assert outcome.failed.name == RUNNER_VERSION
+
+
 # privileges and tokens -------------------------------------------------------------------------
 
 
@@ -283,6 +570,8 @@ def test_contents_write_is_held_by_the_three_bot_jobs_and_no_other_job():
     for name in EVERY:
         if name == IMAGE_WORKFLOW.name:
             continue  # its own release job is pinned by tests/images/test_workflow.py
+        if name == RUNNER_WORKFLOW:
+            continue  # its own release job is pinned by the runner release tests below
         for job, body in load(name)["jobs"].items():
             if body.get("permissions", {}).get("contents") == "write":
                 holders.add((name, job))
