@@ -327,6 +327,27 @@ class StopStream(io.StringIO):
 # ---- the rig --------------------------------------------------------------------------------------------
 
 
+CLI_SNIPPET = (
+    "import os, sys; "
+    "from nemar_runner.__main__ import main; "
+    "from nemar_runner.config import Tuning; "
+    "sys.exit(main(sys.argv[1:], Tuning(launch_path=os.environ['TEST_LAUNCH_PATH'])))"
+)
+
+
+def cli_command(rig, *args):
+    """The real command line (its signal handlers, its exit status) with the launch PATH of the test's
+    own bin directory, so the host's /usr/local/bin and /usr/bin (which a CI machine may leave writable
+    by group or others, and which the runner then rightly refuses) are not part of the test.
+    Returns ``(argv, env)``."""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(ROOT / "runner"),
+        "TEST_LAUNCH_PATH": rig.tuning.launch_path,
+    }
+    return [sys.executable, "-c", CLI_SNIPPET, "--config", str(rig.config_file), *args], env
+
+
 def write_private(path: Path, text: str, mode: int = 0o600) -> None:
     path.write_text(text, encoding="utf-8")
     path.chmod(mode)

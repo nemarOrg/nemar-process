@@ -150,6 +150,15 @@ def pdeathsig_hook(parent: int | None = None) -> Callable[[], None] | None:
         import ctypes
 
         prctl = ctypes.CDLL(None, use_errno=True).prctl
+        # `prctl` is variadic in C: say what the five arguments are, so none is passed as a narrow int
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
     except (ImportError, OSError, AttributeError):
         return None
     pr_set_pdeathsig, term = 1, int(signal.SIGTERM)

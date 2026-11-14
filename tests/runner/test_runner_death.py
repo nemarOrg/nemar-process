@@ -21,6 +21,7 @@ from runner_support import (
     Rig,
     alive,
     claim_job,
+    cli_command,
     job_dir,
     job_id,
     make_launcher,
@@ -342,15 +343,29 @@ def cli_runner(tmp_path):
     }
     write_private(rig.config_file, json.dumps(document))
     rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
-    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT / "runner")}
+    argv, env = cli_command(rig, "once")
+    errors = open(tmp_path / "runner.err", "w")  # noqa: SIM115 - kept open for the child's life
     runner = subprocess.Popen(
-        [sys.executable, "-m", "nemar_runner", "--config", str(rig.config_file), "once"],
+        argv,
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=errors,
         start_new_session=True,
     )
-    stub_pid = int(wait_for(lambda: pid_path.exists() and pid_path.read_text(), 30, "the launcher"))
+
+    def launcher_pid():
+        if pid_path.exists() and pid_path.read_text():
+            return pid_path.read_text()
+        if runner.poll() is not None:  # the runner ended before it ran the launcher: say why
+            errors.flush()
+            raise AssertionError(
+                "the runner exited {} before its launcher started: {}".format(
+                    runner.returncode, (tmp_path / "runner.err").read_text()[-1500:]
+                )
+            )
+        return None
+
+    stub_pid = int(wait_for(launcher_pid, 30, "the launcher"))
     return rig, runner, stub_pid
 
 

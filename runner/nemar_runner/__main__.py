@@ -14,7 +14,7 @@ import sys
 
 from . import __version__, doctor
 from .agent import EXIT_CONFIG, Agent
-from .config import ConfigError, default_config_path, load_config, read_secret
+from .config import ConfigError, Tuning, default_config_path, load_config, read_secret
 from .logs import Log
 
 
@@ -32,12 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, tuning: Tuning | None = None) -> int:
+    """Run a command. ``tuning`` is for tests: the numbers (and the launch PATH) of a run are fixed by the
+    card, and nothing in the configuration file or the environment can change them."""
     args = build_parser().parse_args(argv)
     os.umask(0o077)
     path = args.config or default_config_path()
     if args.command == "doctor":
-        return doctor.run(path, sys.stdout)
+        return doctor.run(path, sys.stdout, tuning)
     try:
         config = load_config(path)
         secret = read_secret(config)
@@ -45,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as error:
         sys.stderr.write("nemar-runner: {}\n".format(error))
         return EXIT_CONFIG
-    agent = Agent(config, secret, log)
+    agent = Agent(config, secret, log, tuning)
     try:
         agent.prepare()
     except ConfigError as error:

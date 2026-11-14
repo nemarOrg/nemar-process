@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from nemar_runner import doctor
-from runner_support import SECRET, SIF, Rig, make_launcher, retune, write_private
+from runner_support import SECRET, SIF, Rig, cli_command, make_launcher, retune, write_private
 from test_runner_images import FAKE_RUNTIME, ISOLATED_PROBE, RECORD
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -191,7 +191,9 @@ def test_the_command_line_refuses_a_secret_group_can_read_before_any_request(rig
 
 
 def test_the_command_line_runs_once_with_nothing_to_claim(rig):
-    done = run_cli(rig, "once")
+    argv, env = cli_command(rig, "once")  # the launch PATH is the test's own (see cli_command)
+    done = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
     assert done.returncode == 0
     assert rig.routes.count("claim") == 1
     lines = [json.loads(line) for line in done.stderr.splitlines() if line.strip()]
