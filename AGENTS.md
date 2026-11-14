@@ -83,6 +83,7 @@ uv run python scripts/build_launcher_zip.py --check
 uv lock --check && uv run pytest tests/images --cov=recipes --cov=scripts   # the runtime image's declaration, lock, fixture, Dockerfile, workflows
 uv run --frozen --group runtime --extra cpu pytest tests/recipes --cov=recipes --cov-fail-under=85   # the recipes; the development environment has no eegprep
 uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer"   # the launch end to end with the stand-in runtime; the SIF run is in the image workflow
+NEMAR_CLI_DIR=<full nemar-cli checkout at the pin> uv run pytest tests/e2e/test_runner_stack.py -q -rs   # the runner against the local stack; the container case needs Apptainer (the runner-stack CI job)
 uv run python scripts/derive_tapis_schemas.py --check   # the Tapis schemas are what the vendored OpenAPI files derive
 uv run python scripts/build_observer_zip.py --check
 uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85   # the Tapis definitions, register.py and the observer
