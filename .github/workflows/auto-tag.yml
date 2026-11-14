@@ -1,0 +1,143 @@
+name: Auto Tag and Release
+
+# A merge to `main` that changes pyproject.toml releases a version. The release bot
+#   1. strips the `-devN` suffix from the version (pyproject.toml and uv.lock) and pushes it to main,
+#   2. tags that commit `vX.Y.Z` (annotated),
+#   3. creates the GitHub release of the tag, with generated notes and no assets.
+# A version that already has no suffix is tagged as it is. sync-dev.yml then starts from the tag.
+#
+# The image is not published here: that is a separate, deliberate dispatch of
+# image-nemar-python.yml, and its tags (`image-nemar-python-v*`) are not these. The launcher's
+# release tags (`nemar-launch-v*`) are not these either. docs/release.md.
+#
+# The strip commit is pushed WITHOUT a message marker that asks GitHub to skip workflows: GitHub
+# applies such a marker to every event of the commit, so it would also swallow the tag push that
+# starts sync-dev.yml. The job's `if:` is what stops the bot's push from starting this workflow
+# again: it is skipped when the head commit is the bot's. The job `bot-head` below is the one thing
+# that does run for a bot's head commit, and only to fail loudly when that commit is a dev bump that
+# reached main (a release pull request merged by rebase), which would otherwise release nothing and
+# look green.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    if: github.event.head_commit.author.email != 'nemar-bot@users.noreply.github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The environment that holds AUTO_TAG_PAT, limited to main, dev and release tags (docs/release.md).
+    environment: release
+    permissions:
+      contents: write
+    # On the job so that a run skipped by the `if:` does not take the slot; runs wait, none is canceled.
+    concurrency:
+      group: auto-tag
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A real branch (not a detached head), so `git push origin main` resolves; the whole
+          # history and every tag, for the tag checks below.
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.AUTO_TAG_PAT }}
+
+      - name: Read the version and refuse a release that already exists
+        id: version
+        run: |
+          set -euo pipefail
+          current=$(python3 scripts/bump_version.py --show HEAD)
+          release="${current%-dev*}"
+          {
+            echo "current=$current"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$release" != "$current" ]; then
+            echo "strip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "strip=false" >> "$GITHUB_OUTPUT"
+          fi
+          # The tags of this clone and of the remote: a tag created since the checkout counts too.
+          if [ -n "$(git tag --list "v$release")" ] || [ -n "$(git ls-remote --tags origin "refs/tags/v$release")" ]; then
+            if [ "$release" != "$current" ]; then
+              echo "::error::v$release already exists but main is at $current. Not tagging a version twice; investigate by hand."
+              exit 1
+            fi
+            echo "::notice::v$release already exists and main is at $release: no new tag (an edit of pyproject.toml that is not a version change, or a re-run). The release of the tag is checked below."
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Strip the -devN suffix and push it to main
+        if: steps.version.outputs.tagged == 'false' && steps.version.outputs.strip == 'true'
+        env:
+          RELEASE: ${{ steps.version.outputs.release }}
+        run: |
+          set -euo pipefail
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+          before=$(git rev-parse HEAD)
+          python3 scripts/bump_version.py "$RELEASE"
+          if [ "$before" = "$(git rev-parse HEAD)" ]; then
+            echo "::error::the bump made no commit, although main is at a -devN version."
+            exit 1
+          fi
+          # Not a force push, and no retry: a main that moved since the checkout is a person's to look at.
+          git push origin main
+
+      - name: Tag the release commit
+        if: steps.version.outputs.tagged == 'false'
+        env:
+          RELEASE: ${{ steps.version.outputs.release }}
+        run: |
+          set -euo pipefail
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+          git tag -a "v$RELEASE" -m "Release v$RELEASE"
+          git push origin "refs/tags/v$RELEASE"
+
+      # Not conditional on the tag having been made here: a re-run after `gh release create` failed
+      # finds the tag and must still create the release. One that exists is left alone.
+      - name: Create the GitHub release if it does not exist
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_TAG_PAT }}
+          RELEASE: ${{ steps.version.outputs.release }}
+        run: |
+          set -euo pipefail
+          if gh release view "v$RELEASE" > /dev/null 2>&1; then
+            echo "::notice::the release v$RELEASE already exists."
+            exit 0
+          fi
+          # No assets: the image's digest file is attached by image-nemar-python.yml, to its own tag.
+          gh release create "v$RELEASE" --verify-tag --title "v$RELEASE" --generate-notes --latest
+
+  # A bot's commit at the head of main is normally the strip commit, which has no suffix. A dev bump
+  # there means a release pull request was merged by rebase (main's rules must allow merge commits
+  # only), whose last commit is the bot's: `tag` was skipped, nothing was released, and without this
+  # job the run would be green. No token, no write.
+  bot-head:
+    if: github.event.head_commit.author.email == 'nemar-bot@users.noreply.github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The bot's commit at the head of main must not be a dev version
+        run: |
+          set -euo pipefail
+          current=$(python3 scripts/bump_version.py --show HEAD)
+          if [[ "$current" == *-dev* ]]; then
+            echo "::error::the head of main is the bot's commit and the version is $current: a release pull request was merged without a merge commit, so nothing was released. See docs/release.md ('A release that did not happen')."
+            exit 1
+          fi
+          echo "the bot's commit at the head of main is at $current"

@@ -225,12 +225,43 @@ def test_the_build_context_is_an_allow_list_that_names_what_the_build_copies():
         assert needed in allowed, needed
 
 
-def test_the_docker_gate_in_the_issue_has_defaults_for_every_build_argument():
-    # `docker build -f images/nemar-python/Dockerfile .` must work with no --build-arg.
+def test_every_build_argument_has_a_default_and_the_unnamed_build_is_the_refused_one():
+    # a plain `docker build` takes the defaults, and those must name nothing that could be mistaken
+    # for a release: an empty version and commit (the build file's writer refuses them) and `dev`.
     args = [rest for keyword, rest in instructions() if keyword == "ARG"]
     assert args
     for rest in args:
         assert "=" in rest, "ARG {} has no default".format(rest)
+    defaults = dict(rest.split("=", 1) for rest in args)
+    assert defaults["NEMAR_PROCESS_VERSION"] == ""
+    assert defaults["NEMAR_PROCESS_COMMIT"] == ""
+    assert defaults["NEMAR_PROCESS_BUILD"] == "dev"
+    assert "SOURCE_COMMIT" not in DOCKERFILE.read_text(encoding="utf-8")
+
+
+def test_the_labels_mirror_the_build_arguments():
+    labels = " ".join(rest for keyword, rest in instructions() if keyword == "LABEL")
+    assert 'org.opencontainers.image.version="${NEMAR_PROCESS_VERSION}"' in labels
+    assert 'org.opencontainers.image.revision="${NEMAR_PROCESS_COMMIT}"' in labels
+    assert 'io.nemar.build="${NEMAR_PROCESS_BUILD}"' in labels
+
+
+def test_the_build_file_is_written_by_the_checked_writer_as_root_in_the_final_stage():
+    rows = instructions()
+    writes = [
+        i
+        for i, (k, r) in enumerate(rows)
+        if k == "RUN" and "nemar_process.common.build write /opt/nemar/build.json" in r
+    ]
+    assert len(writes) == 1
+    final = max(i for i, (k, r) in enumerate(rows) if k == "FROM")
+    venv = next(
+        i for i, (k, r) in enumerate(rows) if k == "COPY" and "--from=builder /opt/venv" in r
+    )
+    user = next(i for i, (k, r) in enumerate(rows) if k == "USER")
+    assert final < venv < writes[0] < user  # the package is there, and the job's user is not yet
+    # the arguments reach the writer as the environment of RUN, never through the shell's text
+    assert "$" not in rows[writes[0]][1]
 
 
 def test_the_pinned_python_series_matches_the_project():

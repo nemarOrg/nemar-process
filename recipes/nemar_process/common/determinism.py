@@ -23,7 +23,7 @@ from typing import Any
 
 from threadpoolctl import threadpool_info, threadpool_limits
 
-from nemar_process.common import COMMON_VERSION
+from nemar_process.common import COMMON_VERSION, build
 
 # Seeds inside the engine that no argument reaches (sccn/eegprep#540 asks for a parameter). Recorded in every record (extensions.nemar.seeds)
 # and compared with eegprep's source by tests/recipes/test_determinism.py.
@@ -36,6 +36,9 @@ THREAD_ENVIRONMENT = (
     "NUMEXPR_NUM_THREADS",
 )
 RECORDED_ENVIRONMENT = ("PYTHONHASHSEED", *THREAD_ENVIRONMENT)
+# Engine distributions an ICA recipe runs on; each is recorded when it is installed, so such a recipe
+# needs no change of its own to record them.
+OPTIONAL_ENGINES = ("torch", "pamica")
 
 
 @contextlib.contextmanager
@@ -86,13 +89,28 @@ def run_seeds(extra: Iterable[tuple[str, int]] = ()) -> dict[str, int]:
     return seeds
 
 
+def installed_versions(names: Iterable[str]) -> dict[str, str]:
+    """The version of each distribution that is installed; one that is not is left out."""
+    found: dict[str, str] = {}
+    for name in names:
+        with contextlib.suppress(metadata.PackageNotFoundError):
+            found[name] = metadata.version(name)
+    return found
+
+
 def engine_info(limit: int = 1, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The engine stamp: versions, the thread pin, the pools found and the variables seen.
 
     ``extra`` are the recipe's fields (``Recipe.engine_extra``): plain JSON values under names the
-    stamp does not already use.
+    stamp does not already use. ``torch`` and ``pamica`` are recorded when they are installed.
+
+    The build file is read here too, and not recorded here (a record's ``process`` block states it):
+    the stamp is made before anything is created, so a build that contradicts itself ends the run
+    before it writes a byte (``BuildRefused``).
     """
     import numpy
+
+    build.build_info()
 
     stamp: dict[str, Any] = {
         "package": "eegprep",
@@ -104,6 +122,7 @@ def engine_info(limit: int = 1, extra: Mapping[str, Any] | None = None) -> dict[
         "threadpools": thread_pools(),
         "environment": {name: os.environ.get(name) for name in RECORDED_ENVIRONMENT},
         "commonLayer": COMMON_VERSION,
+        **installed_versions(OPTIONAL_ENGINES),
     }
     for name, value in (extra or {}).items():
         if name in stamp:

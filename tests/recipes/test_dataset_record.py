@@ -165,7 +165,7 @@ def test_an_unknown_image_digest_is_written_as_unknown_never_guessed():
     record = build([succeeded(1)], image_digest=None, dataset_id=None, dataset_version=None)
     nemar = record["extensions"]["nemar"]
     assert nemar["report"]["engine_version"].endswith("/unknown")
-    assert nemar["image"] == {"digest": None}
+    assert nemar["image"] == {"digest": None, "tag": None}
     assert nemar["dataset"]["id"] is None
     assert (
         record["processingSteps"][0]["inputSources"][0]["location"]
