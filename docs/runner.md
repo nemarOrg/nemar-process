@@ -214,7 +214,7 @@ The runner reads the host's live state before it asks for work, and sends no cla
 | Rule | Idle means | Reason when it fails |
 |---|---|---|
 | free scratch | free space under `root` is at least `max_scratch_gb` (always checked, even with `enabled` false) | `scratch` |
-| memory | `MemAvailable` less `reserve_memory_mb` is at least `claim_memory_mb` | `memory`, or `memory_unknown` when `/proc/meminfo` has no `MemAvailable` |
+| memory | `MemAvailable` less `reserve_memory_mb`, less the memory held for this runner's other jobs, and (cgroup v2) no more than the room left under the tightest `memory.max` of the runner's control group and the groups above it, is at least `claim_memory_mb` | `memory`, or `memory_unknown` when `/proc/meminfo` has no `MemAvailable` |
 | load | the one-minute load average divided by the CPUs this process may use is at most `max_load_per_core` | `load`, or `load_unknown` |
 | pause | no entry named `pause` is in any reservation directory | `paused` |
 | backoff | no job was given up for lack of room less than `backoff_seconds` ago | `backoff` |
@@ -224,8 +224,20 @@ The readings are Linux's: `/proc/meminfo` and `/proc/loadavg` (the load comes fr
 Where there is no `/proc/meminfo` (macOS) the host is always busy for memory unless `enabled` is false, so a workstation runner is a Linux one.
 `claim_memory_mb` is the largest memory a claim can hand this runner: set it to the memory the runner was registered with.
 The reserve is the memory always left to people, the larger of 8 GiB and a tenth of the host's memory, unless set.
+`MemAvailable` is the whole host's number, so a runner confined by a control group's `memory.max` (a user slice, a container) would otherwise see room that it does not have: the runner also reads the room left under that limit (`memory.max` less `memory.current`, for its own group from `/proc/self/cgroup` and every group above it) and uses the smaller room.
+A limit that is `max`, absent or unreadable is no limit.
 
-A decline is logged as `claim_skipped` with `reason` and the numbers it was judged on (`free_gb`, `mem_available_mb`, `mem_total_mb`, `reserve_mb`, `need_mb`, `load_per_core`, `max_load_per_core`, `cpus`), once each time the reason changes and not on every poll; the first claim that follows is `claim_resumed` with `after` the last reason.
+When `claim_memory_mb` is left out it is one job's size (`default_job_memory_mb`, else 4096), and a claim for several free slots can hand over several jobs, so the runner asks for no more slots than the room holds (the room divided by the size, rounded down, and at most the free slots); a room for less than one job is a decline.
+A runner with one slot is judged as before.
+When `claim_memory_mb` is set it is the memory of the whole claim and no slot is dropped for it.
+
+Memory the runner has already promised counts against the room.
+The runner keeps a ledger, per job, from the claim answer to the end of the job.
+A job that has been claimed but not yet let start (it may be pulling its image) is counted against the next claim only.
+A job that passed its start check is promised: it is counted against the next claim and against every other job's start check, so of two jobs that start together with room for one, exactly one starts and the other waits.
+A promise ends when the job ends or is abandoned, or 120 seconds after its launcher started (a fixed number that only tests shorten): by then the job's own memory is in `MemAvailable`, and counting it twice would hold back room that is there.
+
+A decline is logged as `claim_skipped` with `reason` and the numbers it was judged on (`free_gb`, `mem_available_mb`, `mem_total_mb`, `reserve_mb`, `held_mb`, `cgroup_room_mb`, `need_mb`, `slots`, `load_per_core`, `max_load_per_core`, `cpus`), once each time the reason changes and not on every poll; the first claim that follows is `claim_resumed` with `after` the last reason.
 The runner then polls again after the usual 15 seconds.
 
 ### Just before a claimed job starts
@@ -234,6 +246,7 @@ The same rules, except the backoff (which is about claiming), are asked again af
 While they fail the runner asks again every 15 seconds (`start_waiting` once per reason, `start_resumed` when there is room) until 540 seconds after the claim, the lease less a minute, or the job's own deadline if that comes first.
 Then no heartbeat has been sent and none will be, so the job is abandoned exactly as a pull that outlasted the lease is: nothing is completed, the lease expires, and the Worker releases the claim and counts it (a job has three).
 The log line is `claim_abandoned` with the reason and the numbers, and the runner sets a backoff: no claim for `backoff_seconds` (half an hour), so one busy host never spends the same job's three claims in a row.
+The backoff lives only in the running process: a restart clears it, so the service's restart after an exit, its daily update's restart and every `once` start with none.
 A job whose wait ends because the runner is stopping is refused as it is when a stop reaches it during a pull.
 
 ### Pausing it
@@ -243,7 +256,6 @@ The runner only looks at the name with `lstat`: it never opens, reads or follows
 A running job is not stopped, a claimed job that has not started waits as above, and no new claim goes out.
 Who can pause the runner is whoever can create a file in a reservation directory: make a shared one the way the lab decides (a directory the lab's group can write), and name it in `reservation_dirs`.
 The default is the `reservations` directory beside the configuration file, which the runner never creates.
-The card for the GPU reads the same directories.
 
 ### Priority
 
