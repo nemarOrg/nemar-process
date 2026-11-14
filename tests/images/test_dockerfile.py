@@ -542,3 +542,17 @@ def test_the_dockerfile_comment_names_the_other_file_and_the_cuda_header_says_ho
     header = CUDA_DOCKERFILE.read_text(encoding="utf-8").split("\nFROM ", 1)[0]
     assert "NVIDIA_VISIBLE_DEVICES=void" in header
     assert "--no-gpu" in header
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_libgomp1_pin_is_described_as_the_live_archives_version_not_a_snapshots(flavor):
+    # the base's apt sources point at the live archive (a snapshot date in its debian.sources is only
+    # a comment), so the pin fails closed when the archive moves on; the files must not say otherwise
+    text = re.sub(r"\s*\n#\s*", " ", BOTH[flavor].read_text(encoding="utf-8"))
+    assert "dated apt snapshot" not in text
+    assert "the base's apt sources point at the live archive" in text
+    assert "the pin is bumped together with the base digest" in text
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert "dated apt snapshot" not in docs
+    assert "the version the live trixie archive served when it was pinned" in docs
+    assert "fails closed" in docs
