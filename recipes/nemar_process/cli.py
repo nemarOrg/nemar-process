@@ -5,14 +5,20 @@ directories into one, ``version``.
                               [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                               [--image-digest sha256:HEX] [--run-id ID]
                               [the recipe's own options, e.g. --time-budget-s N]
-    nemar-recipe run <zarr recipe> --zarr-base https://HOST --dataset-id ID --dataset-version TAG
-                              --source-commit SHA [--out DIR] [--recording STORE ...] [...]
+    nemar-recipe run <recipe> --input zarr --zarr-base https://HOST --dataset-id ID
+                              --dataset-version TAG --source-commit SHA [--out DIR]
+                              [--recording STORE ...] [...]
     nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
     nemar-recipe version
 
+``--input bids|zarr`` says what a recipe that reads more than one input reads (default ``bids``, a
+dataset directory); it is the same recipe either way (``nemar-floor``), with one set of steps, one
+name and one label. A name that was a recipe of its own (``nemar-floor-zarr``) is refused, exit 2,
+with the command that replaces it.
+
 The command is an argument vector, so a launch specification names it without a shell. It reads only
 ``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``). It opens no
-network connection, with one exception: a recipe whose input is ``zarr`` (``nemar-floor-zarr``)
+network connection, with one exception: a recipe run with ``--input zarr`` (``nemar-floor``)
 reads the dataset's Zarr serving copy over HTTPS from the hosts in the allowlist of
 ``common/zarr_hosts.py`` only (the Zarr host and, after one redirect, the data bucket), refuses
 ``--dataset-dir``, and holds nothing on disk. Standard error gets
@@ -106,8 +112,8 @@ from nemar_process.common.errors import (
     Status,
     is_cuda_out_of_memory,
 )
-from nemar_process.common.recipe import Identity, Option, Recipe, RunContext
-from nemar_process.recipes import REGISTRY
+from nemar_process.common.recipe import INPUTS, Identity, Option, Recipe, RunContext
+from nemar_process.recipes import REGISTRY, RETIRED
 
 EXIT_OK = 0
 EXIT_INTERNAL = 1
@@ -164,11 +170,31 @@ def add_identity(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-id", type=matching(RUN_ID, "run id"))
 
 
-def declared_options() -> dict[str, Option]:
-    """The options of every registered recipe, by flag. A flag two recipes declare is one option:
-    declared differently, it is refused, because ``--help`` and the parsing could not both be true."""
-    found: dict[str, Option] = {}
+def every_recipe() -> Generator[Recipe]:
+    """Every registered recipe, each followed by its variants (the same recipe on another input)."""
     for recipe in REGISTRY.values():
+        yield recipe
+        yield from recipe.variants
+
+
+def recipe_name(value: str) -> str:
+    """A registered recipe, or a name that was one (which the command then answers with its
+    replacement, ``main``); anything else is a usage error as a choice not offered would be."""
+    if value in REGISTRY or value in RETIRED:
+        return value
+    raise argparse.ArgumentTypeError(
+        "invalid choice: {!r} (choose from {})".format(
+            value, ", ".join(repr(name) for name in sorted(REGISTRY))
+        )
+    )
+
+
+def declared_options() -> dict[str, Option]:
+    """The options of every registered recipe (and its variants), by flag. A flag two recipes declare
+    is one option: declared differently, it is refused, because ``--help`` and the parsing could not
+    both be true."""
+    found: dict[str, Option] = {}
+    for recipe in every_recipe():
         for option in recipe.options:
             if found.setdefault(option.flag, option) != option:
                 raise ValueError("{} is declared twice, differently".format(option.flag))
@@ -190,6 +216,17 @@ def add_options(run: argparse.ArgumentParser) -> None:
         )
 
 
+def reading(recipe: Recipe, args: argparse.Namespace, parser: argparse.ArgumentParser) -> Recipe:
+    """The recipe as it reads the input ``--input`` names, or itself when none is named."""
+    named = getattr(args, "input", None)
+    if named is None:
+        return recipe
+    try:
+        return recipe.reading(named)
+    except ValueError as error:
+        parser.error("--input {}: {}".format(named, error))
+
+
 def option_values(
     recipe: Recipe, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> dict[str, Any]:
@@ -203,25 +240,31 @@ def option_values(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nemar-recipe", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="run a recipe on a dataset directory")
-    run.add_argument("recipe", choices=sorted(REGISTRY))
+    run = commands.add_parser(
+        "run", help="run a recipe on a dataset directory or a Zarr serving copy"
+    )
+    run.add_argument("recipe", type=recipe_name, metavar="recipe", help=recipe_help())
     run.add_argument(
         "--dataset-dir",
-        help="the dataset (read only); required, except for a recipe whose input is a Zarr "
-        "serving copy, which refuses it",
+        help="the dataset (read only); required, except with --input zarr, which refuses it",
     )
     run.add_argument("--out", help="the product directory (default: $NEMAR_OUT/product)")
     run.add_argument(
         "--recording",
         action="append",
         default=[],
-        help="a recording, relative to the dataset (for a zarr recipe: a store of the index); "
+        help="a recording, relative to the dataset (with --input zarr: a store of the index); "
         "repeatable",
     )
     add_identity(run)
     add_options(run)
     aggregate = commands.add_parser("aggregate", help="merge product directories into one")
-    aggregate.add_argument("recipe", choices=sorted(REGISTRY))
+    aggregate.add_argument("recipe", type=recipe_name, metavar="recipe", help=recipe_help())
+    aggregate.add_argument(
+        "--input",
+        choices=INPUTS,
+        help="what the recipe's product directories were made from; only bids can be merged",
+    )
     aggregate.add_argument(
         "--in",
         dest="inputs",
@@ -233,6 +276,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_identity(aggregate)
     commands.add_parser("version", help="print the versions as one JSON line")
     return parser
+
+
+def recipe_help() -> str:
+    return "one of: {}".format(", ".join(sorted(REGISTRY)))
 
 
 def identity_of(args: argparse.Namespace, dataset_dir: Path | None) -> Identity:
@@ -523,9 +570,10 @@ def zarr_arguments(
     ``--dataset-dir`` is refused, and the origin, the dataset id, the version and the commit the
     caller attests are required. The attestation is checked here, before any network is used.
     """
+    command = "{} --input {}".format(recipe.id, recipe.input)
     if args.dataset_dir is not None:
         parser.error(
-            "--dataset-dir is not an option of {}: it reads a Zarr serving copy".format(recipe.id)
+            "--dataset-dir is not an option of {}: it reads a Zarr serving copy".format(command)
         )
     named = (
         ("--zarr-base", options.get("zarr_base")),
@@ -535,7 +583,7 @@ def zarr_arguments(
     )
     missing = [flag for flag, value in named if value is None]
     if missing:
-        parser.error("{} requires {}".format(recipe.id, ", ".join(missing)))
+        parser.error("{} requires {}".format(command, ", ".join(missing)))
     try:
         return zarr_input.attest(
             args.source_commit,
@@ -600,7 +648,7 @@ def network_fence(recipe: Recipe) -> zarr_hosts.Fence:
 
 
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    recipe = REGISTRY[args.recipe]
+    recipe = reading(REGISTRY[args.recipe], args, parser)
     options = option_values(recipe, args, parser)
     budget = TimeBudget(options.get("time_budget_s"))  # the clock starts here
     if args.out:
@@ -894,11 +942,13 @@ def copy_file(source: Path, target: Path) -> None:
 
 
 def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    recipe = REGISTRY[args.recipe]
+    recipe = reading(REGISTRY[args.recipe], args, parser)
     if recipe.input != "bids":
         # the merged record would have no input of its own to state: the inputs' say where each read
         parser.error(
-            "aggregate does not support {}: its input is not a dataset directory".format(recipe.id)
+            "aggregate does not support {} --input {}: its input is not a dataset directory".format(
+                recipe.id, recipe.input
+            )
         )
     out = Path(args.out)
     try:
@@ -994,6 +1044,7 @@ def version_command() -> int:
 
     versions = {
         "recipes": {key: REGISTRY[key].version for key in sorted(REGISTRY)},
+        "inputs": {key: list(REGISTRY[key].inputs) for key in sorted(REGISTRY)},
         "common": COMMON_VERSION,
         "eegprep": metadata.version("eegprep"),
         "python": platform.python_version(),
@@ -1007,6 +1058,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command in ("run", "aggregate") and args.recipe in RETIRED:
+            print("{} is now: {}".format(args.recipe, RETIRED[args.recipe]), file=sys.stderr)
+            return EXIT_USAGE
         if args.command == "version":
             return version_command()
         if args.command == "run":

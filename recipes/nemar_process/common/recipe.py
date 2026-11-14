@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 Kind = Literal["text", "str", "int", "float"]
 KINDS: tuple[Kind, ...] = get_args(Kind)
 
+# What a recipe can read: a dataset directory (``bids``) or NEMAR's Zarr serving copy (``zarr``).
+Input = Literal["bids", "zarr"]
+INPUTS: tuple[Input, ...] = get_args(Input)
+
 
 @dataclass(frozen=True)
 class Column:
@@ -92,6 +96,20 @@ TIME_BUDGET_S = Option(
 )
 
 
+# `--input bids|zarr`: which input a recipe that reads more than one is run on. The recipe is the same
+# (its name, version and label do not change with it); the input decides the other arguments and what
+# the records say about where the data came from (docs/recipes.md).
+INPUT_OPTION = Option(
+    "input",
+    "--input",
+    str,
+    "bids",
+    "what the recipe reads: bids (a dataset directory, --dataset-dir; the default) or zarr (NEMAR's "
+    "Zarr serving copy over HTTPS, --zarr-base)",
+    choices=INPUTS,
+)
+
+
 @dataclass(frozen=True)
 class DatasetStep:
     """One step of the recipe as the dataset record states it: the recipe-level parameters."""
@@ -128,7 +146,7 @@ class RunContext:
     validator: Any
     options: Mapping[str, Any] = field(default_factory=dict)  # the values of the recipe's options
     # What a recipe whose input is not a dataset directory reads from (the Zarr source of
-    # `nemar-floor-zarr`); None for the recipes that read a directory.
+    # `nemar-floor --input zarr`); None for a run that reads a directory.
     source: Any = None
 
 
@@ -201,9 +219,14 @@ class Recipe:
       field the stamp already has is refused.
     * ``preflight``: raises ``EngineUnavailable`` when the engine cannot run here. The command calls
       it once, before it creates anything, and ends the run with exit 8 if it raises.
-    * ``input``: what the recipe reads. ``"bids"`` is a dataset directory (``--dataset-dir``);
-      ``"zarr"`` is NEMAR's Zarr serving copy over HTTPS (``--zarr-base``), and the command then
-      refuses ``--dataset-dir`` and requires the dataset id, version and source commit.
+    * ``input``: what this value of the recipe reads. ``"bids"`` is a dataset directory
+      (``--dataset-dir``); ``"zarr"`` is NEMAR's Zarr serving copy over HTTPS (``--zarr-base``), and
+      the command then refuses ``--dataset-dir`` and requires the dataset id, version and source
+      commit.
+    * ``variants``: the same recipe reading another input, each its own ``Recipe`` (its own options,
+      steps and hooks) with this one's name, version and label, and each reading an input of its own;
+      ``--input`` (``INPUT_OPTION``, which the recipe lists in ``options``) chooses among this value
+      and its variants (``reading``). A variant has none of its own.
     * ``dataset_extras``: keys added to ``extensions.nemar`` of the dataset record, read after the
       last recording (what a recipe that reads a remote source says about it).
     """
@@ -218,8 +241,42 @@ class Recipe:
     engine_extra: Callable[[Mapping[str, Any]], dict[str, Any]] = _nothing_extra
     options: tuple[Option, ...] = ()
     preflight: Callable[[Mapping[str, Any]], None] = _no_preflight
-    input: Literal["bids", "zarr"] = "bids"
+    input: Input = "bids"
     dataset_extras: Callable[[RunContext], dict[str, Any]] = _no_record_extras
+    variants: tuple[Recipe, ...] = ()
+
+    def __post_init__(self) -> None:
+        identity = (self.info.id, self.info.version, self.info.label)
+        kinds = [self.input]
+        for variant in self.variants:
+            if (variant.info.id, variant.info.version, variant.info.label) != identity:
+                raise ValueError(
+                    "a variant is the same recipe: it has this one's name, version and label"
+                )
+            if variant.variants:
+                raise ValueError("a variant has no variants of its own")
+            kinds.append(variant.input)
+        if len(set(kinds)) != len(kinds):
+            raise ValueError(
+                "each of a recipe and its variants reads one input, and no two the same"
+            )
+
+    @property
+    def inputs(self) -> tuple[Input, ...]:
+        """The inputs the recipe can be run on (this value's and its variants'), sorted."""
+        return tuple(sorted({self.input, *(variant.input for variant in self.variants)}))
+
+    def reading(self, kind: str) -> Recipe:
+        """The value of the recipe that reads ``kind``: this one or a variant; ``ValueError`` when
+        the recipe does not read it."""
+        if kind == self.input:
+            return self
+        for variant in self.variants:
+            if variant.input == kind:
+                return variant
+        raise ValueError(
+            "{} does not read {} (it reads {})".format(self.id, kind, ", ".join(self.inputs))
+        )
 
     def threads_for(self, options: Mapping[str, Any]) -> int:
         count = self.threads(options) if callable(self.threads) else self.threads

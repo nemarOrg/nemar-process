@@ -1,4 +1,4 @@
-"""A local stand-in for NEMAR's Zarr hosts, for the ``nemar-floor-zarr`` tests.
+"""A local stand-in for NEMAR's Zarr hosts, for the ``nemar-floor --input zarr`` tests.
 
 Real Zarr stores written by zarr itself, served over real HTTP that honors ``Range`` (the way
 eegprep-lean's own tests serve them), plus an index document in the format of the contract. The

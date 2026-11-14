@@ -36,6 +36,7 @@ def expected_document() -> dict:
             "via": "nemar-recipe",
             "version": {
                 "recipes": {"nemar-floor": PINNED_RECIPE_VERSION},
+                "inputs": {"nemar-floor": ["bids", "zarr"]},
                 "common": PINNED_COMMON_VERSION,
                 "eegprep": PINNED_EEGPREP_VERSION,
                 "python": "3.12.16",
@@ -177,9 +178,9 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
     assert document["recipe_command"]["via"] == "python -m nemar_process"
     assert document["recipe_command"]["version"]["eegprep"] == PINNED_EEGPREP_VERSION
     assert document["recipe_command"]["version"]["recipes"] == {
-        "nemar-floor": PINNED_RECIPE_VERSION,
-        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
+        "nemar-floor": PINNED_RECIPE_VERSION
     }
+    assert document["recipe_command"]["version"]["inputs"] == {"nemar-floor": ["bids", "zarr"]}
     # every pinned package was imported, not only installed
     for module in ("eegprep", "mne", "pamica", "numpy", "scipy", "torch", "picard", "bids"):
         assert document["imports"][module], module

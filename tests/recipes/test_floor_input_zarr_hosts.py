@@ -1,4 +1,4 @@
-"""``nemar-floor-zarr``: the network rule.
+"""``nemar-floor --input zarr``: the network rule.
 
 A Zarr-input recipe may contact only the hosts of the allowlist in ``common/zarr_hosts.py``, and no
 host is ever taken from data. These tests show each line of the fence:
@@ -13,7 +13,7 @@ host is ever taken from data. These tests show each line of the fence:
   nothing while no fence is open, and its refusals are shown in a child process (``test_the_fence_
   in_a_child_process``) as well as in this one, where every fence is closed again before the next
   test;
-* the records name the hosts actually contacted (``test_floor_zarr.py``).
+* the records name the hosts actually contacted (``test_floor_input_zarr.py``).
 
 The servers are stand-ins for the external hosts (``tests/zarr_support``); the rules under test are
 the recipe's own.
@@ -74,7 +74,7 @@ PUBLIC = address(0x08080808)
 
 
 def test_the_allowlist_is_fixed_in_code():
-    """The allowlist is the pairs of ``zarr_hosts`` (their own tests are in ``test_floor_zarr_pairs.py``)."""
+    """The allowlist is the pairs of ``zarr_hosts`` (their own tests are in ``test_floor_input_zarr_pairs.py``)."""
     assert isinstance(zarr_hosts.ZARR_HOSTS, frozenset)
     assert isinstance(zarr_hosts.ZARR_DATA_HOSTS, frozenset)
     assert frozenset(zarr_hosts.ZARR_HOST_PAIRS) == zarr_hosts.ZARR_HOSTS
@@ -349,7 +349,7 @@ def test_the_index_is_read_under_its_limit_and_a_longer_one_is_refused(cli, monk
     monkeypatch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
     assert zarr_input.MAX_INDEX_BYTES == 64 * 1024**2
     monkeypatch.setattr(zarr_input, "MAX_INDEX_BYTES", 100)  # the index is longer than this
-    code, _, stderr = cli("run", "nemar-floor-zarr", "--out", tmp_path / "o", *ARGS)
+    code, _, stderr = cli("run", "nemar-floor", "--input", "zarr", "--out", tmp_path / "o", *ARGS)
     assert (code, documents.limits) == (6, [100])  # the limit reached the fetch
     assert "index cannot be read (TransportError)" in stderr
     assert not (tmp_path / "o").exists()
@@ -363,7 +363,7 @@ def run_with_index(cli, monkeypatch, tmp_path, body: bytes):
     monkeypatch.setattr(zarr_input, "fetch_https", documents.fetch)
     monkeypatch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
     out = tmp_path / "o"
-    result = cli("run", "nemar-floor-zarr", "--out", out, *ARGS)
+    result = cli("run", "nemar-floor", "--input", "zarr", "--out", out, *ARGS)
     assert documents.urls == [z.INDEX_URL]  # nothing else was asked for
     assert not out.exists()
     return result
@@ -551,7 +551,15 @@ def test_an_index_that_declares_a_huge_store_still_counts_it_as_too_large(
     monkeypatch.setattr(zarr_input, "fetch_https", documents.fetch)
     monkeypatch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
     code, stdout, _ = cli(
-        "run", "nemar-floor-zarr", "--out", tmp_path / "o", *ARGS, "--recording", z.HUGE
+        "run",
+        "nemar-floor",
+        "--input",
+        "zarr",
+        "--out",
+        tmp_path / "o",
+        *ARGS,
+        "--recording",
+        z.HUGE,
     )
     assert code == 4
     assert json.loads(stdout.strip().splitlines()[-1])["too_large"] == 1
@@ -589,7 +597,9 @@ def test_a_zarr_base_off_the_allowlist_is_refused_before_any_request(
     documents = z.DocumentFetch({})
     monkeypatch.setattr(zarr_input, "fetch_https", documents.fetch)
     argv = [BASES[label] if a == z.ORIGIN else a for a in ARGS]
-    code, stdout, stderr = cli("run", "nemar-floor-zarr", "--out", tmp_path / "o", *argv)
+    code, stdout, stderr = cli(
+        "run", "nemar-floor", "--input", "zarr", "--out", tmp_path / "o", *argv
+    )
     assert code == 6
     assert stdout == ""
     assert "--zarr-base" in stderr  # the field is named...
@@ -756,7 +766,10 @@ def test_the_command_gives_a_directory_recipe_a_fence_with_no_hosts():
     fence = command.network_fence(REGISTRY["nemar-floor"])
     assert isinstance(fence, zarr_hosts.Fence)
     assert fence.hosts == frozenset()
-    assert command.network_fence(REGISTRY["nemar-floor-zarr"]).hosts == zarr_hosts.ALLOWED_HOSTS
+    assert (
+        command.network_fence(REGISTRY["nemar-floor"].reading("zarr")).hosts
+        == zarr_hosts.ALLOWED_HOSTS
+    )
 
 
 def test_nested_fences_each_apply_and_closing_them_leaves_none():
@@ -844,7 +857,9 @@ def test_the_command_runs_a_zarr_recipe_inside_the_fence_and_no_other(cli, monke
 
     monkeypatch.setattr(zarr_input, "fetch_https", straight_to_the_loopback)
     try:
-        code, _, stderr = cli("run", "nemar-floor-zarr", "--out", tmp_path / "o", *ARGS)
+        code, _, stderr = cli(
+            "run", "nemar-floor", "--input", "zarr", "--out", tmp_path / "o", *ARGS
+        )
     finally:
         listener.close()
     assert code == 6
@@ -876,18 +891,18 @@ def test_an_eeg_store_whose_products_cannot_be_named_is_a_skipped_row(
     monkeypatch.setattr(zarr_input, "fetch_https", documents.fetch)
     monkeypatch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
     out = tmp_path / "o"
-    code, stdout, _ = cli("run", "nemar-floor-zarr", "--out", out, *ARGS)
+    code, stdout, _ = cli("run", "nemar-floor", "--input", "zarr", "--out", out, *ARGS)
     assert code == 7  # every store was skipped for its format
     assert json.loads(stdout.strip().splitlines()[-1])["other"] == 1
     assert documents.urls == [z.INDEX_URL]  # nothing was read
     written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
     assert written == [
-        "desc-nemarfloorzarr_recordings.tsv",
-        "desc-nemarfloorzarr_signalJourney.json",
+        "desc-nemarfloor_recordings.tsv",
+        "desc-nemarfloor_signalJourney.json",
     ]
-    record = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
+    record = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())
     assert record["extensions"]["nemar"]["profile"] == "dataset"
-    rows = (out / "desc-nemarfloorzarr_recordings.tsv").read_text().splitlines()
+    rows = (out / "desc-nemarfloor_recordings.tsv").read_text().splitlines()
     assert rows[1].split("\t")[:4] == [path, "eeg", "skipped", "unsupported_format"]
 
 

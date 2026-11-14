@@ -1,6 +1,6 @@
-"""``nemar-floor-zarr`` on a real public dataset, read over the internet from NEMAR's Zarr serving copy.
+"""``nemar-floor --input zarr`` on a real public dataset, read over the internet from NEMAR's Zarr serving copy.
 
-Run it with ``uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_zarr_network.py
+Run it with ``uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_input_zarr_network.py
 -m network -q``; without ``-m network`` it is skipped. The dataset is the demo dataset chosen for the
 portable-compute work: ``nm000274`` (never one of the live datasets). Its serving index was built a
 few metadata-only commits after the version tag, which is what the attestation records; the check
@@ -62,7 +62,9 @@ def live_index() -> tuple[bytes, dict]:
 def arguments(out: Path, *extra: str, source_commit: str = SOURCE_COMMIT) -> list[str]:
     return [
         "run",
-        "nemar-floor-zarr",
+        "nemar-floor",
+        "--input",
+        "zarr",
         "--out",
         str(out),
         "--zarr-base",
@@ -115,17 +117,17 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
 
     # every output present, and each record valid for the schema
     validate = ROOT / "scripts" / "validate_signaljourney.py"
-    record = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
+    record = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())
     stores = record["extensions"]["nemar"]["input"]["stores"]
     assert len(stores) == STORES
-    files = [out / "desc-nemarfloorzarr_signalJourney.json"]
+    files = [out / "desc-nemarfloor_signalJourney.json"]
     for path in stores:
         stem = path.removesuffix("_eeg.edf")
         for suffix in PRODUCT:
-            product = out / "{}_desc-nemarfloorzarr_{}".format(stem, suffix)
+            product = out / "{}_desc-nemarfloor_{}".format(stem, suffix)
             assert product.is_file(), product.name
-        files.append(out / "{}_desc-nemarfloorzarr_signalJourney.json".format(stem))
-    assert (out / "desc-nemarfloorzarr_recordings.tsv").is_file()
+        files.append(out / "{}_desc-nemarfloor_signalJourney.json".format(stem))
+    assert (out / "desc-nemarfloor_recordings.tsv").is_file()
     for file in files:
         done = subprocess.run(
             [sys.executable, str(validate), str(file)], capture_output=True, text=True, check=False
@@ -155,9 +157,7 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     total = 0
     for path in stores:
         stem = path.removesuffix("_eeg.edf")
-        mine = json.loads(
-            (out / "{}_desc-nemarfloorzarr_signalJourney.json".format(stem)).read_text()
-        )
+        mine = json.loads((out / "{}_desc-nemarfloor_signalJourney.json".format(stem)).read_text())
         metrics = mine["summaryMetrics"]
         assert (metrics["nChannelsInput"], metrics["samplingRateHz"]) == (32, 200.0)
         total += metrics["nChannelsInput"] * round(metrics["durationS"] * metrics["samplingRateHz"])

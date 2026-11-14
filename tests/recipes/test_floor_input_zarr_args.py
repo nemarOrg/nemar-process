@@ -1,11 +1,13 @@
-"""``nemar-floor-zarr``: the arguments, the usage errors and the commit attestation.
+"""``nemar-floor --input zarr``: the arguments, the usage errors and the commit attestation.
 
 None of these reads a serving copy: the transport the reader would use is replaced by one that
 fails the test if it is ever asked for anything, so each refusal here is shown to happen before any
-request. The refusals that need an index are in ``test_floor_zarr.py``.
+request. The refusals that need an index are in ``test_floor_input_zarr.py``.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 from nemar_process.common import zarr_input
@@ -45,7 +47,7 @@ def silent(monkeypatch):
 def usage(cli, silent, *argv):
     """The run's exit code and standard error; the transport must not have been asked for anything."""
     with pytest.raises(SystemExit) as stopped:
-        cli("run", "nemar-floor-zarr", "--out", "unused", *argv)
+        cli("run", "nemar-floor", "--input", "zarr", "--out", "unused", *argv)
     assert silent.urls == []
     return stopped.value.code
 
@@ -177,41 +179,123 @@ def test_a_directory_recipe_still_requires_the_dataset_directory(cli, tmp_path):
     assert stopped.value.code == 2
 
 
-def test_aggregate_is_not_offered_for_a_zarr_recipe(cli, tmp_path):
+def test_aggregate_is_not_offered_for_the_zarr_input(cli, tmp_path):
     with pytest.raises(SystemExit) as stopped:
-        cli("aggregate", "nemar-floor-zarr", "--in", tmp_path, "--out", tmp_path / "o")
+        cli(
+            "aggregate", "nemar-floor", "--input", "zarr", "--in", tmp_path, "--out", tmp_path / "o"
+        )
     assert stopped.value.code == 2
 
 
-def test_the_recipe_is_registered_with_its_input_and_label():
+def test_the_floor_is_one_recipe_with_two_inputs_that_share_its_name_version_and_label():
     from nemar_process.recipes import REGISTRY
 
-    recipe = REGISTRY["nemar-floor-zarr"]
-    assert recipe.input == "zarr"
-    assert recipe.label == "nemarfloorzarr"
-    assert REGISTRY["nemar-floor"].input == "bids"
-    assert {option.flag for option in recipe.options} == {
+    assert sorted(REGISTRY) == ["nemar-floor"]
+    floor = REGISTRY["nemar-floor"]
+    zarr = floor.reading("zarr")
+    assert floor.input == "bids"
+    assert floor.inputs == ("bids", "zarr")
+    assert floor.reading("bids") is floor
+    with pytest.raises(ValueError, match="does not read tapis"):
+        floor.reading("tapis")
+    assert zarr.input == "zarr"
+    assert (zarr.id, zarr.version, zarr.label) == ("nemar-floor", "1.0.0", "nemarfloor")
+    assert (zarr.id, zarr.version, zarr.label) == (floor.id, floor.version, floor.label)
+    assert {option.flag for option in floor.options} == {"--input"}
+    assert {option.flag for option in zarr.options} == {
+        "--input",
         "--zarr-base",
         "--tag-commit",
         "--commit-equivalence",
         "--commit-delta-path",
     }
+    input_option = next(option for option in floor.options if option.flag == "--input")
+    assert (input_option.default, input_option.choices) == ("bids", ("bids", "zarr"))
+
+
+# ---- the input is an argument -----------------------------------------------------------------
+
+RETIRED_LINE = "nemar-floor-zarr is now: nemar-floor --input zarr\n"
 
 
 @pytest.mark.parametrize(
-    ("expression", "selected"),
+    "argv",
     [
-        ("network", True),
-        ("network and not apptainer", True),
-        ("not apptainer or network", True),
-        ("", False),
-        ("not network", False),
-        ("not apptainer", False),
-        ("(not network)", False),
-        ("networking", False),
+        ("run", "nemar-floor-zarr"),
+        ("run", "nemar-floor-zarr", "--out", "unused", *BASE, *IDENTITY),
+        ("aggregate", "nemar-floor-zarr", "--in", "unused", "--out", "unused"),
     ],
+    ids=["bare", "with the old arguments", "aggregate"],
 )
-def test_the_network_tests_run_only_when_the_marker_expression_selects_them(expression, selected):
-    from recipe_plugin import wants_network
+def test_the_old_name_exits_2_with_the_one_line_that_names_the_new_command(
+    cli, silent, tmp_path, monkeypatch, argv
+):
+    monkeypatch.chdir(tmp_path)
+    code, out, err = cli(*argv)
+    assert (code, out, err) == (2, "", RETIRED_LINE)
+    assert silent.urls == []  # before any request
+    assert list(tmp_path.iterdir()) == []  # and before anything is written
 
-    assert wants_network(expression) is selected
+
+def test_the_old_name_exits_2_as_a_process(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from nemar_process import cli as command
+
+    env = dict(os.environ, PYTHONPATH=str(Path(command.__file__).parent.parent))
+    done = subprocess.run(
+        [sys.executable, "-m", "nemar_process", "run", "nemar-floor-zarr", "--out", "unused"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert (done.returncode, done.stdout, done.stderr) == (2, "", RETIRED_LINE)
+
+
+def test_an_unknown_recipe_is_still_a_usage_error(cli):
+    with pytest.raises(SystemExit) as stopped:
+        cli("run", "nemar-floor-tapis", "--out", "unused")
+    assert stopped.value.code == 2
+
+
+def test_an_input_that_is_neither_bids_nor_zarr_is_a_usage_error(cli, tmp_path):
+    with pytest.raises(SystemExit) as stopped:
+        cli("run", "nemar-floor", "--input", "tapis", "--dataset-dir", tmp_path, "--out", "o")
+    assert stopped.value.code == 2
+
+
+def test_the_zarr_options_are_refused_for_the_bids_input_before_anything_happens(
+    cli, silent, tmp_path
+):
+    for argv in (
+        ("--input", "bids", *BASE),
+        ("--input", "bids", "--tag-commit", T),
+        ("--input", "bids", "--commit-equivalence", "exact"),
+        ("--input", "bids", "--commit-delta-path", ".nemar/x"),
+    ):
+        with pytest.raises(SystemExit) as stopped:
+            cli("run", "nemar-floor", *argv, "--dataset-dir", tmp_path, "--out", tmp_path / "o")
+        assert stopped.value.code == 2, argv
+    assert silent.urls == []
+    assert not (tmp_path / "o").exists()
+
+
+def test_the_bids_input_still_requires_the_dataset_directory_when_it_is_named(cli, tmp_path):
+    with pytest.raises(SystemExit) as stopped:
+        cli("run", "nemar-floor", "--input", "bids", "--out", tmp_path / "o")
+    assert stopped.value.code == 2
+
+
+def test_the_zarr_input_names_the_recipe_and_the_input_in_what_it_refuses(cli, silent, capsys):
+    with pytest.raises(SystemExit):
+        cli("run", "nemar-floor", "--input", "zarr", "--out", "unused", "--dataset-dir", "x")
+    err = capsys.readouterr().err
+    assert "--dataset-dir is not an option of nemar-floor --input zarr" in err
+    with pytest.raises(SystemExit):
+        cli("run", "nemar-floor", "--input", "zarr", "--out", "unused")
+    assert "nemar-floor --input zarr requires --zarr-base, --dataset-id" in capsys.readouterr().err
+    assert silent.urls == []

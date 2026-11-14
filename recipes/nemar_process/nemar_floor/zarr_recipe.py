@@ -1,10 +1,11 @@
-"""The ``nemar-floor-zarr`` recipe as the command and the record builders see it.
+"""``nemar-floor --input zarr``: the floor's steps on every EEG store of a dataset's Zarr serving copy.
 
 nemar-floor's steps, unchanged, on a recording read whole from the Zarr serving copy: the chain is
 ``nemar_floor.pipeline.process`` and the files are ``nemar_floor.outputs.write_product``, so the
-decisions and the outputs have the floor's own definitions and only the label (``nemarfloorzarr``),
-the load step and the provenance of the input differ. The recipe exists under this name until the
-two converge into one ``nemar-floor`` with the input kind as an argument.
+decisions and the outputs have the floor's own definitions, and only the load step and the
+provenance of the input differ. This is the floor as a variant of itself: the same name, version and
+label (``nemar-floor``, ``1.0.0``, ``nemarfloor``), read on another input; ``--input zarr`` chooses
+it (``nemar_floor.RECIPE.reading``), and what each record says was read is in ``common/zarr_input``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Any
 from nemar_process.common import naming, zarr_input
 from nemar_process.common.io import Loaded, Recording
 from nemar_process.common.recipe import (
+    INPUT_OPTION,
     DatasetStep,
     Option,
     Recipe,
@@ -22,33 +24,31 @@ from nemar_process.common.recipe import (
     RecordingProduct,
     RunContext,
 )
-from nemar_process.nemar_floor import outputs
+from nemar_process.nemar_floor import outputs, steps
 from nemar_process.nemar_floor import recipe as floor
 from nemar_process.nemar_floor.pipeline import process
 
-RECIPE_ID = "nemar-floor-zarr"
-RECIPE_VERSION = "1.0.0"
-
 INFO = RecipeInfo(
-    id=RECIPE_ID,
-    version=RECIPE_VERSION,
-    label=naming.label(RECIPE_ID),
+    id=steps.RECIPE_ID,
+    version=steps.RECIPE_VERSION,
+    label=naming.label(steps.RECIPE_ID),
     pipeline_description=(
         "NEMAR quality floor on the Zarr serving copy: load, flatline, drift, line noise, "
         "bad channels, bad windows, QC (eegprep)."
     ),
     recording_description=(
-        "nemar-floor-zarr 1.0.0: annotation of one EEG recording read from NEMAR's Zarr serving copy "
+        "nemar-floor 1.0.0: annotation of one EEG recording read from NEMAR's Zarr serving copy "
         "(bad channels, bad windows, filters, QC); no samples are written."
     ),
     dataset_pipeline_description="NEMAR quality floor on the Zarr serving copy, dataset level.",
     dataset_description=(
-        "nemar-floor-zarr 1.0.0: dataset-level quality record of the Zarr serving copy "
+        "nemar-floor 1.0.0: dataset-level quality record of the Zarr serving copy "
         "(aggregates and per-recording summary table)."
     ),
 )
 
 OPTIONS = (
+    INPUT_OPTION,
     Option(
         "zarr_base",
         "--zarr-base",
@@ -120,7 +120,7 @@ def dataset_extras(context: RunContext) -> dict[str, Any]:
     return source.dataset_extras()
 
 
-RECIPE = Recipe(
+ZARR_RECIPE = Recipe(
     info=INFO,
     columns=floor.COLUMNS,
     distributions=floor.DISTRIBUTIONS,
@@ -130,3 +130,5 @@ RECIPE = Recipe(
     input="zarr",
     dataset_extras=dataset_extras,
 )
+"""The floor on the Zarr input: every EEG store of a dataset's serving copy (EEG resampled to 250 Hz,
+16 bit), not the archived recordings, and the records say so. Nothing is downloaded to disk."""

@@ -498,12 +498,38 @@ def test_the_version_is_one_json_line(cli):
     assert code == 0
     document = json.loads(out)
     assert out.count("\n") == 1
-    assert document["recipes"] == {
-        "nemar-floor": PINNED_RECIPE_VERSION,
-        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
-    }
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
+    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"]}
     assert document["common"] == PINNED_COMMON_VERSION
-    assert set(document) == {"recipes", "common", "eegprep", "python", "numpy"}
+    assert set(document) == {"recipes", "inputs", "common", "eegprep", "python", "numpy"}
+
+
+def test_naming_the_bids_input_changes_nothing(tmp_path, cli):
+    """``--input bids`` is the default: every file is the same, a record's clock and run id aside."""
+    common = [
+        "--dataset-dir",
+        DATASET,
+        "--dataset-id",
+        "on007823",
+        "--dataset-version",
+        "v1.0.0",
+        "--run-id",
+        "same",
+    ]
+    assert cli("run", "nemar-floor", *common, "--out", tmp_path / "plain")[0] == 0
+    assert (
+        cli("run", "nemar-floor", "--input", "bids", *common, "--out", tmp_path / "named")[0] == 0
+    )
+    names = product_files(tmp_path / "plain")
+    assert names == product_files(tmp_path / "named")
+    for name in names:
+        plain, named = (tmp_path / which / name for which in ("plain", "named"))
+        if name.endswith("_signalJourney.json"):  # these hold the time they were written
+            assert records.content_sha256(json.loads(plain.read_text())) == records.content_sha256(
+                json.loads(named.read_text())
+            ), name
+        else:
+            assert plain.read_bytes() == named.read_bytes(), name
 
 
 def test_a_read_only_dataset_is_read_and_never_written(tmp_path, cli):
