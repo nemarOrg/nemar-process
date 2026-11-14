@@ -1611,6 +1611,25 @@ def test_the_demo_digest_with_another_issuer_is_refused(machine, real_cosign):
     assert caught.value.reason == "cosign_failed", caught.value.stderr
 
 
+def test_a_real_signature_with_another_repository_is_refused(machine, real_cosign):
+    """The identity and the issuer are right and only the repository asked for is not: the real cosign
+    refuses, so the field is enforced on the real certificate and not ignored."""
+    home = verify.cosign_home(machine.config)
+    with pytest.raises(images.Unverified) as caught:
+        verify.run_cosign(
+            real_cosign,
+            DEMO_REFERENCE,
+            home,
+            machine.tuning,
+            lambda: None,
+            repository="nemarOrg/other",
+        )
+    assert caught.value.reason == "cosign_failed", caught.value.stderr
+    # and the repository the certificate names goes through, so the refusal is the repository's
+    out = verify.run_cosign(real_cosign, DEMO_REFERENCE, home, machine.tuning, lambda: None)
+    assert "sha256:" + DEMO_HEX in verify.parse_digests(out)
+
+
 def test_a_tag_of_the_real_repository_is_refused_before_cosign_runs(machine):
     with pytest.raises(images.Unverified) as caught:
         machine.verifier.verify_image("job_demo", REPOSITORY + ":latest", DEMO_HEX, lambda: None)
