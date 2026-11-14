@@ -127,8 +127,27 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
           uv run ty check
-          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images
+          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images -m "not docker"
           uv run python scripts/build_launcher_zip.py --check
+
+  docker:
+    # The launcher with NEMAR_CONTAINER_RUNTIME=docker against the runner's own Docker daemon and a
+    # real image pinned by digest (DM-10): isolation as the container sees it, and the memory kill.
+    # The other jobs deselect this test (`-m "not docker"`); here a missing daemon is a failure.
+    name: docker backend (end to end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEMAR_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Docker version
+        run: docker version
+      - name: Launch end to end (real Docker)
+        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
 
   images:
     # The runtime image's declaration, lock, vendored schema, smoke fixture, Dockerfile and workflows.
@@ -195,7 +214,7 @@ jobs:
       # recipe on the fixture, against stand-in routes. The same test runs in the SIF in
       # image-nemar-python.yml, where the isolation is real.
       - name: Launch end to end (stand-in runtime)
-        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer"
+        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer and not docker"
 
   deploy:
     # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
