@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import re
+import time
 
 import harness
 import nemar_launch.__main__ as launcher
@@ -97,13 +98,13 @@ def failure_at(received, **environ):
 
 
 def test_the_deadline_comes_from_nemar_job_end_time_without_slurm():
-    end = 1_000_000
+    end = int(time.time()) + 1_000_000
     assert failure_at(end - 120, NEMAR_JOB_END_TIME=str(end)).code == "time_limit"
     assert failure_at(end - 121, NEMAR_JOB_END_TIME=str(end)).detail == "terminated"
 
 
 def test_slurm_job_end_time_wins_when_both_are_set():
-    end = 1_000_000
+    end = int(time.time()) + 1_000_000
     both = {"SLURM_JOB_END_TIME": str(end), "NEMAR_JOB_END_TIME": str(end + 100_000)}
     assert failure_at(end - 10, **both).code == "time_limit"
     assert failure_at(end - 10, NEMAR_JOB_END_TIME=str(end + 100_000)).detail == "terminated"
@@ -116,8 +117,9 @@ def test_a_malformed_deadline_is_absent(bad):
 
 
 def test_a_malformed_slurm_deadline_does_not_hide_the_runner_one():
-    env = Env({b"SLURM_JOB_END_TIME": b"soon", b"NEMAR_JOB_END_TIME": b"1000000"})
-    assert run.end_time(env) == 1_000_000.0
+    end = int(time.time()) + 1_000_000
+    env = Env({b"SLURM_JOB_END_TIME": b"soon", b"NEMAR_JOB_END_TIME": str(end).encode()})
+    assert run.end_time(env) == float(end)
 
 
 # ---- scratch ------------------------------------------------------------------------------------

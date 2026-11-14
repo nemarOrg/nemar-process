@@ -411,7 +411,7 @@ def test_terminated_failure_by_the_end_time_with_an_injected_timestamp():
         env = Env({} if end is None else {b"SLURM_JOB_END_TIME": str(end).encode()})
         return run.terminated_failure(terminator, env)
 
-    end = 1_000_000
+    end = int(time.time()) + 1_000_000
     assert failure(end - 120, end).code == "time_limit"  # exactly 120 s before: the time limit
     assert failure(end - 121, end).detail == "terminated"
     assert failure(end + 5, end).code == "time_limit"
