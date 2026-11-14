@@ -21,8 +21,8 @@ FROM ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158
 # ---- builder: the virtual environment ---------------------------------------------------------
 FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS builder
 
-# git is needed in this stage only: the signalJourney validator is installed from a pinned commit of
-# its repository (it is not on PyPI with its schema), and uv fetches a git source with git.
+# git is needed in this stage only: the Zarr reader eegprep-lean is installed from a pinned commit of
+# the eegprep repository, and uv fetches a git source with git.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -47,9 +47,9 @@ RUN if [ "$LOCK_SHA256" != "unverified" ]; then echo "$LOCK_SHA256  uv.lock" | s
 
 RUN uv sync --frozen --no-dev --group runtime --extra cpu
 
-# The recipes package: the signalJourney validator wrapper with the vendored schema, the common layer
-# and the recipes themselves (nemar_process.nemar_floor). Every signal-processing call in it is an
-# eegprep function from the environment above.
+# The recipes package: the signalJourney validator wrapper (the schema is the release's own, pinned by
+# its tree digest), the common layer and the recipes themselves (nemar_process.nemar_floor). Every
+# signal-processing call in it is an eegprep function from the environment above.
 COPY recipes/nemar_process /tmp/nemar_process
 RUN site="$(/opt/venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
     && cp -R /tmp/nemar_process "$site/nemar_process" \
