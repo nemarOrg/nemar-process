@@ -1,0 +1,15 @@
+{
+  "comment": "The one place the nemar-cli commit this repository's contract copies are pinned to is recorded. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/launcher/test_drift.py compares against it.",
+  "repository": "nemarOrg/nemar-cli",
+  "ref": "b54ab726d2bc683f86839221f2080675411e28c9",
+  "schema": {
+    "source": "shared/contract/compute-launch.schema.json",
+    "copy": "launcher/schema/launch-spec.v1.json",
+    "sha256": "d25c7dcacd782f6e8baa6b550dcd5d193ff0f066aa3437ac794e8dc381c1e561",
+    "bytes": 21600
+  },
+  "words": {
+    "failure_codes": "shared/compute-state.ts",
+    "launcher_files_and_env": "shared/contract/compute.ts"
+  }
+}

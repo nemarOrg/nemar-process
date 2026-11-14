@@ -1,0 +1,25 @@
+# Vendored byte for byte from the Tapis project's public OpenAPI specifications; never edit these files by hand.
+# Both repositories carry the same BSD 3-Clause licence text, kept once as LICENSE-tapis.
+# To move to a newer commit: copy the two files from the new commit, update this file, then run
+#   uv run python scripts/derive_tapis_schemas.py
+# and commit the regenerated schemas with them (docs/operator.md).
+# The commits were current on 2026-11-03. tests/deploy/test_tapis_schemas.py checks the sha256 of each file against this record.
+
+[apps]
+repository: https://github.com/tapis-project/openapi-apps
+commit: 10ec91aa31c1d2670fbacd7e5d1ac338c52b079d
+path: AppsAPI.yaml
+version: 26Q3.0
+sha256: 2240144ab02b213e70e38b88508a090cfc9bb35fbae906b7b10b6ad52e1ed023
+
+[systems]
+repository: https://github.com/tapis-project/openapi-systems
+commit: 929af4b8855d06953ecf03ffef58c45a72fb80ea
+path: SystemsAPI.yaml
+version: 26Q3.0
+sha256: 8678350b97a3a9449784c8b210470d5c98399ce0971956b1f946cd28dc6c3dcf
+
+[license]
+path: LICENSE-tapis
+license: BSD-3-Clause
+sha256: 58cf7d38837e906ce9e7306caadbb121f6a150da18e977ddee66b31c055fe54a

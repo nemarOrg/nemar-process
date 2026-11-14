@@ -1,0 +1,557 @@
+{
+  "$defs": {
+    "AppArgSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "arg": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "description": {
+          "$ref": "#/$defs/ArgDescriptionString"
+        },
+        "inputMode": {
+          "$ref": "#/$defs/ArgInputModeEnum"
+        },
+        "name": {
+          "$ref": "#/$defs/InputNameString"
+        },
+        "notes": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "AppFileInput": {
+      "additionalProperties": false,
+      "properties": {
+        "autoMountLocal": {
+          "default": true,
+          "type": "boolean"
+        },
+        "description": {
+          "$ref": "#/$defs/ArgDescriptionString"
+        },
+        "envKey": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "inputMode": {
+          "$ref": "#/$defs/FileInputModeEnum"
+        },
+        "name": {
+          "$ref": "#/$defs/InputNameString"
+        },
+        "notes": {
+          "type": "object"
+        },
+        "sourceUrl": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "targetPath": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "targetPath"
+      ],
+      "type": "object"
+    },
+    "AppFileInputArray": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/ArgDescriptionString"
+        },
+        "envKey": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "inputMode": {
+          "$ref": "#/$defs/FileInputModeEnum"
+        },
+        "name": {
+          "$ref": "#/$defs/InputNameString"
+        },
+        "notes": {
+          "type": "object"
+        },
+        "sourceUrls": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "targetDir": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "targetDir"
+      ],
+      "type": "object"
+    },
+    "AppVersionString": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
+    "ArchiveModeEnum": {
+      "default": "ALWAYS",
+      "enum": [
+        "ALWAYS",
+        "SKIP_ON_FAIL",
+        "NEVER"
+      ],
+      "type": "string"
+    },
+    "ArgDescriptionString": {
+      "maxLength": 8096,
+      "type": "string"
+    },
+    "ArgInputModeEnum": {
+      "default": "INCLUDE_ON_DEMAND",
+      "enum": [
+        "REQUIRED",
+        "FIXED",
+        "INCLUDE_ON_DEMAND",
+        "INCLUDE_BY_DEFAULT"
+      ],
+      "type": "string"
+    },
+    "DescriptionString": {
+      "maxLength": 2048,
+      "type": "string"
+    },
+    "DirString": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "FileInputModeEnum": {
+      "default": "OPTIONAL",
+      "enum": [
+        "REQUIRED",
+        "OPTIONAL",
+        "FIXED"
+      ],
+      "type": "string"
+    },
+    "IdString": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "InputNameString": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "JobAttributes": {
+      "additionalProperties": false,
+      "properties": {
+        "archiveMode": {
+          "$ref": "#/$defs/ArchiveModeEnum"
+        },
+        "archiveOnAppError": {
+          "default": true,
+          "type": "boolean"
+        },
+        "archiveSystemDir": {
+          "$ref": "#/$defs/DirString"
+        },
+        "archiveSystemId": {
+          "$ref": "#/$defs/IdString"
+        },
+        "cmdPrefix": {
+          "maxLength": 126,
+          "minLength": 1,
+          "type": "string"
+        },
+        "coresPerNode": {
+          "type": "integer"
+        },
+        "description": {
+          "$ref": "#/$defs/DescriptionString"
+        },
+        "dtnSystemInputDir": {
+          "$ref": "#/$defs/DirString"
+        },
+        "dtnSystemOutputDir": {
+          "$ref": "#/$defs/DirString"
+        },
+        "dynamicExecSystem": {
+          "default": false,
+          "type": "boolean"
+        },
+        "execSystemConstraints": {
+          "items": {
+            "minLength": 3,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "execSystemExecDir": {
+          "$ref": "#/$defs/DirString"
+        },
+        "execSystemId": {
+          "$ref": "#/$defs/IdString"
+        },
+        "execSystemInputDir": {
+          "$ref": "#/$defs/DirString"
+        },
+        "execSystemLogicalQueue": {
+          "$ref": "#/$defs/QueueNameString"
+        },
+        "execSystemOutputDir": {
+          "$ref": "#/$defs/DirString"
+        },
+        "fileInputArrays": {
+          "items": {
+            "$ref": "#/$defs/AppFileInputArray"
+          },
+          "type": "array"
+        },
+        "fileInputs": {
+          "items": {
+            "$ref": "#/$defs/AppFileInput"
+          },
+          "type": "array"
+        },
+        "isMpi": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maxMinutes": {
+          "type": "integer"
+        },
+        "memoryMB": {
+          "type": "integer"
+        },
+        "mpiCmd": {
+          "maxLength": 126,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nodeCount": {
+          "type": "integer"
+        },
+        "parameterSet": {
+          "$ref": "#/$defs/ParameterSet"
+        },
+        "subscriptions": {
+          "items": {
+            "$ref": "#/$defs/ReqSubscribe"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "items": {
+            "$ref": "#/$defs/TagString"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "JobEventCategoryFilter": {
+      "enum": [
+        "ALL",
+        "JOB_NEW_STATUS",
+        "JOB_INPUT_TRANSACTION_ID",
+        "JOB_ARCHIVE_TRANSACTION_ID",
+        "JOB_ERROR_MESSAGE",
+        "JOB_SUBSCRIPTION"
+      ],
+      "type": "string"
+    },
+    "JobTypeEnum": {
+      "enum": [
+        "BATCH",
+        "FORK"
+      ],
+      "type": "string"
+    },
+    "KeyValueInputModeEnum": {
+      "default": "INCLUDE_BY_DEFAULT",
+      "enum": [
+        "REQUIRED",
+        "FIXED",
+        "INCLUDE_ON_DEMAND",
+        "INCLUDE_BY_DEFAULT"
+      ],
+      "type": "string"
+    },
+    "KeyValuePair": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/DescriptionString"
+        },
+        "inputMode": {
+          "$ref": "#/$defs/KeyValueInputModeEnum"
+        },
+        "key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "notes": {
+          "type": "object"
+        },
+        "value": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "NotifDeliveryMethod": {
+      "enum": [
+        "WEBHOOK",
+        "EMAIL"
+      ],
+      "type": "string"
+    },
+    "NotifDeliveryTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "deliveryAddress": {
+          "type": "string"
+        },
+        "deliveryMethod": {
+          "$ref": "#/$defs/NotifDeliveryMethod"
+        }
+      },
+      "required": [
+        "deliveryMethod",
+        "deliveryAddress"
+      ],
+      "type": "object"
+    },
+    "ParameterSet": {
+      "additionalProperties": false,
+      "properties": {
+        "appArgs": {
+          "items": {
+            "$ref": "#/$defs/AppArgSpec"
+          },
+          "type": "array"
+        },
+        "archiveFilter": {
+          "additionalProperties": false,
+          "properties": {
+            "excludes": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "includeLaunchFiles": {
+              "default": true,
+              "type": "boolean"
+            },
+            "includes": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "containerArgs": {
+          "items": {
+            "$ref": "#/$defs/AppArgSpec"
+          },
+          "type": "array"
+        },
+        "envVariables": {
+          "items": {
+            "$ref": "#/$defs/KeyValuePair"
+          },
+          "type": "array"
+        },
+        "logConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "stderrFilename": {
+              "type": "string"
+            },
+            "stdoutFilename": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stdoutFilename",
+            "stderrFilename"
+          ],
+          "type": "object"
+        },
+        "schedulerOptions": {
+          "items": {
+            "$ref": "#/$defs/AppArgSpec"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "QueueNameString": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "ReqSubscribe": {
+      "additionalProperties": false,
+      "properties": {
+        "deliveryTargets": {
+          "items": {
+            "$ref": "#/$defs/NotifDeliveryTarget"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "description": {
+          "$ref": "#/$defs/DescriptionString"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "jobEventCategoryFilter": {
+          "$ref": "#/$defs/JobEventCategoryFilter"
+        },
+        "ttlMinutes": {
+          "default": 10080,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "jobEventCategoryFilter",
+        "deliveryTargets"
+      ],
+      "type": "object"
+    },
+    "RuntimeEnum": {
+      "enum": [
+        "SINGULARITY",
+        "DOCKER",
+        "ZIP"
+      ],
+      "type": "string"
+    },
+    "RuntimeOptionEnum": {
+      "enum": [
+        "NONE",
+        "SINGULARITY_RUN"
+      ],
+      "type": "string"
+    },
+    "RuntimeOptions": {
+      "items": {
+        "$ref": "#/$defs/RuntimeOptionEnum"
+      },
+      "type": "array"
+    },
+    "TagString": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "UserNameApiDefaultString": {
+      "default": "${apiUserId}",
+      "maxLength": 60,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "containerImage": {
+      "type": "string"
+    },
+    "description": {
+      "$ref": "#/$defs/DescriptionString"
+    },
+    "enabled": {
+      "default": true,
+      "type": "boolean"
+    },
+    "id": {
+      "$ref": "#/$defs/IdString"
+    },
+    "jobAttributes": {
+      "$ref": "#/$defs/JobAttributes"
+    },
+    "jobType": {
+      "$ref": "#/$defs/JobTypeEnum"
+    },
+    "locked": {
+      "default": false,
+      "type": "boolean"
+    },
+    "maxJobs": {
+      "default": -1,
+      "type": "integer"
+    },
+    "maxJobsPerUser": {
+      "default": -1,
+      "type": "integer"
+    },
+    "notes": {
+      "type": "object"
+    },
+    "owner": {
+      "$ref": "#/$defs/UserNameApiDefaultString"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeEnum"
+    },
+    "runtimeOptions": {
+      "$ref": "#/$defs/RuntimeOptions"
+    },
+    "runtimeVersion": {
+      "type": "string"
+    },
+    "strictFileInputs": {
+      "default": false,
+      "type": "boolean"
+    },
+    "tags": {
+      "items": {
+        "$ref": "#/$defs/TagString"
+      },
+      "type": "array"
+    },
+    "version": {
+      "$ref": "#/$defs/AppVersionString"
+    },
+    "versionEnabled": {
+      "default": true,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "containerImage"
+  ],
+  "title": "ReqPostApp",
+  "type": "object"
+}

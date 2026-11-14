@@ -1,0 +1,393 @@
+name: image-nemar-python
+
+# The nemar-python runtime image, CPU flavor: built from the root lock, smoke-tested as a container
+# image and as a Singularity Image Format (SIF) file under Apptainer, and, on a version tag or a
+# manual dispatch from main, pushed to GHCR, smoke-tested again by digest, signed with cosign
+# (keyless), turned into a SIF from its digest, pushed again as an OCI artifact, signed again and
+# recorded in a release asset.
+#
+#   pull request              the `test` job only: build without pushing, smoke test in both forms.
+#                             No job that pushes, signs or releases runs on a pull request.
+#   tag image-nemar-python-v* the whole chain, but only for a commit that is reachable from main:
+#                             the first step of `publish` fails otherwise. The first publication
+#                             therefore happens from main, after this file has been merged.
+#   workflow_dispatch         the same chain, from main only, with the version as an input.
+#
+# What the guard is: a check in this file, at the tagged commit. It stops a mistaken tag. It does
+# not stop someone who can push a tag and edit this file in the same commit; that is what a tag
+# ruleset on `image-nemar-python-v*`, branch protection on main, or an environment with required
+# reviewers can do, and they are the repository owner's (docs/images.md, "What is not verified").
+#
+# docs/images.md says how a consumer references and verifies what this publishes.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/image-nemar-python.yml"
+      - "images/nemar-python/**"
+      - "recipes/**"
+      - "launcher/**"
+      - "tests/e2e/**"
+      - "tests/harness.py"
+      - "tests/standin/**"
+      - "tests/fixtures/eeg/**"
+      - "scripts/check_smoke_pins.py"
+      - "scripts/check_tag_absent.py"
+      - "scripts/make_image_digests.py"
+      - "tests/fixtures/smoke/**"
+      - ".dockerignore"
+      - ".python-version"
+      - "pyproject.toml"
+      - "uv.lock"
+  push:
+    tags: ["image-nemar-python-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version as MAJOR.MINOR.PATCH; the tag is <version>-cpu"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-nemar-python-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The same pins as ci.yml, bumped together (tests/images/test_workflow.py compares them).
+  APPTAINER_VERSION: "1.5.5"
+  APPTAINER_DEB_SHA256: "25095d3711504b3e8657dbb2e172ef8db9db43c4503d940c9c36b105db8dce77"
+  UV_VERSION: "0.13.4"
+  # What a signature must say about who made it: this workflow, from a version tag or from main.
+  SIGNING_IDENTITY: '^https://github\.com/nemarOrg/nemar-process/\.github/workflows/image-nemar-python\.yml@refs/(tags/image-nemar-python-v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'
+
+jobs:
+  test:
+    name: build and smoke test (container and SIF)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Hash the lock
+        id: lock
+        run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build the image (nothing is pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/nemar-python/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: nemar-python:ci
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+            LOCK_SHA256=${{ steps.lock.outputs.sha256 }}
+          cache-from: type=gha,scope=nemar-python-cpu
+          cache-to: type=gha,scope=nemar-python-cpu,mode=max
+
+      - name: Smoke test the container image
+        run: |
+          set -euo pipefail
+          docker run --rm nemar-python:ci python /opt/smoke.py > smoke-container.json
+          python3 scripts/check_smoke_pins.py --image smoke-container.json
+
+      - name: Check the labels against the lock and the commit
+        env:
+          LOCK_SHA256: ${{ steps.lock.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          label() { docker inspect --format "{{ index .Config.Labels \"${1}\" }}" nemar-python:ci; }
+          test "$(label io.nemar.lock-sha256)" = "$LOCK_SHA256"
+          test "$(label org.opencontainers.image.revision)" = "$GITHUB_SHA"
+          test "$(label io.nemar.flavor)" = "cpu"
+
+      - name: Install Apptainer
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
+          echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y ./apptainer.deb
+          apptainer --version
+
+      - name: Build a SIF from the local image
+        run: |
+          set -euo pipefail
+          docker save nemar-python:ci --output nemar-python.tar
+          apptainer build nemar-python.sif docker-archive:nemar-python.tar
+
+      - name: Smoke test the SIF under Apptainer, isolated as the launcher runs it
+        run: |
+          set -euo pipefail
+          apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
+          python3 scripts/check_smoke_pins.py --image smoke-sif.json
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # The launch end to end (docs/recipes.md): the real launcher stages the fixture from a stand-in
+      # data plane, runs `nemar-recipe run nemar-floor` in this SIF as it runs a job, and uploads to
+      # stand-in outputs routes. The test needs the runtime environment to compare the result with a
+      # direct run of the same fixture.
+      - name: Run the floor through the launcher, in the SIF
+        env:
+          NEMAR_REQUIRE_APPTAINER: "1"
+          NEMAR_REQUIRE_RECIPE_SIF: "1"
+          NEMAR_REQUIRE_RUNTIME: "1"
+          NEMAR_RECIPE_SIF: ${{ github.workspace }}/nemar-python.sif
+        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m apptainer -v
+
+  publish:
+    name: push the image to GHCR
+    needs: test
+    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/image-nemar-python-v') || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the whole history, so that main is there to compare with
+
+      # A tag can be pushed on any commit by anyone who can write to the repository, and the signature
+      # a tag run gets names only this workflow and the tag. Only a commit of main is published.
+      - name: Refuse a commit that is not on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not reachable from main: only a commit of main is published"
+            exit 1
+          fi
+
+      - name: Read the version from the tag or the dispatch input
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            version="${REF_NAME#image-nemar-python-v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::the version must be MAJOR.MINOR.PATCH, got '${version}'"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Hash the lock
+        id: lock
+        run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # A version is published once: the tag <version>-cpu is never moved to a new image. Only a
+      # manifest HEAD answered with exactly 404 lets the run go on; any other reply stops it.
+      - name: Refuse to overwrite an existing version tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_tag_absent.py nemarorg/nemar-python "${VERSION}-cpu"
+
+      # No provenance or SBOM attestation: either would make the pushed manifest an index, and the
+      # digest every consumer pins is then the index's, not the image's.
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/nemar-python/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ghcr.io/nemarorg/nemar-python:${{ steps.version.outputs.version }}-cpu
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+            LOCK_SHA256=${{ steps.lock.outputs.sha256 }}
+          cache-from: type=gha,scope=nemar-python-cpu
+
+  sign:
+    name: sign, build the SIF from the digest, sign it
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The only job with the OIDC token: cosign keyless exchanges it for a short-lived certificate
+    # that names this workflow and ref.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.publish.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: "v3.1.4"
+
+      - uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+        with:
+          version: "1.3.6"
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The pushed digest passes its smoke test BEFORE it is signed: a signature means this workflow
+      # built the image and the image passed, not only that this workflow built it.
+      - name: Smoke test the pushed image by digest (container form)
+        run: |
+          set -euo pipefail
+          docker run --rm "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" python /opt/smoke.py > smoke-container.json
+          python3 scripts/check_smoke_pins.py --image smoke-container.json
+
+      - name: Sign the image digest and verify the signature
+        run: |
+          set -euo pipefail
+          cosign sign --yes "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"
+          cosign verify "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" \
+            --certificate-identity-regexp "$SIGNING_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Install Apptainer
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
+          echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y ./apptainer.deb
+          apptainer --version
+
+      - name: Build the SIF from the image digest
+        env:
+          APPTAINER_DOCKER_USERNAME: ${{ github.actor }}
+          APPTAINER_DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          apptainer build nemar-python.sif "docker://ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"
+
+      - name: Smoke test the SIF under Apptainer (SIF form)
+        run: |
+          set -euo pipefail
+          apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
+          python3 scripts/check_smoke_pins.py --image smoke-sif.json
+
+      # The same rule for the SIF's tag, which is the image digest.
+      - name: Refuse to overwrite an existing SIF tag
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_tag_absent.py nemarorg/nemar-python-sif "sha256-${IMAGE_DIGEST#sha256:}"
+
+      # The artifact is tagged with the image digest, because the SIF file is named by it: the launcher
+      # looks for <64 hex digits of the image digest>.sif under NEMAR_SIF_ROOT.
+      - name: Push the SIF to GHCR as an OCI artifact
+        id: push-sif
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          hex="${IMAGE_DIGEST#sha256:}"
+          echo "$GITHUB_TOKEN" | apptainer registry login --username "$GITHUB_ACTOR" --password-stdin oras://ghcr.io
+          apptainer push nemar-python.sif "oras://ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}"
+          sif_digest="$(oras manifest fetch --descriptor "ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')"
+          if ! [[ "$sif_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::no SIF digest: ${sif_digest}"
+            exit 1
+          fi
+          echo "digest=${sif_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the SIF artifact digest and verify the signature
+        env:
+          SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}"
+          cosign verify "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}" \
+            --certificate-identity-regexp "$SIGNING_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Write the digest record
+        env:
+          SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/make_image_digests.py \
+            --version "$VERSION" \
+            --image-digest "$IMAGE_DIGEST" \
+            --sif-digest "$SIF_DIGEST" \
+            --sif-file nemar-python.sif \
+            --smoke smoke-sif.json \
+            --run-url "$RUN_URL" \
+            --commit "$GITHUB_SHA" \
+            --output "nemar-python-${VERSION}-cpu-digests.json"
+          cat "nemar-python-${VERSION}-cpu-digests.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nemar-python-digests
+          path: nemar-python-${{ env.VERSION }}-cpu-digests.json
+          if-no-files-found: error
+
+  release:
+    name: attach the digest record to the release
+    needs: [publish, sign]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nemar-python-digests
+
+      - name: Attach the file to the release of the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="nemar-python-${VERSION}-cpu-digests.json"
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            digest="$(jq -r .image.digest "$file")"
+            gh release create "$TAG" --title "nemar-python ${VERSION} (cpu)" --notes "Runtime image ghcr.io/nemarorg/nemar-python@${digest}. See docs/images.md for how to verify it."
+          fi
+          # no overwrite flag: the digest file is the record of a release, and a second upload must fail
+          gh release upload "$TAG" "$file"

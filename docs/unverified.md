@@ -1,0 +1,345 @@
+# What is not verified yet
+
+The launcher is tested against local stand-ins and, in continuous integration (CI), against a real Apptainer 1.5.5 on a hosted Linux runner.
+It has not run on a compute node.
+These are the facts it depends on that nobody has confirmed on the node or against NEMAR's Worker, in the order they would bite.
+
+## What CI has observed, and what it is not
+
+Observed on the hosted runner with Apptainer 1.5.5 (the community build), and pinned by tests that run there:
+
+- An entry killed by SIGKILL (the kill signal, the one the kernel's out-of-memory killer sends) is reported with exit status 137, and the launcher records `out_of_memory` with `entry_exit_code` 137.
+  Any other signal death is reported as 128 plus the signal (SIGSEGV, 11, is 139) and is `runtime_error`.
+- A SIGTERM (the termination signal) sent to the container's process group stops `sleep 60` at once, run directly or through a shell, and the runtime reports exit status 143 (128 plus 15); so the job ends `time_limit` or `terminated` as the end time dictates, with the launcher files uploaded.
+  The container's process group is killed after 10 seconds if the entry has not stopped (an entry that ignores SIGTERM is the case for that; the stand-in runtime tests it).
+- A container started with `--containall` has a process identifier (PID) namespace of its own, a private `/dev/shm`, no view of the host's home directory, and `oom_score_adj` 1000 as the launcher set it.
+- A `bind path` line in the runtime's system configuration mounts a host directory into every container unless the container is contained (`--contain`, so `--containall`) or `--no-mount bind-paths` is given; the control runs show each case (see `tests/launcher/test_runtime_config.py`).
+  The launcher gives both, so on this runtime either alone would do; the node's runtime may differ.
+- A configuration with `allow pid ns = no` is refused by the launcher before any user code runs.
+
+None of this has been observed on the node's runtime, which may be a commercial Singularity.
+
+## The node
+
+- **Host Python.** The launcher needs Python 3.9 or newer on the node, outside the container.
+  If the node has only an older `python3`, the wrapper exits 13 with a message and the application definition has to name an interpreter (`NEMAR_HOST_PYTHON`).
+  This is an escalation to the owner, not something to work around in the launcher.
+- **Outbound Hypertext Transfer Protocol Secure (HTTPS) from compute nodes** to NEMAR's application programming interface (API) and to the object storage endpoint the presigned addresses point at.
+  It was measured as available in October 2026; it is still a question for the center that runs the nodes.
+- **The container runtime's behaviour on the node.** CI uses the community Apptainer; the node may run a commercial Singularity.
+  `--containall`, `--cleanenv`, `--no-home`, `--no-mount bind-paths`, `--env`, `--bind ...:ro` and `--nv` are common to both as far as the documentation says, but the isolation tests have not run there.
+- **Site bind paths.** `--no-mount bind-paths` turns off the `bind path` lines of the runtime's configuration; whether the node's runtime honours the flag, and what else its configuration mounts (`mount hostfs`, `mount tmp`), is unconfirmed. Check the site's `apptainer.conf` or `singularity.conf`.
+- **PID namespace verification.** The launcher fails closed: with no way to verify the namespace it refuses before any user code (`pid_namespace_unavailable`). It reads `allow pid ns` from the runtime's configuration: the `SYSCONFDIR` that `<runtime> buildcfg` prints is authoritative (only `<SYSCONFDIR>/<runtime>/<runtime>.conf` is read, and a missing file there is "cannot be verified"), and only when `buildcfg` is unavailable or prints none are the usual places tried (beside the install prefix, `/usr/local/etc`, `/etc`). For `runtime: python` a preflight probe in the job's image also runs, and proves the namespace even where no configuration is found.
+  For `runtime: image` (a user's image, no Python to count on) only the configuration can verify it, so a user image on a node whose configuration cannot be located or read is refused and not run.
+  Whether `buildcfg` prints `SYSCONFDIR` on the node's runtime, and whether the file is where it says, is unconfirmed; CI runs against the real Apptainer 1.5.5 and requires its configuration to be found and read that way.
+- **How `--env` is parsed.** Apptainer 1.5.5 reads the flag as a comma-separated values (CSV) record, and the launcher quotes values accordingly; whether the commercial Singularity on the node parses it the same way is unconfirmed (a value with a comma is the case to try).
+- **The network namespace is shared.** `--containall` does not isolate the network: the entry can reach whatever the node can, including NEMAR's API.
+  The container has no job token (its environment is the allowlist), so it cannot call the job routes, but it is not cut off from them or from the node's network.
+  Whether `--net --network none` is permitted on the site is a question for the site operator, an owner decision; nothing in this phase uses it.
+- **Manifest addresses.** A manifest entry's `bytes_url` may name any HTTPS host (or loopback HTTP); the launcher trusts NEMAR's data plane to name its own, and moving to an allow-list of hosts was declined.
+- **Graphics processing unit (GPU) visibility.** `CUDA_VISIBLE_DEVICES` is passed into the container for a GPU job when its value is plain; whether the scheduler sets it, and whether the device control group alone shows the container the right devices, is unconfirmed.
+- **Node-local scratch is shared.** The container's `/tmp` is bound to node-local scratch (not to the archived directory), so one job can fill a shared node's scratch and co-located jobs then fail with `disk_error` or `scratch_unavailable` (refunded as the platform's). The launcher removes its own scratch tree afterwards, whatever modes the entry gave the directories in it, but it sets no quota: a per-job quota or a scratch size limit is a question for the site operator.
+- **The image file.** `image.sif` is `<64 hex digits of the image digest>.sif` under `NEMAR_SIF_ROOT`, which the application definition sets; there is no fallback.
+  A Singularity Image Format (SIF) file's content hash is NOT verified: only its name ties it to the digest, so whoever can write the root can substitute an image.
+- **Slurm's environment.** The launcher reads `SLURM_JOB_END_TIME` (the time limit rule), `SLURM_JOB_ID` and `SLURM_TMPDIR`.
+  Whether a Tapis ZIP-runtime job sees them, and how long Slurm waits between SIGTERM and SIGKILL (the record must be written inside it; the launcher gives the container 10 seconds), is unconfirmed.
+- **Tapis.** The ZIP runtime runs `./tapisjob_app.sh` and reads `tapisjob.exitcode`; the launcher writes that file itself and exits with the same number.
+  Whether the runtime keeps the script's mode bits, and what it does with a non-zero exit, is unconfirmed.
+  `tapisjob.out` holds the entry's output and is untrusted: NEMAR must never parse it for a result.
+
+## NEMAR's data and storage
+
+- **The local dataset root layout and its protection.** The launcher binds `<NEMAR_LOCAL_DATASETS_ROOT>/<id>/<version>/` (a real directory, with `<version>` the data-plane tag: `latest` or `vN.N.N`) when every selected file there matches the manifest.
+  Whether NEMAR's copy on the node is laid out that way, and holds plain files and not symlinks into an annex object store, is unconfirmed; a symlink never matches, so a git-annex checkout would always fall back to download.
+  The root must be immutable and not writable by the shared account that runs the jobs: bind mode verifies the selected files by checksum and then mounts the whole `<id>/<version>` directory read-only, so the unselected files in it are visible to the job and are not verified (documented; an owner decision).
+- **The checksum algorithm names in live manifests.**
+  Read from the data plane's manifests on 2026-11-10 (69 sampled datasets and the five live `nm` datasets): exactly three names are served, all lowercase, with `checksum` a bare hex value: `git` (blob SHA-1), `sha256` and `md5`.
+  md5 is real content hashing (a downloaded file's stored md5 equals the MD5 of its bytes), and about a fifth of the entries of some live datasets use it.
+  `net.Checker` matches the name in any ASCII case and verifies those three, plus the annex spellings `SHA256`, `SHA256E`, `SHA512`, `SHA512E`, `MD5` and `MD5E`; a selected entry that names any other algorithm (with or without a checksum), or has a checksum and no name, is refused as `bad_manifest`, never checked by size alone. A known name with no checksum stays size-only by design.
+  **Owner decision: `unknown`.** The backend yields the literal word `unknown` for a stored checksum with no algorithm prefix; the launcher refuses it as `bad_manifest` rather than widening to a size-only check.
+  Overrule by adding a deliberate size-only path for it, not by adding it to the hash table.
+  A wider read of 1,601 of 1,617 live manifests (all versions of all 910 datasets) saw exactly `git`, `sha256` and `md5`: no `unknown`, no uppercase name, and no entry with a checksum but no name or the reverse.
+  **Known consequence, owner decision: `on003104`.** In `on003104@v1.0.0` 260 `sha256` entries carry a stored value that is not a SHA-256 digest (256 have 65 characters with a trailing `C`, 4 have 66 with a trailing `01`; the real digest is the stored value without the suffix).
+  Before the launcher verified lowercase `sha256` these were checked by size only; now they are hashed and fail as `checksum_mismatch`, so a job that selects them cannot stage.
+  That is the fail-closed behavior and the launcher does not work around it: the cause is a backend data fault, filed as nemarOrg/nemar-cli#2118. Ship with that dataset called out, or wait for the fix.
+  Unconfirmed: the 16 manifests not read, and names beyond the three served ones against real data (none read carried `unknown`); the fixture's committed `manifest.json` and the stand-in data plane use `SHA256E` and `git`.
+- **Dataset version forms.** The data plane accepts only `latest` and `vN.N.N`. The launch specification carries that tag and the launcher uses it verbatim; the Worker resolves the user's spelling. The stand-in data plane enforces the same two forms; the real one has not been called by the launcher.
+- **Presigned multipart upload to the results bucket.** A single PUT per file is the only upload the launcher does, so a single result file is limited to 5 GB until multipart upload through presigned addresses is verified on Cloudflare R2 object storage.
+- **What the presigned addresses require.** The launcher PUTs with `Content-Type: application/octet-stream`, a `Content-Length`, and no token; if the Worker signs other headers, the PUT fails with a 403 and the address is re-requested (up to 2 times for each file).
+  It sends a `nemar-launch/<version>` `User-Agent` on every request, in case a content delivery network rejects the default.
+- **A per-object checksum header (deferred).** A `x-amz-checksum-sha256` header on each output PUT would let storage verify the bytes, but it has to be signed by the Worker together with the address, so the launcher does NOT send it. Decide it with a real R2 check in the gateway epic.
+- **The Worker's responses.** The outputs and bundle routes do not exist yet; the stand-ins follow the schema's `$defs`.
+  The error body is read for a `code` word only, and only the three results refusals (`results_too_large`, `results_quota_exceeded`, `too_many_outputs`) are recorded as they are; any other refusal is `outputs_refused` or `complete_refused`.
+  The launcher posts `{}` as the body of the bundle and complete routes, retries `complete` on a 409 `results_incomplete`, and so may call it more than once: it must be idempotent.
+- **Who pays for a detail.** `codes.PLATFORM_LAUNCHER_DETAILS` says which declared details are the platform's (refunded) and which the submitter's (charged); a transport fault is `fetch_failed`, the platform's.
+  A status of 255 after user code started is `entry_failed` and charged, because the runtime's own fatal exit cannot be told from an entry's: a platform fault that surfaces as 255 mid-run is therefore charged to the submitter (a known limitation, and a question for the Epic A refund path).
+
+## Not done in this phase
+
+- No image is published by the launcher's phase; the container tests use a small public image. The runtime image, its build and its smoke tests are in [images.md](images.md).
+- The Tapis application and system definitions and the observer are written and validated in CI (see the last section), but nothing is registered with a tenant and nothing has run on a node.
+- A symlink or special file that cannot be unlinked even after the directory's permissions are widened, a directory that cannot be listed even after the same, and an entry that vanishes between the directory listing and its `lstat`, have no test: an unprivileged test cannot make any of them on demand (the walk records each as `outputs_unreadable` or skips it, and the code paths are read, not run).
+
+## The runtime image (nemar-python)
+
+[images.md](images.md) says what the image is and how a consumer refers to it.
+CI builds the image, builds a SIF from it and smoke-tests both, with the community Apptainer 1.5.5.
+These are the facts that nothing has confirmed yet.
+
+- **The push, sign and release path has not run.** Pushing to GHCR, `cosign sign`, `cosign verify`, the SIF built from a digest, its push as an OCI artifact and the release asset all run only on a version tag or a dispatch from `main`, and only for a commit reachable from `main`.
+- **SIF compatibility with the cluster's Apptainer variant is unverified.** The cluster may run a commercial Singularity; a SIF from this image has not been run there. It is the operator's test, with `--containall --cleanenv --no-home --no-mount bind-paths` and the smoke test.
+- **The image's environment under `--cleanenv`: observed once, with a limited scope.** The Dockerfile sets `PATH` (the virtual environment first), the thread counts and `PYTHONHASHSEED`; the launcher runs the entry with `python` from the image's `PATH`, so the launcher depends on them surviving `apptainer exec --containall --cleanenv`. The `test` job of run 41909394410 (pull request 8) passed that check: the community Apptainer 1.5.5 on a hosted runner, with a SIF built from a local image archive, not from the pushed digest, and not the cluster's variant.
+- **A SIF's content hash is not verified by the launcher** (see above); the release's digest file records the file's SHA-256, but it is an unsigned release asset, so it guards only against a corrupted copy.
+- **The existence checks rely on GHCR answering with exactly 404.** `scripts/check_tag_absent.py` lets a publication go on only when a manifest `HEAD` for the tag answers 404, and stops on every other answer. Unconfirmed: that GHCR answers 404 for an absent tag, including in a package that does not exist yet, and that its token endpoint accepts the actor and the workflow's token as basic authentication. If the first release stops at this check, the check needs a change; it is not bypassed.
+- **Signature verification** needs cosign 3 or newer; older versions may not read signatures made by cosign 3. What a passing check proves, and what it does not, is in [images.md](images.md).
+- **Build requirements are pinned by version, not by hash.** `docopt` and the signalJourney validator are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
+- **Thread counts.** The image pins one thread per math library; a recipe that wants more must set them, and what is right on a node is unmeasured.
+
+### Owner items for the image
+
+None of these is in place; each needs a repository setting, not a code change.
+
+- **Protect publication.** The workflow refuses a commit that is not reachable from `main`, but that check lives in a file the tagged commit supplies. A tag ruleset on `image-nemar-python-v*`, branch protection or a ruleset on `main`, or an environment with required reviewers on the `publish` and `sign` jobs (which the workflow does not name today) would stop a person with write access who edits the file and pushes a tag. Until one exists, a signature that passes the documented check does not mean the commit was reviewed.
+- **GHCR.** Confirm that publishing is enabled for the repository and set `nemar-python` and `nemar-python-sif` public so a node can pull without credentials.
+- **The SIF package.** `apptainer push` creates `nemar-python-sif`, and it cannot set `org.opencontainers.image.source`, so GHCR does not link the package to this repository by itself. The first release creates it with the workflow's token; link the package to the repository and give the workflow write access before the first release. The second release is the likely point of failure; [images.md](images.md) says what to do when a run fails after the image was pushed (re-run only the failed jobs, never use an unsigned tag, publish a new version if the SIF tag already exists).
+
+## The recipes (`nemar-floor`)
+
+[recipes.md](recipes.md) says what the recipe does.
+These are the facts nothing has confirmed yet, and what continuous integration (CI) has observed since.
+
+Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), microvolt (uV), Secure Hash Algorithm 256 (SHA-256), megabyte (MB, 10^6 bytes), mebibyte (MiB, 1,048,576 bytes), gigabyte (GB, 10^9 bytes), Basic Linear Algebra Subprograms (BLAS), Singularity Image Format (SIF), kill signal (SIGKILL).
+
+- **Equality across hosts.**
+  The decisions pinned in `tests/recipes/test_golden_decisions.py` were generated on one machine (macOS arm64, NumPy on Apple's Accelerate) and reproduced by CI on a hosted Linux runner (ubuntu-24.04, x86-64, NumPy on OpenBLAS) on 2026-11-05.
+  That is one recording and two hosts, and it compares decisions only: no float of `_qc.json` was compared across hosts, and no other architecture or BLAS was run.
+  A difference on another host is a finding to record, not to hide.
+- **The thread pin.**
+  `threadpoolctl` detects no pool on the macOS machine, so there the recorded inventory is empty and the test that every pool reports one thread skips with a stated reason.
+  On the Linux runner it found the pools, and the test ran and passed.
+  Whether an unpinned run would give different answers was not measured; the recipe pins the count, and a run with the thread variables set to 4 in its environment wrote the same files.
+- **The launch end to end in the SIF.**
+  There is no container runtime on the development machine.
+  The test ran with the stand-in runtime locally and in CI (`ci.yml`, job `recipes`).
+  Its container half runs in the image workflow's pull-request job, and this document does not say that job passed.
+  Comparing the container's state files with a direct run on the same host is the first time equality between the container and the host is asserted.
+- **Units.**
+  `robustAmplitude` is in the unit the loader delivers: microvolts (uV) for EDF and BDF files, as read.
+  A source in another unit would be wrong by a constant factor.
+  It is recorded as "as loaded" and not verified for other sources.
+- **Loaders.**
+  The BrainVision route was run by the phase plan on a real recording, and `.edf` and a set saved with an empty `etc` were run here.
+  A `.set` with a separate `.fdt` and a `.bdf` were read in eegprep's source and not run through the whole floor.
+  A MATLAB v7.3 `.set` is refused by the header check (`unreadable_header`), unread, because eegprep's reader for it follows external storage, links and virtual datasets to files anywhere; a large set saved in that format is refused until an HDF5 walk is written.
+  The header check (`common/headers.py`) ran on BrainVision triples written by hand, on EEGLAB sets written by SciPy in both layouts with a separate sample file, and on EDF and BDF headers written byte by byte.
+  It ran on sets written byte by byte as MATLAB writes an empty field (a matrix of no bytes, which SciPy never writes), and its walk of the element headers agrees with SciPy's on eighteen of the files written by MATLAB versions 5.3 to 8 that SciPy ships in its test data.
+  It also read, once and without keeping them, the five sets saved by MATLAB's EEGLAB that were on the development machine (saved on macOS and Linux between 2013 and 2025: EEGLAB's sample data and test set, a plugin's test set, and an example set from another project), and accepted all five with the sizes it gave before the walk was written.
+  Those five are not in the repository, because it was not established that they may be copied into it, so a future change is tested against the byte-built sets and not against them.
+  Nothing else saved by MATLAB's EEGLAB was run, so the reading of that layout still rests on eegprep's loader, on five files and on files shaped like them.
+  The refusal of the `Read error: ...` string covers a text `data` only, the one variable the check loads by name to read a name from it. SciPy 1.18 cannot return that string for a numeric top-level `data`: in its Python source `MatReadError` is raised only in `_get_matfile_version`, which fails a whole file, and no file made it substitute the string for a variable. A SciPy upgrade must re-check this.
+  A header that cannot be read is refused (`unreadable_header`), so a legitimate file that this parser reads differently from eegprep's loader would be refused too; the parser mirrors eegprep 0.5.0's rules and is not run against files from other writers.
+- **A link out of the dataset is checked where the recipe can know of it.**
+  The recording, the data and marker files of a header and the `.fdt` of a set are checked before eegprep reads anything.
+  A recording read through BIDS metadata is also checked, before the load, for links at the top of the dataset and anywhere in its subject's directory, and in every directory that a link to a directory there leads to inside the dataset (one hop was not enough: a link to a directory in the dataset, whose contents held a link out of it, passed), because eegprep reads the sidecars of the inheritance chain without naming them in its report (the line frequency of a sidecar elsewhere was read through a link in a test) and the pybids layout walks every link to a directory; the sidecars eegprep does report, and the companions listed as inputs, are checked again after the load and before any product is written.
+  A link in a directory that no link there leads to, in another subject's directory say, is not looked at, although pybids walks a link to a directory anywhere in the tree once per process.
+  Finding one means walking the whole dataset: that is a cost of every recording on a dataset of tens of thousands of files unless the result is kept for the process, which would be state that a test cannot see change, and neither was built.
+  The same holds for the channel, electrode and coordinate system files: eegprep matches them across the whole layout by entity, so a file in a directory such as `sub-01.bak` or `extra` can be the one it opens, and the check cannot know which; the list of inputs refuses such a file only after it was read, and a link there to a file that never ends would stop the run.
+  A link that leads to a large directory (the top of the dataset, a directory of annexed content) makes the walk read all of it once.
+  The sizes of the JSON and TSV sidecars that eegprep and pandas read whole are not limited either; limiting them is a follow-up and not part of this phase.
+  Whether a dataset staged from the data plane can hold a link at all was not checked here; the rule is a bound for a tree that does.
+- **The all-flat failure listens to a log warning.**
+  eegprep's `clean_flatlines` removes nothing, and says so only by a warning on its module's logger, when every channel has a flat portion; the floor fails such a recording (`all_channels_flat`).
+  The detection depends on that logger name and level, taken from the function's module at run time and not from a message text.
+  Two tests (a constant recording and a pause shared by all channels) fail if eegprep changes either, but a release of eegprep that does so would be noticed only when they run.
+  A pause every channel shares fails the whole recording: that cost is stated in [recipes.md](recipes.md).
+- **A truncated EDF** loads with fewer samples and only a reader warning.
+  The launcher's size and checksum checks, and the SHA-256 the recipe records for each input, are what catch a damaged copy; the recipe adds no check of its own.
+- **Memory.**
+  A run holds about three float64 copies of the longest recording at its peak.
+  For a recording of an hour at 1 kHz with 128 channels that is about 11 GB; nothing was measured at that size.
+  A `MemoryError` is a recorded failure and a SIGKILL by the kernel is the launcher's `out_of_memory`.
+- **The text-file limit and the ASCII width are provisional.**
+  A BrainVision header or marker file larger than 1 MiB (`MAX_TEXT_BYTES`) is refused as `too_large` before it is read, because eegprep reads both whole; 1 MiB is a starting value, and a long recording with a marker for every stimulus can have a larger marker file, which this refuses.
+  ASCII data are counted at ten values to the byte of text (`ASCII_VALUES_PER_BYTE`), the cost of the worst case that was measured: eegprep peaked at 80 bytes to a byte of text for values of one digit, one to a line (CPython 3.12, `tracemalloc`), and at 8 to 26 bytes for the longer or wider rows that were tried.
+  A file of longer values is therefore counted at up to ten times what it holds and is refused sooner than it need be; the default limit lets through 100 MB of ASCII text.
+  The measure is of the interpreter and the version of eegprep used here, and was not repeated on another.
+  Neither this nor the text limit was set from the headers or the ASCII files of real datasets.
+- **The size limit is provisional.**
+  A recording that declares or holds more than 1,000,000,000 channel samples (8 GB as float64, about 24 GB at the peak) fails as `too_large` before it is read.
+  The number is arithmetic and not a measurement.
+  The check reads the fields of a set that keeps its variables in an `EEG` structure by loading that structure, once the count has shown that it holds no more than the cap, so a set just under the cap (about 8 GB at the provisional limit) costs the check as much memory as the loader needs for its first copy; the check frees it before eegprep reads the file, and nothing was measured at that size.
+  Counting a set that keeps its variables in an `EEG` structure inflates the structure once more before the loader inflates it again (a flat set is read only as far as the headers), so the check costs time as well as a step of memory; that time was not measured at the size of the limit.
+  The count follows at most 5,000,000 elements (`MAT_ELEMENT_LIMIT`) and 32 levels of nesting (`MAT_DEPTH_LIMIT`), so that its own work is bounded; both numbers are estimates, and nothing was measured on how many elements a real set holds or how deep one nests.
+  The element limit is acceptable only because every element is charged against the cap (24 values, `MAT_ELEMENT_VALUES`, and 44 more for an element of a structure array, `MAT_STRUCT_VALUES`): the limit alone let 500,000 empty cells, a file of 81,687 bytes, make `loadmat` hold 92 MiB.
+  The charges were measured on CPython 3.12 with the NumPy and SciPy of the lock: about 190 bytes for an empty cell member, and 144 to 336 bytes for an element of a structure array of no fields, depending on what the process had loaded before (the same call measured 144 alone and 336 after another test had run; the cause was not found, and the larger is charged).
+  A structure element with fields costs that and each field's member besides, and a measure in another interpreter could differ.
+  Pre-registered follow-ups, to be settled by the scale measurement and not before: (1) measure the peak memory and the time of the floor at 100 million, 500 million and one billion values and set the limit from them; (2) run each recording in a child process, so that one that exhausts memory or is killed by the kernel fails alone, with a row in the table and the other recordings' products intact, instead of ending the run without a dataset record.
+  Neither is built.
+- **Staging cost.**
+  The phase plan read in eegprep's source that pybids indexes the whole staged tree once per process; the cost for a job that stages tens of thousands of files was not measured.
+  Job authors include `dataset_description.json` and the recording's `channels.tsv`, `electrodes.tsv`, `coordsystem.json` and `eeg.json` and nothing else they can avoid.
+- **The dataset record's size cap** keeps about 300 rows in the record: 312 of 5,000 rows fit in a test with session-level paths, at about 420 bytes a row as indented JSON.
+  The rest are in the table file, which is complete and hashed, and the counts, the distributions and the plan variants cover every recording.
+- **What happens to a run that exits 9 or 8, outside this repository.**
+  The command exits 9 (`time_budget_exhausted`) after it wrote its dataset record, and 8 (`engine_unavailable`) before it wrote anything.
+  The launcher records both as `runtime_error` with the detail `entry_failed` and, from its code and its tests (an entry that writes files and then exits 3), still hashes and uploads what the entry wrote and completes the upload; nothing was run with exit 9 or 8 in particular, and no real storage or Worker took the upload.
+  Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost, and whether the job is charged for the time used and how.
+  Resuming a budget-cut run is not supported in 1.0.0: `aggregate` refuses two inputs that name the same recording, so a later run of the skipped recordings cannot replace their `time_budget` rows (the Worker runs one whole dataset per job, so nothing needs it yet).
+  Resume or replace is a follow-up: nemarOrg/nemar-process#16.
+  Epic A's recipe registry should treat the Worker's handling of failed jobs' outputs as open before it dispatches a recipe that can exit 9.
+- **Exit 8 is charged.**
+  The launcher records every non-zero entry exit except 137 as `runtime_error` with the detail `entry_failed`, which is the submitter's and charged, so an `engine_unavailable` exit (no GPU, a binary that is not there), which is the platform's fault, is charged too.
+  A distinct uncharged failure code would change the seven-code launcher contract shared with nemar-cli, a cross-repository change, so nothing here changes it: it is a decision for Epic A (for instance by checking the engine before the Worker dispatches).
+- **The time budget's estimate.**
+  The rule starts a recording only if the time spent plus 1.5 times the slowest recording so far would fit, which assumes the next recording is not much slower than the slowest one seen.
+  The 1.5 is a starting value, not a measurement; the first recording is started unless the budget is already spent, and a dataset whose recordings grow in cost can still run over.
+- **A recipe that embeds the floor names the plan.**
+  `nemar_floor.process(loaded, recipe_id=, recipe_version=)` takes the name and version of the plan (the defaults are the floor's), so the embedding recipe's records verify against its own plan hash; `Plan.hash_as` then gives the embedded floor part's hash under the floor's name.
+  A test shows the hash of the floor run under another name equals the floor plan's `hash_as` under that name.
+- **CUDA out-of-memory by name.**
+  The recipes recognize torch's out-of-memory error by the name and module of its class, so torch is never imported for it.
+  The test uses a class made to carry that name and, where torch is installed, torch's own class built by hand; a real GPU running out of memory was not produced, and a torch release that renames the class would make it a plain `step_failed`.
+
+## The Tapis definitions and the observer
+
+[operator.md](operator.md) says what the definitions are and how they are registered.
+Nothing here has run against a real tenant or a real node.
+The application and system schemas are derived from Tapis's own OpenAPI files (commits recorded in `deploy/tapis/openapi/SOURCE`), so a field name is as Tapis spells it, but the specifications say nothing about behaviour, and no stand-in response was recorded from a real tenant.
+Answers marked "from source" were read in the Tapis source (branch `local`, release 26Q2.1) by a reviewer; each is to be confirmed on the tenant, and each says so.
+These are the assumptions, in the order they would bite.
+
+### The encoding of the launch specification, and what still blocks registration
+
+**Registration is BLOCKED.**
+Nothing is to be registered with any tenant until the owner items recorded on nemarOrg/nemar-process#9 are settled:
+the release-asset procedure (immutable releases, tag rulesets and a reviewed release workflow),
+whether the entry scripts delete the launch files after the job starts,
+whether the launcher adds `--no-mount hostfs`,
+and confirmation on the tenant of every Tapis behaviour marked "from source, to confirm on the tenant".
+The encoding of the launch specification is no longer one of them:
+the value of `NEMAR_LAUNCH_SPEC` is the base64url encoding (no padding) of the specification's JSON text,
+so a shell that sources the launch file reads only letters, digits, `-` and `_`,
+and the launcher decodes it strictly.
+No job with a real token is to be submitted before then either, and the observer's application waits with the rest.
+A dry run of `scripts/register.py` is safe.
+
+Tapis writes each environment variable into launch files (`tapisjob.env` and `tapisjob.sh`) that a shell reads, and the launch specification travels in one of them.
+Its first design sent the JSON text, which is not safe there: the scheduler quotes a value only conditionally, so a value with no space loses its quotes, and a `$`, a backtick or a backslash in a user's string is expanded or breaks the quoting.
+The value is now the text in base64url without padding ([launcher.md](launcher.md)), made only of `A-Za-z0-9-_`, which no shell treats as special whether or not the scheduler quotes it.
+This repository's tests show that against a stand-in of the quoting rule, with real shells; they do not show what Tapis does.
+Still unconfirmed, each to be confirmed on the tenant:
+
+- **The quoting rule.**
+  From source, to confirm on the tenant: the scheduler leaves a value bare unless it holds a space, one of `&`, `>`, `<`, `|` or `;`, or a backtick, and otherwise double-quotes it and escapes only the double quote.
+  The encoded value is safe under that rule and under any other that leaves letters, digits, `-` and `_` alone.
+  After the first job, read the launch file in the execution directory and compare its line with the value NEMAR sent.
+- **Any other change to a value.**
+  Whether Tapis trims, wraps, expands a macro in or limits the length of a value is unconfirmed (the longest value is 87,382 characters).
+  A changed value is refused as `runtime_error` / `invalid_spec`.
+  When a wire rule fires, the log names it (`empty`, `too_long`, `not_base64url`, `bad_length` or `not_printable`) and no part of the value.
+  A value cut at a group boundary decodes to a truncated text and is refused by the JSON rules with no word, so a bare `failed: runtime_error (invalid_spec)` on a large job also points at truncation.
+  A macro such as `${JobUUID}` cannot match, since the value holds no `$` and no brace.
+
+### Archiving and directories
+
+- **The request is the control and the application is the fallback.**
+  From source: a job request's own `archiveFilter.includeLaunchFiles` wins whenever the request sets it, and the application's value is used only when the request leaves it out; Tapis's own default is `true` (`JobParmSetMarshaller.mergeArchiveFilters`).
+  NEMAR's client sets it to `false` on every job it submits, so the client is what keeps `tapisjob.env` out of the archive, and the applications' `false` covers a request that omits it.
+  The setting is sometimes written `archiveIncludeLaunchFiles`, but the specification has no such field: the derived schema refuses an unknown key, and `archiveFilter.includeLaunchFiles` is the only field that exists.
+  To confirm on the tenant: after the first job, that the archive holds neither launch file.
+- **The applications' `excludes` do not reach the launch files.**
+  From source: Tapis copies the launch files by name from the execution directory, and when the archive directory is the output directory it skips the filters entirely.
+  The applications still list both files in `excludes`, as a record of intent and for the case the filter is applied; it is not the control.
+- **The macros.**
+  `${JobWorkingDir}` and `${JobUUID}` are Tapis's own and are not in the specification; their spelling and expansion are from the documentation.
+- **Where Tapis creates a job's directories, and what it tells the job.**
+  From source: Tapis creates the directories at `rootDir` plus the path, but the environment variables it gives the job (`_tapisExecSystemOutputDir` and the others) hold the rootDir-RELATIVE path.
+  The launcher reads `_tapisExecSystemOutputDir` as a host path, so the two agree only when `rootDir` is `/`.
+  The system template therefore sets `rootDir` to `/` and `jobWorkingDir` to the absolute `<scratch root>/jobs`, and `scripts/tapis_policy.py` computes the variable the way Tapis does and refuses to register a system whose root is not `/`.
+  What keeps other accounts out of the scratch root is the host's own permission (mode 0700), not Tapis's `rootDir`.
+  With `rootDir` `/`, any Tapis Files permission on `nemar-exec` reaches the community account's whole filesystem view, not only the scratch root; that is why the system is never shared with anyone but NEMAR's own service identity.
+  If the first job on the `debug` partition shows the output directory somewhere else, stop: the launcher's directory contract is wrong and that is a launcher change, not a definition change.
+- **Default archive location.**
+  With no archive system fields, Tapis archives to its default place on the execution system.
+  Where that is, and that it is not under a home directory, is unconfirmed.
+- **What a read of a registered definition looks like.**
+  `scripts/register.py` compares the stored definition with the rendered one, and also refuses a stored one that holds a forbidden field the rendered one leaves out (a non-null `archiveSystemId` or `archiveSystemDir`, a non-empty `archiveFilter.includes`, `fileInputs` or `jobEnvVariables`, and so on).
+  Unconfirmed: that Tapis returns what was posted in the same order (a list it reorders is reported as a difference), and that it leaves `archiveSystemId` and `archiveSystemDir` null when they were not set (if it fills them with the execution system's defaults on read, every registered application will be reported as drifted; both are fail-closed noise, to be loosened only after a real read has been seen).
+- **Job directories are never removed by Tapis**, so they accumulate (the observer adds one every 15 minutes); the site's scratch purge policy is what bounds them.
+- **Tokens stay on disk.**
+  Every launcher job's specification, and with it the job's token, stays in `exec/<job>/tapisjob.env` until the directory is purged, and the token is valid for the job's run (up to 7 days on the preemptible partitions).
+  Deleting `./tapisjob.env` from the entry scripts after the job starts is an owner decision, pending a check on the tenant that nothing else reads the file; it is not implemented.
+
+### Variables and the job request
+
+- **A request can add any variable the application does not declare.**
+  From source: only names starting with `_tapis` are reserved, and `FIXED` blocks only names the application declares.
+  So `SLURM_TMPDIR` (which the launcher prefers to the fixed `TMPDIR`), `PATH`, `LD_PRELOAD` and the rest are guarded only by NEMAR's client, whose request schema declares exactly one variable, `NEMAR_LAUNCH_SPEC`, in a closed one-element array; `tests/deploy/test_tapis_client_agreement.py` pins that shape against the client's source.
+  The definitions can add one guard of their own, and do: `NEMAR_HOST_PYTHON` is declared `FIXED` with an empty value, which (from source) Tapis accepts and which makes it refuse a request that sets a different value; the entry scripts read an empty value as "search the host".
+- **The longest environment value.**
+  A launch specification may be up to 64 KiB of JSON text, which is up to 87,382 characters as the base64url value.
+  Tapis may limit an environment variable's length, or the length of the generated launch script.
+  If it does, large specifications fail at submit; this is an escalation.
+- **Empty `REQUIRED` variables.**
+  The definitions give a `REQUIRED` variable no value; whether Tapis accepts that in a definition is unconfirmed.
+- **`locked` at creation.**
+  Both applications are created `locked`, so Tapis refuses to modify a version; whether Tapis accepts the flag on a create, and whether disabling a locked version still works, is unconfirmed.
+  The owner can unlock a version (by Tapis's own route, with the owner's own tooling; `register.py` never calls it) to correct a mistake before first use.
+- **The zip is fetched with no digest check.**
+  From source: Tapis's zip stager fetches `containerImage` and unzips it, and checks nothing about its content.
+  The URL is a GitHub release asset, which is mutable while immutable releases are off, so the digest in the definition's `notes` is only a record: `scripts/register.py --apply` downloads the file and refuses to register unless its SHA-256 is that digest, a ledger (`deploy/tapis/released-versions.json`) makes a released version's digest permanent, and the publishing steps are the owner's ([operator.md](operator.md)).
+  Whether the tenant fetches a URL that redirects to object storage, and whether it restricts which hosts a ZIP application may come from, is unconfirmed.
+  No workflow publishes the zips as release assets yet.
+
+### Running a job
+
+- **Reading `tapisjob.exitcode`.**
+  From source: for a `FORK` ZIP job Tapis checks the process and then reads `<output directory>/tapisjob.exitcode`, and a missing file counts as success; the observer's entry script therefore writes it, as the launcher's does.
+  For a `BATCH` job Tapis documents the file for `FORK` jobs only; how it turns a non-zero exit of a `BATCH` ZIP job into `FAILED` or `FINISHED` is unconfirmed.
+- **Slurm's grace period.**
+  How long Slurm waits between SIGTERM (the termination signal) and SIGKILL (the kill signal) when a job is cancelled or reaches its limit, its `KillWait` setting, is unconfirmed.
+  The launcher records the result inside 10 seconds of the signal; a shorter wait loses the record.
+- **The account option.**
+  The system gives each logical queue a scheduler option `--account=<account>`, the CPU account for the CPU partitions and the GPU account for the GPU ones.
+  Whether Tapis applies a logical queue's scheduler options (and not only a job's or an application's) is unconfirmed; so is the spelling of NEMAR's client's `--gpus=N`, listed in nemar-cli.
+- **Memory.**
+  From source: Tapis always sends `--mem`.
+  A whole-node job that omits memory would be charged a full node but limited to the application's default, 2048 MB, so NEMAR's client must always send memory per partition (a note for phase A5).
+- **Queue limits.**
+  The logical queues' limits (nodes, cores, memory, minutes and the running-plus-queued job counts used as `maxJobsPerUser`) were read from the public Expanse user guide on 2026-11-04 and are unverified until measured; the template says so in its `notes`.
+  The client sets no per-job ceiling for `large-shared` and the two preemptible partitions, so these limits are their only cap.
+  The user guide gives some of its limits per group, not per user, and the preemptible partitions are not refunded; a limit that is too low only holds a job in Tapis, and one that is too high is refused by the scheduler.
+- **No scheduler profile.**
+  The system sets no `batchSchedulerProfile`, so no module is loaded for a job; whether the site needs one is unconfirmed.
+- **Outbound HTTPS from the login node**, for the observer's post to NEMAR, is a separate question from the one for compute nodes; both are for the site operator.
+- **The container's mounts (a launcher follow-up).**
+  `--no-mount bind-paths` does not cover a site whose runtime configuration sets `mount hostfs = yes`, which would put the host's file systems, including the execution directories that hold tokens, in the container.
+  Adding `--no-mount hostfs` is a change to the launcher's container arguments, which is a security change in another phase: the owner and driver decide.
+
+### The observer
+
+- **A `FORK` application on the login node (design question 6).**
+  Whether the site allows `squeue`, `sinfo`, `sacct` and `expanse-client` to run on a login node every 15 minutes through Tapis is a question for the site operator, and the observer cannot run as designed without it.
+- **The environment of a `FORK` job.**
+  Whether it has the Slurm commands on its `PATH`, and whether `expanse-client`'s module (`sdsc`) is loaded in it, is unconfirmed.
+- **`expanse-client`.**
+  The observer runs `expanse-client user -r expanse` and `-r expanse_gpu`, the invocation and the resource names the public user guide shows, and recognises only the table the guide shows (rows drawn with the vertical bar, a header naming PROJECT, USED, AVAILABLE and USED BY PROJECT, a whole number in each of the last three columns).
+  Anything else is reported as the lines that were printed.
+  Whether the client works non-interactively under a Tapis job (the guide lists an authentication flag) and what it prints there is unconfirmed, and so is the unit of the figures.
+- **The Slurm formats.**
+  The observer's fixtures follow the formats the Slurm manual documents for `sinfo -o`, `squeue -o` and `sacct --format`; none was captured from a cluster.
+  `squeue --start` is asked with an explicit format (`%i|%P|%T|%S`), which the manual says overrides the one `--start` implies; which jobs `sacct -X -S -E` selects for a day, and the time zone of its times, are also unconfirmed.
+  A state word or reason the observer has not seen is carried as printed, and a row in another format is counted, never guessed at.
+- **The receiving route and the observation contract.**
+  `POST` of a `nemar.observation.v1` document with `Authorization: Bearer <token>` is NEMAR's route in nemar-cli, and its Worker takes the document as this observer writes it (the owner decided that on 2026-11-06; the observer was not changed).
+  The document is pinned in both repositories by one JSON Schema, `observer/schema/observation-v1.schema.json`, written in nemar-cli and copied byte for byte ([contracts](contracts.md)); every document the observer tests post is checked against it, and the two fixtures the observer wrote are held in both repositories.
+  What stays unconfirmed: the Worker has been tested against those documents and not against a cluster's; the token is for one run and the Worker spends it on the first post it accepts, so a retry after an answer was lost is refused (the observer reports it as not delivered); and `raw_lines` is treated by the Worker as text it only validates and never stores.
+  The row cap and the byte cap differ: this observer cuts its export by bytes only (1 MiB, from the end) and the Worker refuses more than 5,000 rows (partitions and accounting jobs together).
+  A busy day of short rows can pass 5,000 jobs inside 1 MiB, and the document is then refused on every retry (`too_big`), so that day never settles.
+  The observer is not changed for this; it is an open item for the observer-dispatch phase (a row cap in the observer, a larger Worker bound, or reading the day in parts).
+  The Worker also refuses a whole document for one allocation item it cannot read, or for a row with elapsed time and no `cpu` or no `node` item, rather than skipping the row; the owner is asked to confirm that choice (nemar-cli ADR 0118, amendment of 2026-11-06).
+  A token has to be minted for every run, including each 15-minute `quick` run, which is the operator's procedure and is not decided here.
+
+### Also listed above
+
+Whether `--no-mount bind-paths` has its effect, that the PID namespace exists, and whether the site allows `--net --network none` are under [The node](#the-node); the host Python, outbound HTTPS from the nodes, the local dataset root layout and the SIF's compatibility with the cluster's Apptainer are there and under [The runtime image](#the-runtime-image-nemar-python).

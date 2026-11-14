@@ -1,0 +1,132 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nemar-process"
+version = "0.1.0"
+description = "NEMAR's processing repository: the launcher, runtime images, recipes and Tapis definitions."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+# The CPU flavor of the runtime image (the only flavor in this phase). The extra exists so that
+# `[tool.uv.sources]` can send torch to the CPU index; a CUDA flavor adds its own extra later.
+# The floor is pamica 0.4.0's own.
+cpu = ["torch>=2.12.1"]
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.23",
+    "packaging>=24.2",
+    "pre-commit>=4.0",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pyyaml>=6.0",
+    "ruff>=0.17",
+    "ty>=0.0.89",
+    { include-group = "signaljourney" },
+]
+
+# The signalJourney validator is not on PyPI and finds its schema relative to its own source tree,
+# so it is installed from a pinned commit and pointed at the schema vendored into
+# `recipes/nemar_process/_vendor/signalJourney/` (docs/upstream.md). The development environment
+# and the runtime image share this one declaration.
+signaljourney = [
+    "signaljourney-validator @ git+https://github.com/signalJourney/signalJourney@169c3261d044039c359bab7e121e78157a4f5af9",
+]
+
+# The runtime image's packages (`images/nemar-python/`). Exact pins for what NEMAR chose; NumPy and
+# SciPy are left to the lock. eegprep takes four extras and never `eeglab` (it installs the Octave
+# bridge `oct2py`) or `full` and `all` (they include it): there is no MATLAB path in the image.
+runtime = [
+    "eegprep[mne,pybids,picard,torch]==0.5.0",
+    "mne==1.13.2",
+    "pamica==0.4.0",
+    "numpy",
+    "scipy",
+    # The recipes pin the BLAS thread pools to one and record what they found (docs/recipes.md).
+    # It is already in the lock as a dependency of MNE-Python; declaring it keeps that true.
+    "threadpoolctl",
+    { include-group = "signaljourney" },
+]
+
+# The repository is a set of directories, not one installable package: the launcher ships as a zip
+# (scripts/build_launcher_zip.py), and the recipes package arrives with phase 4. Nothing here is
+# built into a wheel yet, so uv installs the dependency groups only.
+[tool.uv]
+package = false
+
+# A package with no wheel for a target is built on the machine, in an isolated environment whose
+# build requirements uv resolves afresh (uv.lock does not record them), so a new release of the
+# build backend would change what is installed while `uv lock --check` stays green. These pins are
+# the versions the lock already holds for the backend. They give a version, not a hash: the build
+# requirements are still fetched from PyPI by name and version (docs/images.md).
+build-constraint-dependencies = ["setuptools==84.2.1"]
+
+# torch comes from the CPU index only, never from PyPI (whose Linux wheels carry the CUDA runtime).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `observer` holds the
+# stdlib-only program `observe`; `recipes` holds the package `nemar_process`; `tests/standin` holds
+# the stdlib HTTP stand-ins. None is installed, so all go on the path here, which also makes
+# `uv run --no-project --python 3.9 --with pytest pytest tests/launcher tests/observer` work.
+pythonpath = ["launcher", "observer", "recipes", "scripts", "tests/standin", "tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["launcher", "recipes", "scripts"]
+omit = ["launcher/schema/*"]
+# The launcher also runs as a child process of the tests (signals, the shell wrapper); count those.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ty.environment]
+python-version = "3.12"
+# The launcher package, the observer, the zip builders and the stand-ins are imported by name, not installed.
+extra-paths = ["launcher", "observer", "recipes", "scripts", "tests/standin", "tests"]
+
+[tool.ty.src]
+include = ["images", "launcher", "observer", "recipes", "scripts", "tests"]
+
+# The runtime image's packages (eegprep, NumPy, torch, threadpoolctl) are installed in the runtime
+# environment, not in the development one, so the files that run only there import them unresolved
+# on purpose: the smoke test, the fixture scripts, the recipes package and its tests.
+[[tool.ty.overrides]]
+include = [
+    "images/nemar-python/smoke.py",
+    "scripts/make_smoke_fixture.py",
+    "recipes/nemar_process/**",
+    "tests/recipes/**",
+    "tests/recipe_plugin.py",
+    "tests/recipe_support.py",
+]
+
+[tool.ty.overrides.rules]
+import-not-found = "ignore"
+
+# The packages the lock builds from source today (a git source, or an sdist with no wheel) and the
+# build backend each declares. tests/images/test_dependencies.py reads the lock for the packages that
+# need building and fails until each is listed here with its backend pinned in
+# `build-constraint-dependencies` above.
+[tool.nemar-process.build-backends]
+docopt = "setuptools"
+signaljourney-validator = "setuptools"

@@ -1,0 +1,10 @@
+{
+  "comment": "The nemar-cli commit whose Tapis client (backend/src/services/tapis/) the application and system definitions in deploy/tapis are tested against: the client's own constants and request shape are read at this commit (tests/deploy/test_tapis_client_agreement.py). It is a commit of nemar-cli's compute epic branch (the launch specification's wire form, A1c). Bump it deliberately, with the test, when the client's request changes. CI checks out exactly this commit.",
+  "repository": "nemarOrg/nemar-cli",
+  "ref": "b54ab726d2bc683f86839221f2080675411e28c9",
+  "files": {
+    "client": "backend/src/services/tapis/client.ts",
+    "schemas": "backend/src/services/tapis/schemas.ts",
+    "contract": "shared/contract/compute.ts"
+  }
+}

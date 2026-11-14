@@ -1,0 +1,492 @@
+"""Each step runs with the pinned parameters, in the pinned order, and does what the plan says.
+
+The literal table below is the test's own: it is not imported from the recipe, so a changed value
+in the recipe fails here. The test then repeats each eegprep call itself with those literals on the
+loaded fixture and asserts that what the floor recorded agrees with what eegprep returns.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import logging
+
+import numpy as np
+import pytest
+from eegprep import (
+    clean_channels,
+    clean_drifts,
+    clean_flatlines,
+    clean_windows,
+    pop_select,
+)
+from nemar_process.common import io, plan, qc
+from nemar_process.common.errors import RecordingError, RecordingSkipped
+from nemar_process.nemar_floor import outputs, process, steps
+from recipe_support import (
+    SMOKE_SET,
+    correlated_channels,
+    floor_literals,
+    loaded_fixture,
+    step_of,
+    write_set,
+)
+
+ORDER = [
+    "load",
+    "signal_channels",
+    "flatline",
+    "drift",
+    "line_noise_measure",
+    "bad_channels",
+    "bad_windows",
+    "qc",
+]
+
+# Every executed step of the fixture's plan: function and parameters, written out by hand in
+# tests/recipe_support.py so that the plan and the written record are held to the same table.
+LITERALS = floor_literals()
+
+
+def sha256_of(array, dtype):
+    return hashlib.sha256(np.ascontiguousarray(array, dtype=dtype).tobytes()).hexdigest()
+
+
+def test_the_fixtures_plan_is_the_pinned_order(fixture_result):
+    plan = fixture_result.plan
+    assert [step.step_id for step in plan.steps] == ORDER
+    assert plan.skipped == [
+        {
+            "step_id": "line_noise_50",
+            "function": "eegprep.pop_eegfiltnew",
+            "reason": "below_threshold",
+        },
+        {
+            "step_id": "line_noise_60",
+            "function": "eegprep.pop_eegfiltnew",
+            "reason": "below_threshold",
+        },
+    ]
+    assert plan.rules == ["signal-channels-typed", "locations-usable"]
+    assert (plan.recipe_id, plan.recipe_version) == ("nemar-floor", "1.0.0")
+
+
+def test_every_step_carries_the_literal_function_and_parameters(fixture_result):
+    for step in fixture_result.plan.steps:
+        function, parameters = LITERALS[step.step_id]
+        assert step.function == function, step.step_id
+        assert step.parameters == parameters, step.step_id
+    assert set(LITERALS) == set(ORDER)
+
+
+def test_the_floor_agrees_with_eegprep_called_with_those_literals(fixture_result):
+    """Repeat the calls here, with the table above, and compare what the floor recorded."""
+    loaded = loaded_fixture()
+    eeg = loaded.eeg
+    types = [str(c["type"]) for c in eeg["chanlocs"]]
+    work = pop_select(eeg, channel=[i for i, t in enumerate(types) if t == "EEG"])
+    work = clean_flatlines(work, max_flatline_duration=5.0, max_allowed_jitter=20.0)
+    work = clean_drifts(work, transition=(0.25, 0.75), attenuation=80.0, method="fft")
+    kernel_sha = sha256_of(work["etc"]["clean_drifts_kernel"], "<f8")
+    work = clean_channels(
+        work,
+        corr_threshold=0.8,
+        noise_threshold=4.0,
+        window_len=5.0,
+        max_broken_time=0.4,
+        num_samples=50,
+        subset_size=0.25,
+    )
+    gone = [
+        c
+        for c, keep in zip(
+            fixture_result.signal_names, work["etc"]["clean_channel_mask"], strict=True
+        )
+        if not keep
+    ]
+    _, mask = clean_windows(work, max_bad_channels=0.2, zthresholds=(-3.5, 5.0))
+
+    plan = fixture_result.plan
+    assert step_of(plan, "drift").quality["kernelSha256"] == kernel_sha
+    assert step_of(plan, "drift").quality["kernelLength"] == 1005
+    assert step_of(plan, "bad_channels").quality["removedChannels"] == gone == ["O1", "T6"]
+    assert step_of(plan, "bad_channels").quality["branch"] == "ransac"
+    assert sha256_of(fixture_result.sample_mask, bool) == sha256_of(mask, bool)
+    assert step_of(plan, "bad_windows").quality["nSegments"] == 40
+    assert step_of(plan, "bad_windows").quality["percentGoodSamples"] == 49.4043
+
+
+def test_the_fixture_has_no_flat_channel_and_the_masks_say_so(fixture_result):
+    assert step_of(fixture_result.plan, "flatline").quality == {
+        "nRemoved": 0,
+        "removedChannels": [],
+    }
+    assert fixture_result.kept_after_flatline.all()
+    assert fixture_result.kept_final.sum() == 19
+    assert fixture_result.signal_names[-2:] == ["Pg1", "Pg2"]
+    assert "ECG" not in fixture_result.signal_names
+    assert fixture_result.all_names[-1] == "ECG"
+
+
+def test_the_fixtures_channels_without_coordinates_are_named_and_judged_on_noise_alone(
+    fixture_result,
+):
+    """Pg1 and Pg2 have no coordinates: clean_channels cannot correlate them with a reconstruction,
+    so only its noise criterion looked at them (it runs above 100 Hz and the fixture is at 200)."""
+    quality = step_of(fixture_result.plan, "bad_channels").quality
+    assert quality["noiseCriterionApplied"] is True
+    assert quality["noiseOnlyChannels"] == ["Pg1", "Pg2"]
+    assert quality["notAssessedChannels"] == []
+    channels = fixture_result.metrics["channels"]
+    assert (channels["nNoiseOnly"], channels["nNotAssessed"]) == (2, 0)
+    assert (channels["nFlatline"], channels["nBad"], channels["nGood"]) == (0, 2, 19)
+    rows = {row[0]: row[2:] for row in outputs.channel_rows(fixture_result)}
+    for name in ("Pg1", "Pg2"):
+        status, description, reason = rows[name]
+        assert (status, reason) == ("good", "noise_only")
+        assert "no coordinates" in description
+    assert rows["Fp1"] == ["good", None, None]
+    assert rows["O1"][0] == "bad"
+
+
+def test_the_signal_channels_step_names_what_it_left_out(fixture_result):
+    assert step_of(fixture_result.plan, "signal_channels").quality == {
+        "nInputChannels": 22,
+        "nSignalChannels": 21,
+        "excludedChannels": ["ECG"],
+    }
+
+
+def test_the_raw_copy_is_not_kept_and_no_samples_leave_the_floor():
+    loaded = loaded_fixture()
+    result = process(loaded)
+    assert loaded.eeg == {}
+    assert result.work["data"].dtype == np.float64
+
+
+def test_a_flat_segment_is_found_because_flatline_runs_before_the_drift_filter():
+    """A 6 s constant stretch in one channel: flatline sees it only on the unfiltered copy."""
+    loaded = loaded_fixture()
+    names = io.channel_labels(loaded.eeg)
+    victim = names.index("C3")
+    srate = int(loaded.eeg["srate"])
+    loaded.eeg["data"][victim, 20 * srate : 26 * srate] = 5.0
+    result = process(loaded)
+    assert step_of(result.plan, "flatline").quality["removedChannels"] == ["C3"]
+    # and the masks compose: the flat channel, then the bad channels RANSAC found among the rest
+    assert not result.kept_after_flatline[result.signal_names.index("C3")]
+    assert result.kept_final.sum() < result.kept_after_flatline.sum()
+    assert not result.kept_final[result.signal_names.index("C3")]
+    assert step_of(result.plan, "qc").quality["percentGoodChannels"] == pytest.approx(
+        100.0 * result.kept_final.sum() / 21, abs=1e-4
+    )
+
+
+def test_the_same_flat_segment_is_missed_when_the_drift_filter_runs_first():
+    """The evidence for the order: after the drift filter a flat stretch is no longer constant."""
+    loaded = loaded_fixture()
+    srate = int(loaded.eeg["srate"])
+    loaded.eeg["data"][8, 20 * srate : 26 * srate] = 5.0
+    types = [str(c["type"]) for c in loaded.eeg["chanlocs"]]
+    work = pop_select(loaded.eeg, channel=[i for i, t in enumerate(types) if t == "EEG"])
+    work = clean_drifts(work, transition=(0.25, 0.75), attenuation=80.0, method="fft")
+    after_drift = clean_flatlines(copy.deepcopy(work), max_flatline_duration=5.0)
+    assert after_drift["nbchan"] == work["nbchan"]  # nothing found
+
+
+# ---- recordings that take the other branches --------------------------------------------------
+
+
+def smoke_loaded(tmp_path):
+    target = tmp_path / "sub-01" / "eeg" / "sub-01_task-smoke_eeg.set"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(SMOKE_SET.read_bytes())
+    (recording,) = io.discover(tmp_path)
+    return io.load(recording)
+
+
+def test_a_short_all_eeg_recording_skips_the_signal_channels_and_the_two_window_steps(tmp_path):
+    result = process(smoke_loaded(tmp_path))
+    plan = result.plan
+    assert [s.step_id for s in plan.steps] == [
+        "load",
+        "flatline",
+        "drift",
+        "line_noise_measure",
+        "qc",
+    ]
+    reasons = {(s["step_id"], s["reason"]) for s in plan.skipped}
+    assert reasons == {
+        ("signal_channels", "all_channels_are_signal"),
+        ("line_noise_50", "below_threshold"),
+        ("line_noise_60", "below_threshold"),
+        ("bad_channels", "too_short"),
+        ("bad_windows", "too_short"),
+    }
+    assert plan.rules == ["short-recording"]
+    assert step_of(plan, "flatline").quality == {"nRemoved": 1, "removedChannels": ["Ch8"]}
+    assert result.sample_mask is None
+    assert result.metrics["samples"] is None
+    assert result.bad_channels_branch is None
+    # the bad-channel step did not run, so no channel was judged beyond flatline: what would claim a
+    # channel is good or bad is null, never zero or a flatline-only percentage
+    channels = result.metrics["channels"]
+    assert channels["assessed"] == ["flatline"]
+    assert (channels["nFlatline"], channels["nNotAssessed"], channels["nNoiseOnly"]) == (1, 7, 0)
+    assert (channels["nBad"], channels["nGood"], channels["percentGood"]) == (None, None, None)
+
+
+def test_a_set_saved_with_an_empty_etc_runs_the_whole_floor(tmp_path):
+    """Without the loader's repair every cleaning step fails on such a set (sccn/eegprep#533)."""
+    data = correlated_channels(np.random.default_rng(3), 8, 250 * 70) * 10.0
+    data[7, 10 * 250 : 20 * 250] = 0.0  # a flat stretch of 10 s
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    loaded = io.load(recording)
+    assert loaded.etc_normalized
+    result = process(loaded)
+    plan = result.plan
+    assert step_of(plan, "flatline").quality["removedChannels"] == ["Ch8"]
+    assert step_of(plan, "bad_channels").function == "eegprep.clean_channels_nolocs"
+    assert step_of(plan, "bad_channels").quality["branch"] == "nolocs"
+    # the window step ran on the recording and its record agrees with the mask it returned
+    assert result.sample_mask is not None
+    assert step_of(plan, "bad_windows").quality["nSegments"] == len(qc.runs(result.sample_mask))
+    assert step_of(plan, "bad_windows").quality["nSamplesRemoved"] == int(
+        (~result.sample_mask).sum()
+    )
+    assert "locations-usable" not in plan.rules
+
+
+def test_few_channels_skip_the_channel_step_but_not_the_window_step(tmp_path):
+    rng = np.random.default_rng(4)
+    write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", rng.standard_normal((3, 250 * 70))
+    )
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    assert {(s["step_id"], s["reason"]) for s in result.plan.skipped} >= {
+        ("bad_channels", "few_channels")
+    }
+    assert result.plan.rules == ["few-channels"]
+    assert result.plan.has_step("bad_windows")
+    assert result.sample_mask is not None
+
+
+def test_a_flat_channel_can_take_a_recording_below_the_channel_minimum(tmp_path):
+    """The rule counts the channels that reach the step, not the channels that were typed EEG."""
+    rng = np.random.default_rng(5)
+    data = rng.standard_normal((4, 250 * 70))
+    data[3, :] = 5.0
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    assert step_of(result.plan, "flatline").quality["removedChannels"] == ["Ch4"]
+    assert ("bad_channels", "few_channels") in {
+        (s["step_id"], s["reason"]) for s in result.plan.skipped
+    }
+
+
+def test_a_low_sampling_rate_without_locations_cannot_use_the_nolocs_criterion(tmp_path):
+    rng = np.random.default_rng(6)
+    write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set",
+        rng.standard_normal((6, 100 * 70)),
+        srate=100.0,
+    )
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    assert ("bad_channels", "sampling_rate_too_low") in {
+        (s["step_id"], s["reason"]) for s in result.plan.skipped
+    }
+    assert result.bad_channels_branch is None
+    assert result.plan.has_step("bad_windows")
+
+
+def flat_failure(tmp_path, data):
+    """Run the floor on `data` (channels by samples, 250 Hz, no locations); return what it raised."""
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingError) as caught:
+        process(io.load(recording))
+    return caught.value
+
+
+def test_a_recording_whose_channels_are_all_constant_fails_at_flatline(tmp_path):
+    """eegprep removes nothing when every channel is flat and only logs a warning; the floor fails.
+
+    Before this, such a recording succeeded with every channel called good (sccn/eegprep#535).
+    """
+    error = flat_failure(tmp_path, np.zeros((4, 250 * 70)) + 5.0)
+    assert (error.status, error.code, error.step, error.detail) == (
+        "failed",
+        "all_channels_flat",
+        "flatline",
+        None,
+    )
+    assert str(error) == "all_channels_flat in flatline"
+
+
+def test_a_pause_shared_by_all_channels_fails_the_same_way(tmp_path):
+    """The cost of the rule: eegprep's condition is a flat portion in every channel, not a constant
+    recording, so a 10 s pause that every channel shares fails the whole recording."""
+    data = np.random.default_rng(11).standard_normal((4, 250 * 70)) * 10.0
+    data[:, 20 * 250 : 30 * 250] = 0.0
+    error = flat_failure(tmp_path, data)
+    assert (error.code, error.step) == ("all_channels_flat", "flatline")
+
+
+def test_the_failure_is_found_while_logging_is_disabled_as_the_command_runs(tmp_path):
+    saved = logging.root.manager.disable
+    logging.disable(logging.WARNING)
+    try:
+        error = flat_failure(tmp_path, np.zeros((4, 250 * 70)) + 5.0)
+    finally:
+        logging.disable(saved)
+    assert error.code == "all_channels_flat"
+
+
+def test_a_pause_in_some_channels_only_is_still_annotated_not_failed(tmp_path):
+    data = np.random.default_rng(12).standard_normal((6, 250 * 70)) * 10.0
+    data[:3, 20 * 250 : 30 * 250] = 0.0  # three channels pause, three do not
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    assert step_of(result.plan, "flatline").quality["removedChannels"] == ["Ch1", "Ch2", "Ch3"]
+
+
+def test_channels_that_share_nothing_are_all_flagged_and_the_recording_fails(tmp_path):
+    """Without locations the criterion compares channels with each other; independent noise is all
+    flagged, eegprep then removes nothing, and the floor used to call every channel good."""
+    write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set",
+        np.random.default_rng(13).standard_normal((8, 250 * 70)),
+    )
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingError) as caught:
+        process(io.load(recording))
+    error = caught.value
+    assert (error.status, error.code, error.step, error.detail) == (
+        "failed",
+        "all_channels_flagged",
+        "bad_channels",
+        None,
+    )
+
+
+def test_one_channel_that_shares_nothing_is_removed_and_the_others_are_kept(tmp_path):
+    data = correlated_channels(np.random.default_rng(14), 8, 250 * 70)
+    data[7] = np.random.default_rng(15).standard_normal(250 * 70)
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(tmp_path)
+    result = process(io.load(recording))
+    quality = step_of(result.plan, "bad_channels").quality
+    assert quality["branch"] == "nolocs"
+    assert quality["removedChannels"] == ["Ch8"]
+    assert result.kept_final.tolist() == [True] * 7 + [False]
+
+
+def synthetic_floor(directory):
+    """Six correlated channels of 70 s at 250 Hz, no locations: every step but the band-stops runs."""
+    data = correlated_channels(np.random.default_rng(30), 6, 250 * 70)
+    write_set(directory / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
+    (recording,) = io.discover(directory)
+    return process(io.load(recording))
+
+
+@pytest.mark.parametrize(
+    ("module", "name", "changed", "recorded_in"),
+    [
+        (
+            steps,
+            "SHORT_RECORDING_S",
+            50.0,
+            [
+                ("bad_channels", ("rules", "short_recording_s")),
+                ("bad_windows", ("rules", "short_recording_s")),
+            ],
+        ),
+        (steps, "FEW_CHANNELS", 3, [("bad_channels", ("rules", "few_channels"))]),
+        (steps, "MIN_NOLOCS_SRATE_HZ", 105.0, [("bad_channels", ("rules", "min_nolocs_srate_hz"))]),
+        (qc, "MIN_LOCATED_CHANNELS", 5, [("bad_channels", ("rules", "min_located_channels"))]),
+        (qc, "LINE_THRESHOLD_DB", 12.0, [("line_noise_measure", ("threshold_db",))]),
+    ],
+)
+def test_the_plan_hash_changes_with_each_rule_constant(
+    tmp_path, monkeypatch, module, name, changed, recorded_in
+):
+    """A rule constant is part of the plan, so a recording processed under another one never shares
+    a hash with it, even when every decision came out the same."""
+    baseline = synthetic_floor(tmp_path / "before")
+    monkeypatch.setattr(module, name, changed)
+    result = synthetic_floor(tmp_path / "after")
+    assert result.plan.hash() != baseline.plan.hash()
+    for step_id, keys in recorded_in:
+        value = step_of(result.plan, step_id).parameters
+        for key in keys:
+            value = value[key]
+        assert value == changed, (step_id, keys)
+
+
+@pytest.mark.parametrize(
+    ("name", "changed", "key", "recorded"),
+    [
+        ("SPECTRUM_RANGE_HZ", (2, 60), "spectrum_hz", [2, 60]),
+        ("MAD_SCALE", 2.0, "robust_amplitude", "2.0*MAD"),
+    ],
+)
+def test_the_qc_step_records_the_constants_it_applies_and_the_plan_hash_follows_them(
+    tmp_path, monkeypatch, name, changed, key, recorded
+):
+    """The qc step's parameters were typed in twice, here and in `qc.py`; a change to the one the
+    measurement uses must show in the plan, in a recording's and in the recipe's."""
+    from nemar_process.nemar_floor import recipe
+
+    baseline = synthetic_floor(tmp_path / "before")
+    assert step_of(baseline.plan, "qc").parameters == {
+        "spectrum_hz": [1, 70],
+        "robust_amplitude": "1.4826*MAD",
+    }
+    monkeypatch.setattr(qc, name, changed)
+    result = synthetic_floor(tmp_path / "after")
+    assert result.plan.hash() != baseline.plan.hash()
+    assert step_of(result.plan, "qc").parameters[key] == recorded
+    dataset_step = next(s for s in recipe.dataset_steps() if s.step_id == "qc")
+    assert dataset_step.parameters[key] == recorded
+
+
+def test_a_failure_in_the_bookkeeping_of_a_step_is_that_steps_failure(tmp_path, monkeypatch):
+    """The parameter table is complete by test; a row missing would say which step it broke."""
+    monkeypatch.delitem(plan.PARAMETER_TYPES, "eegprep.clean_drifts")
+    with pytest.raises(RecordingError) as caught:
+        process(smoke_loaded(tmp_path))
+    error = caught.value
+    assert (error.code, error.step, error.detail) == ("step_failed", "drift", "KeyError")
+
+
+def test_a_recording_with_no_eeg_channel_is_skipped_not_failed(tmp_path):
+    data = np.random.default_rng(7).standard_normal((3, 250 * 20))
+    write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data, types=["ECG", "ECG", "EOG"]
+    )
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingSkipped) as caught:
+        process(io.load(recording))
+    assert caught.value.code == "no_signal_channels"
+
+
+def test_a_step_eegprep_cannot_run_is_a_step_failure_with_only_the_error_class(tmp_path):
+    """A recording at 1 Hz has no room for the drift filter's transition band: a real ValueError."""
+    data = np.random.default_rng(8).standard_normal((4, 80))
+    write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data, srate=1.0)
+    (recording,) = io.discover(tmp_path)
+    with pytest.raises(RecordingError) as caught:
+        process(io.load(recording))
+    error = caught.value
+    assert (error.status, error.code, error.step, error.detail) == (
+        "failed",
+        "step_failed",
+        "drift",
+        "ValueError",
+    )
+    assert str(error) == "step_failed in drift (ValueError)"

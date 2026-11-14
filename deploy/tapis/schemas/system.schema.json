@@ -1,0 +1,486 @@
+{
+  "$defs": {
+    "ArgDescriptionString": {
+      "maxLength": 8096,
+      "type": "string"
+    },
+    "AuthnEnum": {
+      "enum": [
+        "PASSWORD",
+        "PKI_KEYS",
+        "ACCESS_KEY",
+        "TOKEN",
+        "TMS_KEYS",
+        "CERT"
+      ],
+      "type": "string"
+    },
+    "Capability": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/CategoryEnum"
+        },
+        "datatype": {
+          "$ref": "#/$defs/DatatypeEnum"
+        },
+        "name": {
+          "type": "string"
+        },
+        "precedence": {
+          "type": "integer"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "name",
+        "datatype"
+      ],
+      "type": "object"
+    },
+    "CategoryEnum": {
+      "enum": [
+        "SCHEDULER",
+        "OS",
+        "HARDWARE",
+        "SOFTWARE",
+        "JOB",
+        "CONTAINER",
+        "MISC",
+        "CUSTOM"
+      ],
+      "type": "string"
+    },
+    "DatatypeEnum": {
+      "enum": [
+        "STRING",
+        "INTEGER",
+        "BOOLEAN",
+        "NUMBER",
+        "TIMESTAMP"
+      ],
+      "type": "string"
+    },
+    "DescriptionString": {
+      "description": "Optional more verbose description.",
+      "maxLength": 2048,
+      "type": "string"
+    },
+    "DirString": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "DtnSysId": {
+      "description": "An alternate system to use as a Data Transfer Node (DTN) during job execution.",
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "EffectiveUserId": {
+      "default": "${apiUserId}",
+      "description": "Username to use when accessing the system. A specific user (such as a service account) or the dynamic user ``${apiUserId}``.",
+      "maxLength": 60,
+      "minLength": 1,
+      "type": "string"
+    },
+    "Enabled": {
+      "default": true,
+      "description": "Indicates if system is currently considered active and available for use.",
+      "type": "boolean"
+    },
+    "HostString": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "IdString": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "InputNameString": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "JobRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "runtimeType": {
+          "$ref": "#/$defs/RuntimeTypeEnum"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtimeType"
+      ],
+      "type": "object"
+    },
+    "KeyValueInputModeEnum": {
+      "default": "INCLUDE_BY_DEFAULT",
+      "enum": [
+        "REQUIRED",
+        "FIXED",
+        "INCLUDE_ON_DEMAND",
+        "INCLUDE_BY_DEFAULT"
+      ],
+      "type": "string"
+    },
+    "KeyValuePair": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/DescriptionString"
+        },
+        "inputMode": {
+          "$ref": "#/$defs/KeyValueInputModeEnum"
+        },
+        "key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "notes": {
+          "type": "object"
+        },
+        "value": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "LogicalQueue": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/DescriptionString"
+        },
+        "hpcQueueName": {
+          "$ref": "#/$defs/QueueNameString"
+        },
+        "maxCoresPerNode": {
+          "type": "integer"
+        },
+        "maxJobs": {
+          "default": 2147483647,
+          "type": "integer"
+        },
+        "maxJobsPerUser": {
+          "default": 2147483647,
+          "type": "integer"
+        },
+        "maxMemoryMB": {
+          "type": "integer"
+        },
+        "maxMinutes": {
+          "type": "integer"
+        },
+        "maxNodeCount": {
+          "type": "integer"
+        },
+        "minCoresPerNode": {
+          "type": "integer"
+        },
+        "minMemoryMB": {
+          "type": "integer"
+        },
+        "minMinutes": {
+          "type": "integer"
+        },
+        "minNodeCount": {
+          "type": "integer"
+        },
+        "name": {
+          "$ref": "#/$defs/QueueNameString"
+        },
+        "schedulerOptions": {
+          "items": {
+            "$ref": "#/$defs/SysArgSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "hpcQueueName"
+      ],
+      "type": "object"
+    },
+    "QueueNameString": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "ReqPostPutCredential": {
+      "additionalProperties": false,
+      "properties": {
+        "accessKey": {
+          "type": "string"
+        },
+        "accessSecret": {
+          "type": "string"
+        },
+        "accessToken": {
+          "type": "string"
+        },
+        "certificate": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "privateKey": {
+          "type": "string"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "refreshToken": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RootDir": {
+      "description": "Effective root directory to be used when listing files or moving files to and from the system.",
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "RuntimeTypeEnum": {
+      "enum": [
+        "DOCKER",
+        "SINGULARITY",
+        "ZIP"
+      ],
+      "type": "string"
+    },
+    "SchedulerTypeEnum": {
+      "enum": [
+        "SLURM",
+        "CONDOR",
+        "PBS",
+        "SGE",
+        "UGE",
+        "TORQUE"
+      ],
+      "type": "string"
+    },
+    "SysArgInputModeEnum": {
+      "default": "INCLUDE_BY_DEFAULT",
+      "enum": [
+        "REQUIRED",
+        "FIXED",
+        "INCLUDE_ON_DEMAND",
+        "INCLUDE_BY_DEFAULT"
+      ],
+      "type": "string"
+    },
+    "SysArgSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "arg": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "description": {
+          "$ref": "#/$defs/ArgDescriptionString"
+        },
+        "inputMode": {
+          "$ref": "#/$defs/SysArgInputModeEnum"
+        },
+        "name": {
+          "$ref": "#/$defs/InputNameString"
+        },
+        "notes": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "SysHost": {
+      "description": "FQDN, IP address, Globus endpoint ID or Globus collection ID.",
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "SysId": {
+      "description": "Short descriptive name for the system that is unique within the tenant.",
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "SystemTypeEnum": {
+      "description": "Type of system",
+      "enum": [
+        "LINUX",
+        "S3",
+        "IRODS",
+        "GLOBUS"
+      ],
+      "type": "string"
+    },
+    "TagString": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "allowChildren": {
+      "default": false,
+      "description": "Indicates if system allows for the creation of child systems.",
+      "type": "boolean"
+    },
+    "authnCredential": {
+      "$ref": "#/$defs/ReqPostPutCredential"
+    },
+    "batchDefaultLogicalQueue": {
+      "$ref": "#/$defs/QueueNameString"
+    },
+    "batchLogicalQueues": {
+      "items": {
+        "$ref": "#/$defs/LogicalQueue"
+      },
+      "type": "array"
+    },
+    "batchScheduler": {
+      "$ref": "#/$defs/SchedulerTypeEnum"
+    },
+    "batchSchedulerProfile": {
+      "$ref": "#/$defs/IdString"
+    },
+    "bucketName": {
+      "description": "Name of the bucket for an S3 type system.",
+      "type": "string"
+    },
+    "canExec": {
+      "description": "Indicates if system can be used to execute jobs.",
+      "type": "boolean"
+    },
+    "canRunBatch": {
+      "default": false,
+      "description": "Indicates if system supports running jobs using a batch scheduler.",
+      "type": "boolean"
+    },
+    "defaultAuthnMethod": {
+      "$ref": "#/$defs/AuthnEnum"
+    },
+    "description": {
+      "$ref": "#/$defs/DescriptionString"
+    },
+    "dtnSystemId": {
+      "$ref": "#/$defs/DtnSysId"
+    },
+    "effectiveUserId": {
+      "$ref": "#/$defs/EffectiveUserId"
+    },
+    "enableCmdPrefix": {
+      "default": false,
+      "description": "Indicates if system allows a job submission request to specify a *cmdPrefix*.",
+      "type": "boolean"
+    },
+    "enabled": {
+      "$ref": "#/$defs/Enabled"
+    },
+    "host": {
+      "$ref": "#/$defs/SysHost"
+    },
+    "id": {
+      "$ref": "#/$defs/SysId"
+    },
+    "jobCapabilities": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
+    "jobEnvVariables": {
+      "items": {
+        "$ref": "#/$defs/KeyValuePair"
+      },
+      "type": "array"
+    },
+    "jobMaxJobs": {
+      "type": "integer"
+    },
+    "jobMaxJobsPerUser": {
+      "type": "integer"
+    },
+    "jobRuntimes": {
+      "items": {
+        "$ref": "#/$defs/JobRuntime"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "jobWorkingDir": {
+      "$ref": "#/$defs/DirString"
+    },
+    "mpiCmd": {
+      "maxLength": 126,
+      "minLength": 1,
+      "type": "string"
+    },
+    "notes": {
+      "description": "Metadata in the form of a Json object. Not used by Tapis.",
+      "type": "object"
+    },
+    "owner": {
+      "description": "A specific user set at system creation.",
+      "type": "string"
+    },
+    "port": {
+      "maximum": 2147483647,
+      "minimum": -2147483648,
+      "type": "integer"
+    },
+    "proxyHost": {
+      "$ref": "#/$defs/HostString"
+    },
+    "proxyPort": {
+      "maximum": 2147483647,
+      "minimum": -2147483648,
+      "type": "integer"
+    },
+    "rootDir": {
+      "$ref": "#/$defs/RootDir"
+    },
+    "systemType": {
+      "$ref": "#/$defs/SystemTypeEnum"
+    },
+    "tags": {
+      "description": "List of tags as simple strings.",
+      "items": {
+        "$ref": "#/$defs/TagString"
+      },
+      "type": "array"
+    },
+    "useProxy": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "systemType",
+    "host",
+    "defaultAuthnMethod",
+    "canExec"
+  ],
+  "title": "ReqPostSystem",
+  "type": "object"
+}
