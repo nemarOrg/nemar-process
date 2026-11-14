@@ -268,6 +268,28 @@ def test_an_input_that_is_neither_bids_nor_zarr_is_a_usage_error(cli, tmp_path):
     assert stopped.value.code == 2
 
 
+def test_an_input_the_recipe_does_not_read_is_a_usage_error(cli, tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    from nemar_process.recipes import REGISTRY
+
+    monkeypatch.setitem(REGISTRY, "bids-only", replace(REGISTRY["nemar-floor"], variants=()))
+    with pytest.raises(SystemExit) as stopped:
+        cli(
+            "run",
+            "bids-only",
+            "--input",
+            "zarr",
+            "--dataset-dir",
+            tmp_path,
+            "--out",
+            tmp_path / "o",
+        )
+    assert stopped.value.code == 2
+    assert "does not read zarr (it reads bids)" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
 def test_the_zarr_options_are_refused_for_the_bids_input_before_anything_happens(
     cli, silent, tmp_path
 ):
