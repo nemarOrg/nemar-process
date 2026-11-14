@@ -627,6 +627,7 @@ def systemd_path(path: str) -> str:
 def render_units(version_dir: str, prefix: str, config_path: str, units_dir: str) -> list[str]:
     """Write the three unit files, from the verified bundle's templates, with the prefix and the
     configuration filled in. Returns the file names written."""
+    config_path = os.path.normpath(os.path.abspath(os.path.expanduser(config_path)))
     values = {"@PREFIX@": systemd_path(prefix), "@CONFIG@": systemd_path(config_path)}
     os.makedirs(units_dir, mode=0o700, exist_ok=True)
     written = []

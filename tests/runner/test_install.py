@@ -796,6 +796,22 @@ def test_the_command_installs_and_writes_the_units_from_the_verified_bundle(
         assert support.mode_of(path) == 0o600
 
 
+def test_a_relative_configuration_path_is_written_into_a_unit_as_an_absolute_one(
+    env, monkeypatch, tmp_path
+):
+    work = tmp_path / "work"
+    (work / "cfg").mkdir(parents=True)
+    monkeypatch.chdir(work)
+    env.publish("0.1.0")
+    env.install("0.1.0", write_units=("cfg/../config.json", str(tmp_path / "units")))
+    run = (tmp_path / "units" / "nemar-runner.service").read_text(encoding="utf-8")
+    assert "--config {}/config.json\n".format(work.resolve()) in run or (
+        "--config {}/config.json\n".format(work) in run
+    )
+    assert "cfg/../" not in run
+    assert "--config config.json" not in run
+
+
 def test_a_prefix_or_a_configuration_that_cannot_be_written_into_a_unit_is_refused(env, tmp_path):
     env.publish("0.1.0")
     env.install("0.1.0")
