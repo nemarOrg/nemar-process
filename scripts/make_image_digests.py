@@ -1,14 +1,19 @@
-"""Write ``nemar-python-<version>-cpu-digests.json``, the record attached to an image release.
+"""Write ``nemar-python-<version>-<flavor>-digests.json``, the record attached to an image release.
 
-The record names the image by digest (the only reference a consumer uses), the Singularity Image
-Format (SIF) file the launcher looks for, the SIF's registry artifact, and what the image holds.
+There is one record per flavor (``cpu`` and ``cuda``). It names the image by digest (the only
+reference a consumer uses), what the image holds (the native AMICA binary's SHA-256, the CPU fit's
+SHA-256 reading and, for the CUDA flavor, torch's CUDA build and the GPU architectures it lists), and
+the Singularity Image Format (SIF) file the launcher looks for. The CPU flavor's SIF is published and
+the record names its registry artifact; the CUDA flavor publishes no SIF (a GPU host builds one from
+the verified image digest), so its record has ``"sif": null`` and ``launch_image`` names the file a
+host is to build.
 The SIF is named by the image digest: ``<64 lowercase hexadecimal digits>.sif``, in the directory
 the Tapis application sets as ``NEMAR_SIF_ROOT`` (the launcher refuses a specification whose
 ``image.sif`` is not that name for ``image.digest``). ``launch_image`` is the ``image`` object of a
 launch specification for this release, ready to copy.
 
-Called by ``.github/workflows/image-nemar-python.yml`` after the image and the SIF are signed. The
-standard library only.
+Called by ``.github/workflows/image-nemar-python.yml`` after the image (and, for ``cpu``, the SIF) is
+signed. The standard library only.
 """
 
 from __future__ import annotations
@@ -24,9 +29,11 @@ ROOT = Path(__file__).resolve().parent.parent
 IMAGE_REPOSITORY = "ghcr.io/nemarorg/nemar-python"
 SIF_REPOSITORY = "ghcr.io/nemarorg/nemar-python-sif"
 NAME = "nemar-python"
-FLAVOR = "cpu"
+FLAVORS = ("cpu", "cuda")
+AMICA15_RELEASE = "0.4.0"
 SIF_ROOT_ENV = "NEMAR_SIF_ROOT"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+HEX64 = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/actions/runs/[0-9]+")
@@ -47,55 +54,103 @@ def require(pattern: re.Pattern[str], value: str, what: str) -> None:
         raise ValueError("{} is not valid: {!r}".format(what, value))
 
 
-def build_record(
-    *,
-    version: str,
-    image_digest: str,
-    sif_digest: str,
-    sif_file: Path,
-    lock: Path,
-    smoke: dict,
-    run_url: str,
-    commit: str,
-) -> dict:
-    require(VERSION, version, "version")
-    require(DIGEST, image_digest, "image digest")
-    require(DIGEST, sif_digest, "SIF artifact digest")
-    require(COMMIT, commit, "source commit")
-    require(RUN_URL, run_url, "run URL")
+def smoke_facts(smoke: dict, flavor: str) -> dict:
+    """What the smoke document says the image holds, refused when it does not say it."""
     installed = smoke.get("distributions", {})
     for name in VERSIONED:
         if name not in installed:
             raise ValueError("the smoke document does not list {}".format(name))
+    if smoke.get("flavor") != flavor:
+        raise ValueError(
+            "the smoke document is of flavor {!r}, not {!r}".format(smoke.get("flavor"), flavor)
+        )
+    native = smoke.get("amica15") or {}
+    require(HEX64, str(native.get("sha256", "")), "the native AMICA binary's SHA-256")
+    fit = smoke.get("cpu_fit") or {}
+    require(HEX64, str(fit.get("sha256", "")), "the CPU fit's SHA-256")
+    facts: dict = {
+        "amica15": {
+            "release": AMICA15_RELEASE,
+            "path": native.get("path"),
+            "sha256": native["sha256"],
+        },
+        "cpu_fit_sha256": fit["sha256"],
+    }
+    if flavor == "cuda":
+        torch = smoke.get("torch") or {}
+        arch_list = torch.get("arch_list")
+        if not (
+            isinstance(arch_list, list) and arch_list and all(isinstance(a, str) for a in arch_list)
+        ):
+            raise ValueError("the smoke document of the CUDA flavor lists no GPU architecture")
+        facts["cuda"] = {"torch_cuda": torch.get("cuda"), "arch_list": arch_list}
+    return facts
+
+
+def sif_block(image_digest: str, sif_digest: str, sif_file: Path) -> dict:
+    """The SIF's part of the record: its registry artifact and the file the launcher looks for."""
     sif_bytes = sif_file.read_bytes()
+    return {
+        "repository": SIF_REPOSITORY,
+        "oras_tag": "sha256-" + hex_of(image_digest),
+        "oras_digest": sif_digest,
+        "oras_reference": "oras://{}:sha256-{}".format(SIF_REPOSITORY, hex_of(image_digest)),
+        "file_name": sif_name(image_digest),
+        "root_env": SIF_ROOT_ENV,
+        "file_sha256": hashlib.sha256(sif_bytes).hexdigest(),
+        "file_size": len(sif_bytes),
+    }
+
+
+def build_record(
+    *,
+    version: str,
+    image_digest: str,
+    sif_digest: str | None = None,
+    sif_file: Path | None = None,
+    lock: Path,
+    smoke: dict,
+    run_url: str,
+    commit: str,
+    flavor: str = "cpu",
+) -> dict:
+    if flavor not in FLAVORS:
+        raise ValueError("flavor is not valid: {!r}".format(flavor))
+    require(VERSION, version, "version")
+    require(DIGEST, image_digest, "image digest")
+    require(COMMIT, commit, "source commit")
+    require(RUN_URL, run_url, "run URL")
+    sif = None
+    if flavor == "cpu":
+        if sif_digest is None or sif_file is None:
+            raise ValueError("the cpu flavor publishes a SIF: its digest and its file are needed")
+        require(DIGEST, sif_digest, "SIF artifact digest")
+        sif = sif_block(image_digest, sif_digest, sif_file)
+    elif sif_digest is not None or sif_file is not None:
+        raise ValueError("the {} flavor publishes no SIF".format(flavor))
+    facts = smoke_facts(smoke, flavor)
+    installed = smoke.get("distributions", {})
     image_reference = "{}@{}".format(IMAGE_REPOSITORY, image_digest)
     return {
         "schema": "nemar.image-digests.v1",
         "name": NAME,
         "version": version,
-        "flavor": FLAVOR,
+        "flavor": flavor,
         "image": {
             "repository": IMAGE_REPOSITORY,
-            "tag": "{}-{}".format(version, FLAVOR),
+            "tag": "{}-{}".format(version, flavor),
             "digest": image_digest,
             "reference": image_reference,
         },
-        "sif": {
-            "repository": SIF_REPOSITORY,
-            "oras_tag": "sha256-" + hex_of(image_digest),
-            "oras_digest": sif_digest,
-            "oras_reference": "oras://{}:sha256-{}".format(SIF_REPOSITORY, hex_of(image_digest)),
-            "file_name": sif_name(image_digest),
-            "root_env": SIF_ROOT_ENV,
-            "file_sha256": hashlib.sha256(sif_bytes).hexdigest(),
-            "file_size": len(sif_bytes),
-        },
-        # the `image` object of a launch specification for this release
+        "sif": sif,
+        # the `image` object of a launch specification for this release; for the CUDA flavor the
+        # file is the one a GPU host builds from the verified digest
         "launch_image": {
             "uri": "docker://" + image_reference,
             "digest": image_digest,
             "sif": sif_name(image_digest),
         },
+        **facts,
         "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
         "versions": {"python": smoke.get("python"), **{n: installed[n] for n in VERSIONED}},
         "run_url": run_url,
@@ -106,12 +161,16 @@ def build_record(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--version", required=True)
+    parser.add_argument("--flavor", choices=FLAVORS, default="cpu")
     parser.add_argument("--image-digest", required=True)
-    parser.add_argument("--sif-digest", required=True)
-    parser.add_argument("--sif-file", type=Path, required=True)
+    parser.add_argument("--sif-digest", help="the SIF artifact's digest (cpu only)")
+    parser.add_argument("--sif-file", type=Path, help="the SIF file (cpu only)")
     parser.add_argument("--lock", type=Path, default=ROOT / "uv.lock")
     parser.add_argument(
-        "--smoke", type=Path, required=True, help="the JSON smoke.py printed in the SIF"
+        "--smoke",
+        type=Path,
+        required=True,
+        help="the JSON smoke.py printed (in the SIF for cpu, in the image for cuda)",
     )
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--commit", required=True)
@@ -127,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             smoke=json.loads(args.smoke.read_text(encoding="utf-8")),
             run_url=args.run_url,
             commit=args.commit,
+            flavor=args.flavor,
         )
     except ValueError as error:
         print(error, file=sys.stderr)
