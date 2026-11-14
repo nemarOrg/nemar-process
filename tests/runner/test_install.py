@@ -620,6 +620,19 @@ def test_a_version_a_runner_is_using_is_never_removed(env):
     assert env.versions() == ["0.1.3", "0.1.4"]
 
 
+def test_the_version_that_was_current_before_an_install_is_kept_as_the_way_back(env):
+    for version in ("0.1.0", "0.1.1"):
+        env.publish(version)
+        env.install(version)
+    env.install("0.1.0")  # a rollback: current is 0.1.0, and 0.1.1 is the newest
+    env.publish("0.1.2")
+    env.install("0.1.2")  # the newest two are 0.1.2 and 0.1.1, but 0.1.0 was current a moment ago
+    assert env.versions() == ["0.1.0", "0.1.1", "0.1.2"]
+    env.publish("0.1.3")
+    env.install("0.1.3")  # now 0.1.0 was not current before this install, and goes
+    assert env.versions() == ["0.1.2", "0.1.3"]
+
+
 def test_the_current_version_is_never_removed_even_when_it_is_old(env):
     for version in ("0.1.0", "0.1.1", "0.1.2"):
         env.publish(version)
