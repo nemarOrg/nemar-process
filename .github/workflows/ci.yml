@@ -127,7 +127,7 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
           uv run ty check
-          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images -m "not docker"
+          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images -m "not docker and not runner_stack"
           uv run python scripts/build_launcher_zip.py --check
 
   docker:
@@ -148,6 +148,79 @@ jobs:
         run: docker version
       - name: Launch end to end (real Docker)
         run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
+
+  runner-stack:
+    # `nemar-runner once` against NEMAR's own local stack (nemar-cli's compute-local-stack.ts, started from a
+    # full checkout at the pin) through the real claim, heartbeat, outputs and complete routes, with a real
+    # Apptainer container built here (DM-18, gate G3). The other jobs deselect this marker; here neither a
+    # missing Apptainer, a missing image nor a missing checkout may skip (NEMAR_REQUIRE_APPTAINER).
+    name: runner against the local stack (real routes, real Apptainer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NEMAR_REQUIRE_APPTAINER: "1"
+      NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
+      NEMAR_E2E_SIF_DIR: ${{ github.workspace }}/.cache/runner-stack-sif
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the nemar-cli pin
+        id: pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      # Not sparse: the stack imports nemar-cli's backend and its test helpers (Miniflare, the migrations).
+      - name: Check out nemar-cli at the pinned commit (the stack runs from it)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli
+          fetch-depth: 1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      # Development dependencies included (Miniflare, the test helpers), and no lifecycle script: the
+      # checkout's husky would set core.hooksPath. The backend has its own lockfile.
+      - name: Install the stack's dependencies
+        run: |
+          set -euo pipefail
+          (cd .nemar-cli && bun install --frozen-lockfile --ignore-scripts)
+          (cd .nemar-cli/backend && bun install --frozen-lockfile --ignore-scripts)
+
+      - name: Install Apptainer
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
+          echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y ./apptainer.deb
+          apptainer --version
+
+      # The SIF is named by the Docker image id, which is the digest the stack's `--image` carries and
+      # the file name the runner looks for (`<sif_root>/<hex>.sif`).
+      - name: Build the tiny image into a SIF
+        run: |
+          set -euo pipefail
+          docker build -t tiny:ci tests/images/tiny-recipe
+          id=$(docker inspect --format '{{.Id}}' tiny:ci)
+          hex=${id#sha256:}
+          if ! [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "unexpected image id: $id" >&2
+            exit 1
+          fi
+          mkdir -p "$NEMAR_E2E_SIF_DIR"
+          apptainer build "$NEMAR_E2E_SIF_DIR/${hex}.sif" docker-daemon://tiny:ci
+          ls -l "$NEMAR_E2E_SIF_DIR"
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: The runner against the local stack
+        run: uv run --frozen pytest tests/e2e/test_runner_stack.py -q -rs
 
   images:
     # The runtime image's declaration, lock, vendored schema, smoke fixture, Dockerfile and workflows.
@@ -214,7 +287,7 @@ jobs:
       # recipe on the fixture, against stand-in routes. The same test runs in the SIF in
       # image-nemar-python.yml, where the isolation is real.
       - name: Launch end to end (stand-in runtime)
-        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer and not docker"
+        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer and not docker and not runner_stack"
 
   deploy:
     # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI

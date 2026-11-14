@@ -227,4 +227,8 @@ uv run ty check --python-version 3.9 launcher observer runner
 ```
 
 The tests run real child processes and real HTTP; NEMAR's Worker is a recording stand-in that answers fixtures and checks each request body against the pinned schema, and the container runtime is a stand-in executable where a test is about how it is called.
+The runner against NEMAR's real routes is `tests/e2e/test_runner_stack.py` (marker `runner_stack`): it starts nemar-cli's local stack (`backend/scripts/compute-local-stack.ts serve --seed-fixture`) from a full checkout named by `NEMAR_CLI_DIR` (at the pinned commit, with `bun install --frozen-lockfile --ignore-scripts` run in its root and in `backend/`), registers a runner with the stored owner key, dispatches `nemar-floor-zarr` with `executor: "runner"` with the stored administrator key, runs `once`, and asserts what the Worker's own job record says.
+One case takes the job to `finished` in a real Apptainer container (the tiny image of `tests/images/tiny-recipe`, built into `<NEMAR_E2E_SIF_DIR>/<image id>.sif`, default `.cache/runner-stack-sif`); the other, with an empty `sif_root`, ends `failed` with `image_missing` before any container starts.
+Without Apptainer the first skips with "apptainer absent"; with `NEMAR_REQUIRE_APPTAINER=1` (the `runner-stack` CI job) a skip is a failure.
+The other jobs deselect the marker.
 The drift test needs a nemar-cli checkout that has the pinned commit (`NEMAR_CLI_RUNNER_DIR`, or a `nemar-cli` directory beside this checkout), and fails instead of skipping when `NEMAR_REQUIRE_RUNNER_DRIFT=1`.
