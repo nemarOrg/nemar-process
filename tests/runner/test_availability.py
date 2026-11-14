@@ -1097,6 +1097,39 @@ def test_a_job_thread_that_cannot_start_leaves_nothing_held_and_the_failure_goes
         agent.release()
 
 
+def test_started_and_release_do_not_wait_on_a_slow_reading(tmp_path):
+    # `meminfo` is a pipe: opening it to read waits for a writer, a real reading that does not return
+    slow = tmp_path / "slow-proc"
+    slow.mkdir()
+    os.mkfifo(slow / "meminfo")
+    (slow / "loadavg").write_text("0.00 0.00 0.00 1/1 1\n")
+    gate = build_gate(tmp_path / "gate-root", str(slow), settings())
+    gate.claimed("a", None)
+    checker = threading.Thread(target=lambda: gate.claim_check(1), name="slow-check", daemon=True)
+    checker.start()
+    time.sleep(0.3)
+    assert checker.is_alive()  # it is inside the reading
+    finished = threading.Event()
+
+    def others():
+        gate.started("a")
+        gate.start_backoff()
+        gate.backoff_remaining()
+        gate.claimed("b", 1)
+        gate.release("a")
+        gate.release("b")
+        finished.set()
+
+    threading.Thread(target=others, name="others", daemon=True).start()
+    waited = finished.wait(3)
+    # let the slow reading end whatever happened, so no thread is left blocked
+    with open(slow / "meminfo", "w") as pipe:
+        pipe.write("MemTotal: 1024 kB\nMemAvailable: 1024 kB\n")
+    checker.join(10)
+    assert waited, "started, release or the backoff waited on a reading that had not returned"
+    assert not checker.is_alive()
+
+
 def waiting_launcher(tmp_path):
     """A launcher that notes it started and stays until the file `go` exists."""
     marker, go = tmp_path / "started", tmp_path / "go"

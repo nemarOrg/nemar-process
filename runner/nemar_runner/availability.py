@@ -292,7 +292,10 @@ class Gate:
     """The runner's answer to "is there room?", the backoff after a job was given up, and the ledger of
     the memory promised to jobs that are not yet using it.
 
-    One per runner, shared by its job threads, all of its state under one lock.
+    One per runner, shared by its job threads, all of its state under one lock. The lock is held only for
+    the arithmetic on that state: every reading (memory, load, scratch, the cgroup files, the reservation
+    directories, which may sit on a lab's network share and hang) is taken BEFORE it, so a slow reading
+    can delay the check that asked for it and nothing else (never ``started`` or ``release``).
 
     THE LEDGER. Memory room is judged against what the host says is available, and a job that has just
     been let start has not taken its memory yet, so the next job (or the next claim) would be judged
@@ -312,7 +315,7 @@ class Gate:
     def __init__(self, config: Config, tuning: Tuning) -> None:
         self.config = config
         self.tuning = tuning
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()
         self._backoff_until = 0.0  # on the monotonic clock
         # lease id -> [megabytes, promised (the start check passed), forget-at (monotonic) or None]
         self._ledger: dict[str, list[Any]] = {}
@@ -400,26 +403,35 @@ class Gate:
     def start_check(self, memory_mb: int | None, key: str | None = None) -> Verdict:
         """Just before a claimed job starts: the same rules but the backoff (it is about claiming),
         for the job's own memory (the claim size when the job has none). When ``key`` (the job's lease)
-        is given and the answer is idle, the job's memory is promised in the same locked step, so a job
-        that checks a moment later sees it."""
+        is given and the answer is idle, the job's memory is promised in the same locked step as the
+        arithmetic, so a job that checks a moment later sees it."""
         need = self.claim_memory_mb() if memory_mb is None else memory_mb
-        with self._lock:
-            verdict = self._check(need, claiming=False, key=key)
-            if verdict.idle and key is not None and self.config.availability.enabled:
-                self._ledger[key] = [need, True, None]
-            return verdict
+        return self._check(need, claiming=False, key=key, promise=key is not None)
+
+    def _read(self) -> tuple[Readings, bool]:
+        """Every reading of one check, and whether a `pause` entry exists. No lock is held here."""
+        settings = self.config.availability
+        readings = read_all(self.config.root, self.tuning.proc_root, self.tuning.cgroup_root)
+        return readings, settings.enabled and paused(settings.reservation_dirs)
 
     def _check(
-        self, need_mb: int, claiming: bool, free_slots: int = 1, key: str | None = None
+        self,
+        need_mb: int,
+        claiming: bool,
+        free_slots: int = 1,
+        key: str | None = None,
+        promise: bool = False,
     ) -> Verdict:
         config = self.config
         settings = config.availability
+        readings, is_paused = self._read()
+        reserve = self.reserve_mb(readings.mem_total_mb)
         with self._lock:
-            readings = read_all(config.root, self.tuning.proc_root, self.tuning.cgroup_root)
-            reserve = self.reserve_mb(readings.mem_total_mb)
             held = self._counted_mb(key, claiming)
 
             def verdict(reason: str | None, slots: int) -> Verdict:
+                if reason is None and promise and key is not None and settings.enabled:
+                    self._ledger[key] = [need_mb, True, None]
                 return Verdict(
                     reason,
                     readings,
@@ -430,9 +442,9 @@ class Gate:
                     slots if claiming else None,
                 )
 
-            if settings.enabled and paused(settings.reservation_dirs):
+            if is_paused:
                 return verdict("paused", 0)
-            if settings.enabled and claiming and self.backoff_remaining() > 0:
+            if settings.enabled and claiming and self._backoff_until > time.monotonic():
                 return verdict("backoff", 0)
             if readings.free_bytes < config.max_scratch_gb * _GIB:
                 return verdict("scratch", 0)
