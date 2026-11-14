@@ -34,6 +34,7 @@ HUMAN = {
     "GIT_COMMITTER_EMAIL": "person@example.invalid",
 }
 SEED = ("pyproject.toml", "uv.lock", "README.md", "LICENSE", ".python-version")
+SEED_VERSION = "0.1.0"
 SKIP_MARKERS = re.compile(r"skip[ -]ci|ci[ -]skip|no[ -]ci|skip[ -]actions|actions[ -]skip", re.I)
 
 
@@ -61,7 +62,11 @@ class World:
         for name in SEED:
             shutil.copy(ROOT / name, seed / name)
         (seed / "scripts").mkdir()
-        shutil.copy(ROOT / "scripts" / "bump_version.py", seed / "scripts" / "bump_version.py")
+        for script in ("bump_version.py", "sync_dev_merge.py"):
+            shutil.copy(ROOT / "scripts" / script, seed / "scripts" / script)
+        set_version(
+            seed, SEED_VERSION
+        )  # never the repository's own: the tests must not depend on it
         self.git("add", "-A", cwd=seed)
         self.git("commit", "-qm", "the repository", cwd=seed)
         self.git("push", "-q", "origin", "main", cwd=seed)
@@ -94,7 +99,14 @@ class World:
             self.git("checkout", "-q", "--detach", detach, cwd=path)
         return path
 
-    def commit(self, branch: str, version: str | None = None, text: str | None = None) -> str:
+    def commit(
+        self,
+        branch: str,
+        version: str | None = None,
+        text: str | None = None,
+        replace: dict[str, tuple[str, str]] | None = None,
+        files: dict[str, str] | None = None,
+    ) -> str:
         """A person's commit on a branch of origin (created from main if it is new)."""
         path = self.clone()
         if self.remote("branch", "--list", branch):
@@ -105,6 +117,14 @@ class World:
             set_version(path, version)
         if text is not None:
             (path / "README.md").write_text(text, encoding="utf-8")
+        for name, (old, new) in (replace or {}).items():
+            content = (path / name).read_text(encoding="utf-8")
+            assert old in content, (name, old)
+            (path / name).write_text(content.replace(old, new, 1), encoding="utf-8")
+        for name, content in (files or {}).items():
+            (path / name).parent.mkdir(parents=True, exist_ok=True)
+            (path / name).write_text(content, encoding="utf-8")
+        self.git("add", "-A", cwd=path)
         self.git("commit", "-qam", f"a person changes {branch}", cwd=path)
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=path)
         return self.git("rev-parse", "HEAD", cwd=path)
@@ -159,9 +179,14 @@ def dev(world) -> World:
     return world
 
 
+def bump_dev(world: World, sha: str | None = None):
+    """The dev workflow for a push: the checkout is the pushed commit, not dev's tip."""
+    sha = sha or world.remote("rev-parse", "dev")
+    return run_steps(BUMP, "bump", world.clone(detach=sha), PUSH_BY_A_PERSON, world.env())
+
+
 def test_a_push_to_dev_by_a_person_gets_the_next_dev_number_from_the_bot(dev):
-    work = dev.clone("dev")
-    outcome = run_steps(BUMP, "bump", work, PUSH_BY_A_PERSON, dev.env())
+    outcome = bump_dev(dev)
     assert outcome.failed is None, outcome.log
     assert dev.version("dev") == "0.2.0-dev4"
     assert dev.remote("log", "-1", "--format=%s", "dev") == "chore: bump version to 0.2.0-dev4"
@@ -171,23 +196,23 @@ def test_a_push_to_dev_by_a_person_gets_the_next_dev_number_from_the_bot(dev):
 
 
 def test_two_runs_after_two_pushes_make_two_numbers(dev):
-    run_steps(BUMP, "bump", dev.clone("dev"), PUSH_BY_A_PERSON, dev.env())
+    bump_dev(dev)
     dev.commit("dev", text="another change\n")
-    run_steps(BUMP, "bump", dev.clone("dev"), PUSH_BY_A_PERSON, dev.env())
+    bump_dev(dev)
     assert dev.version("dev") == "0.2.0-dev5"
 
 
 def test_a_dev_without_a_suffix_is_left_alone_and_the_run_succeeds(world):
     world.commit("dev", version="0.2.0")
     before = world.remote("rev-parse", "dev")
-    outcome = run_steps(BUMP, "bump", world.clone("dev"), PUSH_BY_A_PERSON, world.env())
+    outcome = bump_dev(world)
     assert outcome.failed is None, outcome.log
     assert "no -devN suffix" in outcome.log
     assert world.remote("rev-parse", "dev") == before
 
 
 def test_a_rejected_push_is_a_warning_and_not_a_failure(dev):
-    work = dev.clone("dev")
+    work = dev.clone(detach=dev.remote("rev-parse", "dev"))
     dev.commit("dev", text="a push that wins the race\n")  # origin moves after the checkout
     winner = dev.remote("rev-parse", "dev")
     outcome = run_steps(BUMP, "bump", work, PUSH_BY_A_PERSON, dev.env())
@@ -196,8 +221,29 @@ def test_a_rejected_push_is_a_warning_and_not_a_failure(dev):
     assert dev.remote("rev-parse", "dev") == winner
 
 
+def test_a_queued_run_bumps_the_commit_it_was_started_for_and_so_never_bumps_twice(dev):
+    pushed = dev.remote("rev-parse", "dev")
+    queued = dev.clone(detach=pushed)  # a second run for the same push, waiting behind the first
+    assert bump_dev(dev, pushed).failed is None
+    after_first = dev.remote("rev-parse", "dev")
+    outcome = run_steps(BUMP, "bump", queued, PUSH_BY_A_PERSON, dev.env())
+    assert outcome.failed is None, outcome.log
+    # it made the same bump on the same parent, so its push changes nothing (or is rejected)
+    assert dev.remote("rev-parse", "dev") == after_first
+    assert dev.version("dev") == "0.2.0-dev4"
+
+
+def test_a_released_base_is_not_bumped_while_dev_waits_for_the_sync(dev):
+    dev.remote("tag", "v0.2.0", dev.remote("rev-parse", "dev"))  # the release happened
+    before = dev.remote("rev-parse", "dev")
+    outcome = bump_dev(dev)
+    assert outcome.failed is None, outcome.log
+    assert "already released" in outcome.log
+    assert dev.remote("rev-parse", "dev") == before
+
+
 def test_the_bump_makes_a_commit_the_next_run_will_skip(dev):
-    run_steps(BUMP, "bump", dev.clone("dev"), PUSH_BY_A_PERSON, dev.env())
+    bump_dev(dev)
     pushed = {
         "github.event.head_commit.author.email": dev.remote("log", "-1", "--format=%ae", "dev"),
         "github.event.head_commit.message": dev.remote("log", "-1", "--format=%B", "dev"),
@@ -264,7 +310,8 @@ def test_a_merge_with_a_dev_version_is_stripped_tagged_and_released(release_pr_m
         f"<{BOT_EMAIL}>"
     )
     assert world.gh_calls() == [
-        "release create v0.2.0 --verify-tag --title v0.2.0 --generate-notes --latest"
+        "release view v0.2.0",
+        "release create v0.2.0 --verify-tag --title v0.2.0 --generate-notes --latest",
     ]
 
 
@@ -293,10 +340,13 @@ def test_a_version_without_a_suffix_is_tagged_as_it_is(world):
     assert world.remote("rev-parse", "main") == before  # no strip commit
     assert tags_of(world) == ["v0.2.0"]
     assert world.remote("rev-parse", "v0.2.0^{commit}") == before
-    assert len(world.gh_calls()) == 1
+    assert [c.split(" --")[0] for c in world.gh_calls()] == [
+        "release view v0.2.0",
+        "release create v0.2.0",
+    ]
 
 
-def test_an_unsuffixed_version_that_is_already_tagged_is_a_warning_and_nothing_else(world):
+def test_an_unsuffixed_version_that_is_already_tagged_and_released_changes_nothing(world):
     world.commit("main", version="0.2.0")
     first = release(world)
     assert first.failed is None
@@ -304,10 +354,27 @@ def test_an_unsuffixed_version_that_is_already_tagged_is_a_warning_and_nothing_e
     world.gh_log.write_text("", encoding="utf-8")
     again = release(world)  # a dependency edit of pyproject.toml, or a re-run
     assert again.failed is None, again.log
-    assert "::warning::" in again.log
+    assert "no new tag" in again.log
     assert world.remote("rev-parse", "main") == head
     assert tags_of(world) == ["v0.2.0"]
-    assert world.gh_calls() == []
+    assert world.gh_calls() == ["release view v0.2.0"]  # it exists: nothing is created
+
+
+def test_a_rerun_after_the_release_failed_creates_it_and_does_not_tag_twice(release_pr_merged):
+    world = release_pr_merged
+    assert release(world).failed is None
+    (world.gh_log.parent / "gh.log.releases").write_text(
+        "", encoding="utf-8"
+    )  # the release is lost
+    world.gh_log.write_text("", encoding="utf-8")
+    tag_before = world.remote("rev-parse", "v0.2.0")
+    again = release(world)  # main is at 0.2.0 now: the tag exists, the release does not
+    assert again.failed is None, again.log
+    assert world.remote("rev-parse", "v0.2.0") == tag_before
+    assert [c.split(" --")[0] for c in world.gh_calls()] == [
+        "release view v0.2.0",
+        "release create v0.2.0",
+    ]
 
 
 def test_a_dev_version_whose_release_is_already_tagged_fails_and_changes_nothing(release_pr_merged):
@@ -365,6 +432,40 @@ def test_a_refused_version_stops_the_release(world):
     assert outcome.failed is not None
     assert world.gh_calls() == []
     assert tags_of(world) == []
+
+
+def bot_head(world: World, rev: str = "main"):
+    """The `bot-head` job, for a push whose head commit is the bot's, checked out at that commit."""
+    context = {"github.event.head_commit.author.email": BOT_EMAIL}
+    assert job_runs(TAG, "bot-head", context)
+    work = world.clone(detach=world.remote("rev-parse", rev))
+    return run_steps(TAG, "bot-head", work, context, world.env())
+
+
+def test_the_bot_head_job_runs_only_for_the_bots_commits():
+    assert not job_runs(TAG, "bot-head", MERGED_TO_MAIN)
+    assert job_runs(TAG, "tag", MERGED_TO_MAIN)
+    assert not job_runs(TAG, "tag", {"github.event.head_commit.author.email": BOT_EMAIL})
+
+
+def test_a_release_pull_request_merged_by_rebase_fails_loudly_and_releases_nothing(world):
+    # a rebase puts the bot's own dev bump at the head of main, so `tag` is skipped for it
+    world.commit("dev", version="0.2.0-dev3")
+    path = world.clone("dev")
+    set_version(path, "0.2.0-dev4")
+    env = {**world.human_env, "GIT_AUTHOR_EMAIL": BOT_EMAIL, "GIT_COMMITTER_EMAIL": BOT_EMAIL}
+    world.git("commit", "-qam", "chore: bump version to 0.2.0-dev4", cwd=path, env=env)
+    world.git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=path, env=env)
+    outcome = bot_head(world)
+    assert outcome.failed is not None, outcome.log
+    assert "nothing was released" in outcome.log
+    assert tags_of(world) == []
+
+
+def test_the_bot_head_job_passes_for_the_strip_commit(release_pr_merged):
+    assert release(release_pr_merged).failed is None
+    outcome = bot_head(release_pr_merged)
+    assert outcome.failed is None, outcome.log
 
 
 # sync-dev --------------------------------------------------------------------------------------
@@ -428,7 +529,7 @@ def test_a_second_run_for_the_same_tag_changes_nothing(released):
 def test_work_that_landed_on_dev_after_the_sync_is_not_undone_by_a_rerun(released):
     sync(released)
     released.commit("dev", text="work after the release\n")
-    run_steps(BUMP, "bump", released.clone("dev"), PUSH_BY_A_PERSON, released.env())
+    bump_dev(released)
     before = released.remote("rev-parse", "dev")
     assert released.version("dev") == "0.2.1-dev2"
     again = sync(released)
@@ -437,15 +538,75 @@ def test_work_that_landed_on_dev_after_the_sync_is_not_undone_by_a_rerun(release
     assert released.version("dev") == "0.2.1-dev2"
 
 
-def test_a_dev_that_changed_the_version_line_is_a_conflict_for_a_person(released):
+def last_clone(world: World) -> Path:
+    return world.base / f"clone{world.counter}"
+
+
+def test_a_push_to_dev_after_the_release_merge_conflicts_only_on_the_version_lines_and_is_resolved(
+    released,
+):
     released.commit("dev", version="0.2.0-dev9")  # both branches changed the line since they met
+    outcome = sync(released)
+    assert outcome.failed is None, outcome.log
+    assert "resolved the version lines" in outcome.log
+    assert released.version("dev") == "0.2.1-dev1"  # main's 0.2.0, then the patch after it
+    assert released.remote("merge-base", "--is-ancestor", "main", "dev") == ""
+    assert "chore: sync dev with main after v0.2.0" in released.remote(
+        "log", "--merges", "--format=%s", "dev"
+    )
+    assert released.version("main") == "0.2.0"
+
+
+def test_a_resolved_version_conflict_keeps_what_dev_changed_elsewhere_in_the_same_file(released):
+    released.commit(
+        "dev",
+        version="0.2.0-dev9",
+        replace={"pyproject.toml": ('minversion = "8.0"', 'minversion = "8.1"')},
+    )
+    assert sync(released).failed is None
+    kept = released.remote("show", "dev:pyproject.toml")
+    assert 'minversion = "8.1"' in kept
+    assert released.version("dev") == "0.2.1-dev1"
+
+
+def test_a_conflict_in_another_file_is_not_resolved_and_leaves_dev_untouched(released):
+    released.commit("main", text="main's words\n")
+    released.commit("dev", text="dev's words\n")
     before = released.remote("rev-parse", "dev")
     outcome = sync(released)
     assert outcome.failed is not None
     assert outcome.failed.name == "Merge main into dev"
-    assert "by hand" in outcome.log
+    assert "needs a person" in outcome.log
+    assert "README.md" in outcome.log
     assert released.remote("rev-parse", "dev") == before
+    work = last_clone(released)
+    assert released.git("status", "--porcelain", cwd=work) == ""  # the merge was aborted
+    assert not (work / ".git" / "MERGE_HEAD").exists()
     assert not outcome.ran("Push dev")
+
+
+def test_a_version_conflict_with_another_line_in_the_same_hunk_is_not_resolved(released):
+    description = "NEMAR's processing repository"
+    released.commit("main", replace={"pyproject.toml": (description, "main's repository")})
+    released.commit(
+        "dev", version="0.2.0-dev9", replace={"pyproject.toml": (description, "dev's repository")}
+    )
+    before = released.remote("rev-parse", "dev")
+    outcome = sync(released)
+    assert outcome.failed is not None
+    assert "pyproject.toml" in outcome.log
+    assert "needs a person" in outcome.log
+    assert released.remote("rev-parse", "dev") == before
+
+
+def test_a_tag_that_does_not_name_its_commits_version_syncs_nothing(world):
+    world.commit("dev", version="0.2.0-dev3")
+    world.remote("tag", "v9.9.9", world.remote("rev-parse", "main"))  # main is at 0.1.0
+    before = world.remote("rev-parse", "dev")
+    outcome = sync(world, tag="v9.9.9")
+    assert outcome.failed is not None
+    assert "not 9.9.9" in outcome.log
+    assert world.remote("rev-parse", "dev") == before
 
 
 def test_without_a_dev_branch_the_run_logs_a_notice_and_succeeds(world):
@@ -559,3 +720,25 @@ def test_a_fork_branch_called_dev_is_not_a_release_pull_request(world):
     outcome = pull_request(world, "dev", "main", head_repo="someone/nemar-process")
     assert outcome.failed is not None  # it bumps the version, which only the bot may
     assert outcome.ran("Any other pull request leaves the version alone")
+
+
+def test_a_pull_request_cannot_weaken_the_check_it_is_measured_by(world):
+    always_passes = "import sys\nsys.exit(0)\n"
+    world.commit(
+        "weak", version="0.1.1", files={"scripts/bump_version.py": always_passes}
+    )  # bumps the version and replaces the checker with one that approves
+    outcome = pull_request(world, "weak", "main")
+    assert outcome.failed is not None, outcome.log
+    assert "only the release bot changes it" in outcome.log  # main's copy ran
+
+
+def test_a_base_without_the_script_falls_back_to_the_pull_requests_own_with_a_warning(world):
+    path = world.clone("main")
+    world.git("rm", "-q", "scripts/bump_version.py", cwd=path)
+    world.git("commit", "-qm", "the script is not there yet", cwd=path)
+    world.git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=path)
+    script = (ROOT / "scripts" / "bump_version.py").read_text(encoding="utf-8")
+    world.commit("introduces", files={"scripts/bump_version.py": script})
+    outcome = pull_request(world, "introduces", "main")
+    assert outcome.failed is None, outcome.log
+    assert "::warning::" in outcome.log

@@ -5,7 +5,8 @@ their steps for real.
 real git clone whose `origin` is a bare repository on disk. Each step's `if:` and `env:` expressions
 are evaluated by `evaluate` over a context the test supplies, and each step's `GITHUB_OUTPUT` file
 feeds the later steps. What is not run: `uses:` steps (the test makes the checkout itself) and the
-network. `gh` is the one outside system, and a recording stand-in takes its place on `PATH`.
+network. `gh` is the one outside system, and a recording stand-in takes its place on `PATH`; it also
+remembers which releases it was asked to create, so that `gh release view` answers truthfully.
 """
 
 from __future__ import annotations
@@ -141,7 +142,16 @@ def shim_bin(directory: Path) -> Path:
     if not python.exists():
         python.symlink_to(sys.executable)
     gh = directory / "gh"
-    gh.write_text('#!/bin/sh\necho "$*" >> "$GH_LOG"\n', encoding="utf-8")
+    # `release view` succeeds for a tag that `release create` was given before (kept beside the log).
+    gh.write_text(
+        "#!/bin/sh\n"
+        'echo "$*" >> "$GH_LOG"\n'
+        'case "$1 $2" in\n'
+        '  "release view") grep -qx "$3" "$GH_LOG.releases" 2> /dev/null ;;\n'
+        '  "release create") echo "$3" >> "$GH_LOG.releases" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     return directory
 

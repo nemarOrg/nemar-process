@@ -27,6 +27,7 @@ EVERY = sorted(p.name for p in WORKFLOWS.glob("*.yml"))
 SHA_PIN = re.compile(r"^\s*(?:-\s+)?uses:\s+([\w./-]+)@([0-9a-f]{40})\s+#\s+v\d")
 SKIP_MARKERS = re.compile(r"skip[ -]ci|ci[ -]skip|no[ -]ci|skip[ -]actions|actions[ -]skip", re.I)
 OTHER_ARTIFACT_TAGS = ("image-nemar-python-v1.2.3", "nemar-launch-v0.1.0")
+RELEASE_STEP = "Create the GitHub release if it does not exist"
 GUARD = f"github.event.head_commit.author.email != '{BOT_EMAIL}'"
 
 
@@ -95,8 +96,12 @@ def test_the_sync_workflow_starts_only_on_a_release_tag():
 
 
 def test_the_validator_starts_on_every_pull_request_and_the_gate_on_those_into_main():
-    assert triggers(load("bump-validator.yml")) == {"pull_request": None}
-    assert triggers(load("release-gate.yml")) == {"pull_request": {"branches": ["main"]}}
+    # `edited` is what re-evaluates a pull request whose base was changed
+    types = ["opened", "synchronize", "reopened", "edited"]
+    assert triggers(load("bump-validator.yml")) == {"pull_request": {"types": types}}
+    assert triggers(load("release-gate.yml")) == {
+        "pull_request": {"branches": ["main"], "types": types}
+    }
 
 
 def test_ci_also_runs_on_dev_and_still_on_main_feature_branches_and_pull_requests():
@@ -225,6 +230,18 @@ def test_only_the_bot_jobs_read_the_bot_token_and_no_other_secret_is_used():
             assert not used, (name, used)
 
 
+def test_every_job_that_reads_the_bot_token_runs_in_the_release_environment():
+    # the environment limits which refs can reach the secret (docs/release.md); a job without it
+    # would read a repository secret that any branch of a writer could print
+    found = set()
+    for name in EVERY:
+        for job, body in load(name)["jobs"].items():
+            if "secrets.AUTO_TAG_PAT" in str(body):
+                assert body.get("environment") == "release", (name, job)
+                found.add((name, job))
+    assert found == BOT_JOBS
+
+
 def test_every_bot_checkout_pushes_with_the_bot_token():
     for name, job in BOT_JOBS:
         checkout = steps(name, job)[0]
@@ -233,7 +250,7 @@ def test_every_bot_checkout_pushes_with_the_bot_token():
 
 
 def test_the_release_is_created_with_the_bot_token_and_nothing_else_calls_gh():
-    release = step_named("auto-tag.yml", "tag", "Create the GitHub release")
+    release = step_named("auto-tag.yml", "tag", RELEASE_STEP)
     assert release["env"]["GH_TOKEN"] == "${{ secrets.AUTO_TAG_PAT }}"
     for name in NEW:
         if name != "auto-tag.yml":
@@ -277,9 +294,16 @@ def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_conta
         "uv lock --check",
         "actionlint -color=false .github/workflows/*.yml",
         "uv run pytest tests/release -q",
-        "uv run pytest -q",
+        # the suites as ci.yml splits them: one pytest over the whole tree cannot collect
+        "uv run pytest -q --ignore=tests/images",
+        "uv run pytest -q tests/images",
+        "uv run --frozen --group runtime --extra cpu pytest -q tests/recipes",
+        'uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer"',
     ):
         assert needed in commands, needed
+    assert not re.search(r"uv run pytest -q\s*$", commands, re.M)  # the unsplit run that fails
+    recipes = next(s for s in job["steps"] if "tests/recipes" in s.get("run", ""))
+    assert recipes["env"]["NEMAR_REQUIRE_RUNTIME"] == "1"
     assert job["env"]["NEMAR_REQUIRE_APPTAINER"] == "1"
     assert job["env"]["NEMAR_REQUIRE_ACTIONLINT"] == "1"
     assert "apptainer.deb" in commands  # installed the way ci.yml installs it
@@ -339,10 +363,11 @@ def test_the_release_creates_a_tag_before_the_release_and_attaches_nothing():
     assert names.index("Strip the -devN suffix and push it to main") < names.index(
         "Tag the release commit"
     )
-    assert names.index("Tag the release commit") < names.index("Create the GitHub release")
+    assert names.index("Tag the release commit") < names.index(RELEASE_STEP)
     run = step_named("auto-tag.yml", "tag", "Tag the release commit")["run"]
     assert 'git tag -a "v$RELEASE"' in run
-    release = step_named("auto-tag.yml", "tag", "Create the GitHub release")["run"]
+    release = step_named("auto-tag.yml", "tag", RELEASE_STEP)["run"]
+    assert "gh release view" in release  # a re-run creates a release that is missing, once
     assert "--verify-tag" in release
     assert "--generate-notes" in release
     assert "--clobber" not in release
@@ -418,3 +443,45 @@ def test_actionlint_passes_on_every_workflow():
 def test_ci_is_one_of_the_linted_workflows():
     assert CI_WORKFLOW.name in EVERY
     assert set(NEW) <= set(EVERY)
+
+
+def test_the_validator_runs_the_base_branchs_copy_of_the_checker():
+    job = load("bump-validator.yml")["jobs"]["bump-validator"]
+    commands = "\n".join(s.get("run", "") for s in job["steps"])
+    assert 'git show "origin/$BASE_REF:scripts/bump_version.py"' in commands
+    assert "python3 scripts/bump_version.py" not in commands  # never the pull request's own
+    assert commands.count('python3 "$RUNNER_TEMP/bump_version.py"') == 2
+
+
+def test_the_bot_head_job_holds_no_token_and_no_write():
+    job = load("auto-tag.yml")["jobs"]["bot-head"]
+    assert "permissions" not in job  # the workflow's contents: read
+    assert "environment" not in job
+    assert "secrets" not in str(job)
+    assert job["steps"][0]["with"]["persist-credentials"] is False
+    condition = " ".join(str(job["if"]).split())
+    assert condition == GUARD.replace("!=", "==")
+
+
+def test_the_scripts_and_workflows_the_bot_runs_have_code_owners():
+    owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    for path in (
+        "/.github/workflows/",
+        "/scripts/bump_version.py",
+        "/scripts/sync_dev_merge.py",
+    ):
+        assert re.search(rf"^{re.escape(path)}\s+@\S+", owners, re.M), path
+
+
+def test_the_dev_bump_checks_out_the_pushed_commit_and_pushes_it_to_dev():
+    checkout = steps("auto-bump-dev.yml", "bump")[0]
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    run = step_named("auto-bump-dev.yml", "bump", "Bump dev to the next -devN")["run"]
+    assert "git push origin HEAD:refs/heads/dev" in run
+    assert 'git ls-remote --tags origin "refs/tags/v$base"' in run
+
+
+def test_the_sync_merge_goes_through_the_version_only_resolver():
+    run = step_named("sync-dev.yml", "sync", "Merge main into dev")["run"]
+    assert 'python3 scripts/sync_dev_merge.py "chore: sync dev with main after $TAG"' in run
+    assert "git merge" not in run
