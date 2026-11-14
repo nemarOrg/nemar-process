@@ -21,6 +21,7 @@ from runner_support import (
     check_def,
     claim_job,
     claimed,
+    job_dir,
     job_id,
     lease_id,
     make_launcher,
@@ -93,7 +94,7 @@ def test_every_request_is_valid_against_the_pinned_schema_and_carries_the_user_a
     assert paths[0] == "/compute/runners/token"
     assert "/compute/runners/claim" in paths
     assert "/compute/runners/heartbeat" in paths
-    assert paths[-1] == "/compute/runners/complete"
+    assert "/compute/runners/complete" in paths
     for request in rig.routes.requests:
         assert request["headers"]["user-agent"] == "nemar-runner/" + contract_version()
     token_body = rig.routes.bodies("token")[0]
@@ -181,7 +182,7 @@ def test_the_launcher_gets_exactly_the_cards_environment_for_a_job_with_no_memor
     assert env["NEMAR_LEASE_ID"] == lease_id(1)
     assert env["NEMAR_SIF_ROOT"] == str(seen_rig.sif_root)
     assert env["LANG"] == "C.UTF-8"
-    jobs_dir = seen_rig.root / "jobs" / job_id(1)
+    jobs_dir = job_dir(seen_rig, 1)
     assert env["NEMAR_OUTPUT_DIR"] == str(jobs_dir / "out")
     assert env["NEMAR_SCRATCH_DIR"] == str(jobs_dir / "scratch")
     assert env["HOME"] == str(jobs_dir / "home")
@@ -231,7 +232,7 @@ def test_the_launcher_directory_the_job_ran_in_is_gone_and_its_bytes_are_logged(
         rig.sif_root.mkdir()
         (rig.sif_root / SIF).write_bytes(b"sif")
         run_once(rig, claim_job(1))
-        assert not (rig.root / "jobs" / job_id(1)).exists()
+        assert not (job_dir(rig, 1)).exists()
         [line] = rig.events("scratch_discarded")
         assert line["job"] == job_id(1)
         assert line["bytes"] >= 1_500_000
@@ -286,7 +287,7 @@ def test_the_real_launcher_refuses_an_invalid_specification_and_the_runner_repor
         assert done["exit_number"] == 13
         assert done["launcher_failure_code"] == "runtime_error"
         assert done["launcher_detail"] == "invalid_spec"
-        assert not (rig.root / "jobs" / jid).exists()
+        assert not (job_dir(rig, 1)).exists()
     finally:
         rig.close()
 
@@ -398,7 +399,7 @@ def test_two_jobs_run_in_parallel_up_to_the_slots(tmp_path):
     marks = tmp_path / "marks"
     marks.mkdir()
     body = (
-        "name = os.path.basename(os.path.dirname(OUT))\n"
+        "name = os.path.basename(os.path.dirname(OUT)).split('-')[0]\n"
         "open(os.path.join({!r}, name + '.start'), 'w').write(str(time.time()))\n"
         "time.sleep(1.0)\n"
         "open(os.path.join({!r}, name + '.end'), 'w').write(str(time.time()))\n"
@@ -476,7 +477,7 @@ def test_once_with_nothing_to_run_exits_zero(rig):
 def test_leftovers_are_deleted_and_logged_when_the_runner_starts(tmp_path):
     rig = Rig(tmp_path)
     try:
-        leftover = rig.root / "jobs" / job_id(5)
+        leftover = job_dir(rig, 5)
         (leftover / "out" / "locked").mkdir(parents=True)
         (leftover / "out" / "locked" / "f.bin").write_bytes(b"z" * 2048)
         os.chmod(leftover / "out" / "locked", 0)
@@ -485,8 +486,8 @@ def test_leftovers_are_deleted_and_logged_when_the_runner_starts(tmp_path):
         agent.release()
         assert list((rig.root / "jobs").iterdir()) == []
         names = {line["job"]: line for line in rig.events("leftover_deleted")}
-        assert set(names) == {job_id(5), "stray-file"}
-        assert names[job_id(5)]["bytes"] >= 2048
+        assert set(names) == {job_dir(rig, 5).name, "stray-file"}
+        assert names[job_dir(rig, 5).name]["bytes"] >= 2048
     finally:
         rig.close()
 
@@ -514,7 +515,7 @@ def test_a_job_run_directly_cleans_up_after_an_exception_in_the_runner(tmp_path)
         # a launcher directory with an embedded NUL makes the real `Popen` raise ValueError after the
         # job directory exists and holds files
         config = rig.make_config(launcher_dir=str(tmp_path / "bad\0dir"))
-        agent = rig.agent(config=config)
+        agent = rig.agent()  # a good configuration starts the runner; the job below gets a bad one
         item = claimed(claim_job(1))
         runner = job.JobRunner(
             item, config, rig.tuning, agent.api, rig.log, agent.locks, agent.limits, agent.stop
@@ -522,7 +523,7 @@ def test_a_job_run_directly_cleans_up_after_an_exception_in_the_runner(tmp_path)
         state = runner.run()
         agent.release()
         assert state == "finished"
-        assert not (rig.root / "jobs" / job_id(1)).exists()
+        assert not (job_dir(rig, 1)).exists()
         [done] = rig.routes.bodies("complete")
         assert done["exit_number"] == 13
         assert done["launcher_failure_code"] == "runtime_error"

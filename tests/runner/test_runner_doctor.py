@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from nemar_runner import doctor
 from runner_support import SECRET, SIF, Rig, make_launcher, retune, write_private
-from test_runner_images import FAKE_RUNTIME, RECORD
+from test_runner_images import FAKE_RUNTIME, ISOLATED_PROBE, RECORD
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,6 +57,7 @@ EVERYTHING_BUT_LIMITS = {
     "runtime apptainer",
     "launcher python",
     "launcher",
+    "launcher_dir trusted",
     "sif_root writable",
     "egress to api_base",
     "token exchange",
@@ -96,7 +97,7 @@ def test_the_probe_uses_the_documented_command(rig):
     diagnose(rig)
     entries = [json.loads(line) for line in (rig.bin / RECORD).read_text().splitlines()]
     probes = [e["argv"] for e in entries if e["argv"][:1] == ["exec"]]
-    assert probes == [["exec", "--memory", "64M", "--cpus", "1", str(rig.sif_root / SIF), "true"]]
+    assert probes == [[*ISOLATED_PROBE, str(rig.sif_root / SIF), "true"]]
 
 
 def without_system_python(rig):
@@ -113,6 +114,9 @@ def test_each_failed_check_but_limits_exits_one(rig, name):
         "runtime apptainer": lambda: (rig.bin / "apptainer").unlink(),
         "launcher python": lambda: without_system_python(rig),
         "launcher": lambda: rig.document.update(launcher_dir=str(rig.tmp / "no-launcher")),
+        "launcher_dir trusted": lambda: (rig.launcher / "nemar_launch" / "__main__.py").chmod(
+            0o666
+        ),
         "sif_root writable": lambda: rig.sif_root.chmod(0o500),
         "egress to api_base": lambda: rig.document.update(api_base="http://127.0.0.1:1"),
         "token exchange": lambda: setattr(rig.routes, "secret", "nmr_" + "00" * 32),

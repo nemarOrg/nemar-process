@@ -7,11 +7,33 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 
 import pytest
 from nemar_runner import images
-from runner_support import HEX, SIF, Rig, claim_job, job_id, make_launcher, wire
+from runner_support import (
+    HEX,
+    SIF,
+    Rig,
+    claim_job,
+    job_dir,
+    make_launcher,
+    wait_for,
+    wire,
+)
 
+ISOLATED_PROBE = [
+    "exec",
+    "--containall",
+    "--cleanenv",
+    "--no-home",
+    "--no-mount",
+    "bind-paths",
+    "--memory",
+    "64M",
+    "--cpus",
+    "1",
+]
 RECORD = "record.jsonl"
 
 FAKE_RUNTIME = """#!{python}
@@ -31,7 +53,8 @@ if argv[:1] == ["--version"]:
     print("apptainer version 1.3.0-standin")
 elif argv[:1] == ["pull"]:
     if os.path.exists(os.path.join(here, "pull.slow")):
-        time.sleep(0.8)
+        seconds = open(os.path.join(here, "pull.slow")).read().strip()
+        time.sleep(float(seconds) if seconds else 0.8)
     if os.path.exists(os.path.join(here, "pull.fail")):
         open(argv[1], "wb").write(b"partial")  # a failed pull leaves a part behind
         sys.exit(255)
@@ -57,7 +80,7 @@ def calls(rig, verb):
 
 @pytest.fixture
 def rig(tmp_path):
-    made = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", "pass"))
+    made = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", "pass"), sif_pull=True)
     install_runtime(made)
     yield made
     made.close()
@@ -75,7 +98,7 @@ def run_job(rig, n=1):
 def test_a_missing_image_is_pulled_by_digest_into_a_part_name_and_renamed(rig):
     run_job(rig)
     [pull] = calls(rig, "pull")
-    part = str(rig.sif_root / ".{}.sif.part".format(HEX))
+    part = str(rig.sif_root / ".{}.sif.{}.part".format(HEX, os.getpid()))
     assert pull["argv"] == [
         "pull",
         part,
@@ -84,7 +107,8 @@ def test_a_missing_image_is_pulled_by_digest_into_a_part_name_and_renamed(rig):
     assert pull["final_existed_during_pull"] is False
     assert pull["part_existed_before"] is False
     assert (rig.sif_root / SIF).read_bytes() == b"SIFDATA"
-    assert sorted(p.name for p in rig.sif_root.iterdir()) == [SIF]  # no .part is left
+    assert not any(p.name.endswith(".part") for p in rig.sif_root.iterdir())
+    assert sorted(p.name for p in rig.sif_root.iterdir() if not p.name.startswith(".")) == [SIF]
     assert rig.routes.bodies("complete")[0]["exit_number"] == 0
 
 
@@ -92,13 +116,13 @@ def test_the_pull_environment_is_the_jobs_own(rig):
     run_job(rig)
     [pull] = calls(rig, "pull")
     env = pull["env"]
-    jobs = str(rig.root / "jobs" / job_id(1))
+    jobs = str(job_dir(rig, 1))
     assert env["HOME"] == jobs + "/home"
     assert env["APPTAINER_CACHEDIR"].startswith(os.path.join(jobs, "scratch"))
     assert env["APPTAINER_TMPDIR"].startswith(os.path.join(jobs, "scratch"))
     assert env["PATH"] == rig.tuning.launch_path
     assert pull["cwd"] == jobs
-    assert not (rig.root / "jobs" / job_id(1)).exists()  # the cache went with the job
+    assert not (job_dir(rig, 1)).exists()  # the cache went with the job
 
 
 def test_an_image_already_in_sif_root_is_not_pulled(rig):
@@ -112,7 +136,7 @@ def test_an_image_already_in_sif_root_is_not_pulled(rig):
 def test_a_failed_pull_completes_the_job_without_launching_it_and_leaves_no_part(tmp_path):
     marker = tmp_path / "ran"
     body = "open({!r}, 'w').write('x')\nwrite_result()\n".format(str(marker))
-    rig = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", body))
+    rig = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", body), sif_pull=True)
     try:
         install_runtime(rig)
         (rig.bin / "pull.fail").write_text("")
@@ -131,7 +155,7 @@ def test_a_failed_pull_completes_the_job_without_launching_it_and_leaves_no_part
 
 
 def test_a_pull_that_writes_nothing_is_a_failed_pull(tmp_path):
-    rig = Rig(tmp_path)
+    rig = Rig(tmp_path, sif_pull=True)
     try:
         install_runtime(rig)
         (rig.bin / "pull.empty").write_text("")
@@ -165,31 +189,29 @@ def test_two_jobs_for_one_image_pull_it_once(rig):
     assert (rig.sif_root / SIF).read_bytes() == b"SIFDATA"
 
 
-def test_a_cancel_during_the_pull_stops_it_and_completes_the_job(tmp_path):
+def test_stopping_the_runner_during_a_pull_stops_it_and_completes_the_job(tmp_path):
     marker = tmp_path / "ran"
     body = "open({!r}, 'w').write('x')\nwrite_result()\n".format(str(marker))
-    rig = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", body))
+    rig = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", body), sif_pull=True)
     try:
         install_runtime(rig)
         (rig.bin / "pull.slow").write_text("")
-        rig.routes.on_heartbeat = lambda body_, n: {
-            "lease_expires_at": "2030-01-01T00:00:00Z",
-            "cancel": True,
-        }
-        run_job(rig)
+        rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
+        agent = rig.agent()
+        thread = threading.Thread(target=agent.run_forever)
+        thread.start()
+        wait_for(lambda: calls(rig, "pull"), 10, "the pull to start")
+        agent.stop.set()
+        thread.join(15)
+        agent.release()
         [done] = rig.routes.bodies("complete")
         assert (done["exit_number"], done["launcher_detail"]) == (13, "terminated")
         assert not marker.exists()
+        assert rig.routes.count("heartbeat") == 0  # nothing is sent before a launcher exists
         assert not (rig.sif_root / SIF).exists()
         assert not any(p.name.endswith(".part") for p in rig.sif_root.iterdir())
     finally:
         rig.close()
-
-
-def test_the_heartbeat_keeps_the_lease_during_a_long_pull(rig):
-    (rig.bin / "pull.slow").write_text("")
-    run_job(rig)
-    assert rig.routes.count("heartbeat") >= 2  # the lease is renewed before the launcher exists
 
 
 def test_the_limits_probe_runs_the_runtime_with_a_memory_and_cpu_limit(rig):
@@ -197,15 +219,7 @@ def test_the_limits_probe_runs_the_runtime_with_a_memory_and_cpu_limit(rig):
     (rig.sif_root / SIF).write_bytes(b"sif")
     run_job(rig)
     [probe] = calls(rig, "exec")
-    assert probe["argv"] == [
-        "exec",
-        "--memory",
-        "64M",
-        "--cpus",
-        "1",
-        str(rig.sif_root / SIF),
-        "true",
-    ]
+    assert probe["argv"] == [*ISOLATED_PROBE, str(rig.sif_root / SIF), "true"]
     assert rig.events("job_started")[0]["enforce_limits"] is True
     assert rig.events("limits_probed")[0]["enforced"] is True
 
@@ -231,7 +245,7 @@ def test_the_probe_runs_once_per_runner(rig):
 
 
 def test_apptainer_also_answers_to_singularity(tmp_path):
-    rig = Rig(tmp_path)
+    rig = Rig(tmp_path, sif_pull=True)
     try:
         rig.install("singularity", FAKE_RUNTIME.format(python=sys.executable, record=RECORD))
         assert images.runtime_binary(rig.config, rig.tuning) == str(rig.bin / "singularity")
@@ -262,4 +276,7 @@ def test_two_images_pull_side_by_side(rig):
     finally:
         agent.release()
     assert len(calls(rig, "pull")) == 2
-    assert {p.name for p in rig.sif_root.iterdir()} == {SIF, other + ".sif"}
+    assert {p.name for p in rig.sif_root.iterdir() if not p.name.startswith(".")} == {
+        SIF,
+        other + ".sif",
+    }

@@ -147,6 +147,14 @@ def lease_id(n: int = 1) -> str:
     return "{:032x}".format(n)
 
 
+RUNNER_ID = "rnr_" + "ab" * 12
+
+
+def job_dir(rig, n: int = 1) -> Path:
+    """The directory a runner makes for job ``n``: named by the job and the lease."""
+    return rig.root / "jobs" / "{}-{}".format(job_id(n), lease_id(n))
+
+
 JOB_TOKEN = "jt_" + "q7" * 24  # what the real launch value holds; no log may show it
 
 
@@ -222,6 +230,7 @@ class RunnerRoutes:
         self.on_heartbeat: Callable[[Any, int], Any] | None = None
         self.on_complete: Callable[[Any, int], Any] | None = None
         self.on_token: Callable[[int], Any] | None = None
+        self.on_me: Callable[[], Any] | None = None
         self.requests: list[dict] = []
         self.problems: list[str] = []
         self.tokens: list[str] = []
@@ -253,6 +262,13 @@ class RunnerRoutes:
             )
             index = sum(1 for r in self.requests if r["path"] == request.path)
         schema = ROUTE_SCHEMAS.get(request.path)
+        if request.path.endswith("/me"):
+            bearer = request.headers.get("authorization", "")[len("Bearer ") :]
+            if bearer not in self.tokens or bearer in self.expired:
+                return Response.json_body(401, {"error": "runner_token_expired"})
+            if self.on_me is not None:
+                return self.on_me()
+            return Response.json_body(200, {"runner_id": RUNNER_ID, "name": "standin"})
         if schema is None:
             return Response.json_body(404, {"error": "no_such_route"})
         for problem in check_def(schema, body):
@@ -340,7 +356,14 @@ class Rig:
     """A runner root with its secret and configuration, a stand-in NEMAR, and a bin directory that
     holds a `python3` (this interpreter) and whatever runtime stand-ins a test installs."""
 
-    def __init__(self, tmp: Path, runtime: str = "apptainer", launcher: Path | None = None) -> None:
+    def __init__(
+        self,
+        tmp: Path,
+        runtime: str = "apptainer",
+        launcher: Path | None = None,
+        sif_pull: bool = False,
+    ) -> None:
+        self.sif_pull = sif_pull
         self.tmp = tmp
         self.routes = RunnerRoutes()
         self.server = StandinServer(self.routes).start()
@@ -361,7 +384,9 @@ class Rig:
         self.keep: Path = tmp / "seen.json"
         self.config_file = tmp / "config.json"
         self.config = self.make_config(runtime=runtime)
-        self.tuning = fast(launch_path=str(self.bin) + os.pathsep + "/usr/bin:/bin")
+        # the launch PATH is the bin directory alone: a runtime on the host (CI has Apptainer in /usr/bin)
+        # must never be found by a test that did not install one
+        self.tuning = fast(launch_path=str(self.bin))
         self.log = Log(str(self.root / "runner.log"), stream=self.stream)
 
     def make_config(self, **changes: Any) -> Config:
@@ -376,6 +401,7 @@ class Rig:
             "max_scratch_gb": 1,
             "launcher_dir": str(self.launcher),
             "default_job_memory_mb": 512 if self.runtime in ("docker", "podman") else None,
+            "sif_pull": self.sif_pull,
         }
         values.update(changes)
         return Config(**values)
