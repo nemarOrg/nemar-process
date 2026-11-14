@@ -21,7 +21,7 @@ The ICLabel weights check belongs to a later phase.
 | torch, `cuda` flavor | `2.12.1`, built for CUDA 12.9, from the `cu129` index only | extra `cuda`, `[tool.uv.sources]`, `uv.lock` |
 | `amica15`, pAMICA's native AMICA binary | pAMICA release `v0.4.0` (the release pamica 0.4.0 resolves), `amica15-linux-x64`, checked by SHA-256 | both Dockerfiles, `scripts/check_smoke_pins.py` (see "The native AMICA binary") |
 | `libgomp1` (the OpenMP runtime the binary links) | `14.2.0-19`, the version the live trixie archive served when it was pinned | both Dockerfiles |
-| the signalJourney validator | commit `169c3261d044` | the same, with the schema vendored (see [upstream.md](upstream.md)) |
+| the signalJourney validator | `0.2.0`, the release from PyPI (a wheel) | the same; the schema it packages is pinned by its tree digest (see [upstream.md](upstream.md)) |
 
 There is no MATLAB, no Octave and no `eeglab` extra of eegprep in the image or the lock: that extra installs `oct2py`, an Octave bridge.
 `tests/images/test_dependencies.py` fails if any package whose name leads to MATLAB or Octave is locked, directly or through another package.
@@ -31,7 +31,7 @@ The environment in the `cpu` image is exactly `uv sync --frozen --no-dev --group
 The two extras are declared in conflict (`[tool.uv] conflicts`), so uv resolves them apart and the lock holds one torch for each.
 It also holds a third resolution, the one that selects neither extra, whose torch comes from PyPI (the wheels that carry the CUDA runtime); nothing builds an image or runs a test that way, and `tests/images/test_dependencies.py` fails if a Dockerfile, a workflow or a fixture runs `--group runtime` without `--extra cpu` or `--extra cuda`.
 
-Two locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only) and the signalJourney validator (a Git source).
+Two locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only) and `eegprep-lean` (a Git source).
 Their build requirements are not in `uv.lock`, so uv resolves them afresh at build time; `build-constraint-dependencies` in `pyproject.toml` pins the build backend (`setuptools`) to the version the lock holds, and `uv.lock` records the constraint.
 `tests/images/test_dependencies.py` reads the lock for every package built from source and fails until each is listed, with its backend, in `[tool.nemar-process.build-backends]` and the backend is pinned.
 The residual: a pin names a version, not a hash, so the build backend is still fetched from PyPI by name and version, and a changed file under the same version would not be noticed.
@@ -43,7 +43,7 @@ The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED
 The first three facts are in `/opt/nemar/build.json`, `{"version", "commit", "build"}`, which every record reads (see "The build a record names" below).
 The flavor is in `/opt/nemar/flavor`, one word, and the binary's digest in `/opt/amica/amica15.sha256`; both are written as root, and `nemar-recipe version` prints them as `flavor` and `amica15_sha256` (both `null` outside an image, and a file that is there and holds anything else is refused).
 Its bases are digests: `python:3.12-slim` (used by two stages, with the same digest) and the `uv` image, each named with its version in the Dockerfile's comments.
-The image also holds the recipes package `nemar_process` (the signalJourney validator pointed at the vendored schema, the common layer and `nemar_floor`) and the command `nemar-recipe` in `/opt/venv/bin` (see [recipes.md](recipes.md)).
+The image also holds the recipes package `nemar_process` (the signalJourney validator over the schema its release packages, the common layer and `nemar_floor`) and the command `nemar-recipe` in `/opt/venv/bin` (see [recipes.md](recipes.md)).
 The command is a three-line script (the interpreter, an import and the call of `main`) that `python -m nemar_process` stands behind; a launch specification names it as an argument vector, for example `["nemar-recipe", "run", "nemar-floor", "--dataset-dir", "/data/<id>", ...]`.
 
 ## How a consumer refers to it
@@ -279,5 +279,5 @@ To move a base image, look up the new digest from the registry (for example `doc
 The `python:3.12-slim` digest is written twice, in the builder and in the final stage; change both (a test requires them equal).
 When the lock gains a package that is built from source, or `setuptools` moves in the lock, `tests/images/test_dependencies.py` says what to update.
 To move `uv`, change the version in `images/nemar-python/Dockerfile`, `.github/workflows/ci.yml` and `.github/workflows/image-nemar-python.yml` together; a test compares the three.
-To move the signalJourney commit, see [upstream.md](upstream.md).
+To move the signalJourney release, see [upstream.md](upstream.md).
 The version of the image is never edited: it is the tag, and the tag must equal the version the release process put in `pyproject.toml`.

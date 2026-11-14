@@ -458,6 +458,7 @@ def diagnose(rig, runtime):
         "max_scratch_gb": 1,
         "launcher_dir": str(rig.launcher),
         "default_job_memory_mb": 512,
+        "availability": {"enabled": False},  # how busy this host is must not decide these tests
         "verify_images": False,  # the stand-in NEMAR is on loopback
     }
     write_private(rig.config_file, json.dumps(document))
@@ -493,7 +494,8 @@ def test_each_engine_line_that_is_no_exits_one(tmp_path, limits, mode, failing):
         status, answers, _ = diagnose(rig, "docker")
         assert status == 1
         assert answers[failing] == "no"
-        assert [k for k, v in answers.items() if v == "no"] == [failing]
+        # `priority` is a fact about the host (macOS has no idle I/O class), never a failure here
+        assert [k for k, v in answers.items() if v == "no" and k != "priority"] == [failing]
     finally:
         rig.close()
 

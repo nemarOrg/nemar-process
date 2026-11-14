@@ -23,7 +23,7 @@ from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.tags import compatible_tags, cpython_tags, mac_platforms
 from packaging.utils import canonicalize_name, parse_wheel_filename
-from repo_paths import LOCK, PYPROJECT, ROOT, VENDORED
+from repo_paths import LOCK, PYPROJECT, ROOT
 
 EXACT_PINS = {"eegprep": "0.5.0", "mne": "1.13.2", "pamica": "0.4.0"}
 EEGPREP_EXTRAS = {"mne", "pybids", "picard", "torch"}
@@ -116,17 +116,25 @@ def test_the_zarr_reader_is_pinned_to_a_full_commit_and_zarr_to_its_exact_versio
     assert engine["version"] == "0.5.0"
 
 
-def test_the_signaljourney_validator_is_pinned_to_a_full_commit():
+def test_the_signaljourney_group_is_the_pypi_release_and_nothing_else():
+    assert load_pyproject()["dependency-groups"]["signaljourney"] == ["signalJourney==0.2.0"]
+
+
+def test_the_signaljourney_validator_is_the_release_from_pypi():
     requirement = next(
-        r for r in runtime_requirements() if canonicalize_name(r.name) == "signaljourney-validator"
+        r for r in runtime_requirements() if canonicalize_name(r.name) == "signaljourney"
     )
-    assert requirement.url is not None
-    match = re.fullmatch(
-        r"git\+https://github\.com/signalJourney/signalJourney@([0-9a-f]{40})", requirement.url
-    )
-    assert match, requirement.url
-    locked = next(p for p in load_lock()["package"] if p["name"] == "signaljourney-validator")
-    assert locked["source"]["git"].endswith("#" + match.group(1))
+    assert requirement.url is None, "a release from PyPI, not a git or url source"
+    assert str(requirement.specifier) == "==0.2.0"
+    assert not requirement.extras
+    packages = {p["name"]: p for p in load_lock()["package"]}
+    locked = packages["signaljourney"]
+    assert locked["version"] == "0.2.0"
+    # the index every package without a source of its own comes from, numpy for one
+    assert locked["source"] == packages["numpy"]["source"]
+    assert set(locked["source"]) == {"registry"}
+    assert locked["wheels"], "the release must install from a wheel, with no build"
+    assert "signaljourney-validator" not in packages
 
 
 def test_torch_has_a_cpu_extra_and_an_explicit_cpu_index():
@@ -354,14 +362,6 @@ def test_the_locked_torch_meets_pamicas_floor():
     assert min(versions) >= (2, 12, 1)
 
 
-def test_the_vendored_commit_is_the_locked_commit():
-    source = (VENDORED / "SOURCE").read_text(encoding="utf-8")
-    commit = re.search(r"^commit: ([0-9a-f]{40})$", source, re.MULTILINE)
-    assert commit
-    locked = next(p for p in load_lock()["package"] if p["name"] == "signaljourney-validator")
-    assert locked["source"]["git"].endswith("#" + commit.group(1))
-
-
 # ---- build requirements ----------------------------------------------------------------------
 # A package the lock cannot install from a wheel is built on the machine, in an isolated environment
 # whose build requirements (setuptools and the like) uv resolves afresh: uv.lock does not record
@@ -465,7 +465,8 @@ def test_the_lock_records_the_same_build_constraints_as_the_declaration():
 
 def test_the_source_built_rule_finds_the_known_cases():
     names = built_from_source(load_lock())
-    assert "signaljourney-validator" in names  # a git source
+    assert "eegprep-lean" in names  # a git source
     assert "docopt" in names  # an sdist with no wheel
     assert "numpy" not in names  # wheels for every target
+    assert "signaljourney" not in names  # a release with a wheel: nothing is built
     assert "nemar-process" not in names  # the repository itself

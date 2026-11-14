@@ -1,7 +1,8 @@
 """`nemar-runner doctor`: what this host can and cannot do, one line each, yes or no.
 
-Exit 0 only when every check but `limits` is yes: a host that cannot enforce limits still runs jobs
-(the watchdog stands in for the container runtime's memory limit), a host that fails any other check
+Exit 0 only when every check but `limits`, `availability` and `priority` is yes: a host that cannot
+enforce limits still runs jobs (the watchdog stands in for the container runtime's memory limit), a host
+that is busy right now or cannot lower its own priority still can, and a host that fails any other check
 cannot. Nothing printed is a secret, a token or a value of the configuration beyond a fixed phrase.
 """
 
@@ -15,7 +16,7 @@ import tempfile
 from collections.abc import Callable
 from typing import TextIO
 
-from . import __version__, images, scratch, verify
+from . import __version__, availability, images, priority, scratch, verify
 from .api import Api, ApiError
 from .config import (
     ENGINES,
@@ -31,6 +32,8 @@ from .install import InstallError, find_cosign
 from .logs import Log
 
 Check = tuple[str, bool, str]
+# yes or no, and printed, but not part of the exit status (they say how the host is, not whether it works)
+INFORMATIONAL = ("limits", "availability", "priority")
 
 
 def _line(name: str, ok: bool, note: str) -> str:
@@ -242,7 +245,17 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
     if config is None or config.runtime not in ENGINES:
         add("limits", limits_ok, limits_note)
 
+    if config is not None:
+        verdict = availability.Gate(config, tuning).claim_check(config.slots)
+        add(
+            "availability", verdict.idle, "" if verdict.idle else "reason={}".format(verdict.reason)
+        )
+    else:
+        add("availability", False, "no configuration")
+    done = priority.probe(tuning)
+    add("priority", done, "" if done else "niceness 19 or the idle I/O class could not be set")
+
     for name, ok, note in checks:
         out.write(_line(name, ok, note) + "\n")
     out.flush()
-    return 0 if all(ok for name, ok, _ in checks if name != "limits") else 1
+    return 0 if all(ok for name, ok, _ in checks if name not in INFORMATIONAL) else 1

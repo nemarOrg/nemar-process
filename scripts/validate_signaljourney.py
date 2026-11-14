@@ -1,11 +1,12 @@
-"""Validate a signalJourney file against the schema vendored into the recipes package.
+"""Validate a signalJourney file against the schema packaged with the signalJourney release.
 
     python scripts/validate_signaljourney.py FILE
 
 Exit 0 when the file is valid, 1 with the validator's messages on standard error when it is not (or
 when it is not JSON, or cannot be read), 2 for a usage error. It is a wrapper around the validator
-of the ``signaljourney`` dependency group, pointed at the vendored schema by
-``nemar_process.sj.validator`` (docs/upstream.md); it needs nothing else from the runtime image, so
+of the ``signaljourney`` dependency group, built by ``nemar_process.sj.validator``, which first
+checks the packaged schema against its pinned tree digest (docs/upstream.md). It needs nothing
+else from the runtime image, so
 ``uv run --group signaljourney python scripts/validate_signaljourney.py FILE`` runs it. It checks
 the schema only: the timestamps, references and plan hash the recipes also check
 (``nemar_process.common.records.check``) are not repeated here.

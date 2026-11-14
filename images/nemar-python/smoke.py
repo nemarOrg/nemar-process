@@ -57,7 +57,7 @@ IMPORTS = {
     "torch": "torch",
     "picard": "python-picard",
     "bids": "pybids",
-    "signaljourney_validator": "signaljourney-validator",
+    "signaljourney_validator": "signalJourney",
     "nemar_process": None,
 }
 ENVIRONMENT = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "PYTHONHASHSEED")

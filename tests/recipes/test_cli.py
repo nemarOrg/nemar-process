@@ -629,11 +629,11 @@ def test_a_validator_that_cannot_be_built_ends_the_run_before_it_writes_anything
     start: a validator that fails once would fail every record."""
     from nemar_process import sj
 
-    monkeypatch.setattr(sj, "SCHEMA_DIR", tmp_path / "no-schema")
+    monkeypatch.setattr(sj, "SIGNALJOURNEY_SCHEMA_TREE_SHA256", "0" * 64)
     out = tmp_path / "o"
     code, _, err = cli("run", "nemar-floor", "--dataset-dir", DATASET, "--out", out)
     assert code == 1
-    assert err.strip().splitlines()[-1] == "internal_error: FileNotFoundError"
+    assert err.strip().splitlines()[-1] == "internal_error: RuntimeError"
     assert "Traceback" not in err
     assert not out.exists()
 

@@ -36,6 +36,15 @@ OPTIONAL_KEYS = (
     "self_update",
     "install_prefix",
     "cosign_path",
+    "availability",
+)
+AVAILABILITY_KEYS = (
+    "enabled",
+    "max_load_per_core",
+    "reserve_memory_mb",
+    "claim_memory_mb",
+    "backoff_seconds",
+    "reservation_dirs",
 )
 ENGINES = ("docker", "podman")
 
@@ -49,6 +58,27 @@ _LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 class ConfigError(Exception):
     """The configuration or the secret cannot be used; the message is safe to print."""
+
+
+@dataclass(frozen=True)
+class Availability:
+    """When the runner claims, on a workstation other people use (docs/runner.md, "Sharing a
+    workstation"). A key left out of the `availability` object has the value below; None is a value
+    worked out from the host when it is used.
+
+    ``enabled`` False turns off everything but the free-scratch rule (`max_scratch_gb`): no memory,
+    load or pause rule, no check before a claimed job starts, no backoff.
+    ``reserve_memory_mb`` None is the larger of 8192 and a tenth of the host's memory.
+    ``claim_memory_mb`` None is `default_job_memory_mb` when it is set, else 4096.
+    ``reservation_dirs`` () is no directory; `load_config` fills in the `reservations` directory
+    beside the configuration file when the key is absent."""
+
+    enabled: bool = True
+    max_load_per_core: float = 0.9
+    reserve_memory_mb: int | None = None
+    claim_memory_mb: int | None = None
+    backoff_seconds: float = 1800.0
+    reservation_dirs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +106,7 @@ class Config:
     self_update: bool = True
     install_prefix: str | None = None
     cosign_path: str | None = None
+    availability: Availability = Availability()
 
 
 @dataclass(frozen=True)
@@ -101,6 +132,17 @@ class Tuning:
     retry_cap_seconds: float = 60.0
     token_margin_seconds: float = 60.0
     launch_path: str = LAUNCH_PATH
+    # Where the host's memory and load are read from: only a test points it at files it wrote.
+    proc_root: str = "/proc"
+    # Where the control groups are mounted, for the memory limit of the runner's own group: only a test
+    # points it at a tree it wrote (the runner's group is found through `proc_root`).
+    cgroup_root: str = "/sys/fs/cgroup"
+    # How long the memory promised to a job that has started stays counted against the next job's room
+    # (`availability.Gate`): after it the job's own memory is in what the host says is available.
+    settle_seconds: float = 120.0
+    # False leaves this process's own priority alone: only a test that runs the runner inside the
+    # test process sets it (the lowered priority cannot be raised again, and would last the session).
+    lower_priority: bool = True
     # `cosign verify` of an image, and how long a verification is believed (docs/runner.md, "The image")
     cosign_timeout_seconds: float = 120.0
     verified_ttl_seconds: float = 24 * 3600.0
@@ -195,6 +237,58 @@ def _int(value: Any, key: str, low: int, high: int) -> int:
     return value
 
 
+def _number(value: Any, key: str, low: float, high: float) -> float:
+    """A whole or decimal number above ``low`` (a zero is refused) and at most ``high``."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError("{} must be a number".format(key))
+    if not low < value <= high:
+        raise ConfigError("{} must be above {} and at most {}".format(key, low, high))
+    return float(value)
+
+
+def default_reservation_dir(config_path: str) -> str:
+    """The `reservations` directory beside the configuration file."""
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), "reservations")
+
+
+def _availability(value: Any, config_path: str) -> Availability:
+    """The `availability` object: its keys are checked as the top level's are (an unknown key is
+    refused, and the message names the key, never a value)."""
+    if not isinstance(value, dict):
+        raise ConfigError("availability must be an object")
+    unknown = sorted(set(value) - set(AVAILABILITY_KEYS))
+    if unknown:
+        raise ConfigError("unknown availability key {}".format(str(unknown[0])[:40]))
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("availability enabled must be true or false")
+    reserve = value.get("reserve_memory_mb")
+    if reserve is not None:
+        reserve = _int(reserve, "availability reserve_memory_mb", 0, 16_777_216)
+    claim = value.get("claim_memory_mb")
+    if claim is not None:
+        claim = _int(claim, "availability claim_memory_mb", 1, 16_777_216)
+    directories = value.get("reservation_dirs")
+    if directories is None:
+        paths = (default_reservation_dir(config_path),)
+    elif not isinstance(directories, list) or len(directories) > 16:
+        raise ConfigError("availability reservation_dirs must be a list of at most 16 paths")
+    else:
+        paths = tuple(_path(item, "availability reservation_dirs") for item in directories)
+    return Availability(
+        enabled=enabled,
+        max_load_per_core=_number(
+            value.get("max_load_per_core", 0.9), "availability max_load_per_core", 0, 1024
+        ),
+        reserve_memory_mb=reserve,
+        claim_memory_mb=claim,
+        backoff_seconds=float(
+            _int(value.get("backoff_seconds", 1800), "availability backoff_seconds", 1, 604_800)
+        ),
+        reservation_dirs=paths,
+    )
+
+
 def default_launcher_dir() -> str:
     """The `launcher` directory beside this package's repository, when run from a checkout."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -255,6 +349,7 @@ def load_config(path: str) -> Config:
     cosign_path = document.get("cosign_path")
     if cosign_path is not None:
         cosign_path = _path(cosign_path, "cosign_path")
+    availability = _availability(document.get("availability", {}), path)
     config = Config(
         api_base=_api_base(document["api_base"]),
         secret_file=_path(document["secret_file"], "secret_file"),
@@ -271,6 +366,7 @@ def load_config(path: str) -> Config:
         self_update=self_update,
         install_prefix=install_prefix,
         cosign_path=cosign_path,
+        availability=availability,
     )
     if not config.verify_images and not _loopback_http(config.api_base):
         raise ConfigError(
