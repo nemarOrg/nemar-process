@@ -1,0 +1,27 @@
+# The nemar-runner as a systemd USER service (docs/runner.md, "Running it as a service").
+# `nemar_runner install --write-units` fills in the two placeholders (the install prefix and the
+# runner's configuration file) and writes this to ~/.config/systemd/user/. Lingering is what lets a user
+# service run with nobody logged in: `loginctl enable-linger <account>`, which needs root once.
+[Unit]
+Description=NEMAR runner
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I -S @PREFIX@/bin/boot.py run --config @CONFIG@
+Restart=always
+RestartSec=30
+KillMode=mixed
+TimeoutStopSec=180
+NoNewPrivileges=yes
+UMask=0077
+# The shared-workstation priority: the runner and everything it starts (the launcher, the container
+# runtime's own client, the jobs under Apptainer and rootless Podman) run at the lowest CPU and I/O
+# priority. CPUWeight and IOWeight apply only where the user manager has the cpu and io controllers
+# delegated; elsewhere systemd ignores them, and the niceness and the idle I/O class still apply.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=1
+IOWeight=1
+
+[Install]
+WantedBy=default.target

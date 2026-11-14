@@ -16,6 +16,7 @@ import time
 from . import __version__, containers, contract, images, pids, scratch
 from .api import Api, ApiError
 from .config import ENGINES, Config, ConfigError, Tuning
+from .install import read_current
 from .job import JobRunner
 from .logs import Log
 
@@ -50,6 +51,12 @@ class Agent:
         self._lock_fd: int | None = None
         self.refused: str | None = None
         self.draining = False  # stop claiming, let the jobs held finish
+        # the version `<install_prefix>/current` names when it is not this one: claims stop, and the
+        # runner exits 0 once it holds no job, so that systemd starts the new version (idle switch)
+        self.update_to: str | None = None
+        self._update_logged: str | None = None
+        # decided once: does this process run the code installed under install_prefix?
+        self._switch_on: bool | None = None
         self.runner_label: str | None = None  # the registration id, under an engine only
         self.python: str | None = None  # the launcher's python3, pinned at start
 
@@ -101,6 +108,10 @@ class Agent:
         if problem is not None:
             raise ConfigError(problem)
         self.python = images.resolve_python(self.tuning)
+        if self.config.install_prefix is not None:
+            problem = images.dir_problem(self.config.install_prefix)
+            if problem is not None:
+                raise ConfigError("install_prefix {}".format(problem))
 
     def _identify(self) -> None:
         """Under Docker or Podman: the registration id from NEMAR, which labels the containers the
@@ -233,12 +244,63 @@ class Agent:
             self.wait_for_jobs()
         return EXIT_REFUSED if self.refused else EXIT_OK
 
+    def update_target(self) -> str | None:
+        """The version `<install_prefix>/current` names when it is not the one running, else None
+        (also when there is no `install_prefix`, or `current` is missing or not a version)."""
+        prefix = self.config.install_prefix
+        if prefix is None:
+            return None
+        current = read_current(prefix)
+        return current if current is not None and current != self.version else None
+
+    def switch_enabled(self) -> bool:
+        """Whether the idle switch applies to this process: only when it runs the code that
+        `nemar_runner install` put under `install_prefix`, that is, this package is exactly
+        `<install_prefix>/versions/<this version>/runner/nemar_runner`. A runner started from a checkout,
+        or from another prefix than the configuration names, would otherwise exit at every start (the
+        version `current` names is not the one it runs) and never claim; it logs `update_switch_off`
+        once and goes on claiming instead. Silent when there is no `install_prefix`."""
+        if self._switch_on is None:
+            prefix = self.config.install_prefix
+            if prefix is None:
+                self._switch_on = False
+            else:
+                here = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+                installed = os.path.realpath(
+                    os.path.join(prefix, "versions", self.version, "runner", "nemar_runner")
+                )
+                self._switch_on = here == installed
+                if not self._switch_on:
+                    self.log.warn("update_switch_off", reason="not_run_from_install_prefix")
+        return self._switch_on
+
+    def _switch_now(self) -> bool:
+        """The idle switch. True only when a newer install is waiting AND no job is held: the caller
+        then returns, the runner exits 0 and systemd starts the version `current` names. While a job is
+        held the runner takes no new one (so a busy runner does get an idle moment) and never
+        interrupts the job it has."""
+        self.update_to = self.update_target() if self.switch_enabled() else None
+        if self.update_to is None:
+            return False
+        jobs = self.running()
+        if jobs == 0:
+            self.log.info("update_pending", **{"from": self.version, "to": self.update_to})
+            return True
+        if self._update_logged != self.update_to:
+            self._update_logged = self.update_to
+            self.log.info(
+                "update_waiting", **{"from": self.version, "to": self.update_to}, jobs=jobs
+            )
+        return False
+
     def _poll(self) -> None:
         failures = 0
         while not self.stop.is_set():
             pause = self.tuning.poll_seconds
+            if self._switch_now():
+                return
             try:
-                jobs = self.claim_once()
+                jobs = [] if self.update_to is not None else self.claim_once()
                 failures = 0
                 if jobs:
                     self.log.info("claimed", jobs=len(jobs))

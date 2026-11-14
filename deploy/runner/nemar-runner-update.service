@@ -1,0 +1,16 @@
+# The daily check for a newer signed runner release (docs/runner.md, "Running it as a service"): it
+# installs one beside the running version and restarts nothing; the runner switches itself when it
+# holds no job. A configuration with "self_update": false makes this do nothing.
+[Unit]
+Description=NEMAR runner update check
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -S @PREFIX@/bin/boot.py self-update --config @CONFIG@
+NoNewPrivileges=yes
+UMask=0077
+# The same lowest priority as the runner.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=1
+IOWeight=1
