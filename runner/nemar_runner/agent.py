@@ -98,10 +98,10 @@ class Agent:
         if not self.tuning.lower_priority:
             return
         result = priority.lower(self.tuning)
-        if result.nice and result.io:
+        if result.nice and result.io_idle:
             self.log.info("priority_set", nice=priority.NICE, io_class="idle")
         else:
-            self.log.warn("priority_unavailable", nice=result.nice, io_idle=result.io)
+            self.log.warn("priority_unavailable", nice=result.nice, io_idle=result.io_idle)
 
     def _refuse_untrusted(self) -> None:
         os.makedirs(self.config.sif_root, mode=0o700, exist_ok=True)

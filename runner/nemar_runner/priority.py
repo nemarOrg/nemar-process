@@ -34,7 +34,7 @@ _SYSCALLS = {"x86_64": (251, 252), "aarch64": (30, 31), "riscv64": (30, 31)}
 
 class Result(NamedTuple):
     nice: bool  # niceness is 19 or more
-    io: bool  # the I/O class is idle
+    io_idle: bool  # the I/O class is idle
 
 
 def lower_nice() -> bool:
@@ -115,7 +115,7 @@ _PROBE = (
     "import sys; sys.path.insert(0, sys.argv[1]); "
     "from nemar_runner import priority; from nemar_runner.config import Tuning; "
     "result = priority.lower(Tuning(launch_path=sys.argv[2])); "
-    "sys.exit(0 if result.nice and result.io else 1)"
+    "sys.exit(0 if result.nice and result.io_idle else 1)"
 )
 
 
