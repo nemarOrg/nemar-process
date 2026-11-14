@@ -23,13 +23,18 @@ WHERE IT RUNS. The finished case needs a real Apptainer, the built SIF, bun and 
 with its dependencies. Without any of them it skips with the reason stated ("apptainer absent" when there
 is no Apptainer); with ``NEMAR_REQUIRE_APPTAINER=1`` (the ``runner-stack`` CI job) a skip is a failure, so
 CI cannot pass by skipping. The image-missing case ends before any container is started, so it needs
-only bun and the checkout.
+only bun and the checkout. The variable keeps the name of the Apptainer gate used by the other tests, but
+here it gates EVERY way this module can fail to run: a missing Apptainer, SIF, bun or nemar-cli checkout
+(or its dependencies) is a failure under it, never a skip.
 
-THE RUNNER'S TRUST CHECKS ARE NOT RELAXED. The runner refuses a launch PATH directory that group or others
-can write (a CI image may leave ``/usr/local/bin`` so), so the test gives it a launch PATH of its own: a
-private directory holding ``python3`` and an ``apptainer`` wrapper that restores a system PATH and executes
-the real binary. The wrapper is how a real binary is reached from a clean PATH; it changes nothing the
-runtime does.
+WHAT THE RUNNER'S TRUST CHECKS DO AND DO NOT COVER HERE. The runner refuses a launch PATH directory that
+group or others can write (a CI image may leave ``/usr/local/bin`` so), and it is not relaxed. The test
+gives it a launch PATH of its own: a private directory (mode 0700) holding ``python3`` and an ``apptainer``
+wrapper that restores a system PATH and executes the real binary. The runner's trust check vets THE
+WRAPPER in that private directory. It does NOT vet the real Apptainer binary or its directory (the
+wrapper stops the check at itself), and the runner's default launch PATH (``/usr/local/bin:/usr/bin:/bin``)
+is not exercised at all. Those two are not covered by this test;
+the wrapper changes nothing the runtime itself does.
 """
 
 from __future__ import annotations
@@ -135,6 +140,18 @@ class Stack:
     owner_key: str
     admin_key: str
     log: Path
+
+    def log_tail(self, lines: int = 60) -> str:
+        """The last lines of the stack's own output, for the message of a failed assertion."""
+        try:
+            text = self.log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return "(the stack's log cannot be read)"
+        return "\n".join(text.splitlines()[-lines:])
+
+    def explain(self, what: object) -> str:
+        """``what`` followed by the stack's log tail: the message of an assertion about a stack answer."""
+        return "{}\n--- stack log (tail) ---\n{}".format(what, self.log_tail())
 
     def call(self, method: str, path: str, bearer: str, body: Any = None) -> tuple[int, Any]:
         """A real request to the stack's loopback address (the Host its guard accepts is the dialed one)."""
@@ -257,7 +274,7 @@ def make_runner_host(tmp: Path, stack: Stack) -> RunnerHost:
             "trust": "lab",
         },
     )
-    assert status == 201, body
+    assert status == 201, stack.explain(body)
     secret = body["secret"]
     assert RUNNER_SECRET_RE.fullmatch(secret)
     host = tmp / "runner-host"
@@ -273,6 +290,8 @@ def make_runner_host(tmp: Path, stack: Stack) -> RunnerHost:
     secret_file.write_text(secret + "\n", encoding="utf-8")
     secret_file.chmod(0o600)
     if APPTAINER is not None:
+        # The runner's trust check vets THIS wrapper in the private directory, not the real binary or its
+        # directory, and the default launch PATH is not used here (see the module docstring).
         wrapper = launch_path / "apptainer"
         wrapper.write_text(
             "#!/bin/sh\nPATH='{}'\nexport PATH\nexec '{}' \"$@\"\n".format(SYSTEM_PATH, APPTAINER),
@@ -332,21 +351,23 @@ def dispatch(stack: Stack) -> str:
         stack.admin_key,
         {"recipe": "nemar-floor-zarr", "dataset": FIXTURE_DATASET, "executor": "runner"},
     )
-    assert status < 300, body
-    assert body["ok"] is True, body
-    assert body["dispatched"] == 1, body
-    assert body["executor"] == "runner", body
+    assert status < 300, stack.explain(body)
+    assert body["ok"] is True, stack.explain(body)
+    assert body["dispatched"] == 1, stack.explain(body)
+    assert body["executor"] == "runner", stack.explain(body)
     (result,) = body["results"]
-    assert result["ok"] is True, result
-    assert result["dataset_id"] == FIXTURE_DATASET, result
+    assert result["ok"] is True, stack.explain(result)
+    assert result["dataset_id"] == FIXTURE_DATASET, stack.explain(result)
     return result["job_id"]
 
 
 def job_record(stack: Stack, job_id: str) -> dict:
     """The Worker's own record of the job (the administrator's job list)."""
     status, body = stack.call("GET", "/admin/compute/jobs?limit=50", stack.admin_key)
-    assert status == 200, body
-    (job,) = [j for j in body["jobs"] if j["id"] == job_id]
+    assert status == 200, stack.explain(body)
+    found = [j for j in body["jobs"] if j["id"] == job_id]
+    assert len(found) == 1, stack.explain(body)
+    (job,) = found
     return job
 
 
@@ -374,14 +395,14 @@ def test_a_job_finishes_in_a_real_apptainer_container(stack_for, tmp_path):
     assert done.returncode == 0, done.stderr + (host.root / "runner.log").read_text()[-3000:]
 
     job = job_record(stack, job_id)
-    assert job["state"] == "finished", (job, runner_log(host))
-    assert job["executor"] == "runner"
-    assert job["failure_code"] is None
-    assert job["outputs_completed"] is True
+    assert job["state"] == "finished", stack.explain((job, runner_log(host)))
+    assert job["executor"] == "runner", stack.explain(job)
+    assert job["failure_code"] is None, stack.explain(job)
+    assert job["outputs_completed"] is True, stack.explain(job)
     # the usage is the runner's measurement: set, and never a number the Worker made up
-    assert job["runner_wall_seconds"] is not None
-    assert job["runner_cpu_seconds"] is not None
-    assert job["runner_max_rss_mb"] is not None
+    assert job["runner_wall_seconds"] is not None, stack.explain(job)
+    assert job["runner_cpu_seconds"] is not None, stack.explain(job)
+    assert job["runner_max_rss_mb"] is not None, stack.explain(job)
     # the runner's directory for the job is gone, and the log says it was discarded
     assert list((host.root / "jobs").iterdir()) == []
     discarded = [
@@ -404,11 +425,11 @@ def test_a_missing_image_fails_the_job_with_the_image_missing_detail(stack_for, 
     assert done.returncode == 0, done.stderr + (host.root / "runner.log").read_text()[-3000:]
 
     job = job_record(stack, job_id)
-    assert job["state"] == "failed", (job, runner_log(host))
-    assert job["executor"] == "runner"
-    assert job["failure_code"] == "runtime_error", job
-    assert job["failure_detail"] == "image_missing", job
-    assert job["outputs_completed"] is False
+    assert job["state"] == "failed", stack.explain((job, runner_log(host)))
+    assert job["executor"] == "runner", stack.explain(job)
+    assert job["failure_code"] == "runtime_error", stack.explain(job)
+    assert job["failure_detail"] == "image_missing", stack.explain(job)
+    assert job["outputs_completed"] is False, stack.explain(job)
     assert list((host.root / "jobs").iterdir()) == []
     assert any(
         line["event"] == "scratch_discarded" and line["job"] == job_id for line in runner_log(host)
