@@ -32,7 +32,7 @@ SIGTERM, SIGHUP or SIGINT stops claiming, terminates the jobs still running (SIG
 ## Configuration
 
 A JSON file at `$XDG_CONFIG_HOME/nemar-runner/config.json` (default `~/.config/nemar-runner/config.json`; an empty or relative `XDG_CONFIG_HOME` is ignored, as the specification says).
-Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_images` and `cosign_path` is required, and an unknown key is refused.
+Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_images` and the three keys of [the service](#running-it-as-a-service) is required, and an unknown key is refused.
 
 | Key | Meaning |
 |---|---|
@@ -47,7 +47,7 @@ Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_image
 | `default_job_memory_mb` | a positive whole number of megabytes: the memory size of a job that the claim gives none, REQUIRED when `runtime` is `docker` or `podman` (the runner refuses to start without it), optional under Apptainer, where it is never applied |
 | `sif_pull` | optional boolean, default `true`: a missing Apptainer image is pulled, and the pulled file is checked against its signature before it is used; when false the runner never pulls and a missing image fails the job as `image_missing` ([The image](#the-image)) |
 | `verify_images` | optional boolean, default `true`: before an image is pulled or run, the runner proves with cosign that the image workflow signed it, and a job whose image does not verify ends as `image_unverified`; `false` is refused unless `api_base` is a loopback `http://` address (the local stack and CI) ([The image](#the-image)) |
-| `cosign_path` | optional absolute path of the `cosign` binary, checked like `python3` (below): required when `cosign` is not on `/usr/local/bin:/usr/bin:/bin`, and used instead of one that is |
+| `cosign_path` | optional absolute path of the `cosign` binary that the verification of an image ([The image](#the-image)) and `self-update` run: when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and it is required when `cosign` is not on `/usr/local/bin:/usr/bin:/bin`; `install` ignores it and takes `--cosign-path` ([a configuration for the service](#a-configuration-for-the-service)) |
 | `launcher_dir` | optional: the directory that holds the `nemar_launch` package and its `schema` directory (default: the `launcher` directory of this checkout) |
 
 The runner refuses to start when the configuration file or the secret file can be reached by group or others (any group or other permission bit: use mode 0600), is not the user's own regular file (a link is refused), or when `root` is not a directory the user owns, or can be written by group or others.
@@ -60,7 +60,7 @@ Nothing else that runs jobs, or that you do not trust, may run as that account.
 **What it will not run.**
 At start the runner also refuses a `launcher_dir` with any file or directory that is a link, is owned by someone other than the user or root, or that group or others can write; a `sif_root` that is not the user's own directory or that group or others can write; and a `python3` on the launch PATH (the first of `/usr/local/bin:/usr/bin:/bin`) that, or whose directory, group or others can write, that is owned by someone else, or that is older than Python 3.9.
 Every directory of the launch PATH up to the one holding `python3` (and the runtime) must be the user's or root's and not writable by group or others, the `python3` path is resolved once at start and pinned for every job, and the runtime binary gets the same check.
-With `verify_images` true the runner also refuses to start without a `cosign` it can trust: `cosign_path` must be an absolute path to a regular file, not a link, owned by the user or root, with neither it nor its directory writable by group or others, and without `cosign_path` the `cosign` on the launch PATH gets the `python3` check.
+With `verify_images` true the runner also refuses to start without a `cosign` it can trust, found as `self-update` finds its own: when `cosign_path` is set it is the cosign (and any cosign on the launch PATH is ignored), and it must be an absolute path to a regular file, not a link, owned by the user or root, with neither it nor its directory writable by group or others; when it is not set the cosign is the first `cosign` on the launch PATH, which gets the `python3` check (every directory of the PATH up to it, and the program, the user's or root's and not writable by group or others).
 Engine helpers (`ps`, `inspect`, `rm`, `--version`, the preflight) run with `PATH` and `LANG` only, so the engine's default socket is the one used; a rootless engine, a non-default `DOCKER_HOST` or `XDG_RUNTIME_DIR` is unsupported (the launcher does not support a rootless daemon either).
 
 ## What a job gets
@@ -114,13 +114,14 @@ The decoded text holds the job token and is never logged.
 The identity is a constant of `runner/nemar_runner/verify.py` (with the issuer `https://token.actions.githubusercontent.com`), and a test holds it equal to the workflow's own `SIGNING_IDENTITY`.
 A tag is never an identity.
 The check is on unless `verify_images` is false, which the runner allows only for a loopback `http://` `api_base`.
+**Which cosign.** The file `cosign_path` names when it is set (and then no cosign on the launch PATH is looked for), else the first `cosign` on the launch PATH, vetted as `python3` is ([Configuration](#configuration)); the runner looks again before every verification, and a cosign that is not there or not trusted any more ends the job (`cosign_missing`).
 
 **The reference.**
 The only reference the runner hands cosign is exactly `ghcr.io/nemarorg/nemar-python@sha256:` and 64 lowercase hexadecimal digits, with `docker://` allowed in front, whose digits are the claim's `image.digest`.
 A tag, another repository or registry, or another digest ends the job (`reference_refused`) before cosign runs.
 
 **Docker and Podman.**
-The runner runs `cosign verify <reference> --certificate-identity-regexp <identity> --certificate-oidc-issuer <issuer> --output json` with `PATH` (the launch PATH) and a `HOME` of its own, `<root>/cosign` (mode 0700, where cosign keeps the Sigstore trust root it fetches the first time), and nothing else in the environment, one cosign at a time, with a limit of 120 seconds.
+The runner runs `cosign verify <reference> --certificate-identity-regexp <identity> --certificate-oidc-issuer <issuer> --certificate-github-workflow-repository nemarOrg/nemar-process --output json` (the repository of the certificate's GitHub Workflow Repository extension is asked as well as the identity; no trigger is, because the image workflow runs for a tag and for a manual dispatch, and it is not a reusable workflow, whose caller would inherit the identity) with `PATH` (the launch PATH) and a `HOME` of its own, `<root>/cosign` (mode 0700, where cosign keeps the Sigstore trust root it fetches the first time), and nothing else in the environment, one cosign at a time, with a limit of 120 seconds.
 It passes only when cosign exits 0 and every entry of the answer names the digest in `critical.image.docker-manifest-digest`.
 The launcher then pulls that digest, and the engine checks the pulled bytes against it.
 
@@ -139,7 +140,7 @@ A pull that fails, or one that writes nothing, ends the job as `image_missing`.
 With `sif_pull` false a missing file ends the job as `image_missing` before anything is verified, and a placed file is still hashed against the signed layer.
 A pull happens before any heartbeat: if the image took longer than the lease less 60 seconds, the runner abandons that job without completing it (`claim_abandoned_during_pull`), so the lease expires and the job waits again, unstarted; the pulled file stays.
 
-**What was proven is remembered**, in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed): the image digest, the SIF artifact's manifest and layer digests (Apptainer), the identity, cosign's version and the time.
+**What was proven is remembered**, in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed): the image digest, its `kind` (`image`, a digest cosign verified, or `sif`, the SIF artifact cosign verified, which proves nothing of the image digest itself and so never satisfies the other kind), the SIF artifact's manifest and layer digests (`sif`), the identity, cosign's version and the time.
 An entry is believed for 24 hours and only if its identity is the current one; after that the job verifies again.
 An entry never vouches for a file: the file is hashed every time it is used.
 A damaged, linked, group-readable or foreign entry is ignored and written again.
@@ -151,7 +152,7 @@ A damaged, linked, group-readable or foreign entry is ignored and written again.
 | `reference_refused` | the reference is not the image repository at the claimed digest |
 | `digest_mismatch` | cosign exited 0 but named another digest (or, for the SIF artifact, no digest, or two) |
 | `cosign_missing` | no cosign the runner can trust is there now |
-| `cosign_failed` | cosign exited non-zero (no signature, another identity, no network), could not be started, or its answer is not a list of entries that name a digest |
+| `cosign_failed` | cosign exited non-zero (no signature, another identity or repository, no network), could not be started, or its answer is not a list of entries that name a digest; or `<root>/cosign` is not a directory the runner can use (`why` `home_unsafe`) |
 | `cosign_timeout` | cosign took longer than 120 seconds and was killed |
 | `manifest_mismatch` | the registry could not give the artifact's manifest, or gave one that does not hash to the digest cosign named, or one that does not hold exactly one layer |
 | `layer_mismatch` | a file, placed or pulled, does not hash to the signed layer |
@@ -278,11 +279,139 @@ One line each, `<check>: yes` or `no`, with a fixed phrase after a no:
 Exit 0 only if every line but the Apptainer `limits` line is yes (the `cosign` and `signature` lines are asked for only when `verify_images` is true): a host that cannot enforce limits still runs jobs, with the watchdog.
 `run` and `once` run the same probe the first time an image is available and set `NEMAR_ENFORCE_LIMITS` from it; Docker and Podman are never claimed, because the launcher owns their flags and checks them with the preflight.
 
+## Running it as a service
+
+On a workstation the runner runs as a systemd user service, installed and updated only from a release that CI built and signed.
+Nothing here needs more than the runner's own account: the two steps that need the system's owner (lingering and the cosign program) are listed at the end.
+
+Abbreviations used in this section: input and output (I/O), OpenID Connect (OIDC).
+
+### The release
+
+A release is a tag `nemar-runner-vX.Y.Z` on a commit of `main`, where `X.Y.Z` is the runner's own version (`nemar_runner.__version__`) at that commit.
+The workflow `.github/workflows/runner-release.yml` ([release.md](release.md#tags)) refuses a commit that is not reachable from `main` and a tag that disagrees with the version, builds `nemar-runner-X.Y.Z.tar.gz` with `scripts/build_runner_bundle.py`, signs it with cosign (keyless, so no key exists to steal), verifies its own signature, and attaches the file and `nemar-runner-X.Y.Z.tar.gz.sigstore.json` to the GitHub release of the tag, never replacing a file that is already there.
+The bundle holds `runner/`, `launcher/` and `deploy/runner/` (`boot.py` and the unit files); two builds of the same tree are byte-identical on one toolchain.
+Only the signing job holds the OIDC token, and it runs no script of the repository: it downloads the built file, signs it and checks the signature.
+
+What a signature says is fixed in this repository (`IDENTITY_REGEXP` in `runner/nemar_runner/install.py`, which a test holds equal to the workflow's tag trigger): the certificate must name the runner release workflow of this repository, run for a tag of that pattern, its issuer must be GitHub's OIDC issuer, and (as defense in depth, so that the same workflow run by another repository, or by a caller started by any event but push, could not match) its workflow repository must be `nemarOrg/nemar-process` and its trigger `push`.
+These two checks do not replace the owner's tag ruleset on `nemar-runner-v*`, which stays the real control: in a reusable workflow the repository and the event are the caller's, so a caller in this repository started by a push would still pass all four checks if a tagged `runner-release.yml` ever gained `workflow_call`.
+The workflow checks its own signature against the same four things before it attaches a file, so a field that does not read as expected fails a release and never an install; the real certificate fields are confirmed in the staging drills (S2D).
+To check a release by hand:
+
+```bash
+cosign verify-blob nemar-runner-X.Y.Z.tar.gz \
+  --bundle nemar-runner-X.Y.Z.tar.gz.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/nemarOrg/nemar-process/\.github/workflows/runner-release\.yml@refs/tags/nemar-runner-v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-repository nemarOrg/nemar-process \
+  --certificate-github-workflow-trigger push
+```
+
+The tag in the certificate is any release tag, so the installer also requires the version inside the bundle to be the version it was asked for: a correctly signed bundle of another version is refused, and an old release cannot be offered as a new one.
+
+### Installing and updating
+
+```bash
+cd runner && python3 -m nemar_runner install --version X.Y.Z --prefix <prefix> --write-units
+```
+
+`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign is the file `--cosign-path` names when it is given and otherwise `cosign` on the launch PATH; `install` does not read the configuration, so the configuration's `cosign_path` is for `self-update` alone; cosign sees only `PATH`, `LANG` and a `HOME` inside the prefix, so it uses none of the account's proxy settings or credentials), and refuses on any failure: nothing is unpacked, written or switched.
+Only then it unpacks the bytes it verified into `<prefix>/versions/X.Y.Z/` and writes `<prefix>/current` (through a temporary name and a rename).
+Unpacking accepts plain files and directories under `runner/`, `launcher/` and `deploy/` and nothing else: a link, a device, an absolute name, a `..` component, a duplicate or an oversized file refuses the whole bundle.
+Files are mode 0600 (0700 where the archive marks them executable) and directories 0700, so the tree passes the checks the runner makes of `launcher_dir`.
+The checkout `install` is run from is trusted to run the installer and nothing more: `boot.py` and the unit files come out of the verified bundle.
+
+```text
+<prefix>/
+  current                    the version to run (X.Y.Z)
+  bin/boot.py                from the newest installed bundle
+  versions/X.Y.Z/            runner/, launcher/, deploy/runner/
+  locks/X.Y.Z.lock           held shared by a running runner of that version
+```
+
+The prefix must be a directory of the account's own that group and others cannot write, and so must the directories under it.
+`install` removes versions older than the newest two, but never the one `current` names, the one it has just installed, or one a running runner holds the lock of, so a version that is running is never deleted.
+Installing a version that is already there downloads nothing and only switches `current`.
+A rollback is `install --version <older>` **and** `"self_update": false` in the configuration: the next run of the timer would otherwise install the newer release again.
+Turn `self_update` back on once a fixed release exists.
+`--write-units` also writes the three unit files below into `~/.config/systemd/user/` (or `--units-dir`), with the prefix and the configuration path (made absolute first) filled in; it enables and starts nothing.
+`self-update` never rewrites the unit files: a release that changes them reaches a workstation only when its account's owner runs `install --write-units` again.
+
+The daily `self-update` (the timer below) lists the repository's releases, takes the highest `nemar-runner-v*` that is newer than `current`, is not a draft or a prerelease and has both files, and installs it as `install` does.
+It never restarts anything.
+The running runner switches itself: between claims, when `<prefix>/current` names a version other than its own and it holds no job, it logs `update_pending from=<a> to=<b>` and exits 0, and systemd starts the version `current` names (`boot.py` reads it).
+While an update is waiting for a job to end the runner claims nothing new, so a busy runner does reach an idle moment, and the job it holds is never interrupted.
+The switch applies only to a runner that runs the code `install` put under the configured prefix (its package is `<install_prefix>/versions/<its version>/runner/nemar_runner`); a runner started from a checkout, or from a prefix other than the configuration's `install_prefix`, logs `update_switch_off` once and keeps claiming, because it could never become the version `current` names and would otherwise exit at every start.
+`once` and `doctor` are not affected.
+
+`self-update` takes the highest release of the tag family, so a release that carries a higher version and both files stops every workstation from updating until it is deleted: a signature is still required, so it installs nothing, but each daily run then refuses (`verify_failed`) and the update is blocked.
+The remedy is to delete that release from the repository's releases; who can create the tag, and so such a release, is the owner's tag rule on `nemar-runner-v*` ([release.md](release.md#what-the-repository-owner-sets)).
+
+### The units
+
+`nemar-runner.service` runs `/usr/bin/python3 -I -S <prefix>/bin/boot.py run --config <file>` with `Restart=always`, `RestartSec=30`, `KillMode=mixed`, `TimeoutStopSec=180`, `NoNewPrivileges=yes` and `UMask=0077`.
+It carries no `User=`, no capability and no other directive that would give the runner more than its account has.
+`boot.py` reads `current`, accepts only `X.Y.Z`, refuses a prefix, a version or a file in it that is a link, belongs to someone else or can be written by group or others, takes the version's lock for as long as it runs, and runs the package `nemar_runner` from that version with `runpy`.
+`nemar-runner-update.service` (`Type=oneshot`) runs `boot.py self-update --config <file>`, and `nemar-runner-update.timer` starts it daily with `RandomizedDelaySec=3600`.
+
+On a workstation shared with other people's work, the runner and everything it starts run at the lowest priority.
+Both service units carry these four lines:
+
+```ini
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=1
+IOWeight=1
+```
+
+The niceness and the idle I/O class are inherited by every process the runner starts (the launcher, an image pull, the jobs under Apptainer and rootless Podman).
+`CPUWeight=` and `IOWeight=` need the `cpu` and `io` controllers of the control group tree delegated to the user's manager; where they are not, systemd ignores the two lines and the niceness, the I/O class and the containers' hard limits still apply.
+The system's owner can delegate them to user managers with a `Delegate=` drop-in for `user@.service`, an optional step.
+A container started by the Docker daemon is not a child of the runner and does not inherit any of this.
+
+### A configuration for the service
+
+Leave `launcher_dir` out of a service's configuration.
+Without it the launcher is the one in the same signed bundle (`<prefix>/versions/X.Y.Z/launcher`); a `launcher_dir` that is set names a directory the runner trusts as it is, so it bypasses the signed launcher.
+
+```json
+{
+  "api_base": "https://api.nemar.org",
+  "secret_file": "/path/to/runner/secret",
+  "root": "/path/to/runner/root",
+  "sif_root": "/path/to/runner/sif",
+  "runtime": "apptainer",
+  "slots": 1,
+  "arch": "amd64",
+  "max_scratch_gb": 50,
+  "install_prefix": "/path/to/nemar-runner",
+  "cosign_path": "/path/to/bin/cosign"
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `install_prefix` | optional: where `install` put the runner; the running runner watches `<install_prefix>/current` (absent: it never switches versions). It must be the user's own directory that group and others cannot write, or the runner will not start |
+| `self_update` | optional boolean, default `true`: `false` turns the daily update off, so `self-update` does nothing and asks GitHub nothing; this is the opt-out for a machine of another institution, which then updates by `install --version X.Y.Z` when its owner decides |
+| `cosign_path` | optional absolute path of the cosign binary that `self-update` and the verification of an image ([The image](#the-image)) run; when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and without it they look on the launch PATH; `install` ignores this key and takes `--cosign-path` instead. It must not be a link, and its directory and the file must be the user's or root's and not writable by group or others |
+
+### What the account's owner does
+
+Neither step needs more than a few minutes, and neither is done from this repository.
+
+- Install cosign for the account (a user-local, pinned, checksum-verified binary), and name it in `cosign_path` for `self-update` and for the verification of images, and with `--cosign-path` for `install`, if it is not on the launch PATH.
+- Enable lingering, so a user service runs with nobody logged in: `loginctl enable-linger <account>` (needs root, once).
+- As the account: `systemctl --user daemon-reload && systemctl --user enable --now nemar-runner.service nemar-runner-update.timer`; the log is `journalctl --user -u nemar-runner.service`.
+
+What is not guaranteed: a runner that exits for any other reason is restarted after 30 seconds, forever (a revoked secret exits 3 and is restarted as well); stopping or restarting the service by hand stops the jobs the runner holds, as SIGTERM does (see [When the runner dies](#when-the-runner-dies)), because only the idle switch waits for a job to end; and a machine whose `self_update` is true trusts GitHub to list the releases (the signature, not the listing, is what is trusted for the files).
+
 ## Developing
 
 ```bash
 uv run --no-project --python 3.9 --with pytest --with pytest-timeout pytest tests/runner -q     # the runner on its floor (each test is limited to two minutes)
 uv run pytest tests/contract/test_runner_drift.py -q                      # against the pinned nemar-cli commit
+uv run pytest tests/runner/test_service.py tests/runner/test_install.py tests/release -q   # the service, the installer, the release workflows
+uv run python scripts/build_runner_bundle.py --check                     # the bundle builds byte for byte the same twice
 uv run ruff check . && uv run ruff format --check . && uv run ty check
 uv run ty check --python-version 3.9 launcher observer runner
 ```

@@ -33,6 +33,8 @@ OPTIONAL_KEYS = (
     "default_job_memory_mb",
     "sif_pull",
     "verify_images",
+    "self_update",
+    "install_prefix",
     "cosign_path",
 )
 ENGINES = ("docker", "podman")
@@ -66,8 +68,13 @@ class Config:
     # The signature of an image is verified before it is pulled or run (`verify.py`, docs/runner.md);
     # false is refused unless `api_base` is a loopback http address (the local stack and CI).
     verify_images: bool = True
-    # The cosign binary, an absolute path checked like python3; required when `cosign` is not on the
-    # launch PATH.
+    # The service install (docs/runner.md, "Running it as a service"): `self_update` is the opt-out of
+    # the daily signed update; `install_prefix` is where `nemar_runner install` put the runner, which
+    # the idle switch watches; `cosign_path` is the cosign binary `self-update` and the verification of
+    # an image (`verify.py`) run: when it is set it is used instead of any cosign on the launch PATH (it
+    # is not a fallback), and `install` ignores it and takes `--cosign-path`.
+    self_update: bool = True
+    install_prefix: str | None = None
     cosign_path: str | None = None
 
 
@@ -239,6 +246,12 @@ def load_config(path: str) -> Config:
     verify_images = document.get("verify_images", True)
     if not isinstance(verify_images, bool):
         raise ConfigError("verify_images must be true or false")
+    self_update = document.get("self_update", True)
+    if not isinstance(self_update, bool):
+        raise ConfigError("self_update must be true or false")
+    install_prefix = document.get("install_prefix")
+    if install_prefix is not None:
+        install_prefix = _path(install_prefix, "install_prefix")
     cosign_path = document.get("cosign_path")
     if cosign_path is not None:
         cosign_path = _path(cosign_path, "cosign_path")
@@ -255,6 +268,8 @@ def load_config(path: str) -> Config:
         default_job_memory_mb=default_memory,
         sif_pull=sif_pull,
         verify_images=verify_images,
+        self_update=self_update,
+        install_prefix=install_prefix,
         cosign_path=cosign_path,
     )
     if not config.verify_images and not _loopback_http(config.api_base):
