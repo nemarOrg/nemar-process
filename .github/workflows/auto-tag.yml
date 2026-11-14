@@ -13,7 +13,10 @@ name: Auto Tag and Release
 # The strip commit is pushed WITHOUT a message marker that asks GitHub to skip workflows: GitHub
 # applies such a marker to every event of the commit, so it would also swallow the tag push that
 # starts sync-dev.yml. The job's `if:` is what stops the bot's push from starting this workflow
-# again: it is skipped when the head commit is the bot's.
+# again: it is skipped when the head commit is the bot's. The job `bot-head` below is the one thing
+# that does run for a bot's head commit, and only to fail loudly when that commit is a dev bump that
+# reached main (a release pull request merged by rebase), which would otherwise release nothing and
+# look green.
 
 on:
   push:
@@ -29,6 +32,8 @@ jobs:
     if: github.event.head_commit.author.email != 'nemar-bot@users.noreply.github.com'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The environment that holds AUTO_TAG_PAT, limited to main, dev and release tags (docs/release.md).
+    environment: release
     permissions:
       contents: write
     # On the job so that a run skipped by the `if:` does not take the slot; runs wait, none is canceled.
@@ -65,7 +70,7 @@ jobs:
               echo "::error::v$release already exists but main is at $current. Not tagging a version twice; investigate by hand."
               exit 1
             fi
-            echo "::warning::v$release already exists and main is at $release: nothing to release (an edit of pyproject.toml that is not a version change)."
+            echo "::notice::v$release already exists and main is at $release: no new tag (an edit of pyproject.toml that is not a version change, or a re-run). The release of the tag is checked below."
             echo "tagged=true" >> "$GITHUB_OUTPUT"
           else
             echo "tagged=false" >> "$GITHUB_OUTPUT"
@@ -99,12 +104,40 @@ jobs:
           git tag -a "v$RELEASE" -m "Release v$RELEASE"
           git push origin "refs/tags/v$RELEASE"
 
-      - name: Create the GitHub release
-        if: steps.version.outputs.tagged == 'false'
+      # Not conditional on the tag having been made here: a re-run after `gh release create` failed
+      # finds the tag and must still create the release. One that exists is left alone.
+      - name: Create the GitHub release if it does not exist
         env:
           GH_TOKEN: ${{ secrets.AUTO_TAG_PAT }}
           RELEASE: ${{ steps.version.outputs.release }}
         run: |
           set -euo pipefail
+          if gh release view "v$RELEASE" > /dev/null 2>&1; then
+            echo "::notice::the release v$RELEASE already exists."
+            exit 0
+          fi
           # No assets: the image's digest file is attached by image-nemar-python.yml, to its own tag.
           gh release create "v$RELEASE" --verify-tag --title "v$RELEASE" --generate-notes --latest
+
+  # A bot's commit at the head of main is normally the strip commit, which has no suffix. A dev bump
+  # there means a release pull request was merged by rebase (main's rules must allow merge commits
+  # only), whose last commit is the bot's: `tag` was skipped, nothing was released, and without this
+  # job the run would be green. No token, no write.
+  bot-head:
+    if: github.event.head_commit.author.email == 'nemar-bot@users.noreply.github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The bot's commit at the head of main must not be a dev version
+        run: |
+          set -euo pipefail
+          current=$(python3 scripts/bump_version.py --show HEAD)
+          if [[ "$current" == *-dev* ]]; then
+            echo "::error::the head of main is the bot's commit and the version is $current: a release pull request was merged without a merge commit, so nothing was released. See docs/release.md ('A release that did not happen')."
+            exit 1
+          fi
+          echo "the bot's commit at the head of main is at $current"

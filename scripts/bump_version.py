@@ -191,7 +191,7 @@ def next_version(current: Version, target: str) -> Version | None:
         return Version(current.major, current.minor + 1, 0, False, 1)
     if target == "major":
         return Version(current.major + 1, 0, 0, False, 1)
-    numbered = re.fullmatch(r"dev([0-9]+)", target)
+    numbered = re.fullmatch(rf"dev({NUMBER})", target)  # canonical: dev02 is not dev2
     if numbered:
         if current.released:
             raise Refusal(f"{current} has no -devN suffix to set: name a version or patch")

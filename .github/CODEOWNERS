@@ -1,0 +1,7 @@
+# The release workflows and the scripts they run hold or reach the release bot's token
+# (docs/release.md). A change to them needs the owners' review once the branch rules ask for
+# code owner review.
+/.github/workflows/ @nemarOrg/admins
+/.github/CODEOWNERS @nemarOrg/admins
+/scripts/bump_version.py @nemarOrg/admins
+/scripts/sync_dev_merge.py @nemarOrg/admins

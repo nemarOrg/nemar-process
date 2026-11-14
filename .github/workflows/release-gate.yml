@@ -5,12 +5,18 @@ name: Release Gate
 #   - the lock is current (`uv lock --check`),
 #   - every workflow lints (actionlint) and the release tests pass (tests/release),
 #   - the whole test suite passes, including the Apptainer tests, which may not be skipped here.
-# The comparisons with nemar-cli's contract stay in ci.yml, which needs a checkout of it.
+# The suites run the way ci.yml splits them, because one `pytest` over the whole tree cannot collect
+# (tests/images has a conftest.py of its own, which tests/launcher would import by name):
+# everything but tests/images, then tests/images, then the recipes and the launch end to end in the
+# lock's `runtime` environment with NEMAR_REQUIRE_RUNTIME so they cannot be skipped.
+# The comparisons with nemar-cli's contract and with signalJourney stay in ci.yml, which needs
+# checkouts of them.
 # Nothing here pushes, signs or publishes.
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -95,5 +101,15 @@ jobs:
       - name: The release tests
         run: uv run pytest tests/release -q
 
-      - name: The whole test suite
-        run: uv run pytest -q
+      - name: The test suite, but tests/images
+        run: uv run pytest -q --ignore=tests/images
+
+      - name: The runtime image's tests
+        run: uv run pytest -q tests/images
+
+      - name: The recipes and the launch end to end, in the runtime environment
+        env:
+          NEMAR_REQUIRE_RUNTIME: "1"
+        run: |
+          uv run --frozen --group runtime --extra cpu pytest -q tests/recipes
+          uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer"

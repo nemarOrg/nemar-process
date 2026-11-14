@@ -9,6 +9,11 @@ name: Auto Bump Dev
 #   - starts with "chore: bump version to": a bump made by a person, or the bump sync-dev.yml makes;
 #   - contains "[skip-bump]": the escape hatch.
 #
+# The run bumps the commit that was pushed (not whatever dev's tip is by the time it runs), and it
+# does nothing once the version it would bump is already released (a tag `vX.Y.Z` exists): between
+# a release and the sync that follows, dev still carries the released base, and a bump there would
+# only make the sync conflict.
+#
 # A rejected push (a person pushed first) is a warning: that push starts this workflow again from
 # the new head, so the bump is not lost.
 
@@ -27,6 +32,8 @@ jobs:
       && !contains(github.event.head_commit.message, '[skip-bump]')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The environment that holds AUTO_TAG_PAT, limited to main, dev and release tags (docs/release.md).
+    environment: release
     permissions:
       contents: write
     # Declared on the job, not the workflow: a run skipped by the `if:` above must not take the slot
@@ -37,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: dev
+          ref: ${{ github.sha }}
           fetch-depth: 1
           # The token of the bot's pushes: the default token cannot push past a protected branch,
           # and a push made with it does not start the workflows that should run on the new head.
@@ -55,8 +62,13 @@ jobs:
             echo "::notice::dev is at $current, which has no -devN suffix; not bumping."
             exit 0
           fi
+          base="${current%-dev*}"
+          if [ -n "$(git ls-remote --tags origin "refs/tags/v$base")" ]; then
+            echo "::notice::v$base is already released; dev is waiting for the sync after it. Not bumping."
+            exit 0
+          fi
           python3 scripts/bump_version.py "dev$((BASH_REMATCH[1] + 1))"
-          if git push origin dev; then
+          if git push origin HEAD:refs/heads/dev; then
             echo "pushed $(git log -1 --format=%s)"
           else
             echo "::warning::the push to dev was rejected (a concurrent push); that push starts this workflow again."
