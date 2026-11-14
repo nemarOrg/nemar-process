@@ -195,24 +195,79 @@ def test_the_rendered_units_have_no_placeholder_left_and_the_priority_lines_stil
     )
 
 
+# what `systemd-analyze verify` says when it cannot start a manager at all (a runner with no login
+# session has no runtime directory and no user manager): about the machine, not about a unit
+NO_MANAGER = (
+    "Failed to initialize manager",
+    "Failed to lookup RuntimeDirectory path",
+    "Failed to connect",
+)
+BAD_UNIT = re.compile(r"Unknown (key|section|lvalue)", re.IGNORECASE)
+
+
+def verify_attempts(
+    analyze: str, units: Path, work: Path
+) -> list[tuple[str, list[str], dict[str, str]]]:
+    """The ways to run `systemd-analyze verify` on the units without a login session, best first.
+
+    The user manager first, with a private runtime directory (a fresh directory of mode 0700 in the
+    environment of that one process, the place a session would have made) and without generators
+    where this systemd has the option; then the system manager over a private root that holds copies
+    of the units and an executable where the units say `/usr/bin/python3` is."""
+    runtime = work / "run"
+    runtime.mkdir(mode=0o700)
+    runtime.chmod(0o700)
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(work),
+        "XDG_RUNTIME_DIR": str(runtime),
+    }
+    helped = subprocess.run(
+        [analyze, "--help"], capture_output=True, text=True, check=False, env=environment
+    )
+    user = [analyze, "--user"]
+    if "--generators" in helped.stdout:
+        user.append("--generators=false")
+    user += ["verify", *[str(units / name) for name in install.UNIT_FILES]]
+    root = work / "root"
+    directory = root / "etc" / "systemd" / "system"
+    directory.mkdir(parents=True)
+    for name in install.UNIT_FILES:
+        shutil.copy(units / name, directory / name)
+    (root / "usr" / "bin").mkdir(parents=True)
+    (root / "usr" / "bin" / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "usr" / "bin" / "python3").chmod(0o755)
+    system = [
+        analyze,
+        "--root={}".format(root),
+        "verify",
+        *[str(directory / name) for name in install.UNIT_FILES],
+    ]
+    return [
+        ("user manager", user, environment),
+        ("system manager over a private root", system, environment),
+    ]
+
+
 def test_systemd_accepts_the_rendered_units(tmp_path):
     analyze = shutil.which("systemd-analyze")
     if analyze is None:
         pytest.skip("systemd-analyze is not installed here; CI's Linux runner has it")
     units = render(tmp_path, tmp_path / "prefix", tmp_path / "config.json")
-    done = subprocess.run(
-        [analyze, "--user", "verify", *[str(units / name) for name in install.UNIT_FILES]],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
-    )
-    text = done.stdout + done.stderr
-    if "Failed to connect" in text or ("bus" in text.lower() and done.returncode != 0):
-        pytest.skip("systemd-analyze --user cannot run in this environment: " + text.strip()[:200])
-    assert done.returncode == 0, text
-    assert "Unknown key" not in text, text
-    assert "Unknown section" not in text, text
+    could_not = []
+    for label, argv, environment in verify_attempts(analyze, units, tmp_path):
+        done = subprocess.run(
+            argv, capture_output=True, text=True, check=False, env=environment, cwd=str(tmp_path)
+        )
+        text = done.stdout + done.stderr
+        if done.returncode != 0 and any(marker in text for marker in NO_MANAGER):
+            could_not.append("{}: {}".format(label, " ".join(text.split())))
+            continue  # no manager to ask here: try the next way
+        # a manager answered: whatever it says about the units counts, and any other failure fails
+        assert done.returncode == 0, "{}: {}".format(label, text)
+        assert BAD_UNIT.search(text) is None, "{}: {}".format(label, text)
+        return
+    pytest.skip("no systemd manager available: " + " | ".join(could_not)[:600])
 
 
 # ---- boot.py ------------------------------------------------------------------------------------------------
