@@ -123,18 +123,16 @@ def image_spec(rig: Rig, **overrides) -> dict:
 
 
 def containers_left() -> str:
-    """The containers the launcher made and did not remove: by name and by the job label."""
-    found = []
-    for selector in ("name=nemar-launch-", "label=nemar.job"):
-        done = subprocess.run(
-            [ENGINE, "ps", "--all", "--quiet", "--filter", selector],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-        found.append(done.stdout.strip())
-    return "".join(found)
+    """The containers THIS test's launches made and did not remove: by the test's own runner label
+    (a filter on the job label or the name would see other runners' containers on a shared daemon)."""
+    done = subprocess.run(
+        [ENGINE, "ps", "--all", "--quiet", "--filter", "label=nemar.runner=" + RUNNER_LABEL],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    return done.stdout.strip()
 
 
 @pytest.fixture(scope="module")
@@ -270,6 +268,27 @@ def test_a_container_that_outgrows_its_memory_limit_is_killed_and_recorded(tmp_p
         assert result is not None
         assert result["failure_code"] == "out_of_memory"
         assert result["entry_exit_code"] == 137
+        assert containers_left() == ""
+    finally:
+        rig.close()
+
+
+def test_the_containers_output_reaches_the_launcher_though_the_daemon_keeps_no_log(tmp_path, capfd):
+    engine_ready()
+    rig = Rig(tmp_path, "docker")
+    try:
+        bundle = rig.set_bundle(make_bundle({"say.py": "print('said-from-the-container')\n"}))
+        spec = image_spec(rig, runtime="python", entry="say.py", bundle=bundle)
+        launch = rig.launch(
+            spec,
+            NEMAR_CONTAINER_RUNTIME=ENGINE,
+            NEMAR_CPUS="1",
+            NEMAR_MEMORY_MB="256",
+            NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+            NEMAR_RUNNER_LABEL=RUNNER_LABEL,
+        )
+        assert launch.exit == 0, launch.log + launch.stderr
+        assert "said-from-the-container" in capfd.readouterr().out
         assert containers_left() == ""
     finally:
         rig.close()
