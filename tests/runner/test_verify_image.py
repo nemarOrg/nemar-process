@@ -809,7 +809,8 @@ def test_a_verification_is_remembered_in_a_private_entry(docker_world):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     entry = json.loads(path.read_text("utf-8"))
-    assert set(entry) == {"digest", "identity", "cosign_version", "verified_at"}
+    assert set(entry) == {"digest", "kind", "identity", "cosign_version", "verified_at"}
+    assert entry["kind"] == "image"
     assert entry["digest"] == DIGEST
     assert entry["identity"] == verify.SIGNING_IDENTITY
     assert entry["cosign_version"] == "v3.1.4"
@@ -859,6 +860,9 @@ def test_an_entry_just_under_a_day_old_is_still_good(docker_world):
         lambda e: e.update(verified_at=True),
         lambda e: e.pop("verified_at"),
         lambda e: e.pop("identity"),
+        lambda e: e.pop("kind"),
+        lambda e: e.update(kind="sif"),
+        lambda e: e.update(kind="something"),
     ],
 )
 def test_an_entry_that_is_not_this_runners_proof_of_this_digest_is_ignored(docker_world, damage):
@@ -900,6 +904,47 @@ def test_a_failed_verification_leaves_no_entry_and_a_good_one_is_not_undone(dock
     control(docker_world.bin, "exit", "1")
     docker_world.run()
     assert not (docker_world.rig.root / "verified" / (HEX + ".json")).exists()
+
+
+def test_an_apptainer_proof_does_not_satisfy_a_docker_request_and_the_reverse(tmp_path):
+    """A `sif` entry says cosign verified the SIF artifact, found through a tag; it says nothing of the
+    image digest, so a Docker or Podman request needs its own proof, and the reverse."""
+    world = World(tmp_path)
+    try:
+        engine = world.rig.make_config(runtime="docker", default_job_memory_mb=512)
+        tuning = world.tuning()
+        apptainer = verify.Verifier(world.rig.config, tuning, world.rig.log)
+        docker = verify.Verifier(engine, tuning, world.rig.log)
+        world.rig.root.chmod(0o700)
+
+        apptainer.sif_proof("job_x", HEX, lambda: None)
+        assert len(verifications(world.bin)) == 1
+        docker.verify_image("job_x", REFERENCE, HEX, lambda: None)
+        assert len(verifications(world.bin)) == 2  # the SIF proof did not stand in for the image's
+        assert verifications(world.bin)[1]["argv"][1] == REFERENCE
+        docker.verify_image("job_x", REFERENCE, HEX, lambda: None)
+        assert len(verifications(world.bin)) == 2  # its own proof is believed
+        apptainer.sif_proof("job_x", HEX, lambda: None)
+        assert len(verifications(world.bin)) == 3  # and the image's proof is not the SIF's
+        assert verifications(world.bin)[2]["argv"][1] == SIF_TAG
+        apptainer.sif_proof("job_x", HEX, lambda: None)
+        assert len(verifications(world.bin)) == 3
+    finally:
+        world.close()
+
+
+def test_a_sif_proof_on_disk_is_not_an_image_proof_to_a_docker_job(tmp_path):
+    world = World(tmp_path)
+    try:
+        world.run()  # an Apptainer job: the `sif` entry is written
+        assert world.verified_cache()["kind"] == "sif"
+        engine = world.rig.make_config(runtime="docker", default_job_memory_mb=512)
+        verifier = verify.Verifier(engine, world.tuning(), world.rig.log)
+        verifier.verify_image("job_x", REFERENCE, HEX, lambda: None)
+        assert [c["argv"][1] for c in verifications(world.bin)] == [SIF_TAG, REFERENCE]
+        assert world.verified_cache()["kind"] == "image"
+    finally:
+        world.close()
 
 
 # ---- Apptainer: the SIF artifact, its manifest and its layer ---------------------------------------------
@@ -960,8 +1005,10 @@ def test_the_cache_records_the_artifact_and_its_layer(world):
     assert entry["sif_layer"] == world.layer
     assert entry["digest"] == DIGEST
     assert entry["identity"] == verify.SIGNING_IDENTITY
+    assert entry["kind"] == "sif"
     assert set(entry) == {
         "digest",
+        "kind",
         "identity",
         "cosign_version",
         "verified_at",

@@ -371,9 +371,11 @@ class Verifier:
     """Verifies the images of a runner's jobs, one cosign at a time, and remembers what it proved.
 
     A proof is kept in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed)
-    holding the image digest, the SIF artifact's manifest and layer digests when Apptainer is the
-    runtime, the identity, cosign's version and the time; it is believed for ``verified_ttl_seconds``
-    (24 hours) and only if every field is what this runner would write now. A file placed in `sif_root`
+    holding the image digest, its kind (`image`, for a digest cosign verified, or `sif`, for a SIF
+    artifact cosign verified, which proves nothing of the image digest itself and never satisfies the
+    other kind), the SIF artifact's manifest and layer digests for `sif`, the identity, cosign's version
+    and the time; it is believed for ``verified_ttl_seconds`` (24 hours) and only if every field is what
+    this runner would write now. A file placed in `sif_root`
     is never vouched for by the entry: it is hashed against the entry's layer each time it is used."""
 
     def __init__(self, config: Config, tuning: Tuning, log: Log) -> None:
@@ -389,11 +391,11 @@ class Verifier:
         """Docker and Podman: ``Unverified`` unless cosign proves the claim's digest was signed by the
         workflow's identity (``uri`` is checked first, and a tag never reaches cosign)."""
         reference = check_reference(uri, digest_hex)
-        if self._fresh(digest_hex, sif=False) is not None:
+        if self._fresh(digest_hex, "image") is not None:
             self._verified(job_id, digest_hex, cached=True)
             return
         with self._exclusive(interrupted):
-            if self._fresh(digest_hex, sif=False) is not None:  # another job proved it meanwhile
+            if self._fresh(digest_hex, "image") is not None:  # another job proved it meanwhile
                 self._verified(job_id, digest_hex, cached=True)
                 return
             digests = parse_digests(self._cosign(reference, interrupted))
@@ -409,13 +411,13 @@ class Verifier:
         and the digest of its one layer), or ``Unverified``. ``use_cache`` False asks cosign again
         (`doctor` does, and a stale entry does)."""
         if use_cache:
-            entry = self._fresh(digest_hex, sif=True)
+            entry = self._fresh(digest_hex, "sif")
             if entry is not None:
                 self._verified(job_id, digest_hex, cached=True)
                 return SifProof(entry["sif_manifest"], entry["sif_layer"])
         with self._exclusive(interrupted):
             if use_cache:
-                entry = self._fresh(digest_hex, sif=True)
+                entry = self._fresh(digest_hex, "sif")
                 if entry is not None:
                     self._verified(job_id, digest_hex, cached=True)
                     return SifProof(entry["sif_manifest"], entry["sif_layer"])
@@ -469,9 +471,11 @@ class Verifier:
     def _entry_path(self, digest_hex: str) -> str:
         return os.path.join(self._config.root, "verified", digest_hex + ".json")
 
-    def _fresh(self, digest_hex: str, sif: bool) -> dict[str, Any] | None:
+    def _fresh(self, digest_hex: str, kind: str) -> dict[str, Any] | None:
         """The entry of ``digest_hex`` if it is private, readable, this runner's proof of this digest
-        under the current identity, and younger than the lifetime; else None."""
+        under the current identity, of the ``kind`` asked for (`image`: cosign verified the image
+        digest; `sif`: cosign verified the SIF artifact, found by a tag, and nothing was proven of the
+        image digest itself), and younger than the lifetime; else None."""
         try:
             raw = _read_private(self._entry_path(digest_hex), "verification entry", 8192)
             entry = json.loads(raw.decode("utf-8"))
@@ -482,6 +486,7 @@ class Verifier:
         if (
             entry.get("digest") != "sha256:" + digest_hex
             or entry.get("identity") != SIGNING_IDENTITY
+            or entry.get("kind") != kind
         ):
             return None
         at = entry.get("verified_at")
@@ -490,7 +495,7 @@ class Verifier:
         age = time.time() - at
         if not 0 <= age < self._tuning.verified_ttl_seconds:
             return None
-        if sif:
+        if kind == "sif":
             for key in ("sif_manifest", "sif_layer"):
                 value = entry.get(key)
                 if not isinstance(value, str) or contract.IMAGE_DIGEST_RE.fullmatch(value) is None:
@@ -502,6 +507,7 @@ class Verifier:
         job: the entry is a saving, not a proof anyone relies on without reading it again."""
         entry: dict[str, Any] = {
             "digest": "sha256:" + digest_hex,
+            "kind": "image" if proof is None else "sif",
             "identity": SIGNING_IDENTITY,
             "cosign_version": self._cosign_version(),
             "verified_at": int(time.time()),
