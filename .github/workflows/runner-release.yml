@@ -1,0 +1,182 @@
+name: runner-release
+
+# The nemar-runner bundle (the runner, the launcher and the service files), built deterministically,
+# signed with cosign (keyless) and attached to the GitHub release of its tag. A workstation installs
+# and updates the runner only from a bundle this workflow signed (docs/runner.md, "Running it as a
+# service"; `nemar_runner install` and `self-update` run `cosign verify-blob` with the identity below).
+#
+#   tag nemar-runner-vX.Y.Z   the whole chain, but only for a commit that is reachable from main: the
+#                             first steps of `build` fail otherwise, and X.Y.Z must be the version the
+#                             runner itself reports at that commit (nemar_runner.__version__).
+#
+# No other event starts it: no pull request, no dispatch, no branch push. Three jobs, so that each
+# privilege has one holder and no code of the repository runs where it is held:
+#
+#   build    contents: read    checks out the tag, runs scripts/build_runner_bundle.py, uploads the file
+#   sign     id-token: write   runs no code of the repository: it downloads the file, signs it with
+#                              cosign and verifies its own signature against the identity
+#   release  contents: write   attaches the bundle and the signature to the release of the tag, and
+#                              refuses to overwrite a file that is already there
+#
+# What the guard is: a check in this file, at the tagged commit. It stops a mistaken tag. It does not
+# stop someone who can push a tag and edit this file in the same commit; that is what a tag ruleset on
+# `nemar-runner-v*`, branch protection on main and code owner review of `.github/workflows/` can do, and
+# they are the repository owner's (docs/release.md).
+
+on:
+  push:
+    tags: ["nemar-runner-v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The same pins as ci.yml and the image workflow.
+  UV_VERSION: "0.13.4"
+  # What a signature must say about who made it: this workflow, run for a runner release tag. The same
+  # text is the constant IDENTITY_REGEXP of runner/nemar_runner/install.py (tests/release holds them equal).
+  SIGNING_IDENTITY: '^https://github\.com/nemarOrg/nemar-process/\.github/workflows/runner-release\.yml@refs/tags/nemar-runner-v[0-9]+\.[0-9]+\.[0-9]+$'
+  OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+
+jobs:
+  build:
+    name: build the bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the whole history, so that main is there to compare with
+          persist-credentials: false
+
+      # A tag can be pushed on any commit by anyone who can write to the repository, and the signature
+      # a tag run gets names only this workflow and the tag. Only a commit of main is signed.
+      - name: Refuse a commit that is not on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not reachable from main: only a commit of main is signed"
+            exit 1
+          fi
+
+      # The tag, the file names and the version the runner reports are one version: X.Y.Z of the tag
+      # must be the __version__ of nemar_runner at this commit. The installer checks it again inside
+      # the verified bundle.
+      - name: Read the version from the tag and check it against the runner
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::this workflow runs for a tag only"
+            exit 1
+          fi
+          version="${REF_NAME#nemar-runner-v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::the tag must be nemar-runner-vMAJOR.MINOR.PATCH, got '${REF_NAME}'"
+            exit 1
+          fi
+          runner="$(git show "${GITHUB_SHA}:runner/nemar_runner/__init__.py" | sed -n 's/^__version__ = "\([0-9][0-9.]*\)"$/\1/p')"
+          if [ "$runner" != "$version" ]; then
+            echo "::error::the tag names '${version}' and nemar_runner.__version__ is '${runner}' at ${GITHUB_SHA}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # The builder is standard library only: no project environment is made, so no dependency is
+      # resolved or fetched in the job that makes the file that is signed.
+      - name: Check that two builds are byte-identical
+        run: uv run --no-project python scripts/build_runner_bundle.py --check
+
+      - name: Build the bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          uv run --no-project python scripts/build_runner_bundle.py --out dist/
+          test -f "dist/nemar-runner-${VERSION}.tar.gz"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nemar-runner-bundle
+          path: dist/nemar-runner-${{ steps.version.outputs.version }}.tar.gz
+          if-no-files-found: error
+
+  sign:
+    name: sign the bundle
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job with the OIDC token: cosign keyless exchanges it for a short-lived certificate that
+    # names this workflow and the tag. It checks out nothing and runs no script of the repository.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nemar-runner-bundle
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: "v3.1.4"
+
+      - name: Sign the bundle and verify the signature
+        run: |
+          set -euo pipefail
+          file="nemar-runner-${VERSION}.tar.gz"
+          cosign sign-blob --bundle "${file}.sigstore.json" --yes "$file"
+          cosign verify-blob "$file" --bundle "${file}.sigstore.json" \
+            --certificate-identity-regexp "$SIGNING_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nemar-runner-signed
+          path: |
+            nemar-runner-${{ env.VERSION }}.tar.gz
+            nemar-runner-${{ env.VERSION }}.tar.gz.sigstore.json
+          if-no-files-found: error
+
+  release:
+    name: attach the bundle and its signature to the release
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nemar-runner-signed
+
+      - name: Attach the files to the release of the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="nemar-runner-${VERSION}.tar.gz"
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            # not the repository's latest release (that is the vX.Y.Z of the release automation)
+            gh release create "$TAG" --verify-tag --latest=false --title "nemar-runner ${VERSION}" \
+              --notes "The runner bundle, signed with cosign (keyless). See docs/runner.md for how to install and verify it."
+          fi
+          # no overwrite flag: a published file is never replaced, and a second upload must fail
+          gh release upload "$TAG" "$file" "${file}.sigstore.json"
