@@ -87,6 +87,16 @@ def control(name):
 if argv[:1] == ["version"]:
     sys.stdout.write(control("version") or '{"gitVersion": "v3.1.4"}')
     sys.exit(0)
+# strict, like the real thing: a call that does not ask for the whole policy is not answered
+required = {
+    "--certificate-identity-regexp": "@IDENTITY@",
+    "--certificate-oidc-issuer": "@ISSUER@",
+    "--certificate-github-workflow-repository": "@REPOSITORY@",
+}
+for flag, wanted in required.items():
+    if flag not in argv or argv[argv.index(flag) + 1] != wanted:
+        sys.stderr.write("Error: " + flag + " is not what the policy says\\n")
+        sys.exit(3)
 pause = control("sleep")
 if pause:
     time.sleep(float(pause))
@@ -126,7 +136,12 @@ elif argv[:1] == ["pull"]:
 
 def install_cosign(rig, directory: Path | None = None) -> Path:
     """The cosign stand-in, on the launch PATH or (``directory``) beside it."""
-    script = FAKE_COSIGN.replace("@PYTHON@", sys.executable)
+    script = (
+        FAKE_COSIGN.replace("@PYTHON@", sys.executable)
+        .replace("@IDENTITY@", verify.SIGNING_IDENTITY)
+        .replace("@ISSUER@", "https://token.actions.githubusercontent.com")
+        .replace("@REPOSITORY@", "nemarOrg/nemar-process")
+    )
     if directory is None:
         return rig.install("cosign", script)
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -404,6 +419,29 @@ def test_the_documentation_lists_every_reason():
         assert "| `{}` |".format(reason) in docs, reason
 
 
+def test_the_signing_repository_is_the_identitys_repository():
+    found = re.search(r"github\\\.com/([^/]+/[^/]+)/", verify.SIGNING_IDENTITY)
+    assert found is not None
+    assert verify.SIGNING_REPOSITORY == found.group(1) == "nemarOrg/nemar-process"
+
+
+def workflow_triggers() -> str:
+    """The text of the workflow's top-level `on:` block."""
+    found = re.search(r"^on:\n((?:[ \t].*\n|\n)*)", workflow_text(), re.MULTILINE)
+    assert found is not None
+    return found.group(1)
+
+
+def test_the_image_workflow_is_not_a_reusable_workflow():
+    """A reusable workflow's caller inherits the identity (the certificate names the CALLER's repository
+    and ref for `job_workflow_ref`, the callee for the called file), so the workflow must not be one; and
+    that it runs for a tag and for `workflow_dispatch` is why no trigger is asked of cosign."""
+    triggers = workflow_triggers()
+    assert "workflow_call" not in triggers
+    assert "workflow_dispatch:" in triggers
+    assert 'tags: ["image-nemar-python-v*"]' in triggers
+
+
 # ---- the reference: a digest of the image repository and nothing else ----------------------------------
 
 
@@ -630,6 +668,8 @@ def test_cosign_is_asked_to_verify_the_digest_against_the_workflow_identity(dock
         verify.SIGNING_IDENTITY,
         "--certificate-oidc-issuer",
         "https://token.actions.githubusercontent.com",
+        "--certificate-github-workflow-repository",
+        "nemarOrg/nemar-process",
         "--output",
         "json",
     ]
@@ -931,6 +971,22 @@ def test_a_linked_or_unreadable_entry_is_ignored(docker_world):
     assert len(verifications(docker_world.bin)) == 3
 
 
+def test_cosign_is_not_answered_without_the_whole_policy(docker_world):
+    """The stand-in refuses a call that lacks the identity, the issuer or the repository, as cosign
+    refuses a certificate that does not match: so a runner that stopped asking would be refused here."""
+    tuning = docker_world.tuning()
+    binary = str(docker_world.bin / "cosign")
+    home = verify.cosign_home(docker_world.rig.config)
+    for omitted in ("identity", "issuer", "repository"):
+        wrong = {omitted: "something else"}
+        with pytest.raises(images.Unverified) as caught:
+            verify.run_cosign(binary, REFERENCE, home, tuning, lambda: None, **wrong)
+        assert caught.value.reason == "cosign_failed"
+        assert caught.value.why == "exit_3"
+    out = verify.run_cosign(binary, REFERENCE, home, tuning, lambda: None)
+    assert verify.parse_digests(out) == [DIGEST]
+
+
 def test_a_failed_verification_leaves_no_entry_and_a_good_one_is_not_undone(docker_world):
     control(docker_world.bin, "exit", "1")
     docker_world.run()
@@ -992,6 +1048,8 @@ def test_the_sif_artifact_is_verified_by_its_tag_and_pulled_by_the_digest_cosign
         verify.SIGNING_IDENTITY,
         "--certificate-oidc-issuer",
         "https://token.actions.githubusercontent.com",
+        "--certificate-github-workflow-repository",
+        "nemarOrg/nemar-process",
         "--output",
         "json",
     ]

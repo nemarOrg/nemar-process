@@ -62,6 +62,12 @@ SIGNING_IDENTITY = (
     r"@refs/(tags/image-nemar-python-v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
 )
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+# The repository of the certificate's GitHub Workflow Repository extension (the `repository` claim of the
+# workflow's token, `owner/name` as GitHub spells it): asked of cosign as well as the identity, so a
+# certificate whose workflow path matches but that another repository's run obtained is refused. No
+# trigger is asked: the image workflow runs for a tag and for `workflow_dispatch` (a test holds that it
+# is not a reusable workflow, whose caller would inherit the identity).
+SIGNING_REPOSITORY = "nemarOrg/nemar-process"
 
 # The words of the `reason` of an `image_unverified` log line.
 REASONS = (
@@ -223,9 +229,11 @@ def run_cosign(
     interrupted: Interrupt,
     identity: str = SIGNING_IDENTITY,
     issuer: str = OIDC_ISSUER,
+    repository: str = SIGNING_REPOSITORY,
 ) -> bytes:
     """`cosign verify <reference> --certificate-identity-regexp <identity> --certificate-oidc-issuer
-    <issuer> --output json`, and its standard output when it exits 0 inside the timeout.
+    <issuer> --certificate-github-workflow-repository <repository> --output json`, and its standard
+    output when it exits 0 inside the timeout.
 
     ``Unverified("cosign_failed")`` for any other exit (or a cosign that cannot be started),
     ``Unverified("cosign_timeout")`` when it outlasts ``tuning.cosign_timeout_seconds`` (it is killed),
@@ -239,6 +247,8 @@ def run_cosign(
         identity,
         "--certificate-oidc-issuer",
         issuer,
+        "--certificate-github-workflow-repository",
+        repository,
         "--output",
         "json",
     ]
