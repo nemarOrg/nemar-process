@@ -11,14 +11,17 @@ public serving copy is ``test_floor_input_zarr_network.py``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io as stdlib_io
 import json
 import re
 import socket
+import struct
 import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import zarr_support as z
 from nemar_process import sj
@@ -179,6 +182,9 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):  # 
         "stores": IN_INDEX_ORDER,
         "bytes_read": nemar["input"]["bytes_read"],
         "hosts_contacted": BOTH_HOSTS,
+        "stores_content": nemar["input"]["stores_content"],
+        "input_digest": nemar["input"]["input_digest"],
+        "stores_unread": UNREAD,
     }
     assert nemar["ignored_datatypes"] == {"emg": 1}
     assert re.fullmatch(r"eegprep-lean@\d+\.\d+\.\d+\+[0-9a-f]{40}", nemar["reader"])
@@ -253,6 +259,93 @@ def test_the_watch_can_fail(ran, served):  # noqa: F811
         pass
     assert quiet.names == set()
     assert quiet.addresses == set()
+
+
+# ---- what the records say was read ------------------------------------------------------------
+
+# What each store of the stand-in holds, as the stand-in wrote it: (seed or None for zeros, unit,
+# scale). The three stores that failed after a complete read are digested too: the digest is of what
+# was read, whatever the floor then made of it; the two that were never read have none.
+CONTENT = {
+    z.EEG_ONE: (1, "uV", 0.5),
+    z.EEG_TWO: (2, z.MICRO_SIGN, 0.5),
+    z.EEG_MU: (3, z.GREEK_MU, 0.5),
+    z.BAD_UNIT: (4, "kV", 0.5),
+    z.FLAT: (None, "uV", 0.5),
+    z.NON_FINITE: (5, "uV", 1e308),
+}
+READ_IN_FULL = sorted(CONTENT)
+UNREAD = sorted([z.HUGE, z.MISSING])
+GROUP = "eeg_250hz"
+
+
+def reference_digest(path: str) -> str:
+    """The digest of ``path``'s content written out from the definition, apart from the recipe's own
+    function: the header lines, then the physical values as little-endian binary64, channel-major."""
+    seed, unit, scale = CONTENT[path]
+    counts = np.zeros((z.N_CHANNELS, z.N_SAMPLES), dtype=int) if seed is None else z._signal(seed)
+    with np.errstate(over="ignore"):
+        values = counts.astype(np.int16).astype(np.float64) * scale + 0.0
+    header = "nemar.store-content.v1\nshape {} {}\nrate {}\nunit {}\n{}data float64-le\n".format(
+        z.N_CHANNELS,
+        z.N_SAMPLES,
+        struct.pack(">d", z.RATE).hex(),
+        unit,
+        "".join("label {}\n".format(label) for label in z.LABELS),
+    )
+    return hashlib.sha256(header.encode() + values.astype("<f8").tobytes(order="C")).hexdigest()
+
+
+def test_the_dataset_record_names_the_content_of_every_store_read_in_full(ran):
+    _, _, out, *_ = ran
+    nemar = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())["extensions"][
+        "nemar"
+    ]["input"]
+    assert nemar["stores_content"] == [
+        {"path": path, "group": GROUP, "content_sha256": reference_digest(path)}
+        for path in READ_IN_FULL
+    ]
+    assert nemar["stores_unread"] == UNREAD
+    assert set(nemar["stores"]) == {row["path"] for row in nemar["stores_content"]} | set(UNREAD)
+
+
+def test_the_input_digest_is_the_digest_of_the_rows_the_record_lists(ran):
+    _, _, out, *_ = ran
+    nemar = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())["extensions"][
+        "nemar"
+    ]["input"]
+    text = "".join(
+        "{}\t{}\t{}\n".format(row["path"], row["group"], row["content_sha256"])
+        for row in sorted(nemar["stores_content"], key=lambda row: row["path"])
+    )
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", nemar["input_digest"])
+    assert nemar["input_digest"] == "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+    assert nemar["input_digest"] == zarr_input.input_digest(nemar["stores_content"])
+
+
+def test_a_recordings_record_names_the_group_and_content_it_was_made_from(ran):
+    _, _, out, *_ = ran
+    for path in PROCESSED:
+        mine = json.loads(product(out, path, "signalJourney.json").read_text())["extensions"][
+            "nemar"
+        ]["input"]
+        assert mine["group"] == GROUP
+        assert mine["content_sha256"] == reference_digest(path), path
+        # the other fields of the store's input are what they were
+        assert mine["kind"] == "zarr"
+        assert "stores_content" not in mine  # the dataset's list is the dataset's alone
+        assert "input_digest" not in mine
+        assert "stores_unread" not in mine
+
+
+def test_the_content_digest_is_not_the_index_digest_and_does_not_move_with_it(ran, served):  # noqa: F811
+    """A derivative is keyed on what was read: the index file's digest is a different thing."""
+    _, _, out, *_ = ran
+    nemar = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())["extensions"][
+        "nemar"
+    ]["input"]
+    assert served.index_sha256 not in {row["content_sha256"] for row in nemar["stores_content"]}
+    assert served.index_sha256 != nemar["input_digest"].removeprefix("sha256:")
 
 
 # ---- what the reader returns ------------------------------------------------------------------

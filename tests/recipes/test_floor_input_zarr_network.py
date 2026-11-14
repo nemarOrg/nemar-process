@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import io as stdlib_io
 import json
+import re
 import subprocess
 import sys
 import time
@@ -147,6 +148,27 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     assert nemar["input"]["hosts_contacted"] == sorted(pair)
     assert nemar["reader"].startswith("eegprep-lean@")
     assert nemar["engine"]["package"] == "eegprep"
+
+    # what was read, by content: one digest per store, and the dataset's input digest over them
+    rows = nemar["input"]["stores_content"]
+    assert [row["path"] for row in rows] == sorted(stores)
+    assert len(rows) == STORES
+    assert nemar["input"]["stores_unread"] == []
+    for row in rows:
+        assert re.fullmatch(r"[0-9a-f]{64}", row["content_sha256"]), row
+        assert row["content_sha256"] != live  # the index file is not what was read
+        mine = json.loads(
+            (
+                out
+                / "{}_desc-nemarfloor_signalJourney.json".format(
+                    row["path"].removesuffix("_eeg.edf")
+                )
+            ).read_text()
+        )["extensions"]["nemar"]["input"]
+        assert (mine["group"], mine["content_sha256"]) == (row["group"], row["content_sha256"])
+    text = "".join("{path}\t{group}\t{content_sha256}\n".format(**row) for row in rows)
+    assert nemar["input"]["input_digest"] == "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+    print("input digest {}".format(nemar["input"]["input_digest"]))
     print(
         "stores {} bytes read {} reader {}".format(
             len(stores), nemar["input"]["bytes_read"], nemar["reader"]
