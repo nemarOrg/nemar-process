@@ -224,8 +224,9 @@ The readings are Linux's: `/proc/meminfo` and `/proc/loadavg` (the load comes fr
 Where there is no `/proc/meminfo` (macOS) the host is always busy for memory unless `enabled` is false, so a workstation runner is a Linux one.
 `claim_memory_mb` is the largest memory a claim can hand this runner: set it to the memory the runner was registered with.
 The reserve is the memory always left to people, the larger of 8 GiB and a tenth of the host's memory, unless set.
-`MemAvailable` is the whole host's number, so a runner confined by a control group's `memory.max` (a user slice, a container) would otherwise see room that it does not have: the runner also reads the room left under that limit (`memory.max` less `memory.current`, for its own group from `/proc/self/cgroup` and every group above it) and uses the smaller room.
-A limit that is `max`, absent or unreadable is no limit.
+`MemAvailable` is the whole host's number, so a runner confined by a control group's `memory.max` (a user slice, a container) would otherwise see room that it does not have: the runner also reads the room left under that limit (`memory.max` less the group's working set, for its own group from `/proc/self/cgroup` and every group above it) and uses the smaller room.
+The working set is `memory.current` less `inactive_file` from `memory.stat` (what `docker stats` and the kubelet count), because `memory.current` alone includes the page cache that image pulls and file reads leave behind and the kernel frees only under pressure, which would make an idle group look full; without a `memory.stat`, or without an `inactive_file` line, `memory.current` alone is the use.
+Only a missing file or a `memory.max` that is `max` means no limit; a value that is not a whole number, or a file that cannot be read, is a reading that cannot be taken and counts as busy.
 
 When `claim_memory_mb` is left out it is one job's size (`default_job_memory_mb`, else 4096), and a claim for several free slots can hand over several jobs, so the runner asks for no more slots than the room holds (the room divided by the size, rounded down, and at most the free slots); a room for less than one job is a decline.
 A runner with one slot is judged as before.

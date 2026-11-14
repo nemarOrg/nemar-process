@@ -10,8 +10,8 @@ Idle means, for a claim of ``need`` megabytes:
 * free space under the runner's root is at least `max_scratch_gb` (always checked);
 * memory the kernel calls available, less the reserve left to people, and less what this runner has
   already promised to jobs that are not yet using it (see `Gate`), is at least ``need``; on cgroup v2
-  the room left under the tightest `memory.max` above the runner (less its `memory.current`) is a
-  second limit, and the smaller room counts;
+  the room left under the tightest `memory.max` above the runner (less the group's working set, see
+  `_group_room_mb`) is a second limit, and the smaller room counts;
 * the one-minute load average per CPU this process may use is at most `max_load_per_core`;
 * no file named `pause` exists in any reservation directory (`os.lstat`, never followed or read: a
   file, a link or a directory of that name all count, and so does a directory that cannot be searched,
@@ -21,7 +21,8 @@ Idle means, for a claim of ``need`` megabytes:
 A reading that cannot be taken counts as busy. Linux reads `/proc/meminfo` (`MemAvailable`,
 `MemTotal`) and `/proc/loadavg`; where there is no `/proc/loadavg` the load comes from
 `os.getloadavg()`, and where there is no `/proc/meminfo` the host is always busy for memory
-(`memory_unknown`). A cgroup limit that is `max`, absent or unreadable is no limit. ``proc_root``
+(`memory_unknown`). A cgroup file that is missing, or a `memory.max` that is `max`, is no limit; a cgroup value that cannot
+be read or is not a number is a reading that cannot be taken and counts as busy. ``proc_root``
 (default `/proc`) and ``cgroup_root`` (default `/sys/fs/cgroup`) are for tests, which point them at
 files they wrote.
 """
@@ -187,32 +188,73 @@ def own_cgroup(proc_root: str = DEFAULT_PROC_ROOT) -> str | None:
     return None
 
 
-def _read_bytes(path: str) -> int | None:
-    """A whole number of bytes from a cgroup file; None for `max`, an absent file or anything else."""
-    data = _read_file(path)
-    if data is None:
+def _cgroup_text(path: str) -> tuple[str | None, bool]:
+    """``(text, True)`` for a cgroup file, ``(None, True)`` for one that is not there, and
+    ``(None, False)`` for one that is there and cannot be read (a reading that cannot be taken)."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(_READ_MAX)
+    except (FileNotFoundError, NotADirectoryError):
+        return None, True
+    except OSError:
+        return None, False
+    return data.decode("ascii", "replace").strip(), True
+
+
+def _group_room_mb(directory: str) -> int | None:
+    """Megabytes one cgroup may still take, or None when it has no limit.
+
+    The limit is `memory.max`, and the use is its working set: `memory.current` less `inactive_file`
+    from `memory.stat` (what `docker stats` and the kubelet count). `memory.current` alone includes the
+    page cache that image pulls and file reads leave behind, which the kernel frees only under pressure,
+    so a group that is only caching would sit near its limit and look full for good. Without a
+    `memory.stat`, or without an `inactive_file` line in it, `memory.current` alone is the use.
+
+    Only a file that is missing, or a `memory.max` that is the literal `max`, means no limit. A value
+    that is not a whole number, or a file that cannot be read, is a reading that cannot be taken: it
+    counts as busy, room 0."""
+    limit_text, ok = _cgroup_text(os.path.join(directory, "memory.max"))
+    if not ok:
+        return 0
+    if limit_text is None or limit_text == "max":
         return None
-    text = data.decode("ascii", "replace").strip()
-    return int(text) if text.isdigit() else None
+    if not limit_text.isdigit():
+        return 0
+    current_text, ok = _cgroup_text(os.path.join(directory, "memory.current"))
+    if not ok:
+        return 0
+    if current_text is None:
+        return None
+    if not current_text.isdigit():
+        return 0
+    inactive = 0
+    stat_text, ok = _cgroup_text(os.path.join(directory, "memory.stat"))
+    if not ok:
+        return 0
+    for line in (stat_text or "").splitlines():
+        name, _space, value = line.partition(" ")
+        if name == "inactive_file":
+            if not value.strip().isdigit():
+                return 0
+            inactive = int(value)
+            break
+    return max(0, int(limit_text) - max(0, int(current_text) - inactive)) // _MIB
 
 
 def read_cgroup_room(
     proc_root: str = DEFAULT_PROC_ROOT, cgroup_root: str = DEFAULT_CGROUP_ROOT
 ) -> int | None:
-    """Megabytes this process's cgroup may still take: the smallest `memory.max` less `memory.current`
-    among its own group and every group above it (a limit on a user slice binds a service under it),
-    or None when none of them has a number (`max`, absent or unreadable is no limit)."""
+    """Megabytes this process's cgroup may still take: the smallest room among its own group and every
+    group above it (a limit on a user slice binds a service under it), by `_group_room_mb`; None when
+    no group has a limit, or the process is not in a plain cgroup v2 path."""
     group = own_cgroup(proc_root)
     if group is None:
         return None
     parts = [part for part in group.split("/") if part]
     room: int | None = None
     while True:
-        directory = os.path.join(cgroup_root, *parts)
-        limit = _read_bytes(os.path.join(directory, "memory.max"))
-        current = _read_bytes(os.path.join(directory, "memory.current"))
-        if limit is not None and current is not None:
-            left = max(0, limit - current) // _MIB
+        left = _group_room_mb(os.path.join(cgroup_root, *parts))
+        if left is not None:
             room = left if room is None else min(room, left)
         if not parts:
             return room

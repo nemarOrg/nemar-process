@@ -1184,13 +1184,17 @@ def test_a_claimed_job_counts_against_the_next_claim_but_not_against_another_job
 MIB = 1024 * 1024
 
 
-def write_group(root: Path, group: str, limit: str | None, current: str | None) -> None:
+def write_group(
+    root: Path, group: str, limit: str | None, current: str | None, stat: str | None = None
+) -> None:
     directory = root / group.strip("/")
     directory.mkdir(parents=True, exist_ok=True)
     if limit is not None:
         (directory / "memory.max").write_text(limit + "\n")
     if current is not None:
         (directory / "memory.current").write_text(current + "\n")
+    if stat is not None:
+        (directory / "memory.stat").write_text(stat)
 
 
 def cgroup_host(tmp_path, own: str | None = "/user.slice/runner.service") -> tuple[Proc, Path]:
@@ -1226,10 +1230,8 @@ def test_a_group_at_or_over_its_limit_has_no_room(tmp_path, current):
     assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 0
 
 
-@pytest.mark.parametrize(
-    "how", ["max", "no memory.max", "no memory.current", "garbage", "a directory", "no groups"]
-)
-def test_a_limit_that_is_max_absent_or_unreadable_is_no_limit(tmp_path, how):
+@pytest.mark.parametrize("how", ["max", "no memory.max", "no memory.current", "no groups"])
+def test_a_limit_that_is_max_or_missing_is_no_limit(tmp_path, how):
     proc, tree = cgroup_host(tmp_path)
     group = "/user.slice/runner.service"
     if how == "max":
@@ -1238,12 +1240,96 @@ def test_a_limit_that_is_max_absent_or_unreadable_is_no_limit(tmp_path, how):
         write_group(tree, group, None, str(1000 * MIB))
     elif how == "no memory.current":
         write_group(tree, group, str(3000 * MIB), None)
-    elif how == "garbage":
-        write_group(tree, group, "lots", "many")
-    elif how == "a directory":
-        write_group(tree, group, None, str(1000 * MIB))
-        (tree / "user.slice" / "runner.service" / "memory.max").mkdir()
     assert availability.read_cgroup_room(str(proc.dir), str(tree)) is None
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        "garbled memory.max",
+        "garbled memory.current",
+        "memory.max a directory",
+        "memory.current a directory",
+        "memory.stat a directory",
+        "garbled inactive_file",
+        "garbled ancestor",
+    ],
+)
+def test_a_cgroup_value_that_cannot_be_read_counts_as_busy_not_as_no_limit(tmp_path, how):
+    proc, tree = cgroup_host(tmp_path)
+    group = "/user.slice/runner.service"
+    directory = tree / "user.slice" / "runner.service"
+    good = str(3000 * MIB), str(1000 * MIB)
+    if how == "garbled memory.max":
+        write_group(tree, group, "lots", good[1])
+    elif how == "garbled memory.current":
+        write_group(tree, group, good[0], "many")
+    elif how == "memory.max a directory":
+        write_group(tree, group, None, good[1])
+        (directory / "memory.max").mkdir()
+    elif how == "memory.current a directory":
+        write_group(tree, group, good[0], None)
+        (directory / "memory.current").mkdir()
+    elif how == "memory.stat a directory":
+        write_group(tree, group, *good)
+        (directory / "memory.stat").mkdir()
+    elif how == "garbled inactive_file":
+        write_group(tree, group, *good, stat="anon 1\ninactive_file lots\n")
+    else:  # the own group has no limit, a group above it holds a value nobody can read
+        write_group(tree, group, "max", good[1])
+        write_group(tree, "/user.slice", "9x", good[1])
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 0
+
+
+def inactive(megabytes: int) -> str:
+    return "anon 4096\nfile 9999\ninactive_file {}\nactive_file 12\n".format(megabytes * MIB)
+
+
+def test_the_page_cache_the_group_holds_is_not_counted_as_use(tmp_path):
+    proc, tree = cgroup_host(tmp_path)
+    group = "/user.slice/runner.service"
+    # 2900 MB of 3000 is in `memory.current`, but 2000 MB of that is inactive page cache the kernel gives
+    # back under pressure: 900 MB is in use, 2100 MB is room
+    write_group(tree, group, str(3000 * MIB), str(2900 * MIB), inactive(2000))
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 2100
+    write_group(tree, group, str(3000 * MIB), str(2900 * MIB), inactive(5000))  # more than current
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 3000
+
+
+@pytest.mark.parametrize("stat", [None, "anon 4096\nfile 9999\nactive_file 12\n", "", "\n"])
+def test_without_an_inactive_file_line_the_current_use_stands(tmp_path, stat):
+    proc, tree = cgroup_host(tmp_path)
+    write_group(tree, "/user.slice/runner.service", str(3000 * MIB), str(2900 * MIB), stat)
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 100
+
+
+def test_only_the_line_named_inactive_file_counts(tmp_path):
+    proc, tree = cgroup_host(tmp_path)
+    stat = "total_inactive_file {0}\ninactive_file_extra {0}\n".format(2000 * MIB)
+    write_group(tree, "/user.slice/runner.service", str(3000 * MIB), str(2900 * MIB), stat)
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 100
+
+
+def test_a_group_that_only_caches_has_room_and_the_same_group_without_the_number_reads_busy(
+    tmp_path,
+):
+    proc, tree = cgroup_host(tmp_path)
+    group = "/user.slice/runner.service"
+    gate = gate_for(
+        tmp_path,
+        proc,
+        settings(claim_memory_mb=None),
+        default_job_memory_mb=JOB_MB,
+        cgroup_root=str(tree),
+    )
+    # an idle group under a 4000 MB limit, 3900 MB of it page cache: a job of 2048 MB fits
+    write_group(tree, group, str(4000 * MIB), str(3900 * MIB), inactive(3000))
+    verdict = gate.claim_check(2)
+    assert (verdict.idle, verdict.slots, verdict.fields()["cgroup_room_mb"]) == (True, 1, 3100)
+    # with no `inactive_file` to take off, the same numbers say 100 MB of room: busy
+    write_group(tree, group, str(4000 * MIB), str(3900 * MIB), "anon 1\n")
+    verdict = gate.claim_check(2)
+    assert (verdict.reason, verdict.fields()["cgroup_room_mb"]) == ("memory", 100)
 
 
 @pytest.mark.parametrize(
