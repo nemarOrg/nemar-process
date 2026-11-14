@@ -28,7 +28,14 @@ CONFIG_KEYS = (
     "arch",
     "max_scratch_gb",
 )
-OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb", "sif_pull")
+OPTIONAL_KEYS = (
+    "launcher_dir",
+    "default_job_memory_mb",
+    "sif_pull",
+    "self_update",
+    "install_prefix",
+    "cosign_path",
+)
 ENGINES = ("docker", "podman")
 
 # What a job's launcher is run with: no PATH of the user's, so the launcher and the container
@@ -56,6 +63,13 @@ class Config:
     launcher_dir: str
     default_job_memory_mb: int | None = None
     sif_pull: bool = False
+    # The service install (docs/runner.md, "Running it as a service"): `self_update` is the opt-out of
+    # the daily signed update; `install_prefix` is where `nemar_runner install` put the runner, which
+    # the idle switch watches; `cosign_path` is the cosign binary the installer verifies with when
+    # there is none on the launch PATH.
+    self_update: bool = True
+    install_prefix: str | None = None
+    cosign_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +226,15 @@ def load_config(path: str) -> Config:
     sif_pull = document.get("sif_pull", False)
     if not isinstance(sif_pull, bool):
         raise ConfigError("sif_pull must be true or false")
+    self_update = document.get("self_update", True)
+    if not isinstance(self_update, bool):
+        raise ConfigError("self_update must be true or false")
+    install_prefix = document.get("install_prefix")
+    if install_prefix is not None:
+        install_prefix = _path(install_prefix, "install_prefix")
+    cosign_path = document.get("cosign_path")
+    if cosign_path is not None:
+        cosign_path = _path(cosign_path, "cosign_path")
     config = Config(
         api_base=_api_base(document["api_base"]),
         secret_file=_path(document["secret_file"], "secret_file"),
@@ -224,6 +247,9 @@ def load_config(path: str) -> Config:
         launcher_dir=_path(document.get("launcher_dir", default_launcher_dir()), "launcher_dir"),
         default_job_memory_mb=default_memory,
         sif_pull=sif_pull,
+        self_update=self_update,
+        install_prefix=install_prefix,
+        cosign_path=cosign_path,
     )
     problem = root_problem(config.root)
     if problem is not None:
