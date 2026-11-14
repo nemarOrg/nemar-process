@@ -70,6 +70,19 @@ OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 # is not a reusable workflow, whose caller would inherit the identity).
 SIGNING_REPOSITORY = "nemarOrg/nemar-process"
 
+
+def policy_fingerprint(
+    identity: str = SIGNING_IDENTITY,
+    issuer: str = OIDC_ISSUER,
+    repository: str = SIGNING_REPOSITORY,
+) -> str:
+    """A SHA-256 over what a verification asked of the certificate: the identity, the issuer and the
+    repository, joined with a NUL, which cannot occur in an argument. A cached proof carries the one it
+    was made under and counts only if it is this runner's today, so tightening any of the three
+    discards every older proof at once instead of leaving it believed for a day."""
+    return hashlib.sha256("\0".join((identity, issuer, repository)).encode("utf-8")).hexdigest()
+
+
 # The words of the `reason` of an `image_unverified` log line.
 REASONS = (
     "reference_refused",
@@ -354,8 +367,8 @@ class Verifier:
     A proof is kept in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed)
     holding the image digest, its kind (`image`, for a digest cosign verified, or `sif`, for a SIF
     artifact cosign verified, which proves nothing of the image digest itself and never satisfies the
-    other kind), the SIF artifact's manifest and layer digests for `sif`, the identity, cosign's version
-    and the time; it is believed for ``verified_ttl_seconds`` (24 hours) and only if every field is what
+    other kind), the SIF artifact's manifest and layer digests for `sif`, the identity, the fingerprint of the
+    whole policy (``policy_fingerprint``), cosign's version and the time; it is believed for ``verified_ttl_seconds`` (24 hours) and only if every field is what
     this runner would write now. A file placed in `sif_root`
     is never vouched for by the entry: it is hashed against the entry's layer each time it is used."""
 
@@ -470,6 +483,7 @@ class Verifier:
         if (
             entry.get("digest") != "sha256:" + digest_hex
             or entry.get("identity") != SIGNING_IDENTITY
+            or entry.get("policy") != policy_fingerprint()
             or entry.get("kind") != kind
         ):
             return None
@@ -493,6 +507,7 @@ class Verifier:
             "digest": "sha256:" + digest_hex,
             "kind": "image" if proof is None else "sif",
             "identity": SIGNING_IDENTITY,
+            "policy": policy_fingerprint(),
             "cosign_version": self._cosign_version(),
             "verified_at": int(time.time()),
         }

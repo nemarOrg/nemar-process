@@ -425,6 +425,17 @@ def test_the_documentation_lists_every_reason():
         assert "| `{}` |".format(reason) in docs, reason
 
 
+def test_the_policy_fingerprint_changes_with_each_of_the_three_and_the_separator_matters():
+    base = verify.policy_fingerprint()
+    assert re.fullmatch(r"[0-9a-f]{64}", base)
+    assert verify.policy_fingerprint(identity="^other$") != base
+    assert verify.policy_fingerprint(issuer="https://issuer.example.test") != base
+    assert verify.policy_fingerprint(repository="nemarOrg/other") != base
+    # moving a character across a boundary is not the same policy
+    assert verify.policy_fingerprint("ab", "c", "d") != verify.policy_fingerprint("a", "bc", "d")
+    assert verify.policy_fingerprint("a", "bc", "d") != verify.policy_fingerprint("a", "b", "cd")
+
+
 def test_the_signing_repository_is_the_identitys_repository():
     found = re.search(r"github\\\.com/([^/]+/[^/]+)/", verify.SIGNING_IDENTITY)
     assert found is not None
@@ -886,8 +897,9 @@ def test_a_verification_is_remembered_in_a_private_entry(docker_world):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     entry = json.loads(path.read_text("utf-8"))
-    assert set(entry) == {"digest", "kind", "identity", "cosign_version", "verified_at"}
+    assert set(entry) == {"digest", "kind", "identity", "policy", "cosign_version", "verified_at"}
     assert entry["kind"] == "image"
+    assert entry["policy"] == verify.policy_fingerprint()
     assert entry["digest"] == DIGEST
     assert entry["identity"] == verify.SIGNING_IDENTITY
     assert entry["cosign_version"] == "v3.1.4"
@@ -937,6 +949,11 @@ def test_an_entry_just_under_a_day_old_is_still_good(docker_world):
         lambda e: e.update(verified_at=True),
         lambda e: e.pop("verified_at"),
         lambda e: e.pop("identity"),
+        lambda e: e.pop("policy"),  # an entry from before the fingerprint
+        lambda e: e.update(policy=""),
+        lambda e: e.update(policy=verify.policy_fingerprint(repository="nemarOrg/other")),
+        lambda e: e.update(policy=verify.policy_fingerprint(issuer="https://issuer.example.test")),
+        lambda e: e.update(policy=verify.policy_fingerprint(identity="^something else$")),
         lambda e: e.pop("kind"),
         lambda e: e.update(kind="sif"),
         lambda e: e.update(kind="something"),
@@ -1105,11 +1122,13 @@ def test_the_cache_records_the_artifact_and_its_layer(world):
         "digest",
         "kind",
         "identity",
+        "policy",
         "cosign_version",
         "verified_at",
         "sif_manifest",
         "sif_layer",
     }
+    assert entry["policy"] == verify.policy_fingerprint()
 
 
 def test_a_pulled_file_that_is_not_the_signed_layer_is_refused_and_removed(world):
