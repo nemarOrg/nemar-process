@@ -35,7 +35,7 @@ HEX = DIGEST.split(":", 1)[1]
 EXPRESSIONS = {
     "${{ steps.version.outputs.version }}": "1.2.3",
     "${{ needs.publish.outputs.version }}": "1.2.3",
-    "${{ needs.publish.outputs.digest }}": DIGEST,
+    "${{ needs.publish.outputs[format('digest_{0}', matrix.flavor)] }}": DIGEST,
     "${{ github.actor }}": "an-actor",
     "${{ secrets.GITHUB_TOKEN }}": "a-token",
 }
@@ -62,13 +62,17 @@ def find_step(job: str, name: str) -> tuple[dict, dict]:
     raise AssertionError("no step named {!r} in job {}".format(name, job))
 
 
-def declared_env(job: dict, step: dict) -> dict[str, str]:
-    """The workflow's, the job's and the step's `env:`, with each expression replaced."""
+def declared_env(job: dict, step: dict, flavor: str = "cpu") -> dict[str, str]:
+    """The workflow's, the job's and the step's `env:`, with each expression replaced.
+
+    The publish and sign jobs run once per flavor: `flavor` is the matrix leg being run.
+    """
     merged: dict[str, str] = {}
+    expressions = {**EXPRESSIONS, "${{ matrix.flavor }}": flavor}
     for source in (workflow().get("env", {}), job.get("env", {}), step.get("env", {})):
         for key, value in source.items():
             text = str(value)
-            for expression, replacement in EXPRESSIONS.items():
+            for expression, replacement in expressions.items():
                 text = text.replace(expression, replacement)
             assert "${{" not in text, "this test does not know the expression in {}: {}".format(
                 key, text
@@ -220,10 +224,10 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def tag_check(which: str, registry_url: str, tmp_path: Path, **override: str):
+def tag_check(which: str, registry_url: str, tmp_path: Path, flavor: str = "cpu", **override: str):
     job_name, step_name, _repository, _tag = TAG_STEPS[which]
     job, step = find_step(job_name, step_name)
-    env = {**declared_env(job, step), "REGISTRY_URL": registry_url, **override}
+    env = {**declared_env(job, step, flavor), "REGISTRY_URL": registry_url, **override}
     return run_body(step, env, ROOT, tmp_path)
 
 
@@ -260,6 +264,26 @@ def test_the_registry_is_asked_about_the_right_tag_with_the_workflows_credential
     assert method == "HEAD"
     assert path == "/v2/{}/manifests/{}".format(repository, tag)
     assert headers["Authorization"] == "Bearer stand-in-token"
+
+
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_the_version_tag_asked_about_is_the_one_of_the_flavor_being_published(
+    flavor, registry, tmp_path
+):
+    # one step runs in both publish legs; each asks the registry for its own flavor's tag, never the other's
+    assert tag_check("version tag", registry.url, tmp_path, flavor).returncode == 0
+    (_token, manifest_request) = registry.requests
+    assert manifest_request[1] == "/v2/nemarorg/nemar-python/manifests/1.2.3-" + flavor
+
+
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_a_flavor_whose_tag_exists_is_refused_whatever_the_other_flavors_state(
+    flavor, registry, tmp_path
+):
+    registry.manifest = (200, b"")
+    done = tag_check("version tag", registry.url, tmp_path, flavor)
+    assert done.returncode != 0
+    assert "1.2.3-" + flavor in output_of(done)
 
 
 def test_the_sif_tag_asked_about_contains_404():

@@ -278,6 +278,96 @@ def test_the_dev_build_version_is_a_dev_version_whatever_the_version_file_says()
     assert "*-dev[0-9]*" in step["run"]
 
 
+# the flavor matrix leaves the signing and publish path as it was (PX-06) -------------------------------
+
+# The text of the guards as the base held them, before the image workflow became a matrix over the
+# `cpu` and `cuda` flavors. A flavor changes which image a leg builds, never who may publish it, so
+# each of these is equal to the base byte for byte.
+BASE_GUARD_RUN = """set -euo pipefail
+if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+  echo "::error::${GITHUB_SHA} is not reachable from main: only a commit of main is published"
+  exit 1
+fi
+"""
+BASE_PUBLISH_IF = (
+    "github.event_name != 'pull_request' && (startsWith(github.ref, "
+    "'refs/tags/image-nemar-python-v') || github.ref == 'refs/heads/main')"
+)
+BASE_VERSION_RUN_LINES = (
+    "set -euo pipefail",
+    'if [ "$REF_TYPE" = "tag" ]; then',
+    'version="${REF_NAME#image-nemar-python-v}"',
+    'if ! [[ "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
+    'project="$(git show "${GITHUB_SHA}:pyproject.toml" | python3 -c \'import sys, tomllib; '
+    'print(tomllib.loads(sys.stdin.read())["project"]["version"])\')"',
+    'if [[ "$project" == *-dev* ]]; then',
+    'if [ "$project" != "$version" ]; then',
+    'tagged="$(git rev-parse --verify --quiet "refs/tags/v${version}^{commit}" || true)"',
+    'if [ "$tagged" != "$GITHUB_SHA" ]; then',
+    'echo "version=${version}" >> "$GITHUB_OUTPUT"',
+)
+
+
+def test_the_publish_guard_if_and_version_step_are_the_bases_text_whatever_the_flavor():
+    workflow = load(IMAGE_WORKFLOW.name)
+    publish = workflow["jobs"]["publish"]
+    assert publish["if"] == BASE_PUBLISH_IF
+    assert publish["needs"] == "test"
+    guard = step_named(IMAGE_WORKFLOW.name, "publish", "Refuse a commit that is not on main")
+    assert guard["run"] == BASE_GUARD_RUN
+    assert set(guard) == {"name", "run"}  # no `if`, no `env`: nothing a flavor can switch off
+    version = step_named(IMAGE_WORKFLOW.name, "publish", IMAGE_VERSION_STEP)
+    for line in BASE_VERSION_RUN_LINES:
+        assert line in version["run"], line
+    assert version["run"].count("exit 1") == 4
+    assert set(version) == {"name", "id", "env", "run"}
+
+
+def test_the_flavor_matrix_never_widens_who_can_publish_or_sign():
+    workflow = load(IMAGE_WORKFLOW.name)
+    # the trigger, the default permission, the three jobs' privileges and the release condition
+    assert triggers(workflow)["push"] == {"tags": ["image-nemar-python-v*"]}
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    assert jobs["publish"]["permissions"] == {"contents": "read", "packages": "write"}
+    assert jobs["sign"]["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+        "id-token": "write",
+    }
+    assert jobs["release"]["permissions"] == {"contents": "write"}
+    assert jobs["release"]["if"] == "startsWith(github.ref, 'refs/tags/')"
+    assert jobs["release"]["needs"] == ["publish", "sign"]
+    assert jobs["sign"]["needs"] == "publish"
+    # a job that has no `if` of its own runs only if every job it needs ran: the matrix did not add one
+    assert "if" not in jobs["sign"]
+    # the publish and sign legs are the same two flavors, so a flavor cannot be signed that was not
+    # published (and the reverse)
+    publish_legs = [leg["flavor"] for leg in jobs["publish"]["strategy"]["matrix"]["include"]]
+    assert publish_legs == list(jobs["sign"]["strategy"]["matrix"]["flavor"]) == ["cpu", "cuda"]
+
+
+def test_no_step_of_the_publish_or_sign_job_is_conditioned_on_anything_but_the_flavor():
+    jobs = load(IMAGE_WORKFLOW.name)["jobs"]
+    for job in ("publish", "sign"):
+        for step in jobs[job]["steps"]:
+            if "if" in step:
+                assert step["if"] in {
+                    "matrix.flavor == 'cuda'",
+                    "matrix.flavor == 'cpu'",
+                }, (job, step.get("name"), step["if"])
+
+
+def test_the_sign_job_still_signs_after_the_pushed_digest_passed_its_smoke_test():
+    names = [s.get("name", "") for s in image_steps("sign")]
+    first_sign = names.index("Sign the image digest and verify the signature")
+    smokes = [
+        i for i, n in enumerate(names) if n.startswith("Smoke test the pushed image by digest")
+    ]
+    assert len(smokes) == 2  # one per flavor, each behind its own `if`
+    assert all(i < first_sign for i in smokes)
+
+
 # the runner release workflow (S4) ----------------------------------------------------------------------
 
 RUNNER_GLOB = "nemar-runner-v[0-9]+.[0-9]+.[0-9]+"
