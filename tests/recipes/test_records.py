@@ -1,6 +1,6 @@
 """The per-recording record: valid, honest about what ran, and checkable from the record alone.
 
-Validated with the vendored signalJourney validator, which checks the schema and nothing else
+Validated with the signalJourney validator of the PyPI release, which checks the schema and nothing else
 (`records.check` adds the timestamps, the references and the plan hash). Every claim the record makes
 about its files is compared with the files on disk.
 """
@@ -30,7 +30,7 @@ def nemar(record):
     return record["extensions"]["nemar"]
 
 
-def test_the_record_validates_with_the_vendored_validator(record):
+def test_the_record_validates_with_the_pypi_validator(record):
     assert sj.validator().validate(record, raise_exceptions=False) == []
 
 

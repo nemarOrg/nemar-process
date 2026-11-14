@@ -1,6 +1,6 @@
 """NEMAR's processing package: the recipes and what they share.
 
-``nemar_process.sj`` is the signalJourney validator pointed at the schema vendored in ``_vendor/``.
+``nemar_process.sj`` is the signalJourney validator of the PyPI release, over the schema that release packages (pinned by its tree digest).
 ``nemar_process.common`` is the layer every recipe is built on (loading, naming, the resolved plan,
 measurements, files, records), ``nemar_process.nemar_floor`` is the first recipe, and
 ``python -m nemar_process`` (installed in the image as ``nemar-recipe``) runs a recipe on a dataset.

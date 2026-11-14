@@ -9,8 +9,7 @@ name: Release Gate
 # (tests/images has a conftest.py of its own, which tests/launcher would import by name):
 # everything but tests/images, then tests/images, then the recipes and the launch end to end in the
 # lock's `runtime` environment with NEMAR_REQUIRE_RUNTIME so they cannot be skipped.
-# The comparisons with nemar-cli's contract and with signalJourney stay in ci.yml, which needs
-# checkouts of them.
+# The comparisons with nemar-cli's contract stay in ci.yml, which needs checkouts of it.
 # Nothing here pushes, signs or publishes.
 
 on:
