@@ -41,6 +41,7 @@ import stat
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from . import net, spec
@@ -91,15 +92,17 @@ _LOG_LIMIT = 100
 # ---- finding the runtime and the image ------------------------------------------------------------
 
 
-def find_runtime(env: Env) -> tuple[str, str]:
-    """The first of ``apptainer``, ``singularity`` on the launcher's PATH: (name, absolute path)."""
+def find_runtime(env: Env, names: tuple[str, ...] = RUNTIME_BINARIES) -> tuple[str, str]:
+    """The first of ``names`` (``apptainer``, ``singularity``) on the launcher's PATH: (name, path)."""
     search = env.get("PATH", "") or ""
-    for name in RUNTIME_BINARIES:
+    for name in names:
         for directory in search.split(os.pathsep):
             candidate = os.path.join(directory or ".", name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return name, candidate
-    raise Failure("runtime_error", "no_container_runtime", "no apptainer or singularity on PATH")
+    raise Failure(
+        "runtime_error", "no_container_runtime", "no {} on PATH".format(" or ".join(names))
+    )
 
 
 def resolve_sif(job: spec.Spec, env: Env) -> str:
@@ -486,6 +489,42 @@ def prepare_layout(out_dir: str) -> Layout:
 # ---- signals --------------------------------------------------------------------------------------
 
 
+_WAITID = getattr(os, "waitid", None)
+
+
+def has_exited(child: subprocess.Popen[bytes]) -> bool:
+    """Whether ``child`` has exited, WITHOUT reaping it where the system allows (``waitid`` with
+    ``WNOWAIT``, on Linux): a reaped child's process id is free for another process to take, and the
+    group kill that follows must not be able to hit a stranger. Where there is no ``waitid`` (macOS,
+    which only a developer's machine is) it falls back to ``poll``, which reaps."""
+    if _WAITID is not None:
+        try:
+            return _WAITID(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:  # already reaped elsewhere
+            return True
+    return child.poll() is not None
+
+
+def wait_for_exit(child: subprocess.Popen[bytes], timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for ``child`` to exit, without reaping it (see ``has_exited``)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if has_exited(child):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def end_group(child: subprocess.Popen[bytes]) -> int:
+    """Kill whatever is left in ``child``'s session (its own children), THEN reap ``child``: its
+    process id, which is the group's, is still ours while the group is signalled. Returns the
+    child's wait status."""
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(child.pid, signal.SIGKILL)
+    return child.wait()
+
+
 class Terminator:
     """Records a SIGTERM, passes it to the container, and asks running phases to stop."""
 
@@ -505,7 +544,7 @@ class Terminator:
         """Pass the SIGTERM to the container's whole process group (it was started in a session of
         its own, so the group is the container and everything in it, and nothing of ours)."""
         child = self.child
-        if child is not None and child.poll() is None:
+        if child is not None and not has_exited(child):
             with contextlib.suppress(OSError, ProcessLookupError):
                 os.killpg(child.pid, signal.SIGTERM)
 
@@ -574,7 +613,12 @@ def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
 
 
 def run_container(
-    argv: list[str], env: Env, work: str, terminator: Terminator, log: Log
+    argv: list[str],
+    env: Env,
+    work: str,
+    terminator: Terminator,
+    log: Log,
+    oom_check: Callable[[], bool] | None = None,
 ) -> Outcome:
     """Start the container, wait for it, and map how it ended (the first failure wins).
 
@@ -606,37 +650,32 @@ def run_container(
     terminator.attach(child)
     killed = False
     try:
-        while True:
-            try:
-                status = child.wait(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                received = terminator.received
-                if (
-                    received is not None
-                    and not killed
-                    and time.time() - received >= TERM_GRACE_SECONDS
-                ):
-                    killed = True
-                    log.warning(
-                        "the container did not stop {} s after SIGTERM; killing it".format(
-                            TERM_GRACE_SECONDS
-                        )
+        while not wait_for_exit(child, 0.2):
+            received = terminator.received
+            if received is not None and not killed and time.time() - received >= TERM_GRACE_SECONDS:
+                killed = True
+                log.warning(
+                    "the container did not stop {} s after SIGTERM; killing it".format(
+                        TERM_GRACE_SECONDS
                     )
-                    with contextlib.suppress(OSError, ProcessLookupError):
-                        os.killpg(child.pid, signal.SIGKILL)
+                )
+                with contextlib.suppress(OSError, ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
     finally:
         terminator.detach()
-    # Whatever is left in the group (the entry's own children) goes with it.
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(child.pid, signal.SIGKILL)
+    # Whatever is left in the group (the entry's own children) goes with it, before the child is
+    # reaped (its process id is the group's, and must not be free for a stranger to take).
+    status = end_group(child)
     code = 128 - status if status < 0 else status
     log.info("run: the container exited with {}".format(code))
     if terminator.received is not None:
         return Outcome(code, terminated_failure(terminator, env))
     if code == 0:
         return Outcome(code, None)
-    if code == 137:
+    # Under Apptainer a 137 is the kernel's out-of-memory killer. A container engine can say whether
+    # it was (`oom_check`); when it says it was not, the entry was killed some other way (a SIGKILL
+    # of its own, an operator) and that is an ordinary `entry_failed`, below.
+    if code == 137 and (oom_check is None or oom_check()):
         return Outcome(code, Failure("out_of_memory", None, "the entry was killed (exit 137)"))
     return Outcome(
         code, Failure("runtime_error", "entry_failed", "the entry exited with {}".format(code))

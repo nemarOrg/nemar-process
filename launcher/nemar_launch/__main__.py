@@ -27,6 +27,7 @@ Exit number: 0, or 10 to 16 for the seven failure codes (``codes.exit_number``).
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import platform
 import re
@@ -38,7 +39,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from . import bundle, net, provenance, run, spec, stage, upload
+from . import bundle, net, provenance, run, runtime, spec, stage, upload
 from .codes import (
     ENV_SLURM_JOB_ID,
     ENV_SPEC,
@@ -161,9 +162,21 @@ def _do_work(
         tmp_dir = os.path.join(scratch, "tmp")
         os.mkdir(tmp_dir, 0o700)
 
-        runtime_name, runtime_path = run.find_runtime(env)
-        sif = run.resolve_sif(job, env)
+        engine = runtime.selected(env)
+        runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
+        sif = ""
+        if engine == runtime.APPTAINER:
+            runtime_name, runtime_path = run.find_runtime(env)
+            sif = run.resolve_sif(job, env)
+        else:  # Docker or Podman: the image comes from the registry, there is no image file
+            runtime_name, runtime_path = run.find_runtime(env, (engine,))
         state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
+        reference = runtime.image_reference(job)
+        if engine != runtime.APPTAINER:  # like the image file: before anything is fetched
+            assert settings.limits is not None  # read_settings refuses a launch without them
+            runtime.check_registry(reference, env)
+            runtime.preflight(engine, runtime_path, settings.limits, env, terminator.stop, log)
+            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
 
         code_dir: str | None = None
         started = time.monotonic()
@@ -180,7 +193,10 @@ def _do_work(
             if not os.path.isfile(os.path.join(code_dir, *job.entry.split("/"))):
                 raise Failure("entry_not_found", None, "the entry is not in the bundle")
 
-        run.require_pid_namespace(runtime_path, sif, job, state.layout, tmp_dir, env, log)
+        if engine == runtime.APPTAINER:
+            run.require_pid_namespace(runtime_path, sif, job, state.layout, tmp_dir, env, log)
+        else:
+            log.info("pid namespace: private, the engine is never given a host namespace flag")
 
         started = time.monotonic()
         try:
@@ -192,20 +208,47 @@ def _do_work(
             raise Stopped  # a cancel must not run the entry
 
         binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
-        run.check_bind_sources(binds)
-        argv = run.build_argv(
-            runtime_path,
-            job,
-            sif,
-            binds,
-            run.cuda_visible_devices(job, env),
-            limits=settings.limits,
+        container: str | None = None
+        if engine == runtime.APPTAINER:
+            run.check_bind_sources(binds)
+            argv = run.build_argv(
+                runtime_path,
+                job,
+                sif,
+                binds,
+                run.cuda_visible_devices(job, env),
+                limits=settings.limits,
+            )
+        else:
+            runtime.check_mount_sources(binds)
+            assert settings.limits is not None  # read_settings refuses a launch without them
+            assert settings.runner_label is not None
+            container = runtime.container_name()
+            log.info("container: named {}".format(container))
+            argv = runtime.build_argv(
+                engine,
+                runtime_path,
+                job,
+                reference,
+                container,
+                binds,
+                settings.limits,
+                settings.runner_label,
+            )
+        oom_check = (
+            None
+            if container is None
+            else functools.partial(runtime.oom_killed, runtime_path, container, env)
         )
         started = time.monotonic()
         try:
-            outcome = run.run_container(argv, env, state.layout.work, terminator, log)
+            outcome = run.run_container(
+                argv, env, state.layout.work, terminator, log, oom_check=oom_check
+            )
         finally:
             state.phase("run", started)
+            if container is not None:
+                runtime.remove_container(runtime_path, container, env)
         state.entry_exit_code = outcome.entry_exit_code
         if outcome.failure is not None:
             raise outcome.failure

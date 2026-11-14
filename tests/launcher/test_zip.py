@@ -48,6 +48,7 @@ def test_the_script_is_at_the_root_and_executable_and_the_member_list_is_the_lau
             "lib/nemar_launch/net.py",
             "lib/nemar_launch/provenance.py",
             "lib/nemar_launch/run.py",
+            "lib/nemar_launch/runtime.py",
             "lib/nemar_launch/settings.py",
             "lib/nemar_launch/spec.py",
             "lib/nemar_launch/stage.py",
