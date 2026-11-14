@@ -64,9 +64,8 @@ class World:
         (seed / "scripts").mkdir()
         for script in ("bump_version.py", "sync_dev_merge.py"):
             shutil.copy(ROOT / "scripts" / script, seed / "scripts" / script)
-        set_version(
-            seed, SEED_VERSION
-        )  # never the repository's own: the tests must not depend on it
+        # never the repository's own version: the tests must not depend on it
+        set_version(seed, SEED_VERSION)
         self.git("add", "-A", cwd=seed)
         self.git("commit", "-qm", "the repository", cwd=seed)
         self.git("push", "-q", "origin", "main", cwd=seed)
@@ -550,6 +549,7 @@ def test_a_push_to_dev_after_the_release_merge_conflicts_only_on_the_version_lin
     assert outcome.failed is None, outcome.log
     assert "resolved the version lines" in outcome.log
     assert released.version("dev") == "0.2.1-dev1"  # main's 0.2.0, then the patch after it
+    assert released.version("dev~1") == "0.2.0"  # the merge itself took main's side of the line
     assert released.remote("merge-base", "--is-ancestor", "main", "dev") == ""
     assert "chore: sync dev with main after v0.2.0" in released.remote(
         "log", "--merges", "--format=%s", "dev"
@@ -596,6 +596,19 @@ def test_a_version_conflict_with_another_line_in_the_same_hunk_is_not_resolved(r
     assert outcome.failed is not None
     assert "pyproject.toml" in outcome.log
     assert "needs a person" in outcome.log
+    assert released.remote("rev-parse", "dev") == before
+
+
+def test_a_conflict_of_version_lines_in_a_file_other_than_the_two_is_not_resolved(released):
+    # the resolver is for the project's own version only: a `version = ...` line elsewhere is a person's
+    released.commit("dev", files={"other.toml": 'version = "1"\n'})
+    released.commit("main", files={"other.toml": 'version = "2"\n'})
+    released.commit("dev", files={"other.toml": 'version = "3"\n'})
+    released.commit("main", files={"other.toml": 'version = "4"\n'})
+    before = released.remote("rev-parse", "dev")
+    outcome = sync(released)
+    assert outcome.failed is not None
+    assert "other.toml" in outcome.log
     assert released.remote("rev-parse", "dev") == before
 
 
