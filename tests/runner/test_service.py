@@ -253,6 +253,10 @@ def verify_attempts(
 def test_systemd_accepts_the_rendered_units(tmp_path):
     analyze = shutil.which("systemd-analyze")
     if analyze is None:
+        if os.environ.get("NEMAR_REQUIRE_SYSTEMD") == "1":
+            pytest.fail(
+                "systemd-analyze is required here (NEMAR_REQUIRE_SYSTEMD=1) and is not installed"
+            )
         pytest.skip("systemd-analyze is not installed here; CI's Linux runner has it")
     units = render(tmp_path, tmp_path / "prefix", tmp_path / "config.json")
     could_not = []
@@ -268,7 +272,10 @@ def test_systemd_accepts_the_rendered_units(tmp_path):
         assert done.returncode == 0, "{}: {}".format(label, text)
         assert BAD_UNIT.search(text) is None, "{}: {}".format(label, text)
         return
-    pytest.skip("no systemd manager available: " + " | ".join(could_not)[:600])
+    reason = "no systemd manager available: " + " | ".join(could_not)[:600]
+    if os.environ.get("NEMAR_REQUIRE_SYSTEMD") == "1":
+        pytest.fail(reason + " (NEMAR_REQUIRE_SYSTEMD=1: the units must be verified here)")
+    pytest.skip(reason)
 
 
 # ---- boot.py ------------------------------------------------------------------------------------------------
