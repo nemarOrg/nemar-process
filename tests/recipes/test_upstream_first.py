@@ -1,7 +1,6 @@
 """Recipes hold no numerics: a missing signal-processing step is added to eegprep, never written here.
 
-An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_process/` (the vendored
-signalJourney schema excepted) that fails on:
+An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_process/` that fails on:
 
 * an import of, or a reference to, a signal-processing library or module (`scipy.signal`,
   `scipy.fft`, `scipy.linalg`, `numpy.fft`, scikit-learn, torch, pamica, MNE-Python);
