@@ -34,7 +34,8 @@ The residual: a pin names a version, not a hash, so the build backend is still f
 The image holds software under its own licences: this repository's code is MIT, MNE-Python is BSD 3-Clause, and eegprep, pamica, torch and the rest carry theirs.
 The image therefore has no licence label, because one value would be wrong for most of what is inside.
 
-The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED=0`, runs as a non-root user, and carries labels for the source commit (`org.opencontainers.image.revision`) and the lock's SHA-256 (`io.nemar.lock-sha256`).
+The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED=0`, runs as a non-root user, and carries labels for the version (`org.opencontainers.image.version`), the source commit (`org.opencontainers.image.revision`), the build (`io.nemar.build`: `release` or `dev`) and the lock's SHA-256 (`io.nemar.lock-sha256`).
+The same three facts are in `/opt/nemar/build.json`, `{"version", "commit", "build"}`, which every record reads (see "The build a record names" below).
 Its bases are digests: `python:3.12-slim` (used by two stages, with the same digest) and the `uv` image, each named with its version in the Dockerfile's comments.
 The image also holds the recipes package `nemar_process` (the signalJourney validator pointed at the vendored schema, the common layer and `nemar_floor`) and the command `nemar-recipe` in `/opt/venv/bin` (see [recipes.md](recipes.md)).
 The command is a three-line script (the interpreter, an import and the call of `main`) that `python -m nemar_process` stands behind; a launch specification names it as an argument vector, for example `["nemar-recipe", "run", "nemar-floor", "--dataset-dir", "/data/<id>", ...]`.
@@ -116,8 +117,8 @@ The controls that would stop that are the owner's and are not yet in place (see 
 
 | Job | Runs on | Does |
 |---|---|---|
-| `test` | pull request, tag, dispatch | builds the image without pushing; runs `smoke.py` inside it; builds a SIF from the local image; runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths` |
-| `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails unless the registry says `<version>-cpu` is absent (`scripts/check_tag_absent.py`, below); pushes `ghcr.io/nemarorg/nemar-python:<version>-cpu` and captures the digest |
+| `test` | pull request, tag, dispatch | builds the image without pushing, as a dev build; runs `smoke.py` inside it; builds a SIF from the local image; runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths` |
+| `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails unless the version is the `pyproject.toml` version at the commit, a release, and the git tag `v<version>` points at the commit; fails unless the registry says `<version>-cpu` is absent (`scripts/check_tag_absent.py`, below); pushes `ghcr.io/nemarorg/nemar-python:<version>-cpu` and captures the digest |
 | `sign` | after `publish` | smoke-tests the pushed digest, and only then signs it and verifies the signature; builds the SIF from that digest; smoke-tests it; fails unless the registry says the SIF tag is absent (the same script); pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`; signs and verifies the artifact; writes the digest file |
 | `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` to the release of the tag; an existing asset of that name is an error, never overwritten |
 
@@ -129,13 +130,27 @@ A tag `image-nemar-python-vMAJOR.MINOR.PATCH` runs the whole chain, using the wo
 The first publication therefore happens from `main`, after the epic branch has merged: a dispatch from `main`, or a tag on a commit of `main`.
 A manual dispatch runs it from `main` only, with the version as an input; it attaches the digest file to the workflow run, not to a release.
 A version is published once: a second run for the same version stops at the existing `<version>-cpu` tag.
-The version is never read from a file: it is the tag or the input.
+The version is the tag or the input, and the `publish` job refuses it unless it is also the `[project].version` of `pyproject.toml` at the built commit, has no `-devN` suffix, and the git tag `v<version>` exists and points at that commit.
+The image tag, the git tag and the version every record names are therefore one version.
+To publish image `X.Y.Z` after `main` has moved past `vX.Y.Z`, push the tag `image-nemar-python-vX.Y.Z` on the `vX.Y.Z` commit (a dispatch from `main` would build the newer commit and be refused).
+The tag trigger, the "not on `main`" guard, the signing identity and the job permissions are unchanged by this check, so existing signatures stay valid: the identity names the workflow path and the ref, not the file's content.
 
 **The existence checks.** `scripts/check_tag_absent.py` asks the registry for the HTTP status of a manifest `HEAD` and reads nothing else.
 Exactly 404 means the tag is absent and the run goes on; 200 means it exists and the run stops.
 Every other answer also stops the run before anything is pushed: another 2xx, a redirect (never followed), 401, 403, 429, a 5xx, a token exchange that fails, a TLS or network error, an empty reply, a missing credential.
 No text in a reply is searched, so an error that merely contains "404", "unknown" or "not found" is not taken for an absence.
 `tests/images/test_publish_guards.py` runs the steps' shell against a stand-in registry for each of these, and the "not on `main`" guard in a throwaway git repository.
+
+### The build a record names
+
+The image is built with three build arguments: `NEMAR_PROCESS_VERSION`, `NEMAR_PROCESS_COMMIT` and `NEMAR_PROCESS_BUILD`.
+They are written at build time into `/opt/nemar/build.json` (by `python -m nemar_process.common.build write`, as root, into a directory the job's user cannot change) and mirrored as labels.
+Only the `publish` job passes `release`; the `test` job passes `dev`, with the `pyproject.toml` version (a release version gets the suffix `-dev0`) and the checked-out commit.
+The defaults are an empty version, an empty commit and `dev`, so a plain `docker build` without the version and commit is refused rather than named.
+The writer, and the reader (`nemar_process.common.build.build_info`), refuse a `release` whose version has a `-devN` suffix, a `dev` whose version has none, a commit that is not 40 lowercase hexadecimal digits, and any `build` other than `release` or `dev`.
+Outside an image there is no file and the run is a `source` run: the `pyproject.toml` version beside the package and no commit.
+
+Every signalJourney record then carries `extensions.nemar.process` (`version`, `commit`, `build`) and `extensions.nemar.image` (`digest`, and `tag`, `<version>-cpu` for a release and null otherwise), read from inside the image with no network call ([recipes.md](recipes.md)).
 
 ### When a run fails after the image was pushed
 
@@ -210,4 +225,4 @@ The `python:3.12-slim` digest is written twice, in the builder and in the final 
 When the lock gains a package that is built from source, or `setuptools` moves in the lock, `tests/images/test_dependencies.py` says what to update.
 To move `uv`, change the version in `images/nemar-python/Dockerfile`, `.github/workflows/ci.yml` and `.github/workflows/image-nemar-python.yml` together; a test compares the three.
 To move the signalJourney commit, see [upstream.md](upstream.md).
-The version of the image is never edited: it is the tag.
+The version of the image is never edited: it is the tag, and the tag must equal the version the release process put in `pyproject.toml`.
