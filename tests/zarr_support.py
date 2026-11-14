@@ -86,6 +86,27 @@ def _signal(seed: int):
     )
 
 
+def reference_content_sha256(seed: int | None, unit: str, scale: float = 0.5) -> str:
+    """The content digest of a stand-in store (``seed`` None is the flat one), written out from the
+    definition (``nemar.store-content.v1``) and apart from the recipe's own function: the header
+    lines, then the physical values as little-endian binary64, channel-major."""
+    import struct
+
+    import numpy as np
+
+    counts = np.zeros((N_CHANNELS, N_SAMPLES), dtype=int) if seed is None else _signal(seed)
+    with np.errstate(over="ignore"):
+        values = counts.astype(np.int16).astype(np.float64) * scale + 0.0
+    header = "nemar.store-content.v1\nshape {} {}\nrate {}\nunit {}\n{}data float64-le\n".format(
+        N_CHANNELS,
+        N_SAMPLES,
+        struct.pack(">d", RATE).hex(),
+        unit,
+        "".join("label {}\n".format(label) for label in LABELS),
+    )
+    return hashlib.sha256(header.encode() + values.astype("<f8").tobytes(order="C")).hexdigest()
+
+
 def write_group(root, name: str, *, modality: str, unit: str, data, scale: float = 0.5) -> None:
     """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization."""
     import numpy as np

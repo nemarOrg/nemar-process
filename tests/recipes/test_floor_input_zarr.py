@@ -16,12 +16,10 @@ import io as stdlib_io
 import json
 import re
 import socket
-import struct
 import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 import zarr_support as z
 from nemar_process import sj
@@ -280,20 +278,9 @@ GROUP = "eeg_250hz"
 
 
 def reference_digest(path: str) -> str:
-    """The digest of ``path``'s content written out from the definition, apart from the recipe's own
-    function: the header lines, then the physical values as little-endian binary64, channel-major."""
+    """The digest of ``path``'s content, from the definition and apart from the recipe's own function."""
     seed, unit, scale = CONTENT[path]
-    counts = np.zeros((z.N_CHANNELS, z.N_SAMPLES), dtype=int) if seed is None else z._signal(seed)
-    with np.errstate(over="ignore"):
-        values = counts.astype(np.int16).astype(np.float64) * scale + 0.0
-    header = "nemar.store-content.v1\nshape {} {}\nrate {}\nunit {}\n{}data float64-le\n".format(
-        z.N_CHANNELS,
-        z.N_SAMPLES,
-        struct.pack(">d", z.RATE).hex(),
-        unit,
-        "".join("label {}\n".format(label) for label in z.LABELS),
-    )
-    return hashlib.sha256(header.encode() + values.astype("<f8").tobytes(order="C")).hexdigest()
+    return z.reference_content_sha256(seed, unit, scale)
 
 
 def test_the_dataset_record_names_the_content_of_every_store_read_in_full(ran):
