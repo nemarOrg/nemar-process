@@ -196,7 +196,7 @@ def redirect_target(current: str, location: str | None, data_host: str) -> str:
     a host of the other pair. ``location`` is the ``Location`` header, read as a relative reference to
     ``current``, so a path on the Zarr host itself, a scheme-relative address, ``http://``, any other
     scheme, an address with a user name or a port, and an IP literal are all refused: only that one
-    host name is allowed, exactly.
+    host name is allowed, exactly, apart from case.
     """
     target = urljoin(current, location or "")  # no Location is the address itself: refused below
     if zarr_hosts.https_host(target, (data_host,)) is None:
