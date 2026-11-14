@@ -35,6 +35,7 @@ from runner_support import (
     wait_for,
     write_private,
 )
+from test_runner_images import FAKE_RUNTIME, RECORD
 
 LINUX = sys.platform.startswith("linux")
 CPUS = availability.cpu_count()
@@ -114,11 +115,16 @@ class HostRig(Rig):
     reservations: Path
 
 
-def new_rig(tmp_path, launcher) -> HostRig:
-    """A rig with an image, a `/proc`-style directory with room, and a reservation directory."""
-    made = HostRig(tmp_path, launcher=launcher)
+def new_rig(tmp_path, launcher, pulling: bool = False) -> HostRig:
+    """A rig with an image, a `/proc`-style directory with room, and a reservation directory. With
+    ``pulling`` the image is not there and a stand-in `apptainer` pulls it, slowly (`pull.slow`)."""
+    made = HostRig(tmp_path, launcher=launcher, sif_pull=pulling)
     made.sif_root.mkdir()
-    (made.sif_root / SIF).write_bytes(b"sif")
+    if pulling:
+        made.install("apptainer", FAKE_RUNTIME.format(python=sys.executable, record=RECORD))
+        (made.bin / "pull.slow").write_text("1.0")
+    else:
+        (made.sif_root / SIF).write_bytes(b"sif")
     made.proc = Proc(tmp_path / "proc")
     made.reservations = tmp_path / "reservations"
     made.reservations.mkdir()
@@ -132,10 +138,11 @@ def rig(tmp_path):
     made.close()
 
 
-def prepared(rig, availability_settings=None, **tuning):
+def prepared(rig, availability_settings=None, config_changes=None, **tuning):
     """An agent that reads the rig's `/proc`-style files."""
     config = rig.make_config(
-        availability=availability_settings or settings(reservation_dirs=(str(rig.reservations),))
+        availability=availability_settings or settings(reservation_dirs=(str(rig.reservations),)),
+        **(config_changes or {}),
     )
     rig.config = config
     rig.tuning = retune(rig.tuning, proc_root=str(rig.proc.dir), **tuning)
@@ -148,6 +155,7 @@ def build_gate(
     availability_settings: Availability = DEFAULTS,
     max_scratch_gb: int = 1,
     default_job_memory_mb: int | None = None,
+    **tuning,
 ) -> availability.Gate:
     """A gate over a root and a directory in `/proc`'s format, with no runner around it."""
     root.mkdir(exist_ok=True)
@@ -164,7 +172,7 @@ def build_gate(
         default_job_memory_mb=default_job_memory_mb,
         availability=availability_settings,
     )
-    return availability.Gate(config, Tuning(proc_root=proc_root))
+    return availability.Gate(config, Tuning(proc_root=proc_root, **tuning))
 
 
 def gate_for(
@@ -173,6 +181,7 @@ def gate_for(
     availability_settings: Availability = DEFAULTS,
     max_scratch_gb: int = 1,
     default_job_memory_mb: int | None = None,
+    **tuning,
 ) -> availability.Gate:
     return build_gate(
         tmp_path / "gate-root",
@@ -180,6 +189,7 @@ def gate_for(
         availability_settings,
         max_scratch_gb,
         default_job_memory_mb,
+        **tuning,
     )
 
 
@@ -971,6 +981,194 @@ def test_a_disabled_check_starts_a_job_without_asking_the_host(tmp_path):
         assert rig.events("start_waiting") == []
     finally:
         rig.close()
+
+
+# ---- the memory of more than one job ------------------------------------------------------------------------
+
+JOB_MB = 2048
+
+
+def two_slots(**changes) -> dict:
+    """Config changes for a runner with two slots whose jobs have no size of their own (2048 MB)."""
+    return {"slots": 2, "default_job_memory_mb": JOB_MB, **changes}
+
+
+@pytest.mark.parametrize(
+    ("available_mb", "asked"),
+    [
+        (RESERVE_MB + JOB_MB - 1, 0),  # not even one job: a decline
+        (RESERVE_MB + JOB_MB, 1),
+        (RESERVE_MB + 3 * JOB_MB // 2, 1),  # room for one and a half jobs: one slot, not two
+        (RESERVE_MB + 2 * JOB_MB - 1, 1),
+        (RESERVE_MB + 2 * JOB_MB, 2),
+        (RESERVE_MB + 10 * JOB_MB, 2),  # never more than the free slots
+    ],
+)
+def test_an_unset_claim_size_asks_for_no_more_slots_than_the_room_holds(rig, available_mb, asked):
+    rig.proc.set(available_mb=available_mb)
+    agent = prepared(rig, settings(claim_memory_mb=None), two_slots())
+    try:
+        agent.claim_once()
+    finally:
+        agent.release()
+    if asked == 0:
+        assert rig.routes.count("claim") == 0  # a zero is a decline: nothing is sent
+        [skipped] = rig.events("claim_skipped")
+        assert (skipped["reason"], skipped["slots"]) == ("memory", 0)
+    else:
+        assert [body["free_slots"] for body in rig.routes.bodies("claim")] == [asked]
+
+
+@pytest.mark.parametrize(
+    ("available_mb", "claims"), [(RESERVE_MB + JOB_MB - 1, 0), (RESERVE_MB + JOB_MB, 1)]
+)
+def test_a_runner_with_one_slot_is_judged_as_before(rig, available_mb, claims):
+    rig.proc.set(available_mb=available_mb)
+    agent = prepared(
+        rig, settings(claim_memory_mb=None), {"slots": 1, "default_job_memory_mb": JOB_MB}
+    )
+    try:
+        agent.claim_once()
+    finally:
+        agent.release()
+    assert [body["free_slots"] for body in rig.routes.bodies("claim")] == [1] * claims
+    assert [e["reason"] for e in rig.events("claim_skipped")] == ["memory"] * (1 - claims)
+
+
+def test_a_claim_size_that_is_set_is_the_whole_claim_and_drops_no_slot(rig):
+    rig.proc.set(available_mb=RESERVE_MB + JOB_MB)  # room for exactly one job's size
+    agent = prepared(rig, settings(claim_memory_mb=JOB_MB), two_slots())
+    try:
+        agent.claim_once()
+    finally:
+        agent.release()
+    assert [body["free_slots"] for body in rig.routes.bodies("claim")] == [2]
+
+
+def waiting_launcher(tmp_path):
+    """A launcher that notes it started and stays until the file `go` exists."""
+    marker, go = tmp_path / "started", tmp_path / "go"
+    body = (
+        "import os, time\nopen({!r}, 'a').write('x')\n"
+        "while not os.path.exists({!r}):\n    time.sleep(0.02)\nwrite_result()\n"
+    ).format(str(marker), str(go))
+    return marker, go, make_launcher(tmp_path / "launcher-wait", body)
+
+
+def test_of_two_jobs_that_start_together_with_room_for_one_exactly_one_starts(tmp_path):
+    marker, go, launcher = waiting_launcher(tmp_path)
+    rig = new_rig(tmp_path, launcher)
+    try:
+        rig.proc.set(available_mb=RESERVE_MB + 3 * JOB_MB // 2)  # one and a half jobs of room
+        # the claim size is set (the whole claim), so both slots are asked for and only the ledger
+        # can keep the two jobs apart
+        agent = prepared(
+            rig, settings(claim_memory_mb=JOB_MB), {"slots": 2}, lease_abandon_seconds=0.6
+        )
+        both = [claim_job(1, memory_mb=JOB_MB), claim_job(2, memory_mb=JOB_MB)]
+        rig.routes.claims.append({"jobs": both, "min_runner_version": "0.1.0"})
+        timer = threading.Timer(1.5, lambda: go.write_text(""))
+        timer.start()
+        try:
+            assert agent.run_once() == EXIT_OK
+        finally:
+            timer.cancel()
+            go.write_text("")
+            agent.release()
+        assert [body["free_slots"] for body in rig.routes.bodies("claim")] == [2]
+        assert marker.read_text() == "x"  # one launcher ran, not two
+        assert len(rig.events("job_started")) == 1
+        [gave_up] = rig.events("claim_abandoned")  # the other waited out the lease and gave up
+        assert (gave_up["reason"], gave_up["held_mb"]) == ("memory", JOB_MB)
+        assert agent.gate.backoff_remaining() > 0  # into the backoff
+        assert rig.routes.count("complete") == 1  # the abandoned one is left to expire
+    finally:
+        rig.close()
+
+
+def test_a_job_still_pulling_its_image_counts_against_the_next_claim(tmp_path):
+    rig = new_rig(tmp_path, make_launcher(tmp_path / "launcher-pass", "pass"), pulling=True)
+    try:
+        rig.proc.set(available_mb=RESERVE_MB + JOB_MB)  # room for exactly one job
+        agent = prepared(rig, settings(claim_memory_mb=None), two_slots())
+        rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})
+        try:
+            assert len(agent.claim_once()) == 1
+            # job 1 is pulling its image (a second): not let start yet, so nothing is promised, but
+            # it is held, and the room is for one
+            assert agent.claim_once() == []
+            assert rig.routes.count("claim") == 1
+            [skipped] = rig.events("claim_skipped")
+            assert (skipped["reason"], skipped["held_mb"]) == ("memory", JOB_MB)
+            agent.wait_for_jobs()
+        finally:
+            agent.release()
+    finally:
+        rig.close()
+
+
+def test_the_ledger_holds_a_promise_until_its_job_is_released(tmp_path):
+    proc = Proc(tmp_path / "proc")
+    proc.set(available_mb=RESERVE_MB + 3 * JOB_MB // 2)
+    gate = gate_for(tmp_path, proc, settings(claim_memory_mb=JOB_MB))
+    assert gate.start_check(JOB_MB, key="a").reason is None
+    second = gate.start_check(JOB_MB, key="b")
+    assert (second.reason, second.held_mb) == ("memory", JOB_MB)
+    assert (
+        gate.start_check(JOB_MB, key="a").reason is None
+    )  # a job's own promise is not held against it
+    gate.release("a")
+    assert gate.start_check(JOB_MB, key="b").reason is None
+    gate.release("a")  # twice, and for a job never entered
+    gate.release("nobody")
+
+
+def test_a_check_without_a_key_promises_nothing(tmp_path):
+    proc = Proc(tmp_path / "proc")
+    proc.set(available_mb=RESERVE_MB + 3 * JOB_MB // 2)
+    gate = gate_for(tmp_path, proc, settings(claim_memory_mb=JOB_MB))
+    for _ in range(3):
+        assert gate.start_check(JOB_MB).reason is None
+    assert gate.claim_check().held_mb == 0
+
+
+def test_a_disabled_check_keeps_no_ledger(tmp_path):
+    proc = Proc(tmp_path / "proc")
+    gate = gate_for(tmp_path, proc, settings(enabled=False))
+    assert gate.start_check(JOB_MB, key="a").reason is None
+    assert gate.claim_check().held_mb == 0
+
+
+def test_a_promise_is_dropped_settle_seconds_after_the_launcher_started_and_not_before(tmp_path):
+    proc = Proc(tmp_path / "proc")
+    proc.set(available_mb=RESERVE_MB + 3 * JOB_MB // 2)
+    gate = gate_for(tmp_path, proc, settings(claim_memory_mb=JOB_MB), settle_seconds=0.3)
+    assert gate.start_check(JOB_MB, key="a").reason is None
+    time.sleep(0.5)  # the job has not started: time alone does not free its memory
+    assert gate.start_check(JOB_MB, key="b").reason == "memory"
+    gate.started("a")
+    assert gate.start_check(JOB_MB, key="b").reason == "memory"  # still settling
+    time.sleep(0.5)
+    assert (
+        gate.start_check(JOB_MB, key="b").reason is None
+    )  # its memory is in the host's number now
+
+
+def test_a_claimed_job_counts_against_the_next_claim_but_not_against_another_jobs_start(tmp_path):
+    proc = Proc(tmp_path / "proc")
+    proc.set(available_mb=RESERVE_MB + JOB_MB)  # room for one job
+    gate = gate_for(tmp_path, proc, settings(claim_memory_mb=None), default_job_memory_mb=JOB_MB)
+    assert gate.claim_check(2).slots == 1
+    gate.claimed("a", None)  # held by the runner, not yet let start
+    held = gate.claim_check(2)
+    assert (held.reason, held.held_mb, held.slots) == ("memory", JOB_MB, 0)
+    assert gate.start_check(None, key="b").reason is None  # a start check counts promises only
+    gate.release("b")
+    assert (
+        gate.start_check(None, key="a").reason is None
+    )  # nor is a job's own entry held against it
+    gate.release("a")
+    assert gate.claim_check(2).slots == 1
 
 
 # ---- what the person at the keyboard sees -------------------------------------------------------------------

@@ -51,7 +51,7 @@ def availability_command(path: str, tuning: Tuning | None) -> int:
     except ConfigError as error:
         sys.stderr.write("nemar-runner: {}\n".format(error))
         return EXIT_CONFIG
-    verdict = availability.Gate(config, tuning or Tuning()).claim_check()
+    verdict = availability.Gate(config, tuning or Tuning()).claim_check(config.slots)
     sys.stdout.write(verdict.line() + "\n")
     return 0 if verdict.idle else 1
 

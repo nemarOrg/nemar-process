@@ -298,6 +298,8 @@ class JobRunner:
         try:
             return self._run()
         finally:
+            if self.gate is not None:
+                self.gate.release(job.lease_id)  # its memory is no longer promised to anyone
             if self._heartbeat is not None:
                 self._heartbeat.finish()
 
@@ -506,7 +508,7 @@ class JobRunner:
         job, gate, tuning = self.job, self.gate, self.tuning
         assert gate is not None
         memory = effective_memory_mb(job, self.config)
-        verdict = gate.start_check(memory)
+        verdict = gate.start_check(memory, key=job.lease_id)
         waiting = None
         while not verdict.idle:
             if verdict.reason != waiting:
@@ -526,7 +528,7 @@ class JobRunner:
             self.stop.wait(
                 max(0.0, min(tuning.poll_seconds, self._began + tuning.lease_abandon_seconds - now))
             )
-            verdict = gate.start_check(memory)
+            verdict = gate.start_check(memory, key=job.lease_id)
         if waiting is not None:
             self.log.info("start_resumed", job=job.id, after=waiting)
         return None
@@ -544,6 +546,10 @@ class JobRunner:
         )
         self._heartbeat.start()
         self.log.info("job_started", job=job.id, pid=proc.pid, enforce_limits=enforce)
+        if self.gate is not None:
+            self.gate.started(
+                job.lease_id
+            )  # its memory counts as promised for `settle_seconds` more
 
     def _interrupt(self, term_at: float) -> str | None:
         """Why waiting for the image must stop (the stop reasons, or the job's own deadline)."""

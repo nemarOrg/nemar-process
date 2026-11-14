@@ -19,7 +19,7 @@ from . import __version__, availability, containers, contract, images, pids, pri
 from .api import Api, ApiError
 from .config import ENGINES, Config, ConfigError, Tuning
 from .install import read_current
-from .job import JobRunner
+from .job import JobRunner, effective_memory_mb
 from .logs import Log
 
 EXIT_OK = 0
@@ -155,20 +155,22 @@ class Agent:
         for job_id in [j for j, t in self._latest.items() if not t.is_alive()]:
             del self._latest[job_id]
 
-    def room_for_a_claim(self) -> bool:
-        """Whether the host has room now (`availability.Gate.claim_check`). A decline is logged as
-        `claim_skipped` with the reason and the readings, once each time the reason changes rather than on
-        every poll, and sends nothing to NEMAR."""
-        verdict = self.gate.claim_check()
+    def slots_for_a_claim(self, free: int) -> int:
+        """How many of the ``free`` slots to ask for: the host's room now (`availability.Gate.claim_check`)
+        less what is promised to the jobs this runner holds, as many slots as the memory leaves room for
+        and at most ``free``; 0 is a decline. A decline is logged as `claim_skipped` with the reason and
+        the readings, once each time the reason changes rather than on every poll, and sends nothing to
+        NEMAR."""
+        verdict = self.gate.claim_check(free)
         if verdict.idle:
             if self._skipping is not None:
                 self.log.info("claim_resumed", after=self._skipping)
                 self._skipping = None
-            return True
+            return verdict.slots if verdict.slots is not None else free
         if verdict.reason != self._skipping:
             self._skipping = verdict.reason
             self.log.warn("claim_skipped", reason=verdict.reason, **verdict.fields())
-        return False
+        return 0
 
     def claim_once(self) -> list[contract.ClaimedJob]:
         """One claim for the free slots, and the jobs started from it. Raises ``ApiError``.
@@ -177,9 +179,12 @@ class Agent:
         (they are leased to this runner, and dropping them would spend a claim each); the runner then
         drains: it claims no more and exits once they are done."""
         free = self.config.slots - self.running()
-        if free < 1 or self.stop.is_set() or self.draining or not self.room_for_a_claim():
+        if free < 1 or self.stop.is_set() or self.draining:
             return []
-        jobs, minimum = self.api.claim(free, [self.config.runtime], self.config.arch)
+        asked = self.slots_for_a_claim(free)
+        if asked < 1:
+            return []
+        jobs, minimum = self.api.claim(asked, [self.config.runtime], self.config.arch)
         if contract.version_older(self.version, minimum):
             self.refused = "runner_outdated"
             self.draining = True
@@ -202,26 +207,35 @@ class Agent:
             self.stop,
             self.runner_label,
             self.python,
-            self.gate,
+            gate=self.gate,
         )
+        self.gate.claimed(job.lease_id, effective_memory_mb(job, self.config))
 
         previous = self._latest.get(job.id)
 
         def work() -> None:
-            # a claim of a job this runner still has a run of (its lease expired, or the Worker leased
-            # it again): never two runs at once, but not a dropped claim either (each one spends one of
-            # the job's three): this run waits, bounded, for the old one to end, then goes ahead
-            if previous is not None and previous.is_alive():
-                self.log.warn("duplicate_claim_waiting", job=job.id)
-                deadline = time.monotonic() + self.tuning.duplicate_join_seconds
-                while (
-                    previous.is_alive() and not self.stop.is_set() and time.monotonic() < deadline
-                ):
-                    previous.join(0.1)
-                if previous.is_alive():
-                    self.log.warn("duplicate_claim_abandoned", job=job.id)
-                    return
-            self._states[job.id] = runner.run()
+            try:
+                # a claim of a job this runner still has a run of (its lease expired, or the Worker
+                # leased it again): never two runs at once, but not a dropped claim either (each one
+                # spends one of the job's three): this run waits, bounded, for the old one to end, then
+                # goes ahead
+                if previous is not None and previous.is_alive():
+                    self.log.warn("duplicate_claim_waiting", job=job.id)
+                    deadline = time.monotonic() + self.tuning.duplicate_join_seconds
+                    while (
+                        previous.is_alive()
+                        and not self.stop.is_set()
+                        and time.monotonic() < deadline
+                    ):
+                        previous.join(0.1)
+                    if previous.is_alive():
+                        self.log.warn("duplicate_claim_abandoned", job=job.id)
+                        return
+                self._states[job.id] = runner.run()
+            finally:
+                self.gate.release(
+                    job.lease_id
+                )  # whatever happened, its memory is no longer promised
 
         thread = threading.Thread(target=work, name="job-{}-{}".format(job.id, job.lease_id[:8]))
         self._threads[job.lease_id] = thread

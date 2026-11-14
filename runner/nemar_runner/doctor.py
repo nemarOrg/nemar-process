@@ -178,7 +178,7 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
         add("limits", limits_ok, limits_note)
 
     if config is not None:
-        verdict = availability.Gate(config, tuning).claim_check()
+        verdict = availability.Gate(config, tuning).claim_check(config.slots)
         add(
             "availability", verdict.idle, "" if verdict.idle else "reason={}".format(verdict.reason)
         )

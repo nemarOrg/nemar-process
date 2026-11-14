@@ -8,7 +8,8 @@ claimed job starts (`JobRunner`, which waits inside the lease and then abandons 
 Idle means, for a claim of ``need`` megabytes:
 
 * free space under the runner's root is at least `max_scratch_gb` (always checked);
-* memory the kernel calls available, less the reserve left to people, is at least ``need``;
+* memory the kernel calls available, less the reserve left to people, and less what this runner has
+  already promised to jobs that are not yet using it (see `Gate`), is at least ``need``;
 * the one-minute load average per CPU this process may use is at most `max_load_per_core`;
 * no file named `pause` exists in any reservation directory (`os.lstat`, never followed or read: a
   file, a link or a directory of that name all count, and so does a directory that cannot be searched,
@@ -73,6 +74,8 @@ class Verdict(NamedTuple):
     reserve_mb: int
     need_mb: int
     max_load_per_core: float
+    held_mb: int = 0  # memory already promised to other jobs, counted against the room
+    slots: int | None = None  # a claim: how many slots the memory leaves room to ask for (0: none)
 
     @property
     def idle(self) -> bool:
@@ -81,16 +84,20 @@ class Verdict(NamedTuple):
     def fields(self) -> dict[str, Any]:
         read = self.readings
         per_core = read.load_per_core
-        return {
+        fields: dict[str, Any] = {
             "free_gb": read.free_bytes // _GIB,
             "mem_available_mb": read.mem_available_mb,
             "mem_total_mb": read.mem_total_mb,
             "reserve_mb": self.reserve_mb,
+            "held_mb": self.held_mb,
             "need_mb": self.need_mb,
             "load_per_core": None if per_core is None else round(per_core, 2),
             "max_load_per_core": self.max_load_per_core,
             "cpus": read.cpus,
         }
+        if self.slots is not None:
+            fields["slots"] = self.slots
+        return fields
 
     def line(self) -> str:
         """`availability: idle ...` or `availability: busy reason=<word> ...`, then the numbers."""
@@ -175,15 +182,33 @@ def paused(directories: tuple[str, ...]) -> bool:
 
 
 class Gate:
-    """The runner's answer to "is there room?" and the backoff after a job was given up.
+    """The runner's answer to "is there room?", the backoff after a job was given up, and the ledger of
+    the memory promised to jobs that are not yet using it.
 
-    One per runner, shared by its job threads: the backoff is the only state, kept under a lock."""
+    One per runner, shared by its job threads, all of its state under one lock.
+
+    THE LEDGER. Memory room is judged against what the host says is available, and a job that has just
+    been let start has not taken its memory yet, so the next job (or the next claim) would be judged
+    against room that is already spoken for. Two kinds of entry, keyed by the job's lease:
+
+    * ``claimed`` (the claim answered, the job not yet let start): counted against the room of the next
+      CLAIM only, so the runner does not ask for more while the jobs it holds are still pulling an image;
+    * promised (``start_check`` said idle for it, in the same locked step): counted against the room of
+      the next claim AND of every other job's start check, so of two jobs that start together and have
+      room for one, exactly one is let start and the other waits.
+
+    An entry ends when the job ends or is abandoned (``release``), or ``Tuning.settle_seconds`` after the
+    launcher started (``started``): by then the job's own memory is in `MemAvailable`, and counting the
+    promise as well would count it twice. A job that is still growing after that is seen only as the
+    host sees it, which is what a live reading can do."""
 
     def __init__(self, config: Config, tuning: Tuning) -> None:
         self.config = config
         self.tuning = tuning
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._backoff_until = 0.0  # on the monotonic clock
+        # lease id -> [megabytes, promised (the start check passed), forget-at (monotonic) or None]
+        self._ledger: dict[str, list[Any]] = {}
 
     # ---- the numbers --------------------------------------------------------------------------------
 
@@ -208,7 +233,8 @@ class Gate:
     # ---- the backoff --------------------------------------------------------------------------------
 
     def start_backoff(self) -> None:
-        """No claim for `backoff_seconds` from now (a later start keeps the longer of the two)."""
+        """No claim for `backoff_seconds` from now (a later start keeps the longer of the two). It lives
+        in this process only: a restart (the service's, the daily update's, a new `once`) clears it."""
         until = time.monotonic() + self.config.availability.backoff_seconds
         with self._lock:
             self._backoff_until = max(self._backoff_until, until)
@@ -217,43 +243,108 @@ class Gate:
         with self._lock:
             return max(0.0, self._backoff_until - time.monotonic())
 
-    # ---- the verdicts -------------------------------------------------------------------------------
+    # ---- the ledger ---------------------------------------------------------------------------------
 
-    def claim_check(self) -> Verdict:
-        """Before a claim: all the rules, backoff included, for the memory a claim can hand over."""
-        return self._check(self.claim_memory_mb(), claiming=True)
+    def claimed(self, key: str, memory_mb: int | None) -> None:
+        """A job was claimed: count its memory against the next claim until it is let start or ends."""
+        with self._lock:
+            self._ledger[key] = [
+                self.claim_memory_mb() if memory_mb is None else memory_mb,
+                False,
+                None,
+            ]
 
-    def start_check(self, memory_mb: int | None) -> Verdict:
-        """Just before a claimed job starts: the same rules but the backoff (it is about claiming),
-        for the job's own memory (the claim size when the job has none)."""
-        return self._check(
-            self.claim_memory_mb() if memory_mb is None else memory_mb, claiming=False
+    def started(self, key: str) -> None:
+        """The job's launcher started: its promise is dropped `settle_seconds` from now."""
+        with self._lock:
+            entry = self._ledger.get(key)
+            if entry is not None:
+                entry[2] = time.monotonic() + self.tuning.settle_seconds
+
+    def release(self, key: str) -> None:
+        """The job ended or was abandoned. Safe to call twice, and for a job never entered."""
+        with self._lock:
+            self._ledger.pop(key, None)
+
+    def _counted_mb(self, key: str | None, claiming: bool) -> int:
+        """Megabytes spoken for by other jobs (caller holds the lock): the promised ones, and for a claim
+        also the claimed ones, forgetting the entries whose settle time has passed."""
+        now = time.monotonic()
+        for lease in [k for k, e in self._ledger.items() if e[2] is not None and e[2] <= now]:
+            del self._ledger[lease]
+        return sum(
+            entry[0]
+            for lease, entry in self._ledger.items()
+            if lease != key and (entry[1] or claiming)
         )
 
-    def _check(self, need_mb: int, claiming: bool) -> Verdict:
+    # ---- the verdicts -------------------------------------------------------------------------------
+
+    def claim_check(self, free_slots: int = 1) -> Verdict:
+        """Before a claim: all the rules, backoff included, for the memory a claim can hand over.
+
+        ``Verdict.slots`` is how many of ``free_slots`` the memory leaves room to ask for. With
+        `claim_memory_mb` set that number is the memory of the whole claim and no slot is dropped for
+        it. Unset, the size is one job's (`default_job_memory_mb`, else 4096) and a claim of N slots can
+        hand over N of them, so no more slots are asked for than the room holds (at least none: a zero is
+        a decline)."""
+        return self._check(self.claim_memory_mb(), claiming=True, free_slots=free_slots)
+
+    def start_check(self, memory_mb: int | None, key: str | None = None) -> Verdict:
+        """Just before a claimed job starts: the same rules but the backoff (it is about claiming),
+        for the job's own memory (the claim size when the job has none). When ``key`` (the job's lease)
+        is given and the answer is idle, the job's memory is promised in the same locked step, so a job
+        that checks a moment later sees it."""
+        need = self.claim_memory_mb() if memory_mb is None else memory_mb
+        with self._lock:
+            verdict = self._check(need, claiming=False, key=key)
+            if verdict.idle and key is not None and self.config.availability.enabled:
+                self._ledger[key] = [need, True, None]
+            return verdict
+
+    def _check(
+        self, need_mb: int, claiming: bool, free_slots: int = 1, key: str | None = None
+    ) -> Verdict:
         config = self.config
         settings = config.availability
-        readings = read_all(config.root, self.tuning.proc_root)
-        reserve = self.reserve_mb(readings.mem_total_mb)
+        with self._lock:
+            readings = read_all(config.root, self.tuning.proc_root)
+            reserve = self.reserve_mb(readings.mem_total_mb)
+            held = self._counted_mb(key, claiming)
 
-        def verdict(reason: str | None) -> Verdict:
-            return Verdict(reason, readings, reserve, need_mb, settings.max_load_per_core)
+            def verdict(reason: str | None, slots: int) -> Verdict:
+                return Verdict(
+                    reason,
+                    readings,
+                    reserve,
+                    need_mb,
+                    settings.max_load_per_core,
+                    held,
+                    slots if claiming else None,
+                )
 
-        if settings.enabled and paused(settings.reservation_dirs):
-            return verdict("paused")
-        if settings.enabled and claiming and self.backoff_remaining() > 0:
-            return verdict("backoff")
-        if readings.free_bytes < config.max_scratch_gb * _GIB:
-            return verdict("scratch")
-        if not settings.enabled:
-            return verdict(None)
-        if readings.mem_available_mb is None:
-            return verdict("memory_unknown")
-        if readings.mem_available_mb - reserve < need_mb:
-            return verdict("memory")
-        per_core = readings.load_per_core
-        if per_core is None:
-            return verdict("load_unknown")
-        if per_core > settings.max_load_per_core:
-            return verdict("load")
-        return verdict(None)
+            if settings.enabled and paused(settings.reservation_dirs):
+                return verdict("paused", 0)
+            if settings.enabled and claiming and self.backoff_remaining() > 0:
+                return verdict("backoff", 0)
+            if readings.free_bytes < config.max_scratch_gb * _GIB:
+                return verdict("scratch", 0)
+            if not settings.enabled:
+                return verdict(None, free_slots)
+            if readings.mem_available_mb is None:
+                return verdict("memory_unknown", 0)
+            room = readings.mem_available_mb - reserve
+            room -= held
+            slots = free_slots
+            if claiming and settings.claim_memory_mb is None:
+                slots = min(free_slots, max(0, room) // max(1, need_mb))
+                if slots < 1:
+                    return verdict("memory", 0)
+            elif room < need_mb:
+                return verdict("memory", 0)
+            per_core = readings.load_per_core
+            if per_core is None:
+                return verdict("load_unknown", 0)
+            if per_core > settings.max_load_per_core:
+                return verdict("load", 0)
+            return verdict(None, slots)

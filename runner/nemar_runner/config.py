@@ -129,6 +129,9 @@ class Tuning:
     launch_path: str = LAUNCH_PATH
     # Where the host's memory and load are read from: only a test points it at files it wrote.
     proc_root: str = "/proc"
+    # How long the memory promised to a job that has started stays counted against the next job's room
+    # (`availability.Gate`): after it the job's own memory is in what the host says is available.
+    settle_seconds: float = 120.0
     # False leaves this process's own priority alone: only a test that runs the runner inside the
     # test process sets it (the lowered priority cannot be raised again, and would last the session).
     lower_priority: bool = True
