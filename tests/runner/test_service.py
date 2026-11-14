@@ -593,6 +593,7 @@ class Layout:
             "max_scratch_gb": 1,
             "launcher_dir": str(rig.launcher),
             "install_prefix": str(rig.prefix),
+            "availability": {"enabled": False},  # these tests are not about the host's room
             "verify_images": False,  # the stand-in NEMAR is on loopback; test_verify_image.py has it on
         }
         document.update(config)

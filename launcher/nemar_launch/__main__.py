@@ -172,10 +172,13 @@ def _do_work(
             runtime_name, runtime_path = run.find_runtime(env, (engine,))
         state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
         reference = runtime.image_reference(job)
+        engine_found: runtime.Assessment | None = None
         if engine != runtime.APPTAINER:  # like the image file: before anything is fetched
             assert settings.limits is not None  # read_settings refuses a launch without them
             runtime.check_registry(reference, env)
-            runtime.preflight(engine, runtime_path, settings.limits, env, terminator.stop, log)
+            engine_found = runtime.preflight(
+                engine, runtime_path, settings.limits, env, terminator.stop, log
+            )
             runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
 
         code_dir: str | None = None
@@ -223,6 +226,7 @@ def _do_work(
             runtime.check_mount_sources(binds)
             assert settings.limits is not None  # read_settings refuses a launch without them
             assert settings.runner_label is not None
+            assert engine_found is not None  # the preflight above ran for every engine
             container = runtime.container_name()
             log.info("container: named {}".format(container))
             argv = runtime.build_argv(
@@ -234,6 +238,7 @@ def _do_work(
                 binds,
                 settings.limits,
                 settings.runner_label,
+                cpu_shares=engine_found.cpu_shares,
             )
         oom_check = (
             None

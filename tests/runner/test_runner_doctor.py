@@ -34,6 +34,7 @@ def rig(tmp_path):
         "arch": "amd64",
         "max_scratch_gb": 1,
         "launcher_dir": str(made.launcher),
+        "availability": {"enabled": False},  # how busy this host is must not decide these tests
         "verify_images": False,  # the stand-in NEMAR is on loopback; test_verify_image.py has it on
     }
     made.document.update(document)
@@ -65,11 +66,18 @@ EVERYTHING_BUT_LIMITS = {
 }
 
 
+# printed and answered yes or no, but never part of the exit status
+INFORMATIONAL = {"limits", "availability", "priority"}
+
+
 def test_a_healthy_host_says_yes_to_everything_and_exits_zero(rig):
     status, answers, _ = diagnose(rig)
     assert status == 0
-    assert set(answers) == EVERYTHING_BUT_LIMITS | {"limits"}
-    assert set(answers.values()) == {"yes"}
+    assert set(answers) == EVERYTHING_BUT_LIMITS | INFORMATIONAL
+    # `priority` is a fact about the host (macOS has no idle I/O class): tests/runner/test_priority.py
+    assert {k: v for k, v in answers.items() if k != "priority"} == dict.fromkeys(
+        EVERYTHING_BUT_LIMITS | {"limits", "availability"}, "yes"
+    )
 
 
 def test_the_runtime_line_carries_the_version(rig):
@@ -83,7 +91,7 @@ def test_limits_no_does_not_fail_the_exit_status(rig):
     assert answers["limits"] == "no"
     assert "could not apply --memory and --cpus" in text
     assert status == 0
-    assert all(v == "yes" for k, v in answers.items() if k != "limits")
+    assert all(v == "yes" for k, v in answers.items() if k not in ("limits", "priority"))
 
 
 def test_limits_without_an_image_to_probe_with_is_no_and_says_so(rig):

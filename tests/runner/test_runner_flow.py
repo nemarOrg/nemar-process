@@ -463,7 +463,7 @@ def test_a_claim_is_not_made_when_free_space_is_below_max_scratch_gb(tmp_path):
         assert agent.run_once() == EXIT_OK
         agent.release()
         assert rig.routes.count("claim") == 0
-        assert rig.events("claim_skipped")[0]["reason"] == "low_disk"
+        assert rig.events("claim_skipped")[0]["reason"] == "scratch"
     finally:
         rig.close()
 
