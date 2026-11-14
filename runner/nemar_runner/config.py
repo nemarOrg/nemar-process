@@ -129,6 +129,9 @@ class Tuning:
     launch_path: str = LAUNCH_PATH
     # Where the host's memory and load are read from: only a test points it at files it wrote.
     proc_root: str = "/proc"
+    # Where the control groups are mounted, for the memory limit of the runner's own group: only a test
+    # points it at a tree it wrote (the runner's group is found through `proc_root`).
+    cgroup_root: str = "/sys/fs/cgroup"
     # How long the memory promised to a job that has started stays counted against the next job's room
     # (`availability.Gate`): after it the job's own memory is in what the host says is available.
     settle_seconds: float = 120.0

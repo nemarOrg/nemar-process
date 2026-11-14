@@ -47,7 +47,7 @@ SHORT_MB = 2500
 
 
 class Proc:
-    """A directory in `/proc`'s format (`meminfo`, `loadavg`) that a test rewrites to say
+    """A directory in `/proc`'s format (`meminfo`, `loadavg`, `self/cgroup`) that a test rewrites to say
     what the host looks like. ``dir`` is a link to a directory made whole and then swapped in with one
     rename, so a runner that polls while the test changes it reads the old host or the new one, never
     the new memory with the old load."""
@@ -57,6 +57,9 @@ class Proc:
         self._versions = directory.parent / (directory.name + "-versions")
         self._versions.mkdir()
         self._count = 0
+        self.cgroup: str | None = (
+            None  # the `0::` path `self/cgroup` names, or None for no such file
+        )
         self.set()
 
     def set(
@@ -81,6 +84,11 @@ class Proc:
         (version / "loadavg").write_text(
             "{:.2f} 0.10 0.10 1/200 4242\n".format(load), encoding="ascii"
         )
+        if self.cgroup is not None:
+            (version / "self").mkdir()
+            (version / "self" / "cgroup").write_text(
+                "0::{}\n".format(self.cgroup), encoding="ascii"
+            )
         link = self._versions / "swap"
         link.unlink(missing_ok=True)
         link.symlink_to(version)
@@ -1169,6 +1177,127 @@ def test_a_claimed_job_counts_against_the_next_claim_but_not_against_another_job
     )  # nor is a job's own entry held against it
     gate.release("a")
     assert gate.claim_check(2).slots == 1
+
+
+# ---- the memory limit of the runner's own control group -----------------------------------------------------
+
+MIB = 1024 * 1024
+
+
+def write_group(root: Path, group: str, limit: str | None, current: str | None) -> None:
+    directory = root / group.strip("/")
+    directory.mkdir(parents=True, exist_ok=True)
+    if limit is not None:
+        (directory / "memory.max").write_text(limit + "\n")
+    if current is not None:
+        (directory / "memory.current").write_text(current + "\n")
+
+
+def cgroup_host(tmp_path, own: str | None = "/user.slice/runner.service") -> tuple[Proc, Path]:
+    """A `/proc`-style directory whose `self/cgroup` names ``own``, and an empty cgroup tree."""
+    proc = Proc(tmp_path / "proc")
+    proc.cgroup = own
+    proc.set()
+    tree = tmp_path / "cgroup"
+    tree.mkdir()
+    return proc, tree
+
+
+def test_the_cgroup_room_is_the_limit_less_the_current_use_of_the_runners_own_group(tmp_path):
+    proc, tree = cgroup_host(tmp_path)
+    write_group(tree, "/user.slice/runner.service", str(3000 * MIB), str(1000 * MIB))
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 2000
+
+
+def test_a_limit_on_a_group_above_the_runner_binds_it_and_the_tightest_counts(tmp_path):
+    proc, tree = cgroup_host(tmp_path, "/user.slice/user-1000.slice/runner.service")
+    write_group(tree, "/user.slice/user-1000.slice/runner.service", "max", str(100 * MIB))
+    write_group(tree, "/user.slice/user-1000.slice", str(5000 * MIB), str(4500 * MIB))
+    write_group(tree, "/user.slice", str(9000 * MIB), str(100 * MIB))
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 500
+    write_group(tree, "/user.slice/user-1000.slice/runner.service", str(300 * MIB), str(100 * MIB))
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 200
+
+
+@pytest.mark.parametrize("current", [str(5000 * MIB), str(3000 * MIB)])
+def test_a_group_at_or_over_its_limit_has_no_room(tmp_path, current):
+    proc, tree = cgroup_host(tmp_path)
+    write_group(tree, "/user.slice/runner.service", str(3000 * MIB), current)
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) == 0
+
+
+@pytest.mark.parametrize(
+    "how", ["max", "no memory.max", "no memory.current", "garbage", "a directory", "no groups"]
+)
+def test_a_limit_that_is_max_absent_or_unreadable_is_no_limit(tmp_path, how):
+    proc, tree = cgroup_host(tmp_path)
+    group = "/user.slice/runner.service"
+    if how == "max":
+        write_group(tree, group, "max", str(1000 * MIB))
+    elif how == "no memory.max":
+        write_group(tree, group, None, str(1000 * MIB))
+    elif how == "no memory.current":
+        write_group(tree, group, str(3000 * MIB), None)
+    elif how == "garbage":
+        write_group(tree, group, "lots", "many")
+    elif how == "a directory":
+        write_group(tree, group, None, str(1000 * MIB))
+        (tree / "user.slice" / "runner.service" / "memory.max").mkdir()
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [None, "12:memory:/user.slice/runner.service", "0::user.slice", "0::/../etc", "0::/a/../b", ""],
+)
+def test_a_process_that_is_not_in_a_plain_cgroup_v2_path_has_no_limit(tmp_path, line):
+    proc, tree = cgroup_host(tmp_path, None)
+    if line is not None:
+        directory = proc.dir / "self"
+        directory.mkdir()
+        (directory / "cgroup").write_text(line + "\n")
+    write_group(tree, "/user.slice/runner.service", str(10 * MIB), str(1 * MIB))
+    assert availability.read_cgroup_room(str(proc.dir), str(tree)) is None
+
+
+def test_the_own_group_is_the_v2_line_even_among_v1_lines(tmp_path):
+    proc, _tree = cgroup_host(tmp_path, None)
+    (proc.dir / "self").mkdir()
+    (proc.dir / "self" / "cgroup").write_text("12:cpu:/old\n0::/new/path\n")
+    assert availability.own_cgroup(str(proc.dir)) == "/new/path"
+
+
+def test_the_real_cgroup_room_is_a_number_or_no_limit():
+    room = availability.read_cgroup_room()
+    assert room is None or room >= 0
+
+
+def test_a_cgroup_that_has_less_room_than_the_host_decides_the_memory_rule(tmp_path):
+    proc, tree = cgroup_host(tmp_path)
+    group = "/user.slice/runner.service"
+    gate = gate_for(
+        tmp_path,
+        proc,
+        settings(claim_memory_mb=None),
+        default_job_memory_mb=JOB_MB,
+        cgroup_root=str(tree),
+    )
+    # the host has 16 GiB less a 1 GiB reserve: room for seven jobs; the group, 3000 MB of room, one
+    write_group(tree, group, str(4000 * MIB), str(1000 * MIB))
+    verdict = gate.claim_check(2)
+    assert (verdict.idle, verdict.slots, verdict.fields()["cgroup_room_mb"]) == (True, 1, 3000)
+    write_group(tree, group, str(5000 * MIB), str(1000 * MIB))
+    assert gate.claim_check(2).slots == 1  # 4000 MB: one and nearly two
+    write_group(tree, group, str(5100 * MIB), str(1000 * MIB))
+    assert gate.claim_check(2).slots == 2
+    write_group(tree, group, str(2000 * MIB), str(1000 * MIB))  # 1000 MB of room: not one job
+    verdict = gate.claim_check(2)
+    assert (verdict.reason, verdict.slots) == ("memory", 0)
+    assert gate.start_check(JOB_MB).reason == "memory"
+    assert gate.start_check(500).reason is None  # a smaller job fits
+    write_group(tree, group, "max", str(1000 * MIB))  # no limit: the host's room again
+    assert gate.start_check(JOB_MB).reason is None
+    assert gate.claim_check(2).slots == 2
 
 
 # ---- what the person at the keyboard sees -------------------------------------------------------------------
