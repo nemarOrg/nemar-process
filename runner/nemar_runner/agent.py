@@ -55,6 +55,7 @@ class Agent:
         # runner exits 0 once it holds no job, so that systemd starts the new version (idle switch)
         self.update_to: str | None = None
         self._update_logged: str | None = None
+        self._switch_on: bool | None = None  # decided once: does this process run the installed code?
         self.runner_label: str | None = None  # the registration id, under an engine only
         self.python: str | None = None  # the launcher's python3, pinned at start
 
@@ -251,12 +252,33 @@ class Agent:
         current = read_current(prefix)
         return current if current is not None and current != self.version else None
 
+    def switch_enabled(self) -> bool:
+        """Whether the idle switch applies to this process: only when it runs the code that
+        `nemar_runner install` put under `install_prefix`, that is, this package is exactly
+        `<install_prefix>/versions/<this version>/runner/nemar_runner`. A runner started from a checkout,
+        or from another prefix than the configuration names, would otherwise exit at every start (the
+        version `current` names is not the one it runs) and never claim; it logs `update_switch_off`
+        once and goes on claiming instead. Silent when there is no `install_prefix`."""
+        if self._switch_on is None:
+            prefix = self.config.install_prefix
+            if prefix is None:
+                self._switch_on = False
+            else:
+                here = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+                installed = os.path.realpath(
+                    os.path.join(prefix, "versions", self.version, "runner", "nemar_runner")
+                )
+                self._switch_on = here == installed
+                if not self._switch_on:
+                    self.log.warn("update_switch_off", reason="not_run_from_install_prefix")
+        return self._switch_on
+
     def _switch_now(self) -> bool:
         """The idle switch. True only when a newer install is waiting AND no job is held: the caller
         then returns, the runner exits 0 and systemd starts the version `current` names. While a job is
         held the runner takes no new one (so a busy runner does get an idle moment) and never
         interrupts the job it has."""
-        self.update_to = self.update_target()
+        self.update_to = self.update_target() if self.switch_enabled() else None
         if self.update_to is None:
             return False
         jobs = self.running()

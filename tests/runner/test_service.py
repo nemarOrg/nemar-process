@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 from install_support import Env
-from nemar_runner import __version__, install
+from nemar_runner import install
 from nemar_runner.agent import Agent
 from nemar_runner.config import ConfigError, load_config
 from runner_support import (
@@ -30,6 +30,7 @@ from runner_support import (
     SIF,
     Rig,
     claim_job,
+    cli_command,
     job_id,
     make_launcher,
     wait_for,
@@ -544,17 +545,152 @@ def agent_in_thread(rig, **config):
     return agent, thread, result
 
 
-def test_with_no_job_a_pending_update_exits_zero_before_any_claim(rig):
-    set_current(rig, "9.9.9")
-    agent = rig.agent(config=rig.make_config(install_prefix=str(rig.prefix)))
-    assert agent.run_forever() == 0
+# The switch applies only to a process that runs the code `install` put under the prefix, so the loop
+# is tested on a real installed layout: the real installer makes it from the real bundle, and the
+# runner is started from it as a process (with the shortened numbers of `fast`).
+INSTALLED_SNIPPET = (
+    "import os, sys; "
+    "from nemar_runner.__main__ import main; "
+    "from nemar_runner.config import Tuning; "
+    "sys.exit(main(sys.argv[1:], Tuning(launch_path=os.environ['TEST_LAUNCH_PATH'], "
+    "poll_seconds=0.05, heartbeat_seconds=0.2, tick_seconds=0.02, watchdog_seconds=0.1, "
+    "deadline_grace_seconds=0.0, kill_grace_seconds=0.6, http_timeout_seconds=2.0)))"
+)
+
+
+class Layout:
+    """A rig, and under its prefix the real installer's 0.1.0 and 0.1.1 (current: 0.1.0)."""
+
+    def __init__(self, rig: SwitchRig, env: Env) -> None:
+        self.rig = rig
+        self.env = env
+        self.processes: list[subprocess.Popen] = []
+        env.prefix = rig.prefix
+        for version in ("0.1.0", "0.1.1"):
+            env.publish(version)
+        env.install("0.1.0")
+        env.install("0.1.1")
+        set_current(rig, "0.1.0")
+
+    def start(self, version: str = "0.1.0", **config) -> subprocess.Popen:
+        """`nemar_runner run` of the installed ``version``, as the unit would start it."""
+        rig = self.rig
+        document = {
+            "api_base": rig.server.base_url,
+            "secret_file": str(rig.secret_file),
+            "root": str(rig.root),
+            "sif_root": str(rig.sif_root),
+            "runtime": "apptainer",
+            "slots": 2,
+            "arch": "amd64",
+            "max_scratch_gb": 1,
+            "launcher_dir": str(rig.launcher),
+            "install_prefix": str(rig.prefix),
+        }
+        document.update(config)
+        write_private(rig.config_file, json.dumps(document))
+        argv, environment = cli_command(rig, "run")
+        argv[2] = INSTALLED_SNIPPET
+        environment["PYTHONPATH"] = str(rig.prefix / "versions" / version / "runner")
+        errors = open(rig.tmp / "installed-runner.err", "w")  # noqa: SIM115 - kept open for the child
+        process = subprocess.Popen(
+            argv, env=environment, stdout=subprocess.DEVNULL, stderr=errors, start_new_session=True
+        )
+        self.processes.append(process)
+        return process
+
+    def stop(self) -> None:
+        for process in self.processes:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+
+@pytest.fixture
+def layout(rig, tmp_path):
+    made = Layout(rig, Env(tmp_path))
+    yield made
+    made.stop()
+    made.env.close()
+
+
+def test_an_installed_runner_with_no_job_and_a_pending_update_exits_zero_before_any_claim(
+    layout,
+):
+    rig = layout.rig
+    set_current(rig, "0.1.1")
+    process = layout.start()
+    assert process.wait(60) == 0
     [pending] = rig.events("update_pending")
-    assert (pending["from"], pending["to"]) == (__version__, "9.9.9")
+    assert (pending["from"], pending["to"]) == ("0.1.0", "0.1.1")
     assert rig.routes.count("claim") == 0  # an idle runner that is about to switch claims nothing
+    assert rig.events("update_switch_off") == []
 
 
-def test_with_no_pending_update_the_runner_goes_on_claiming(rig):
-    set_current(rig, __version__)
+def test_an_installed_runner_whose_version_current_names_goes_on_claiming(layout):
+    rig = layout.rig
+    process = layout.start()
+    wait_for(lambda: rig.routes.count("claim") >= 3, what="claims")
+    assert process.poll() is None
+    process.terminate()
+    assert process.wait(60) == 0
+    assert rig.events("update_pending") == []
+    assert rig.events("update_switch_off") == []
+
+
+def test_the_switch_fires_only_when_no_job_is_held_and_never_interrupts_one(layout):
+    rig = layout.rig
+
+    def first_claim(_body):
+        set_current(rig, "0.1.1")  # an update lands while this claim is being answered
+        return {"jobs": [claim_job(1, minutes=5)], "min_runner_version": "0.1.0"}
+
+    rig.routes.claims.append(first_claim)
+    rig.routes.claims.append({"jobs": [claim_job(2, minutes=5)], "min_runner_version": "0.1.0"})
+    process = layout.start()
+    try:
+        wait_for(lambda: rig.routes.count("heartbeat") >= 1, what="the job to start")
+        # several polls with a job held and an update pending: it neither exits nor claims again
+        time.sleep(0.6)
+        assert process.poll() is None
+        assert rig.routes.count("claim") == 1
+        assert rig.routes.count("complete") == 0
+        assert rig.events("update_pending") == []
+        [waiting] = rig.events("update_waiting")
+        assert (waiting["from"], waiting["to"], waiting["jobs"]) == ("0.1.0", "0.1.1", 1)
+        rig.go.write_text("", encoding="utf-8")  # the job ends
+        assert process.wait(60) == 0
+    finally:
+        rig.go.write_text("", encoding="utf-8")
+    [complete] = rig.routes.bodies("complete")
+    assert complete["job_id"] == job_id(1)
+    assert complete["exit_number"] == 0  # the job ran to its end: the switch did not stop it
+    [pending] = rig.events("update_pending")
+    assert (pending["from"], pending["to"]) == ("0.1.0", "0.1.1")
+    assert rig.routes.count("claim") == 1  # the second job was never claimed
+    assert [
+        e["event"] for e in rig.log_lines() if e["event"] in ("update_waiting", "update_pending")
+    ] == ["update_waiting", "update_pending"]
+
+
+def test_a_prefix_reached_through_a_link_is_the_same_prefix(layout, tmp_path):
+    rig = layout.rig
+    link = tmp_path / "prefix-link"
+    link.symlink_to(rig.prefix)
+    set_current(rig, "0.1.1")
+    process = layout.start(install_prefix=str(link))
+    assert process.wait(60) == 0
+    assert len(rig.events("update_pending")) == 1
+    assert rig.events("update_switch_off") == []
+
+
+def test_a_runner_run_from_a_checkout_keeps_claiming_with_an_update_pending(rig):
+    # the checkout is not the code under the prefix: `current` naming another version is no reason to
+    # exit (it would exit at every start and never claim)
+    set_current(rig, "9.9.9")
     agent, thread, result = agent_in_thread(rig)
     try:
         wait_for(lambda: rig.routes.count("claim") >= 3, what="claims")
@@ -564,25 +700,40 @@ def test_with_no_pending_update_the_runner_goes_on_claiming(rig):
         thread.join(30)
     assert result["status"] == 0
     assert rig.events("update_pending") == []
+    [off] = rig.events("update_switch_off")  # said once, not at every poll
+    assert off["reason"] == "not_run_from_install_prefix"
+
+
+def test_an_installed_runner_with_another_install_prefix_in_its_configuration_keeps_claiming(
+    layout, tmp_path
+):
+    rig = layout.rig
+    other = tmp_path / "other-prefix"
+    other.mkdir(mode=0o700)
+    write_private(other / "current", "9.9.9\n")
+    process = layout.start(install_prefix=str(other))
+    wait_for(lambda: rig.routes.count("claim") >= 3, what="claims")
+    assert process.poll() is None
+    process.terminate()
+    assert process.wait(60) == 0
+    assert rig.events("update_pending") == []
+    assert len(rig.events("update_switch_off")) == 1
 
 
 @pytest.mark.parametrize(
     "content", [None, "", "1.2", "9.9.9.9", "9.9.9-rc1", "../9.9.9", "garbage"]
 )
-def test_a_current_that_is_missing_or_not_a_version_switches_nothing(rig, content):
+def test_a_current_that_is_missing_or_not_a_version_names_no_target(rig, content):
     if content is not None:
         (rig.prefix / "current").write_text(content, encoding="utf-8")
-    agent, thread, result = agent_in_thread(rig)
+    agent = rig.agent(config=rig.make_config(install_prefix=str(rig.prefix)))
     try:
-        wait_for(lambda: rig.routes.count("claim") >= 2, what="claims")
+        assert agent.update_target() is None
     finally:
-        agent.stop.set()
-        thread.join(30)
-    assert rig.events("update_pending") == []
-    assert result["status"] == 0
+        agent.release()
 
 
-def test_a_current_that_is_a_link_or_group_writable_switches_nothing(rig, tmp_path):
+def test_a_current_that_is_a_link_or_group_writable_names_no_target(rig, tmp_path):
     agent = rig.agent(config=rig.make_config(install_prefix=str(rig.prefix)))
     try:
         elsewhere = tmp_path / "elsewhere"
@@ -596,46 +747,6 @@ def test_a_current_that_is_a_link_or_group_writable_switches_nothing(rig, tmp_pa
         assert agent.update_target() == "9.9.9"
     finally:
         agent.release()
-
-
-def test_the_switch_fires_only_when_no_job_is_held_and_never_interrupts_one(rig):
-    def first_claim(_body):
-        set_current(rig, "9.9.9")  # an update lands while this claim is being answered
-        return {"jobs": [claim_job(1, minutes=5)], "min_runner_version": "0.1.0"}
-
-    rig.routes.claims.append(first_claim)
-    rig.routes.claims.append({"jobs": [claim_job(2, minutes=5)], "min_runner_version": "0.1.0"})
-    agent, thread, result = agent_in_thread(rig, slots=2)
-    try:
-        wait_for(lambda: rig.routes.count("heartbeat") >= 1, what="the job to start")
-        # several polls with a job held and an update pending: it neither exits nor claims again
-        time.sleep(0.6)
-        assert thread.is_alive()
-        assert rig.routes.count("claim") == 1
-        assert rig.routes.count("complete") == 0
-        assert rig.events("update_pending") == []
-        [waiting] = rig.events("update_waiting")
-        assert (waiting["from"], waiting["to"], waiting["jobs"]) == (__version__, "9.9.9", 1)
-        rig.go.write_text("", encoding="utf-8")  # the job ends
-        thread.join(30)
-    finally:
-        rig.go.write_text("", encoding="utf-8")
-        agent.stop.set()
-        thread.join(30)
-    assert result["status"] == 0
-    [complete] = rig.routes.bodies("complete")
-    assert complete["job_id"] == job_id(1)
-    assert complete["exit_number"] == 0  # the job ran to its end: the switch did not stop it
-    [pending] = rig.events("update_pending")
-    assert (pending["from"], pending["to"]) == (__version__, "9.9.9")
-    assert rig.routes.count("claim") == 1  # the second job was never claimed
-    assert rig.events("update_waiting") != []
-    assert [
-        e["event"] for e in rig.log_lines() if e["event"] in ("update_waiting", "update_pending")
-    ] == [
-        "update_waiting",
-        "update_pending",
-    ]
 
 
 def test_a_runner_started_on_a_version_that_current_already_names_does_not_switch(rig):
@@ -670,6 +781,7 @@ def test_without_an_install_prefix_there_is_no_switch(rig):
         agent.stop.set()
         thread.join(30)
     assert rig.events("update_pending") == []
+    assert rig.events("update_switch_off") == []  # nothing was configured, so nothing is said
     assert result["status"] == 0
 
 
