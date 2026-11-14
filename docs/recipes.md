@@ -39,6 +39,7 @@ nemar-recipe version
   `--dataset-version` is the data-plane tag (`latest` or `vN.N.N`).
   `--image-digest` falls back to the environment variable `NEMAR_IMAGE_DIGEST`; the launch specification's `env` allowlist has no name for a digest, so the argument is the way a job passes it.
   The image digest is the caller's claim: the command records what it is told and cannot check it against the image it runs in, so a record's `image.digest` says what the launch specification named and not what ran.
+  The build is the other way round: `extensions.nemar.process` and `image.tag` are read from the image's own build file, never from an argument ([images.md](images.md)).
 - `run` refuses an `--out` that already holds product files (exit 5), writes one recording at a time into a private directory under `--out`, and moves its files into place only when every file and the record exist.
   A failed recording leaves no partial file.
   A SIGTERM ends the run through a normal exit (143), so what was finished stays and the private directory goes.
@@ -46,7 +47,7 @@ nemar-recipe version
   The move then removes the files it had placed and the directories it had made, the last file included, so a recording is whole or absent.
   Every file is written under a temporary name beside its target and renamed over it, so a reader never sees half of the dataset record, and an interrupted write leaves the old file and no temporary one.
 - `aggregate` rebuilds the recordings table and the dataset record from product directories.
-  It reads every input first and refuses the whole merge, writing nothing, when an input is missing, holds no recordings table or no dataset record (a run that did not end), holds a table or record it cannot read, or disagrees with another about the dataset id, the dataset version, the source commit or the image digest (exit 6).
+  It reads every input first and refuses the whole merge, writing nothing, when an input is missing, holds no recordings table or no dataset record (a run that did not end), holds a table or record it cannot read, or disagrees with another about the dataset id, the dataset version, the source commit, the image digest, the nemar-process build or the image tag (exit 6).
   Having no value is a value like another: a chunk that knows its source commit and one that does not disagree, because the merged record would state a commit for rows that nobody can vouch for.
   An identity argument may confirm what the inputs say, and may neither contradict it nor give what they lack, because the command line is a claim about the inputs' provenance and not a source for it.
   The inputs must also agree about the recipe, the engine stamp and the seeds, and they must have been made by the version of the recipe that is running, because the merged record's steps are that recipe's.
@@ -268,11 +269,26 @@ It is absent when the window step was skipped, because an empty file would claim
 
 `pipelineInfo.name` is `nemar-floor` and `pipelineInfo.version` is `1.0.0`.
 `processingSteps` has one entry per executed step in order, each with `stepId`, `name` (the function's dotted path; a test imports every one), `software`, `parameters` (what is hashed), `inputSources`, `outputTargets` (an in-memory target and, on the step that produced it, a file target), `dependsOn`, `executionDateTime` and `qualityMetrics`.
-`extensions.nemar` holds what the schema has no field for: the `recipe`, the `dataset` identity, the `recording`, the `inputs` and `outputs` with their size and SHA-256 (the schema's output targets have no checksum field), the `engine` (versions, the thread pin, the pools threadpoolctl found, the thread variables seen, the common layer's version), the image digest, the `seeds`, the `rules` that fired, the `skipped_steps` with reasons, the `plan_hash` and the `run_id`.
+`extensions.nemar` holds what the schema has no field for: the `recipe`, the `dataset` identity, the `recording`, the `inputs` and `outputs` with their size and SHA-256 (the schema's output targets have no checksum field), the `engine` (versions, the thread pin, the pools threadpoolctl found, the thread variables seen, the common layer's version, and `torch` and `pamica` when they are installed), the `process` block, the `image` (`digest` and `tag`), the `seeds`, the `rules` that fired, the `skipped_steps` with reasons, the `plan_hash` and the `run_id`.
 
 Records validate against the vendored signalJourney schema.
 That validator checks neither timestamps nor non-finite numbers nor references, so `records.check` does: timestamps match `YYYY-MM-DDTHH:MM:SSZ`, the writer refuses NaN and infinity, every `dependsOn` and `previousStepOutput` names an earlier step and one of its outputs, and the plan hash matches the steps.
 A record that fails its own checks is never written (the recording ends `failed`, `internal_error`).
+
+### The build a record names
+
+Both records state the nemar-process build that made them, in `extensions.nemar` because `pipelineInfo` is closed to new keys:
+
+- `process`: `{"version", "commit", "build"}`, where `build` is `release` (a plain `X.Y.Z`), `dev` (an `X.Y.Z-devN`) or `source` (a run from a working tree, with the `pyproject.toml` version and `commit: null`);
+- `image`: `{"digest", "tag"}`, the tag being `<version>-cpu` for a release image and null otherwise;
+- the recipe's id and version (also `pipelineInfo.name` and `pipelineInfo.version`) and the engine versions, now including `torch` and `pamica` when installed.
+
+The image carries `/opt/nemar/build.json`; `nemar_process.common.build.build_info()` reads it with no network call, refuses a file that contradicts itself (a `release` with a `-devN` version, a `dev` without one), and never takes an unreadable file for a source run.
+A refusal ends the run before anything is written (exit 1, with the message `the build file was refused: ` and the part that is wrong, never a path or a value; the engine stamp is where the file is first read).
+A symbolic link at the build path, or a file that is not UTF-8 text, is refused the same way; a project file that is not nemar-process's is not read for the source version.
+`aggregate` runs no step, so it states the build of its inputs, which must agree, and not the build that merges them; a record that predates the block merges as a null `process`.
+Every input's `process` block and `image.tag` are checked by the rules the writer and the reader apply (a release is `X.Y.Z`, a dev build `X.Y.Z-devN`, the tag of a release is `<version>-cpu` and any other build has none, a source block has no commit and no tag), and an input that fails is refused by its position (`input 2 states a build that is not one`, exit 6) before anything is merged.
+`tests/recipes/test_provenance_contract.py` runs every registered recipe on the repository's fixtures and checks both documents.
 
 ### The resolved plan and `plan_hash`
 

@@ -212,7 +212,7 @@ def test_the_dataset_identity_is_what_the_inputs_say_when_the_aggregate_is_told_
     assert code == 0
     nemar = json.loads((out / RECORD).read_text(encoding="utf-8"))["extensions"]["nemar"]
     assert nemar["dataset"] == {"id": "on007823", "version": "v1.0.0", "source_commit": None}
-    assert nemar["image"] == {"digest": "sha256:" + "c" * 64}
+    assert nemar["image"] == {"digest": "sha256:" + "c" * 64, "tag": None}
 
 
 @pytest.mark.parametrize(

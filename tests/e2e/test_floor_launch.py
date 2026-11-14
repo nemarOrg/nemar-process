@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -172,7 +175,7 @@ def test_the_record_says_what_ran_and_what_it_read(floor_launch):
         (product / "desc-nemarfloor_signalJourney.json").read_text(encoding="utf-8")
     )
     nemar = record["extensions"]["nemar"]
-    assert nemar["image"] == {"digest": IMAGE_DIGEST}
+    assert nemar["image"] == {"digest": IMAGE_DIGEST, "tag": None}
     assert nemar["dataset"]["id"] == DATASET_ID
     assert nemar["dataset"]["version"] == DATASET_VERSION
     assert nemar["counts"] == {"discovered": 1, "succeeded": 1, "failed": 0, "skipped": 0}
@@ -182,6 +185,52 @@ def test_the_record_says_what_ran_and_what_it_read(floor_launch):
     edf = recording["extensions"]["nemar"]["inputs"][0]
     # the bytes the recipe read are the bytes the launcher staged are the bytes of the fixture
     assert edf["sha256"] == "b2029c3f30ee2d84839ee97be5abe39ee4b1960bcb6881ca2ac600ae7dc603d3"
+
+
+def expected_process(container: str) -> dict:
+    """What the record's ``process`` block must say about the build the job ran in.
+
+    The stand-in runtime runs the working tree: a source run, with the project's version and no
+    commit. The SIF is the image the test job of the image workflow built, a dev build whose version
+    is the project's (a release version gets the suffix -dev0 there) and whose commit is the one CI
+    checked out; outside CI the commit is only required to be a full hash.
+    """
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
+    if container == "standin":
+        return {"version": version, "commit": None, "build": "source"}
+    dev = (
+        version if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-dev[0-9]+", version) else version + "-dev0"
+    )
+    return {"version": dev, "commit": os.environ.get("GITHUB_SHA") or ANY_COMMIT, "build": "dev"}
+
+
+class AnyCommit:
+    """Equal to any 40-digit lowercase hexadecimal hash."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, str) and re.fullmatch(r"[0-9a-f]{40}", other) is not None
+
+    def __repr__(self) -> str:
+        return "<any 40-digit commit hash>"
+
+
+ANY_COMMIT = AnyCommit()
+
+
+def test_the_records_name_the_build_that_ran_in_the_job(floor_launch):
+    """The dataset record and the recording's record both say which nemar-process made them, read
+    from inside the image (a dev build in the test job's SIF, never a release) with no argument."""
+    rig, launch = floor_launch
+    product = launch.out / "work" / "outputs" / PRODUCT
+    names = ["desc-nemarfloor_signalJourney.json"]
+    names += [p.relative_to(product).as_posix() for p in product.rglob("*_signalJourney.json")]
+    assert len(set(names)) == 2
+    for name in set(names):
+        nemar = json.loads((product / name).read_text(encoding="utf-8"))["extensions"]["nemar"]
+        assert nemar["process"] == expected_process(rig.container), name
+        assert nemar["image"]["tag"] is None, name  # only a published release has a tag
 
 
 def test_the_files_equal_those_of_a_direct_run_of_the_same_fixture(floor_launch, tmp_path):

@@ -185,6 +185,91 @@ def test_the_image_workflow_is_byte_identical_to_the_base_it_was_branched_from()
     assert IMAGE_WORKFLOW.read_bytes() == shown.stdout
 
 
+# the image workflow's provenance guards (PX-10) ---------------------------------------------------
+
+IMAGE_SIGNING_IDENTITY = (
+    r"^https://github\.com/nemarOrg/nemar-process/\.github/workflows/image-nemar-python\.yml"
+    r"@refs/(tags/image-nemar-python-v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
+)
+IMAGE_VERSION_STEP = "Read the version from the tag or the dispatch input"
+IMAGE_DEV_STEP = "Name the dev build"
+
+
+def image_steps(job: str) -> list[dict]:
+    return steps(IMAGE_WORKFLOW.name, job)
+
+
+def build_arguments(job: str) -> dict[str, str]:
+    (build,) = [s for s in image_steps(job) if "docker/build-push-action" in s.get("uses", "")]
+    pairs = (line.split("=", 1) for line in build["with"]["build-args"].splitlines() if line)
+    return dict(pairs)
+
+
+def test_the_image_workflows_publish_guard_signing_identity_and_privileges_are_unchanged():
+    workflow = load(IMAGE_WORKFLOW.name)
+    assert workflow["env"]["SIGNING_IDENTITY"] == IMAGE_SIGNING_IDENTITY
+    guard = step_named(IMAGE_WORKFLOW.name, "publish", "Refuse a commit that is not on main")
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in guard["run"]
+    assert "exit 1" in guard["run"]
+    publish = workflow["jobs"]["publish"]
+    assert "github.event_name != 'pull_request'" in publish["if"]
+    assert "startsWith(github.ref, 'refs/tags/image-nemar-python-v')" in publish["if"]
+    assert "github.ref == 'refs/heads/main'" in publish["if"]
+    assert publish["permissions"] == {"contents": "read", "packages": "write"}
+    assert workflow["jobs"]["sign"]["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+        "id-token": "write",
+    }
+    assert workflow["jobs"]["release"]["permissions"] == {"contents": "write"}
+    assert workflow["permissions"] == {"contents": "read"}
+
+
+def test_the_version_step_checks_pyproject_the_dev_suffix_and_the_git_tag_after_the_guard():
+    publish = image_steps("publish")
+    names = [s.get("name") for s in publish]
+    assert names.index("Refuse a commit that is not on main") < names.index(IMAGE_VERSION_STEP)
+    run = publish[names.index(IMAGE_VERSION_STEP)]["run"]
+    # the tag-derived or dispatched version is the one pyproject.toml has at this commit
+    assert 'git show "${GITHUB_SHA}:pyproject.toml"' in run
+    assert "tomllib" in run
+    assert '[ "$project" != "$version" ]' in run
+    # a dev version is not a release
+    assert '[[ "$project" == *-dev* ]]' in run
+    assert "^[0-9]+\\.[0-9]+\\.[0-9]+$" in run
+    # the git tag exists and names this commit
+    assert 'git rev-parse --verify --quiet "refs/tags/v${version}^{commit}"' in run
+    assert '[ "$tagged" != "$GITHUB_SHA" ]' in run
+    assert run.count("exit 1") >= 4
+    # and all of it before anything is pushed
+    for later in ("docker/login-action", "docker/build-push-action"):
+        assert names.index(IMAGE_VERSION_STEP) < next(
+            i for i, s in enumerate(publish) if later in s.get("uses", "")
+        )
+
+
+def test_only_the_publish_job_builds_a_release_and_the_test_job_builds_a_dev_build():
+    published = build_arguments("publish")
+    assert published["NEMAR_PROCESS_BUILD"] == "release"
+    assert published["NEMAR_PROCESS_VERSION"] == "${{ steps.version.outputs.version }}"
+    assert published["NEMAR_PROCESS_COMMIT"] == "${{ github.sha }}"
+    tested = build_arguments("test")
+    assert tested["NEMAR_PROCESS_BUILD"] == "dev"
+    assert tested["NEMAR_PROCESS_VERSION"] == "${{ steps.devbuild.outputs.version }}"
+    assert tested["NEMAR_PROCESS_COMMIT"] == "${{ github.sha }}"
+    for job in ("test", "sign", "release"):
+        for step in image_steps(job):
+            assert "NEMAR_PROCESS_BUILD=release" not in str(step), (job, step.get("name"))
+    assert "SOURCE_COMMIT" not in text(IMAGE_WORKFLOW.name)
+
+
+def test_the_dev_build_version_is_a_dev_version_whatever_the_version_file_says():
+    step = next(s for s in image_steps("test") if s.get("name") == IMAGE_DEV_STEP)
+    assert step["id"] == "devbuild"
+    assert "${base}-dev0" in step["run"]
+    assert "*-dev[0-9]*" in step["run"]
+
+
 # privileges and tokens -------------------------------------------------------------------------
 
 

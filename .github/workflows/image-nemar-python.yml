@@ -77,6 +77,24 @@ jobs:
         id: lock
         run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
+      # The image built here is never published, so it is a dev build whatever the version file says:
+      # a release version gets the suffix -dev0, one already ending in -devN is kept, anything else is
+      # refused here (the Dockerfile would refuse it too), and the test below reads it from a record.
+      - name: Name the dev build
+        id: devbuild
+        run: |
+          set -euo pipefail
+          base="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          case "$base" in
+            *-dev[0-9]*) version="$base" ;;
+            *) version="${base}-dev0" ;;
+          esac
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev[0-9]+$ ]]; then
+            echo "::error::pyproject.toml has a version that is neither X.Y.Z nor X.Y.Z-devN"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Build the image (nothing is pushed)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -87,7 +105,9 @@ jobs:
           load: true
           tags: nemar-python:ci
           build-args: |
-            SOURCE_COMMIT=${{ github.sha }}
+            NEMAR_PROCESS_VERSION=${{ steps.devbuild.outputs.version }}
+            NEMAR_PROCESS_COMMIT=${{ github.sha }}
+            NEMAR_PROCESS_BUILD=dev
             LOCK_SHA256=${{ steps.lock.outputs.sha256 }}
           cache-from: type=gha,scope=nemar-python-cpu
           cache-to: type=gha,scope=nemar-python-cpu,mode=max
@@ -173,6 +193,10 @@ jobs:
             exit 1
           fi
 
+      # The image tag, the git tag vX.Y.Z and the version every record names are one version: the
+      # version asked for must be the one pyproject.toml has at this commit, a release (no -devN), and
+      # the tag vX.Y.Z must exist and point at this commit. To publish X.Y.Z after main has moved past
+      # vX.Y.Z, push image-nemar-python-vX.Y.Z on the vX.Y.Z commit (docs/images.md).
       - name: Read the version from the tag or the dispatch input
         id: version
         env:
@@ -188,6 +212,20 @@ jobs:
           fi
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::the version must be MAJOR.MINOR.PATCH, got '${version}'"
+            exit 1
+          fi
+          project="$(git show "${GITHUB_SHA}:pyproject.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])')"
+          if [[ "$project" == *-dev* ]]; then
+            echo "::error::pyproject.toml has the dev version '${project}' at ${GITHUB_SHA}: only a release is published"
+            exit 1
+          fi
+          if [ "$project" != "$version" ]; then
+            echo "::error::the version asked for is '${version}' and pyproject.toml has '${project}' at ${GITHUB_SHA}"
+            exit 1
+          fi
+          tagged="$(git rev-parse --verify --quiet "refs/tags/v${version}^{commit}" || true)"
+          if [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::the git tag v${version} must exist and point at ${GITHUB_SHA}"
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -229,7 +267,9 @@ jobs:
           sbom: false
           tags: ghcr.io/nemarorg/nemar-python:${{ steps.version.outputs.version }}-cpu
           build-args: |
-            SOURCE_COMMIT=${{ github.sha }}
+            NEMAR_PROCESS_VERSION=${{ steps.version.outputs.version }}
+            NEMAR_PROCESS_COMMIT=${{ github.sha }}
+            NEMAR_PROCESS_BUILD=release
             LOCK_SHA256=${{ steps.lock.outputs.sha256 }}
           cache-from: type=gha,scope=nemar-python-cpu
 
