@@ -249,7 +249,7 @@ The tag in the certificate is any release tag, so the installer also requires th
 cd runner && python3 -m nemar_runner install --version X.Y.Z --prefix <prefix> --write-units
 ```
 
-`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign from the launch PATH, or from `--cosign-path` or the configuration's `cosign_path`), and refuses on any failure: nothing is unpacked, written or switched.
+`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign from the launch PATH, or from `--cosign-path` or the configuration's `cosign_path`; it sees only `PATH`, `LANG` and a `HOME` inside the prefix, so it uses none of the account's proxy settings or credentials), and refuses on any failure: nothing is unpacked, written or switched.
 Only then it unpacks the bytes it verified into `<prefix>/versions/X.Y.Z/` and writes `<prefix>/current` (through a temporary name and a rename).
 Unpacking accepts plain files and directories under `runner/`, `launcher/` and `deploy/` and nothing else: a link, a device, an absolute name, a `..` component, a duplicate or an oversized file refuses the whole bundle.
 Files are mode 0600 (0700 where the archive marks them executable) and directories 0700, so the tree passes the checks the runner makes of `launcher_dir`.
