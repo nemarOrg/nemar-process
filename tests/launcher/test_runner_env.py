@@ -110,9 +110,14 @@ def test_slurm_job_end_time_wins_when_both_are_set():
     assert failure_at(end - 10, NEMAR_JOB_END_TIME=str(end + 100_000)).detail == "terminated"
 
 
-@pytest.mark.parametrize("bad", ["", "soon", "12.5", "-5", "0x10", " "])
-def test_a_malformed_deadline_is_absent(bad):
-    assert failure_at(999_990, NEMAR_JOB_END_TIME=bad).detail == "terminated"
+@pytest.mark.parametrize("template", ["", "soon", "{t}.5", "-{t}", "+{t}", "0x{t}", " "], ids=repr)
+def test_a_malformed_deadline_is_absent(template):
+    # Built from a current epoch, above the floor of `settings.END_TIME_FLOOR_SECONDS`, so that it is
+    # the pattern that refuses it and not the floor. A deadline that parsed would make a SIGTERM at
+    # its own value a `time_limit`.
+    when = int(time.time()) + 3600
+    bad = template.format(t=when)
+    assert failure_at(when, NEMAR_JOB_END_TIME=bad).detail == "terminated"
     assert run.end_time(Env({b"NEMAR_JOB_END_TIME": bad.encode()})) is None
 
 
@@ -349,11 +354,28 @@ def test_a_refused_setting_prints_one_fixed_line_without_the_value(rig, variable
     assert value not in lines[0].split(": ", 1)[1]
 
 
-@pytest.mark.parametrize("digit", ["\u00b2", "\u0663", "\uff11", "\u2460"])
+# A current epoch (above the floor) written in each script, so that the pattern is what refuses it:
+# superscript digits are `isdigit()` but not `isdecimal()` (and `float` refuses them), Arabic-Indic
+# and fullwidth digits are decimal (and `float` accepts them), circled digits are neither.
+SCRIPTS = {
+    "superscript": "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079",
+    "arabic-indic": "".join(chr(0x0660 + d) for d in range(10)),
+    "fullwidth": "".join(chr(0xFF10 + d) for d in range(10)),
+    "circled": "\u24ea" + "".join(chr(0x2460 + d) for d in range(9)),
+}
+
+
+def in_script(script: str, number: int) -> str:
+    return "".join(SCRIPTS[script][int(digit)] for digit in str(number))
+
+
+@pytest.mark.parametrize("script", sorted(SCRIPTS))
 @pytest.mark.parametrize("variable", ["SLURM_JOB_END_TIME", "NEMAR_JOB_END_TIME"])
-def test_a_non_ascii_digit_in_a_deadline_is_absent_and_never_raises(rig, variable, digit):
-    assert run.end_time(Env({variable.encode(): digit.encode()})) is None
-    assert run.end_time(Env({variable.encode(): ("1" + digit).encode()})) is None
-    code, _ = launch_with(rig, entry_spec(rig), **{variable: digit})
+def test_a_non_ascii_digit_in_a_deadline_is_absent_and_never_raises(rig, variable, script):
+    when = int(time.time()) + 3600
+    value = in_script(script, when)
+    assert run.end_time(Env({variable.encode(): value.encode()})) is None
+    assert run.end_time(Env({variable.encode(): ("1" + value).encode()})) is None
+    code, _ = launch_with(rig, entry_spec(rig), **{variable: value})
     assert code == 0
     assert result_of(rig)["failure_code"] is None
