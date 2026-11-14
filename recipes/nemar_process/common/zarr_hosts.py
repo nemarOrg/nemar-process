@@ -1,16 +1,24 @@
 """The hosts a Zarr-input recipe may contact, and the fence that keeps a run to them.
 
 A recipe whose input is ``zarr`` may open HTTPS connections only to the hosts below; every other
-recipe opens none. The allowlist is written here, in code. No host is ever taken from data: not from
-a command line (``--zarr-base`` must be on it), not from the serving index (its ``data_base`` must be
-on it), not from a redirect (``zarr_input.redirect_target``).
+recipe opens none. The allowlist is written here, in code, as a fixed list of host pairs, one per NEMAR
+environment. No host is ever taken from data: not from a command line (``--zarr-base`` must be the
+Zarr host of a pair), not from the serving index (its ``data_base`` must be the data host of that same
+pair), not from a redirect (``zarr_input.redirect_target`` follows one only to that data host).
 
-* ``ZARR_HOSTS``: the Zarr contract host, which answers the index and every read.
-* ``ZARR_DATA_HOSTS``: the public data bucket the contract host redirects reads to.
+* ``ZARR_HOST_PAIRS``: each Zarr contract host (the key), which answers the index and every read,
+  with the public data bucket (the value) it redirects reads to. ``PAIR_NAMES`` names each pair
+  (``production`` or ``staging``), and the records say which one a run used.
+* ``ZARR_HOSTS`` and ``ZARR_DATA_HOSTS`` are the keys and the values of that table, and
+  ``ALLOWED_HOSTS`` is their union, which only the socket fence below takes.
+
+A run is bound to one pair, the one its ``--zarr-base`` names. A base of one pair with the data host of
+the other is refused, as is any host outside both pairs, before any chunk is read.
 
 Their source is nemar-cli's Zarr serving contract (``shared/contract/zarr-index.ts``: ``contract_base``
-is on the Zarr host, ``data_base`` is the public S3 bucket, ``data_base_kind`` ``s3-public``). A change
-of either host there is a change here, in a reviewed pull request.
+is on the Zarr host, ``data_base`` is the public S3 bucket, ``data_base_kind`` ``s3-public``) and, for
+the staging pair, nemar-cli's staging Worker configuration (its Zarr host and its data bucket). A
+change of any host there is a change here, in a reviewed pull request.
 
 ``Fence`` is the second line: a ``sys.addaudithook`` on the interpreter's name lookups and socket
 connections, active only while a Zarr-input run is open. It refuses a lookup of any host not on the
@@ -26,13 +34,29 @@ from __future__ import annotations
 import ipaddress
 import sys
 import threading
-from collections.abc import Iterable
-from types import TracebackType
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType, TracebackType
 from typing import Any
 from urllib.parse import urlsplit
 
-ZARR_HOSTS = frozenset({"zarr.nemar.org"})
-ZARR_DATA_HOSTS = frozenset({"nemar.s3.us-east-2.amazonaws.com"})
+PRODUCTION = "production"
+STAGING = "staging"
+
+# Zarr host -> the data host of the same environment: the only data host a run on that base may read.
+ZARR_HOST_PAIRS: Mapping[str, str] = MappingProxyType(
+    {
+        "zarr.nemar.org": "nemar.s3.us-east-2.amazonaws.com",
+        "zarr-test.nemar.org": "nemar-dev.s3.us-east-2.amazonaws.com",
+    }
+)
+PAIR_NAMES: Mapping[str, str] = MappingProxyType(
+    {
+        "zarr.nemar.org": PRODUCTION,
+        "zarr-test.nemar.org": STAGING,
+    }
+)
+ZARR_HOSTS = frozenset(ZARR_HOST_PAIRS)
+ZARR_DATA_HOSTS = frozenset(ZARR_HOST_PAIRS.values())
 ALLOWED_HOSTS = ZARR_HOSTS | ZARR_DATA_HOSTS
 
 LOOKUPS = ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex")
@@ -91,14 +115,27 @@ def https_host(url: str, hosts: Iterable[str]) -> str | None:
     return parts.netloc.lower()
 
 
+def data_host_of(zarr_host: str) -> str:
+    """The data host of the pair whose Zarr host is ``zarr_host`` exactly, else ``KeyError``."""
+    return ZARR_HOST_PAIRS[zarr_host]
+
+
+def pair_name(zarr_host: str) -> str:
+    """``production`` or ``staging``: the name of the pair whose Zarr host is ``zarr_host``."""
+    return PAIR_NAMES[zarr_host]
+
+
 def base_origin(text: str) -> str | None:
-    """``https://<host>`` for an origin on ``ZARR_HOSTS`` (nothing after the host), else None."""
-    if https_host(text, ZARR_HOSTS) is None:
+    """``https://<host>`` when ``text`` is exactly that for the Zarr host of a pair (nothing after the
+    host, and the scheme and the host written in lower case), else None."""
+    if not text.startswith("https://") or https_host(text, ZARR_HOSTS) is None:
         return None
     parts = urlsplit(text)
+    if parts.netloc not in ZARR_HOST_PAIRS:
+        return None
     if parts.path not in ("", "/") or parts.query or parts.fragment:
         return None
-    return "https://" + parts.netloc.lower()
+    return "https://" + parts.netloc
 
 
 class Fence:

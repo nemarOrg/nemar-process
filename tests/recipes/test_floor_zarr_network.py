@@ -91,9 +91,11 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
         print("the index changed since it was chosen: now {}".format(live))
     assert document["source_commit"] == SOURCE_COMMIT, "the index was rebuilt: renew the constants"
     # the allowed hosts are the code's constants, never what the live index says; the index must agree
-    allowed = set(zarr_hosts.ALLOWED_HOSTS)
-    assert urlsplit(document["data_base"]).hostname in zarr_hosts.ZARR_DATA_HOSTS
-    assert urlsplit(BASE).hostname in zarr_hosts.ZARR_HOSTS
+    # the run is bound to the pair of the base: its data host is the only other host allowed
+    zarr_host = BASE.removeprefix("https://")
+    pair = {zarr_host, zarr_hosts.data_host_of(zarr_host)}
+    allowed = set(pair)
+    assert urlsplit(document["data_base"]).hostname == zarr_hosts.data_host_of(zarr_host)
 
     out = tmp_path / "product"
     started = time.monotonic()
@@ -139,7 +141,8 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     assert nemar["input"]["commit_delta_paths"] == DELTA
     assert nemar["input"]["commit_check"] == "attested_by_caller"
     assert nemar["input"]["zarr_base"] == BASE
-    assert nemar["input"]["hosts_contacted"] == sorted(zarr_hosts.ALLOWED_HOSTS)
+    assert nemar["input"]["zarr_pair"] == zarr_hosts.pair_name(zarr_host) == "production"
+    assert nemar["input"]["hosts_contacted"] == sorted(pair)
     assert nemar["reader"].startswith("eegprep-lean@")
     assert nemar["engine"]["package"] == "eegprep"
     print(

@@ -37,6 +37,8 @@ The launcher's validator treats the schema this way because the schema says so; 
   They use a nemar-cli checkout named by `NEMAR_CLI_DIR`, or a `nemar-cli` directory beside this checkout (or beside its worktree directory), through `git show <ref>:<path>`.
   Locally, with no checkout, they skip with a message that says the check did not run.
   In CI the workflow checks out exactly the pinned commit (sparse, `shared/` and `test/`) and sets `NEMAR_REQUIRE_DRIFT=1`, which turns that skip into a failure.
+- The `runner-stack` CI job reads the same pin and checks out the pinned commit in full (not sparse), because the local stack it starts imports nemar-cli's backend and test helpers; it installs the dependencies of the checkout's root and of its `backend` directory (development dependencies included, `--ignore-scripts`).
+  A pin that moves must therefore name a commit whose `backend/scripts/compute-local-stack.ts` serves the runner routes the runner here speaks ([runner.md](runner.md)).
 
 Because the comparison is against a commit and not against a moving branch, CI is never red because nemar-cli moved, and it never skips unnoticed.
 A separate advisory CI job, `nemar-cli-latest`, checks out nemar-cli's `dev` and says in an annotation, without failing, when its schema differs from the copy here, or when `dev` does not have the file yet.

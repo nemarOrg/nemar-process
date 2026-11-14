@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily check for a newer NEMAR runner release
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

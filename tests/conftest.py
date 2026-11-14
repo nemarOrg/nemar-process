@@ -33,7 +33,17 @@ SKIP_REASON = (
 )
 
 
+RUNNER_TEST_TIMEOUT = 120
+
+
 def pytest_collection_modifyitems(config, items):
+    # A runner test that waits on a child process (a deadline, a cancel) fails after two minutes
+    # instead of hanging CI. The marker exists only when pytest-timeout is installed (the dev group has
+    # it; `--with pytest` alone has not, and then there is no limit).
+    if config.pluginmanager.hasplugin("timeout") and not config.getoption("timeout", None):
+        for item in items:
+            if "tests/runner/" in item.nodeid and item.get_closest_marker("timeout") is None:
+                item.add_marker(pytest.mark.timeout(RUNNER_TEST_TIMEOUT))
     if BINARY is not None or REQUIRE:
         return  # with REQUIRE set and no binary, the `test_sif` fixture fails the test
     for item in items:
