@@ -535,8 +535,14 @@ class Terminator:
         self._previous: dict[int, Any] = {}
 
     def _handle(self, _signum: int, _frame: Any) -> None:
+        self.terminate(time.time())
+
+    def terminate(self, now: float) -> None:
+        """What a SIGTERM is, taken at ``now`` (and what the job's end time is, when the launcher
+        reaches it itself): the first moment is the one recorded, the stop event is set, and the
+        signal goes to the container."""
         if self.received is None:
-            self.received = time.time()
+            self.received = now
         self.stop.set()
         self._forward()
 
@@ -624,14 +630,20 @@ def run_container(
 
     The container runs in a session of its own, so a SIGTERM reaches the whole of it and, if it has
     not stopped ``TERM_GRACE_SECONDS`` later (a process that is PID 1 of its namespace ignores a
-    SIGTERM it has no handler for), the whole group is killed. ``entry_exit_code`` is the entry's
-    own status, with a signal death as 128 + the signal, as a shell reports it. 137 (SIGKILL, what
-    the kernel's out-of-memory killer sends) is ``out_of_memory``. Every other non-zero status,
-    255 included, is ``entry_failed`` and charged: the runtime's own fatal exit (255) and an entry
-    that exits 255 or ``-1`` cannot be told apart once user code could have run, and refunding
-    255 would let any entry end itself that way. ``runtime_unusable`` is only for a runtime that
-    cannot be started at all or whose preflight failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or ``runtime_error`` (detail
-    ``terminated``).
+    SIGTERM it has no handler for), the whole group is killed.
+
+    The job's end time (``SLURM_JOB_END_TIME``, else ``NEMAR_JOB_END_TIME``) is enforced here: when
+    it comes and no SIGTERM has been received, the launcher stops the container as a SIGTERM would
+    (the same record, the same grace), so a job that overruns ends ``time_limit`` whoever signals.
+
+    ``entry_exit_code`` is the entry's own status, with a signal death as 128 + the signal, as a
+    shell reports it. 137 (SIGKILL, what the kernel's out-of-memory killer sends) is
+    ``out_of_memory``. Every other non-zero status, 255 included, is ``entry_failed`` and charged:
+    the runtime's own fatal exit (255) and an entry that exits 255 or ``-1`` cannot be told apart
+    once user code could have run, and refunding 255 would let any entry end itself that way.
+    ``runtime_unusable`` is only for a runtime that cannot be started at all or whose preflight
+    failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or
+    ``runtime_error`` (detail ``terminated``).
     """
     log.info("run: starting the container with {}".format(os.path.basename(argv[0])))
     try:
@@ -648,9 +660,17 @@ def run_container(
             "runtime_error", "runtime_unusable", "the container runtime could not be started"
         ) from None
     terminator.attach(child)
+    ends = end_time(env)
     killed = False
     try:
         while not wait_for_exit(child, 0.2):
+            now = time.time()
+            if ends is not None and terminator.received is None and now >= ends:
+                # Nobody has signalled the launcher, and the job's time is up: the launcher is what
+                # stops the container, exactly as the SIGTERM the scheduler or the runner would send
+                # (the same record, the same grace), so the end time does not depend on either.
+                log.warning("deadline reached; stopping the container")
+                terminator.terminate(now)
             received = terminator.received
             if received is not None and not killed and time.time() - received >= TERM_GRACE_SECONDS:
                 killed = True
