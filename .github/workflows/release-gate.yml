@@ -1,0 +1,99 @@
+name: Release Gate
+
+# The stricter set for a pull request into `main`, which is how a release (dev into main) and
+# every other change reaches main. ci.yml runs on it as well; this adds what a release owes:
+#   - the lock is current (`uv lock --check`),
+#   - every workflow lints (actionlint) and the release tests pass (tests/release),
+#   - the whole test suite passes, including the Apptainer tests, which may not be skipped here.
+# The comparisons with nemar-cli's contract stay in ci.yml, which needs a checkout of it.
+# Nothing here pushes, signs or publishes.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # The same pins as ci.yml, bumped together (tests/release/test_workflows.py compares them).
+  APPTAINER_VERSION: "1.5.5"
+  APPTAINER_DEB_SHA256: "25095d3711504b3e8657dbb2e172ef8db9db43c4503d940c9c36b105db8dce77"
+  TEST_IMAGE: "docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
+  TEST_IMAGE_KEY: "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
+  UV_VERSION: "0.13.4"
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+jobs:
+  release-gate:
+    name: release-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # Here neither the container tests nor the workflow linter may be skipped unnoticed.
+      NEMAR_REQUIRE_APPTAINER: "1"
+      NEMAR_REQUIRE_ACTIONLINT: "1"
+      NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Apptainer
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
+          echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y ./apptainer.deb
+          apptainer --version
+
+      - name: Cache the test image
+        id: sif-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/runtime.sif
+          key: sif-${{ env.TEST_IMAGE_KEY }}-apptainer-${{ env.APPTAINER_VERSION }}
+
+      - name: Build the test image
+        if: steps.sif-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache
+          for attempt in 1 2 3; do
+            apptainer build --force .cache/runtime.sif "$TEST_IMAGE" && exit 0
+            echo "build attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: The lock is current
+        run: |
+          uv sync --frozen
+          uv lock --check
+
+      - name: The workflows lint
+        run: actionlint -color=false .github/workflows/*.yml
+
+      - name: The release tests
+        run: uv run pytest tests/release -q
+
+      - name: The whole test suite
+        run: uv run pytest -q

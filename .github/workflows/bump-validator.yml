@@ -1,0 +1,47 @@
+name: Bump Validator
+
+# Only the release bot changes the version (docs/release.md), so a pull request is checked for it.
+#
+#   - A release pull request, `dev` of this repository into `main`, must carry `X.Y.Z-devN` in
+#     pyproject.toml and uv.lock, with X.Y.Z above the newest `vX.Y.Z` tag: merging it is what
+#     releases X.Y.Z.
+#   - Every other pull request (into `dev`, into `main`, into a feature branch) must leave the
+#     version of both files as it was at the point the branch left its base.
+#
+# The check is `scripts/bump_version.py --check-release` or `--check-unchanged`, tested in
+# tests/release. It runs with the permissions of a read-only token and no secret.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-validator-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bump-validator:
+    name: bump-validator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      IS_RELEASE: ${{ github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'dev' && github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Every branch and tag: the merge base and the newest release tag are read from them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: A release pull request carries X.Y.Z-devN above the newest tag
+        if: env.IS_RELEASE == 'true'
+        run: python3 scripts/bump_version.py --check-release "$HEAD_SHA"
+
+      - name: Any other pull request leaves the version alone
+        if: env.IS_RELEASE != 'true'
+        run: python3 scripts/bump_version.py --check-unchanged "origin/$BASE_REF" "$HEAD_SHA"
