@@ -83,6 +83,7 @@ class Uploader:
         sleep: net.Sleep,
         stop: threading.Event,
         outputs_dir: str | None,
+        lease: str | None = None,
     ) -> None:
         self.job = job
         self.docs = docs
@@ -90,6 +91,7 @@ class Uploader:
         self.sleep = sleep
         self.stop = stop
         self.outputs_dir = outputs_dir
+        self.lease = lease
         self._base = "{}/compute/jobs/{}".format(job.api_base.rstrip("/"), job.job_id)
         self._lock = threading.Lock()
         self._urls: dict[str, str] = {}
@@ -144,7 +146,7 @@ class Uploader:
 
         try:
             _status, answer = net.retrying(
-                lambda _n: net.post_json(url, self._body, self.job.job_token),
+                lambda _n: net.post_json(url, self._body, self.job.job_token, self.lease),
                 attempts=net.ATTEMPTS,
                 sleep=self.sleep,
                 on_retry=note,
@@ -272,7 +274,7 @@ class Uploader:
         incomplete = 0
         while True:
             try:
-                net.post_json(url, {}, self.job.job_token)
+                net.post_json(url, {}, self.job.job_token, self.lease)
                 return
             except net.HttpFailure as failure:
                 attempts += 1

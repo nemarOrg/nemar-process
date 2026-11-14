@@ -51,7 +51,6 @@ from .codes import (
     CONTAINER_WORK,
     ENV_OUT,
     ENV_SIF_ROOT,
-    ENV_SLURM_END_TIME,
     LOG_FILE,
     OUTPUTS_REQUEST_MAX_BYTES,
     Env,
@@ -59,6 +58,7 @@ from .codes import (
     Stopped,
 )
 from .provenance import Log
+from .settings import Limits, read_settings
 from .stage import Staged
 
 # A SIGTERM within this many seconds of the job's end time is the time limit, not a cancellation.
@@ -239,8 +239,13 @@ def build_argv(
     sif: str,
     binds: list[Bind],
     cuda: str | None = None,
+    limits: Limits | None = None,
 ) -> list[str]:
     argv = [runtime, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
+    if limits is not None:  # the runtime's own cgroup limits, only when the runner proved them
+        argv += ["--cpus", str(limits.cpus)]
+        if limits.memory_mb is not None:
+            argv += ["--memory", "{}M".format(limits.memory_mb)]
     for bind in binds:
         argv += ["--bind", bind.argument()]
     if job.gpus > 0:
@@ -525,10 +530,7 @@ class Terminator:
 
 
 def end_time(env: Env) -> float | None:
-    raw = env.get(ENV_SLURM_END_TIME)
-    if raw is None or not raw.strip().isdigit():
-        return None
-    return float(raw.strip())
+    return read_settings(env).end_time
 
 
 def terminated_failure(terminator: Terminator, env: Env) -> Failure:
