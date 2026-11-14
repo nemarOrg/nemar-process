@@ -61,6 +61,13 @@ class Engine:
         return call["argv"]
 
 
+@pytest.fixture(autouse=True)
+def podman_code_paths_are_tested_behind_the_refusal(monkeypatch):
+    """Podman is refused by default (`runtime.UNSUPPORTED_ENGINES`); its argv and checks stay tested
+    here with the refusal lifted. `test_runtime_podman_refused.py` tests the refusal itself."""
+    monkeypatch.setattr(runtime, "UNSUPPORTED_ENGINES", ())
+
+
 @pytest.fixture(params=["docker", "podman"])
 def engine(request, rig):
     return Engine(rig, request.param, present=True)
@@ -152,6 +159,7 @@ def test_the_engine_arguments_are_exactly_these(rig, engine):
         "/work",
         *(["--entrypoint", ""] if engine.name == "docker" else []),
         "--no-healthcheck",
+        *(["--log-driver=none"] if engine.name == "docker" else []),
         "--cpus",
         "4",
         "--memory",

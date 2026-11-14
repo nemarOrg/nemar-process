@@ -30,6 +30,13 @@ from test_runtime_docker import (
 )
 
 
+@pytest.fixture(autouse=True)
+def podman_code_paths_are_tested_behind_the_refusal(monkeypatch):
+    """Podman is refused by default (`runtime.UNSUPPORTED_ENGINES`); its argv and checks stay tested
+    here with the refusal lifted. `test_runtime_podman_refused.py` tests the refusal itself."""
+    monkeypatch.setattr(runtime, "UNSUPPORTED_ENGINES", ())
+
+
 @pytest.fixture(params=["docker", "podman"])
 def engine(request, rig):
     return Engine(rig, request.param, present=True)
@@ -157,6 +164,24 @@ def test_a_podman_without_cgroup_v2_and_all_three_controllers_is_refused(rig, ho
     podman = Engine(rig, "podman", present=True)
     set_info(podman, {"host": host})
     refused(rig, podman, launch(rig, podman), "runtime_unusable")
+
+
+def test_docker_with_user_namespace_remapping_is_refused(rig, docker):
+    info = fake_info("docker")
+    info["SecurityOptions"] = ["name=seccomp,profile=builtin", "name=userns"]
+    set_info(docker, info)
+    refused(rig, docker, launch(rig, docker), "runtime_unusable")
+    assert ask(rig, "docker") == (True, False)
+
+
+def test_an_engine_that_does_not_say_its_cpu_count_cannot_be_said_to_enforce_limits(rig, engine):
+    info = fake_info(engine.name)
+    if engine.name == "docker":
+        del info["NCPU"]
+    else:
+        del info["host"]["cpus"]
+    set_info(engine, info)
+    assert ask(rig, engine.name) == (False, True)
 
 
 def test_an_engine_that_does_not_say_its_cpu_count_is_refused(rig, engine):
@@ -349,6 +374,83 @@ def test_naming_the_registry_lets_the_launch_through(rig, docker):
     assert reference in docker.run_argv()
 
 
+# ---- the allowlist's own entries -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "myorg",
+        "library",
+        "ghcr.io,myorg",
+        "ghcr.io/x",
+        "user@ghcr.io",
+        "a b",
+        "ghcr.io, docker hub",
+    ],
+)
+def test_an_allowlist_entry_that_is_not_a_host_is_refused_at_the_start(rig, docker, value):
+    result = launch(rig, docker, NEMAR_ALLOWED_REGISTRIES=value)
+    assert result.exit == 13
+    assert result.result["failure_code"] == "runtime_error"
+    assert result.result["detail"] == "invalid_spec"
+    assert "registry allowlist" in result.stderr
+    assert rig.server.requests == []
+    assert docker.runs() == []
+    assert docker._read(".calls") == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ghcr.io",
+        "localhost",
+        "localhost:5000",
+        "127.0.0.1:5000",
+        "public.ecr.aws,ghcr.io",
+        "",
+        " ,, ",
+    ],
+)
+def test_an_allowlist_of_hosts_passes_the_settings(value):
+    got = settings.read_settings(
+        Env(
+            {
+                b"NEMAR_CONTAINER_RUNTIME": b"docker",
+                b"NEMAR_CPUS": b"1",
+                b"NEMAR_MEMORY_MB": b"64",
+                b"NEMAR_RUNNER_LABEL": b"rnr_0123456789abcdef01234567",
+                b"NEMAR_ALLOWED_REGISTRIES": value.encode(),
+            }
+        )
+    )
+    assert got.problem is None
+
+
+def test_the_allowlist_is_not_read_under_apptainer():
+    got = settings.read_settings(Env({b"NEMAR_ALLOWED_REGISTRIES": b"myorg"}))
+    assert got.problem is None
+
+
+@pytest.mark.parametrize(
+    ("entry", "ok"),
+    [
+        ("ghcr.io", True),
+        ("localhost", True),
+        ("localhost:5000", True),
+        ("host:5000", True),
+        ("myorg", False),
+        ("", False),
+        ("a/b.c", False),
+        ("a@b.c", False),
+        ("a b.c", False),
+        ("a\tb.c", False),
+    ],
+)
+def test_a_registry_entry_is_a_host(entry, ok):
+    assert settings.registry_entry_ok(entry) is ok
+
+
 # ---- image volumes -------------------------------------------------------------------------------
 
 
@@ -382,9 +484,10 @@ def test_podman_ignores_image_volumes_and_docker_has_no_such_flag(rig, engine):
 # ---- the flags only one engine takes -------------------------------------------------------------
 
 
-def test_the_entrypoint_is_cleared_for_docker_only(rig, engine):
+def test_the_entrypoint_is_cleared_and_the_daemon_keeps_no_log_for_docker_only(rig, engine):
     assert launch(rig, engine).exit == 0
     argv = engine.run_argv()
+    assert ("--log-driver=none" in argv) == (engine.name == "docker")
     assert ("--entrypoint" in argv) == (engine.name == "docker")
     if engine.name == "docker":
         assert value_after(argv, "--entrypoint") == ""

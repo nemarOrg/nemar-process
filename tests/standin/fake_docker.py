@@ -51,6 +51,7 @@ VALUELESS = {
     "--no-healthcheck",
     "--oom-score-adj=1000",
 }
+DOCKER_ONLY = {"--log-driver=none"}
 PODMAN_ONLY = {
     "--userns=keep-id",
     "--pid=private",
@@ -157,6 +158,8 @@ def _bad_run_option(name: str, option: str, value: str, ncpu: int) -> str | None
     """Why the engine would refuse this option's value, or None."""
     if option in PODMAN_ONLY and name != "podman":
         return "unknown flag: " + option
+    if option in DOCKER_ONLY and name != "docker":
+        return "unknown flag: " + option
     if option == "--user" and re.fullmatch(r"[0-9]+:[0-9]+", value) is None:
         return "invalid user: " + value
     if option == "--security-opt" and value != "no-new-privileges":
@@ -199,6 +202,7 @@ def _bad_run_option(name: str, option: str, value: str, ncpu: int) -> str | None
 
 
 def main(argv: list[str], record_path: str, name: str = "docker") -> int:
+    _log(record_path, ".calls", {"argv": argv})  # every call, whatever it is
     if argv[:1] == ["--version"]:
         print("{} version 0.0.0-standin".format(name.capitalize()))
         return 0
@@ -254,7 +258,11 @@ def main(argv: list[str], record_path: str, name: str = "docker") -> int:
     i = 0
     while i < len(rest) and rest[i].startswith("--"):
         option = rest[i]
-        if option in VALUELESS or (option in PODMAN_ONLY and name == "podman"):
+        if (
+            option in VALUELESS
+            or (option in PODMAN_ONLY and name == "podman")
+            or (option in DOCKER_ONLY and name == "docker")
+        ):
             options.append((option, ""))
             i += 1
         elif option in VALUED:
