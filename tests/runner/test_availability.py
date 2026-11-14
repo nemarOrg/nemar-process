@@ -46,28 +46,44 @@ SHORT_MB = 2500
 
 
 class Proc:
-    """A directory in `/proc`'s format (`meminfo`, `loadavg`) that a test rewrites, atomically, to say
-    what the host looks like."""
+    """A directory in `/proc`'s format (`meminfo`, `loadavg`) that a test rewrites to say
+    what the host looks like. ``dir`` is a link to a directory made whole and then swapped in with one
+    rename, so a runner that polls while the test changes it reads the old host or the new one, never
+    the new memory with the old load."""
 
     def __init__(self, directory: Path) -> None:
         self.dir = directory
-        directory.mkdir()
+        self._versions = directory.parent / (directory.name + "-versions")
+        self._versions.mkdir()
+        self._count = 0
         self.set()
 
-    def _put(self, name: str, text: str) -> None:
-        part = self.dir / (name + ".part")
-        part.write_text(text, encoding="ascii")
-        os.replace(part, self.dir / name)
-
-    def set(self, available_mb: int = ROOM_MB, total_mb: int = 65536, load: float = 0.0) -> None:
-        self._put(
-            "meminfo",
+    def set(
+        self,
+        available_mb: int = ROOM_MB,
+        total_mb: int = 65536,
+        load: float = 0.0,
+        pause: float = 0.0,
+    ) -> None:
+        """``pause`` is for the test that proves the swap: seconds between the files being written."""
+        self._count += 1
+        version = self._versions / str(self._count)
+        version.mkdir()
+        (version / "meminfo").write_text(
             "MemTotal:       {} kB\nMemFree:        4096 kB\nMemAvailable:   {} kB\n"
             "Buffers:        1024 kB\nHugePages_Total:       0\n".format(
                 total_mb * 1024, available_mb * 1024
             ),
+            encoding="ascii",
         )
-        self._put("loadavg", "{:.2f} 0.10 0.10 1/200 4242\n".format(load))
+        time.sleep(pause)
+        (version / "loadavg").write_text(
+            "{:.2f} 0.10 0.10 1/200 4242\n".format(load), encoding="ascii"
+        )
+        link = self._versions / "swap"
+        link.unlink(missing_ok=True)
+        link.symlink_to(version)
+        os.replace(link, self.dir)
 
 
 def settings(
@@ -684,7 +700,7 @@ def test_a_job_that_finds_the_host_busy_waits_then_is_abandoned_inside_the_lease
     marker, launcher = started_marker(tmp_path)
     rig = new_rig(tmp_path, launcher)
     try:
-        agent = prepared(rig, lease_abandon_seconds=0.5)
+        agent = prepared(rig, lease_abandon_seconds=2.0)
         rig.routes.claims.append(busy_at_claim(rig, [claim_job(1)], available_mb=SHORT_MB))
         began = time.monotonic()
         try:
@@ -692,7 +708,9 @@ def test_a_job_that_finds_the_host_busy_waits_then_is_abandoned_inside_the_lease
         finally:
             agent.release()
         waited = time.monotonic() - began
-        assert 0.5 <= waited < 5.0  # it waited out the shortened lease, no longer
+        assert (
+            2.0 <= waited < 3.5
+        )  # it waited out the shortened lease: not less, and not twice as long
         assert rig.routes.count("claim") == 1
         assert rig.routes.count("heartbeat") == 0  # nothing says "started"
         assert rig.routes.count("complete") == 0  # the lease expires and the Worker releases it
@@ -809,6 +827,13 @@ def test_the_wait_is_over_at_once_when_the_runner_is_told_to_stop(tmp_path):
         assert time.monotonic() - began < 10  # not the sixty seconds of the lease
         assert not marker.exists()  # a stopped job is not started
         assert rig.events("claim_abandoned") == []
+        # it is refused, as a stop during a pull refuses a job: one completion, `terminated`
+        [body] = rig.routes.bodies("complete")
+        assert (body["launcher_failure_code"], body["launcher_detail"]) == (
+            "runtime_error",
+            "terminated",
+        )
+        assert rig.routes.count("heartbeat") == 0
     finally:
         rig.close()
 
