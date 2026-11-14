@@ -58,6 +58,12 @@ IDENTITY_REGEXP = (
     r"@refs/tags/nemar-runner-v[0-9]+\.[0-9]+\.[0-9]+$"
 )
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+# Two more fields of the signing certificate, so that a workflow of this path that another repository
+# runs (a tagged commit that ever gains `workflow_call`) could not give it a matching certificate. The
+# real fields are confirmed in the staging drills (S2D); the workflow verifies its own signature with
+# the same two before it attaches anything, so a mismatch fails a release and never an install.
+WORKFLOW_REPOSITORY = "nemarOrg/nemar-process"
+WORKFLOW_TRIGGER = "push"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -106,7 +112,16 @@ class Trust:
 
 
 KEYLESS = Trust(
-    ("--certificate-identity-regexp", IDENTITY_REGEXP, "--certificate-oidc-issuer", OIDC_ISSUER)
+    (
+        "--certificate-identity-regexp",
+        IDENTITY_REGEXP,
+        "--certificate-oidc-issuer",
+        OIDC_ISSUER,
+        "--certificate-github-workflow-repository",
+        WORKFLOW_REPOSITORY,
+        "--certificate-github-workflow-trigger",
+        WORKFLOW_TRIGGER,
+    )
 )
 
 

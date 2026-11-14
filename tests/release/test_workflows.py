@@ -327,6 +327,8 @@ def test_the_workflow_file_and_the_installers_constants_name_the_same_identity()
     workflow = load(RUNNER_WORKFLOW)
     assert workflow["env"]["SIGNING_IDENTITY"] == install.IDENTITY_REGEXP
     assert workflow["env"]["OIDC_ISSUER"] == install.OIDC_ISSUER
+    assert workflow["env"]["SIGNING_REPOSITORY"] == install.WORKFLOW_REPOSITORY
+    assert workflow["env"]["SIGNING_TRIGGER"] == install.WORKFLOW_TRIGGER
     # and the path inside the identity is this file
     assert f".github/workflows/{RUNNER_WORKFLOW}".replace(".", r"\.") in install.IDENTITY_REGEXP
     assert (WORKFLOWS / RUNNER_WORKFLOW).is_file()
@@ -371,6 +373,15 @@ def test_the_signing_job_signs_the_built_file_and_checks_its_own_signature_again
     assert '--bundle "${file}.sigstore.json"' in verify
     assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in verify
     assert '--certificate-oidc-issuer "$OIDC_ISSUER"' in verify
+    # the same two certificate fields the installer asks for
+    assert '--certificate-github-workflow-repository "$SIGNING_REPOSITORY"' in verify
+    assert '--certificate-github-workflow-trigger "$SIGNING_TRIGGER"' in verify
+    assert install.KEYLESS.flags[-4:] == (
+        "--certificate-github-workflow-repository",
+        "nemarOrg/nemar-process",
+        "--certificate-github-workflow-trigger",
+        "push",
+    )
     assert "set -euo pipefail" in commands
     built = next(
         s for s in runner_jobs()["build"]["steps"] if "upload-artifact" in s.get("uses", "")

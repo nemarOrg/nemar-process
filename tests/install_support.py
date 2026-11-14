@@ -115,7 +115,14 @@ import hashlib, hmac, json, re, sys
 
 LOG = {log!r}
 FULCIO = {fulcio!r}.encode()
-VALUE_FLAGS = ("--bundle", "--certificate-identity-regexp", "--certificate-oidc-issuer", "--key")
+VALUE_FLAGS = (
+    "--bundle",
+    "--certificate-identity-regexp",
+    "--certificate-oidc-issuer",
+    "--certificate-github-workflow-repository",
+    "--certificate-github-workflow-trigger",
+    "--key",
+)
 SWITCHES = ("--insecure-ignore-tlog=true", "--private-infrastructure")
 
 
@@ -157,14 +164,21 @@ if "--key" in flags:
     sys.exit(0)
 pattern = flags.get("--certificate-identity-regexp")
 issuer = flags.get("--certificate-oidc-issuer")
-if pattern is None or issuer is None:
-    fail(2, "a certificate identity and an issuer are required")
+repository = flags.get("--certificate-github-workflow-repository")
+trigger = flags.get("--certificate-github-workflow-trigger")
+if None in (pattern, issuer, repository, trigger):
+    fail(2, "a certificate identity, an issuer, a workflow repository and a trigger are required")
 identity = str(document.get("identity", ""))
 if re.search(pattern, identity) is None:
     fail(1, "no matching certificate identity")
 if document.get("issuer") != issuer:
     fail(1, "no matching certificate issuer")
-want = hmac.new(FULCIO, (digest + "\\n" + identity + "\\n" + issuer).encode(), "sha256").hexdigest()
+if document.get("workflow_repository") != repository:
+    fail(1, "no matching certificate workflow repository")
+if document.get("workflow_trigger") != trigger:
+    fail(1, "no matching certificate workflow trigger")
+signed = "\\n".join([digest, identity, issuer, str(repository), str(trigger)])
+want = hmac.new(FULCIO, signed.encode(), "sha256").hexdigest()
 if not hmac.compare_digest(str(document.get("mac", "")), want):
     fail(1, "the certificate is not Fulcio's")
 sys.exit(0)
@@ -201,15 +215,26 @@ class StandinCosign:
         return [json.loads(line) for line in text.splitlines() if line]
 
 
-def keyless_bundle(data: bytes, identity: str, issuer: str = install.OIDC_ISSUER) -> bytes:
-    """What the stand-in accepts as `cosign sign-blob` keyless output for ``data``."""
+def keyless_bundle(
+    data: bytes,
+    identity: str,
+    issuer: str = install.OIDC_ISSUER,
+    repository: str = install.WORKFLOW_REPOSITORY,
+    trigger: str = install.WORKFLOW_TRIGGER,
+) -> bytes:
+    """What the stand-in accepts as `cosign sign-blob` keyless output for ``data``: a certificate that
+    names the identity, the issuer, and the repository and trigger of the run that was signed."""
     digest = hashlib.sha256(data).hexdigest()
-    mac = hmac.new(
-        FULCIO_SECRET.encode(),
-        (digest + "\n" + identity + "\n" + issuer).encode(),
-        "sha256",
-    ).hexdigest()
-    document = {"sha256": digest, "identity": identity, "issuer": issuer, "mac": mac}
+    signed = "\n".join([digest, identity, issuer, repository, trigger])
+    mac = hmac.new(FULCIO_SECRET.encode(), signed.encode(), "sha256").hexdigest()
+    document = {
+        "sha256": digest,
+        "identity": identity,
+        "issuer": issuer,
+        "workflow_repository": repository,
+        "workflow_trigger": trigger,
+        "mac": mac,
+    }
     return json.dumps(document).encode("utf-8")
 
 

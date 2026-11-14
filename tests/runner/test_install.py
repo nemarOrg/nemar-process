@@ -153,6 +153,10 @@ def test_the_identity_accepts_the_release_workflow_for_a_release_tag_and_nothing
         install.IDENTITY_REGEXP,
         "--certificate-oidc-issuer",
         install.OIDC_ISSUER,
+        "--certificate-github-workflow-repository",
+        "nemarOrg/nemar-process",
+        "--certificate-github-workflow-trigger",
+        "push",
     )
 
 
@@ -194,6 +198,10 @@ def test_the_installer_asks_cosign_to_verify_the_bundle_against_the_identity(env
         install.IDENTITY_REGEXP,
         "--certificate-oidc-issuer",
         install.OIDC_ISSUER,
+        "--certificate-github-workflow-repository",
+        "nemarOrg/nemar-process",
+        "--certificate-github-workflow-trigger",
+        "push",
     ]
 
 
@@ -347,6 +355,24 @@ def test_a_bundle_signed_by_another_issuer_is_refused(env):
     env.publish_raw(
         "0.1.0", data, keyless_bundle(data, runner_identity("0.1.0"), "https://issuer.example.test")
     )
+    refused("verify_failed", env.install, "0.1.0")
+    env.assert_untouched()
+
+
+@pytest.mark.parametrize(
+    ("repository", "trigger"),
+    [
+        ("someone-else/nemar-process", "push"),  # the workflow file run by another repository
+        ("nemarOrg/nemar-process", "workflow_call"),  # the workflow called by another workflow
+        ("nemarOrg/nemar-process", "workflow_dispatch"),
+    ],
+)
+def test_a_certificate_for_another_repository_or_trigger_is_refused_though_its_identity_matches(
+    env, repository, trigger
+):
+    data = env.bundle("0.1.0")
+    bundle = keyless_bundle(data, runner_identity("0.1.0"), repository=repository, trigger=trigger)
+    env.publish_raw("0.1.0", data, bundle)
     refused("verify_failed", env.install, "0.1.0")
     env.assert_untouched()
 
