@@ -9,10 +9,12 @@ it. Nothing is unpacked, written or switched when any step before that fails. `d
 (the program the service unit runs) and the unit templates come out of the verified bundle too, never
 from the checkout this command is run from.
 
-What the signature means: the runner release workflow made this file, for a tag of that pattern, on a
-commit that was on `main` (the workflow refuses any other). The tag in the certificate is any release
-tag, so the version INSIDE the bundle (`__version__`) is what ties the file to the version asked for: a
-bundle that is signed but is another version's is refused.
+What the signature means: the runner release workflow, as it is at the tagged commit, made this file
+for a tag of that pattern (that copy of the workflow refuses a commit that is not on `main`, but a tag on
+a commit whose workflow file was edited is signed all the same, so the real control is the owner's tag
+ruleset on `nemar-runner-v*` and the review of `.github/workflows/`, docs/release.md). The tag in the
+certificate is any release tag, so the version INSIDE the bundle (`__version__`) is what ties the file
+to the version asked for: a bundle that is signed but is another version's is refused.
 
 Standard library only, Python 3.9 or newer. Nothing here restarts anything: the running runner switches
 to a new version itself, between claims and with no job in hand (`agent.py`, the idle switch).
