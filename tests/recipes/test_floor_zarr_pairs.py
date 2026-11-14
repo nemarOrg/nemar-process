@@ -17,6 +17,7 @@ import contextlib
 import json
 import socket
 from pathlib import Path
+from typing import Any
 
 import pytest
 import zarr_support as z
@@ -97,7 +98,8 @@ def test_the_pairs_are_fixed_in_code():
 
 
 def test_the_tables_cannot_be_changed_at_run_time():
-    for table in (zarr_hosts.ZARR_HOST_PAIRS, zarr_hosts.PAIR_NAMES):
+    tables: list[Any] = [zarr_hosts.ZARR_HOST_PAIRS, zarr_hosts.PAIR_NAMES]  # read-only by type
+    for table in tables:
         with pytest.raises(TypeError):
             table["elsewhere.example.test"] = "x"
         with pytest.raises(TypeError):

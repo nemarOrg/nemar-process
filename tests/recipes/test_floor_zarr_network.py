@@ -92,7 +92,7 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     assert document["source_commit"] == SOURCE_COMMIT, "the index was rebuilt: renew the constants"
     # the allowed hosts are the code's constants, never what the live index says; the index must agree
     # the run is bound to the pair of the base: its data host is the only other host allowed
-    zarr_host = urlsplit(BASE).hostname
+    zarr_host = BASE.removeprefix("https://")
     pair = {zarr_host, zarr_hosts.data_host_of(zarr_host)}
     allowed = set(pair)
     assert urlsplit(document["data_base"]).hostname == zarr_hosts.data_host_of(zarr_host)
