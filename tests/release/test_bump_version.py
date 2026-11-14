@@ -31,9 +31,9 @@ UNTOUCHED = (
 )
 IDENTITY = {
     "GIT_AUTHOR_NAME": "bump test",
-    "GIT_AUTHOR_EMAIL": "bump-test@example.org",
+    "GIT_AUTHOR_EMAIL": "bump-test@example.invalid",
     "GIT_COMMITTER_NAME": "bump test",
-    "GIT_COMMITTER_EMAIL": "bump-test@example.org",
+    "GIT_COMMITTER_EMAIL": "bump-test@example.invalid",
 }
 SKIP_MARKERS = re.compile(r"skip[ -]ci|ci[ -]skip|no[ -]ci|skip[ -]actions|actions[ -]skip", re.I)
 
