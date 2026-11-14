@@ -1,0 +1,75 @@
+name: Auto Bump Dev
+
+# Every push to `dev` that a person made gets one new `-devN` version, committed by the release
+# bot, so each state of dev carries a version of its own. Pull requests never change the version
+# (bump-validator.yml); this is the only writer on dev besides sync-dev.yml. docs/release.md.
+#
+# The job is skipped (no runner starts) when the head commit
+#   - was authored by the bot: this workflow's own push would otherwise start it again, forever;
+#   - starts with "chore: bump version to": a bump made by a person, or the bump sync-dev.yml makes;
+#   - contains "[skip-bump]": the escape hatch.
+#
+# The run bumps the commit that was pushed (not whatever dev's tip is by the time it runs), and it
+# does nothing once the version it would bump is already released (a tag `vX.Y.Z` exists): between
+# a release and the sync that follows, dev still carries the released base, and a bump there would
+# only make the sync conflict.
+#
+# A rejected push (a person pushed first) is a warning: that push starts this workflow again from
+# the new head, so the bump is not lost.
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    if: |
+      github.event.head_commit.author.email != 'nemar-bot@users.noreply.github.com'
+      && !startsWith(github.event.head_commit.message, 'chore: bump version to')
+      && !contains(github.event.head_commit.message, '[skip-bump]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The environment that holds AUTO_TAG_PAT, limited to main, dev and release tags (docs/release.md).
+    environment: release
+    permissions:
+      contents: write
+    # Declared on the job, not the workflow: a run skipped by the `if:` above must not take the slot
+    # and replace a waiting run that has a bump to make. Runs wait for each other, none is canceled.
+    concurrency:
+      group: auto-bump-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          # The token of the bot's pushes: the default token cannot push past a protected branch,
+          # and a push made with it does not start the workflows that should run on the new head.
+          token: ${{ secrets.AUTO_TAG_PAT }}
+
+      - name: Bump dev to the next -devN
+        run: |
+          set -euo pipefail
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+          current=$(python3 scripts/bump_version.py --show HEAD)
+          # dev always carries -devN; anything else means a release is in flight and sync-dev.yml has
+          # not run yet, so leave it for that.
+          if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev([0-9]+)$ ]]; then
+            echo "::notice::dev is at $current, which has no -devN suffix; not bumping."
+            exit 0
+          fi
+          base="${current%-dev*}"
+          if [ -n "$(git ls-remote --tags origin "refs/tags/v$base")" ]; then
+            echo "::notice::v$base is already released; dev is waiting for the sync after it. Not bumping."
+            exit 0
+          fi
+          python3 scripts/bump_version.py "dev$((BASH_REMATCH[1] + 1))"
+          if git push origin HEAD:refs/heads/dev; then
+            echo "pushed $(git log -1 --format=%s)"
+          else
+            echo "::warning::the push to dev was rejected (a concurrent push); that push starts this workflow again."
+          fi

@@ -1,0 +1,64 @@
+name: Bump Validator
+
+# Only the release bot changes the version (docs/release.md), so a pull request is checked for it.
+#
+#   - A release pull request, `dev` of this repository into `main`, must carry `X.Y.Z-devN` in
+#     pyproject.toml and uv.lock, with X.Y.Z above the newest `vX.Y.Z` tag: merging it is what
+#     releases X.Y.Z.
+#   - Every other pull request (into `dev`, into `main`, into a feature branch) must leave the
+#     version of both files as it was at the point the branch left its base.
+#
+# The check is `scripts/bump_version.py --check-release` or `--check-unchanged`, tested in
+# tests/release. It runs with the permissions of a read-only token and no secret, and it runs the
+# copy of the script that the BASE branch has, so a pull request cannot weaken its own check. (A
+# base without the script, which is only the pull request that introduces it, falls back to the
+# pull request's own copy, with a warning.)
+#
+# A retargeted or re-titled pull request is checked again (`edited`), because what it is measured
+# against is its base.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-validator-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bump-validator:
+    name: bump-validator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      IS_RELEASE: ${{ github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'dev' && github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Every branch and tag: the merge base and the newest release tag are read from them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Take the checker from the base branch
+        run: |
+          set -euo pipefail
+          if git cat-file -e "origin/$BASE_REF:scripts/bump_version.py" 2> /dev/null; then
+            git show "origin/$BASE_REF:scripts/bump_version.py" > "$RUNNER_TEMP/bump_version.py"
+          else
+            echo "::warning::$BASE_REF has no scripts/bump_version.py yet; using the pull request's own copy."
+            cp scripts/bump_version.py "$RUNNER_TEMP/bump_version.py"
+          fi
+
+      - name: A release pull request carries X.Y.Z-devN above the newest tag
+        if: env.IS_RELEASE == 'true'
+        run: python3 "$RUNNER_TEMP/bump_version.py" --check-release "$HEAD_SHA"
+
+      - name: Any other pull request leaves the version alone
+        if: env.IS_RELEASE != 'true'
+        run: python3 "$RUNNER_TEMP/bump_version.py" --check-unchanged "origin/$BASE_REF" "$HEAD_SHA"

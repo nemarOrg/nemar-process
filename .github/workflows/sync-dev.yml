@@ -1,0 +1,99 @@
+name: Sync dev with main
+
+# A release tag `vX.Y.Z` (made by auto-tag.yml) brings main back into dev, then moves dev to the
+# patch after the release at `-dev1`, so work on dev never carries the version just released.
+#
+#   - If dev does not exist yet, this logs a notice and does nothing.
+#   - main is merged into dev with a merge commit "chore: sync dev with main after vX.Y.Z"
+#     (scripts/sync_dev_merge.py). A conflict that is only the version lines of pyproject.toml and
+#     uv.lock, which a push to dev after the release merge causes, is resolved to main's side;
+#     any other conflict fails the job for a person (docs/release.md). Nothing is forced or retried.
+#   - dev is then bumped with `bump_version.py after:X.Y.Z`, unless it is already past X.Y.Z, which
+#     makes a re-run of this workflow harmless.
+#
+# The trigger is a tag, so the bot-author guard of the other two workflows does not apply; the
+# glob below matches `vX.Y.Z` and no other tag (not `v1.2`, not `v1.2.3-rc1`, and neither
+# `image-nemar-python-v*` nor `nemar-launch-v*`), and the first step checks the name again.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The environment that holds AUTO_TAG_PAT, limited to main, dev and release tags (docs/release.md).
+    environment: release
+    permissions:
+      contents: write
+    # Its own group, never shared with auto-bump-dev.yml: a waiting run is replaced by a newer one,
+    # and a sync must not be replaced by a bump.
+    concurrency:
+      group: sync-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AUTO_TAG_PAT }}
+
+      - name: Check the tag, and that dev exists
+        id: guard
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::'$TAG' is not a release tag (vX.Y.Z); not syncing."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG is not on main; a release tag is made on main. Not syncing."
+            exit 1
+          fi
+          # The tag must name the version of the commit it is on: a stray tag made by hand on main
+          # would otherwise move dev past a version that was never released.
+          shown=$(python3 scripts/bump_version.py --show "$GITHUB_SHA")
+          if [ "$shown" != "${TAG#v}" ]; then
+            echo "::error::$TAG is on a commit whose version is $shown, not ${TAG#v}. Not syncing."
+            exit 1
+          fi
+          if [ -z "$(git ls-remote --heads origin dev)" ]; then
+            echo "::notice::there is no dev branch yet; nothing to sync."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Merge main into dev
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+          git fetch origin dev main
+          git checkout -B dev origin/dev
+          python3 scripts/sync_dev_merge.py "chore: sync dev with main after $TAG"
+
+      - name: Move dev to the patch after the release at -dev1
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 scripts/bump_version.py "after:${TAG#v}"
+
+      - name: Push dev
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          git push origin dev

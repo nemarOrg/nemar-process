@@ -298,6 +298,10 @@ def test_the_signing_identity_accepts_this_workflow_at_a_version_tag_and_at_main
         "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/tags/image-nemar-python-v1.2.3-rc1",
         "xhttps://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/main",
         "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/main/extra",
+        # the release workflows run on main, dev and release tags, and none of them may sign an image
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/auto-tag.yml@refs/heads/main",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/tags/v1.2.3",
+        "https://github.com/nemarOrg/nemar-process/.github/workflows/image-nemar-python.yml@refs/heads/dev",
     ],
 )
 def test_the_signing_identity_refuses_everything_else(subject):
