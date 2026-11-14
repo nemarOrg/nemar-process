@@ -31,12 +31,13 @@ dev = [
     { include-group = "signaljourney" },
 ]
 
-# The signalJourney validator is not on PyPI and finds its schema relative to its own source tree,
-# so it is installed from a pinned commit and pointed at the schema vendored into
-# `recipes/nemar_process/_vendor/signalJourney/` (docs/upstream.md). The development environment
-# and the runtime image share this one declaration.
+# The signalJourney validator, the release from PyPI: a wheel that packages its schema. The import
+# package is `signaljourney_validator`. `recipes/nemar_process/sj.py` pins the tree digest of that
+# packaged schema, so moving this pin to a release whose schema differs fails a test until the
+# difference is reviewed and the digest moved (docs/upstream.md). The development environment and
+# the runtime image share this one declaration.
 signaljourney = [
-    "signaljourney-validator @ git+https://github.com/signalJourney/signalJourney@169c3261d044039c359bab7e121e78157a4f5af9",
+    "signalJourney==0.2.0",
 ]
 
 # The runtime image's packages (`images/nemar-python/`). Exact pins for what NEMAR chose; NumPy and
@@ -141,4 +142,3 @@ import-not-found = "ignore"
 [tool.nemar-process.build-backends]
 docopt = "setuptools"
 eegprep-lean = "setuptools"
-signaljourney-validator = "setuptools"
