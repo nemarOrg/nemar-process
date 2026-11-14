@@ -46,9 +46,12 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
   controller); otherwise the launcher's log says so and the container keeps the default weight. A
   container the Docker daemon starts is not a descendant of the runner, so the runner's own niceness
   never reaches it: the weight is what does. A weight only competes with the sibling control groups
-  under the same parent: a Docker container's scope sits under ``system.slice``, so the lowest weight
-  lowers its share against the daemon's other containers and services, and not against a person's
-  processes under ``user.slice``, which the two slices share a contended CPU with by their own weights.
+  under the same parent: with Docker's systemd cgroup driver a container's scope sits under
+  ``system.slice`` (siblings: the daemon's other containers and the system's services), with its
+  cgroupfs driver under ``docker`` (siblings: the other containers). Either way the lowest weight lowers
+  the container's share against those siblings only; a person's login session is under ``user.slice``,
+  a branch of its own, and how a contended CPU splits between that branch and the container's is
+  decided higher up, by the weights of the groups that are siblings there.
   No ``--blkio-weight``: Docker refuses to start a container on a kernel without it.
 * Limits come from ``NEMAR_CPUS`` and ``NEMAR_MEMORY_MB``, both required under an engine
   (``settings.read_settings`` has already refused a launch without them); the launch specification
@@ -120,7 +123,8 @@ RUNNER_LABEL = "nemar.runner"
 UNSUPPORTED_ENGINES = ("podman",)
 _SCHEME = "docker://"
 _CONTROLLERS = ("cpu", "memory", "pids")
-# The lowest CPU weight an engine takes (the kernel's own minimum): a job yields to anything else.
+# The lowest CPU weight an engine takes (the kernel's own minimum): the smallest share among the
+# container's sibling control groups, and nothing more (see the module docstring).
 CPU_SHARES = 2
 
 

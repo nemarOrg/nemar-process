@@ -5,8 +5,9 @@ tasks competing in the same scheduling group (the same control group, or the sam
 with autogrouping when the task is in the root CPU group; `man 7 sched`), and the idle I/O class yields
 the disk to every other class on a scheduler that honors classes. Neither puts the runner behind a
 person's processes that sit in another branch of the control group tree (a login session is under
-`user.slice`, a system service or a Docker container's scope under `system.slice`, and two slices share
-a contended CPU by their own weights). Where the CPU is not contended they cost nothing.
+`user.slice`, a system service under `system.slice`, a Docker container's scope under `system.slice`
+with Docker's systemd cgroup driver or under `docker` with its cgroupfs driver, and sibling groups
+share a contended CPU by their own weights). Where the CPU is not contended they cost nothing.
 
 ``lower`` raises this process's niceness to 19 (never lowers it) and puts its I/O scheduling class in
 idle, on the thread that calls it, so every process started afterwards from that thread or a thread it

@@ -268,7 +268,7 @@ A container's hard `--cpus` and `--memory` limits and its `--oom-score-adj=1000`
 
 These are relative and only as far as the kernel compares.
 Niceness weighs a process against the other tasks competing in the same scheduling group (the same control group, or the same autogroup on a kernel with autogrouping when the task is in the root CPU group; `man 7 sched`), and a control group's CPU weight competes only with its sibling groups.
-A person's login session is under `user.slice` and the Docker daemon's containers are under `system.slice`, and two slices share a contended CPU by their own weights, so neither the niceness nor `--cpu-shares 2` by itself puts the runner behind a person's processes in another slice.
+A person's login session is under `user.slice`, and the Docker daemon's containers are under `system.slice` with Docker's systemd cgroup driver (under `docker` with its cgroupfs driver); sibling groups share a contended CPU by their own weights, so neither the niceness nor `--cpu-shares 2` by itself puts the runner behind a person's processes in another branch.
 Where the CPU is not contended, as on most workstations, none of this costs anything, and the memory rules above are the ones that protect people.
 
 ### Configuration
