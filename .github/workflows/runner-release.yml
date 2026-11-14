@@ -150,6 +150,23 @@ jobs:
             --certificate-github-workflow-repository "$SIGNING_REPOSITORY" \
             --certificate-github-workflow-trigger "$SIGNING_TRIGGER"
 
+      # The negative check: the same file and bundle against a repository that did not run this workflow
+      # must NOT verify. A cosign that ignores the repository field on this bundle format would pass the
+      # step above for any value, and the installer's use of the field would then check nothing.
+      - name: Check that cosign refuses a wrong workflow repository
+        run: |
+          set -euo pipefail
+          file="nemar-runner-${VERSION}.tar.gz"
+          if cosign verify-blob "$file" --bundle "${file}.sigstore.json" \
+            --certificate-identity-regexp "$SIGNING_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            --certificate-github-workflow-repository "nemarOrg/not-nemar-process" \
+            --certificate-github-workflow-trigger "$SIGNING_TRIGGER" > /dev/null 2>&1; then
+            echo "::error::cosign accepted a wrong workflow repository: it ignores the field"
+            exit 1
+          fi
+          echo "a wrong workflow repository is refused"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nemar-runner-signed

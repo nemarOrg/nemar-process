@@ -393,6 +393,30 @@ def test_the_signing_job_signs_the_built_file_and_checks_its_own_signature_again
     assert runner_jobs()["sign"]["needs"] == "build"
 
 
+def test_the_signing_job_checks_that_cosign_refuses_a_wrong_workflow_repository():
+    steps = runner_jobs()["sign"]["steps"]
+    names = [s.get("name") for s in steps]
+    negative = "Check that cosign refuses a wrong workflow repository"
+    assert negative in names
+    # after the verification it contrasts with, and before anything is uploaded
+    assert names.index("Sign the bundle and verify the signature") < names.index(negative)
+    upload = next(i for i, s in enumerate(steps) if "upload-artifact" in s.get("uses", ""))
+    assert names.index(negative) < upload
+    run = steps[names.index(negative)]["run"]
+    assert "set -euo pipefail" in run
+    assert 'if cosign verify-blob "$file" --bundle "${file}.sigstore.json"' in run
+    assert '--certificate-github-workflow-repository "nemarOrg/not-nemar-process"' in run
+    # the rest of the command is the real one: only the repository is wrong
+    assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in run
+    assert '--certificate-oidc-issuer "$OIDC_ISSUER"' in run
+    assert '--certificate-github-workflow-trigger "$SIGNING_TRIGGER"' in run
+    assert install.WORKFLOW_REPOSITORY != "nemarOrg/not-nemar-process"
+    # a verification that succeeds fails the job
+    assert "; then" in run
+    assert "exit 1" in run
+    assert run.index("exit 1") > run.index("; then")
+
+
 def test_the_build_job_guards_come_first_and_the_bundle_is_built_with_the_script():
     steps = runner_jobs()["build"]["steps"]
     names = [s.get("name") for s in steps]
