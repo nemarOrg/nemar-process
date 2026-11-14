@@ -65,8 +65,9 @@ class Config:
     sif_pull: bool = False
     # The service install (docs/runner.md, "Running it as a service"): `self_update` is the opt-out of
     # the daily signed update; `install_prefix` is where `nemar_runner install` put the runner, which
-    # the idle switch watches; `cosign_path` is the cosign binary the installer verifies with when
-    # there is none on the launch PATH.
+    # the idle switch watches; `cosign_path` is the cosign binary `self-update` verifies with: when it
+    # is set it is used instead of any cosign on the launch PATH (it is not a fallback), and
+    # `install` ignores it and takes `--cosign-path`.
     self_update: bool = True
     install_prefix: str | None = None
     cosign_path: str | None = None
