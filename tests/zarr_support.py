@@ -23,12 +23,17 @@ from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 import pytest
-from nemar_process.common import zarr_hosts
 from nemar_process.common.zarr_input import Reply
 
-ZARR_HOST = next(iter(zarr_hosts.ZARR_HOSTS))
-DATA_HOST = next(iter(zarr_hosts.ZARR_DATA_HOSTS))
+# NEMAR's two Zarr environments, written out here as in the code under test (``zarr_hosts``), whose own
+# test pins that the two tables agree. The unprefixed names are the production pair.
+ZARR_HOST = "zarr.nemar.org"
+DATA_HOST = "nemar.s3.us-east-2.amazonaws.com"
+STAGING_ZARR_HOST = "zarr-test.nemar.org"
+STAGING_DATA_HOST = "nemar-dev.s3.us-east-2.amazonaws.com"
+PAIRS = {ZARR_HOST: DATA_HOST, STAGING_ZARR_HOST: STAGING_DATA_HOST}
 ORIGIN = "https://" + ZARR_HOST
+STAGING_ORIGIN = "https://" + STAGING_ZARR_HOST
 DATASET = "xx000001"
 VERSION = "v1.0.0"
 SOURCE_COMMIT = "a" * 40
@@ -123,8 +128,10 @@ def write_group(root, name: str, *, modality: str, unit: str, data, scale: float
     )
 
 
-def index_document(source_commit: str = SOURCE_COMMIT) -> dict:
-    """The serving index of the stand-in dataset, in the contract's shape."""
+def index_document(
+    source_commit: str = SOURCE_COMMIT, zarr_host: str = ZARR_HOST, data_host: str = DATA_HOST
+) -> dict:
+    """The serving index of the stand-in dataset, in the contract's shape, for one pair of hosts."""
     eeg = group_entry("eeg_250hz", "EEG", RATE, N_CHANNELS, N_SAMPLES)
     stores = [
         {
@@ -154,8 +161,8 @@ def index_document(source_commit: str = SOURCE_COMMIT) -> dict:
         "format": "nemar-zarr-index",
         "format_version": 3,
         "dataset_id": DATASET,
-        "contract_base": "{}/{}/zarr/".format(ORIGIN, DATASET),
-        "data_base": "https://{}/{}/zarr/".format(DATA_HOST, DATASET),
+        "contract_base": "https://{}/{}/zarr/".format(zarr_host, DATASET),
+        "data_base": "https://{}/{}/zarr/".format(data_host, DATASET),
         "source_commit": source_commit,
         "engine_version": "3",
         "store_count": len(stores),
@@ -169,11 +176,11 @@ def index_bytes(document: dict) -> bytes:
 
 
 def default_policy(host: str, path: str) -> tuple[str, str | None]:
-    """What NEMAR's hosts do: the Zarr host answers the index itself and redirects every other read
-    to the data host, which serves it."""
-    if host == ZARR_HOST and not path.endswith("/index.json"):
-        return "redirect", "https://{}{}".format(DATA_HOST, path)
-    if host in (ZARR_HOST, DATA_HOST):
+    """What NEMAR's hosts do: a Zarr host answers the index itself and redirects every other read
+    to the data host of its own pair, which serves it."""
+    if host in PAIRS and not path.endswith("/index.json"):
+        return "redirect", "https://{}{}".format(PAIRS[host], path)
+    if host in PAIRS or host in PAIRS.values():
         return "serve", None
     return "missing", None
 
@@ -249,7 +256,13 @@ class Served:
     assigns another to make a host redirect somewhere else.
     """
 
-    def __init__(self, root: Path, source_commit: str = SOURCE_COMMIT) -> None:
+    def __init__(
+        self,
+        root: Path,
+        source_commit: str = SOURCE_COMMIT,
+        zarr_host: str = ZARR_HOST,
+        data_host: str = DATA_HOST,
+    ) -> None:
         import numpy as np
 
         self.root = root
@@ -263,7 +276,7 @@ class Served:
         _store(base, BAD_UNIT, {eeg: ("EEG", "kV", _signal(4))})
         _store(base, FLAT, {eeg: ("EEG", "uV", np.zeros((N_CHANNELS, N_SAMPLES), dtype=int))})
         _store(base, NON_FINITE, {eeg: ("EEG", "uV", _signal(5), 1e308)})
-        self.index_bytes = index_bytes(index_document(source_commit))
+        self.index_bytes = index_bytes(index_document(source_commit, zarr_host, data_host))
         (base / "index.json").write_bytes(self.index_bytes)
         self.index_sha256 = hashlib.sha256(self.index_bytes).hexdigest()
         self.policy = default_policy
@@ -391,6 +404,18 @@ def install() -> None:
 @pytest.fixture(scope="module")
 def served(tmp_path_factory):
     stand_in = Served(tmp_path_factory.mktemp("served"))
+    yield stand_in
+    stand_in.close()
+
+
+@pytest.fixture(scope="module")
+def served_staging(tmp_path_factory):
+    """The same stand-in dataset under the staging pair: its index names the staging hosts."""
+    stand_in = Served(
+        tmp_path_factory.mktemp("served_staging"),
+        zarr_host=STAGING_ZARR_HOST,
+        data_host=STAGING_DATA_HOST,
+    )
     yield stand_in
     stand_in.close()
 

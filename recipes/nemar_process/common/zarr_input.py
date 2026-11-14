@@ -7,16 +7,18 @@ needs around it:
 
 * the index is read once (at most ``MAX_INDEX_BYTES``), checked for shape (``validate_document``),
   its SHA-256 recorded, and the run refused when the index was built from another commit than the
-  one the caller attests, or names a ``data_base`` off the allowlist (``ZarrSource.open``);
+  one the caller attests, or names a ``data_base`` other than the data host of the pair the
+  ``--zarr-base`` belongs to (``ZarrSource.open``);
 * the caller's check that the index describes the tagged data is recorded, never made here
   (``attest``): the network of a run reaches the hosts of ``zarr_hosts`` only, so the commit graph
   is out of reach, and every record says ``commit_check: attested_by_caller``;
 * every request goes through ``GuardedTransport``, which takes its hosts from the allowlist in
-  ``zarr_hosts`` and from nowhere else: the first request is to the Zarr host, the answer may
-  redirect once, and only to ``https://`` on the data host (the ``Location`` header of the Zarr
-  host's answer, which for a read is the public bucket); any other redirect, a second hop included,
-  is refused. Proxies and credentials are never used, and the hosts actually contacted are kept for
-  the records. ``zarr_hosts.Fence`` is the second line, a socket-level audit hook for the run.
+  ``zarr_hosts`` and from nowhere else, and is bound to the one pair its base names: the first
+  request is to that Zarr host, the answer may redirect once, and only to ``https://`` on the data
+  host of that pair (the ``Location`` header of the Zarr host's answer, which for a read is the
+  public bucket); any other redirect, a second hop included, is refused. Proxies and credentials
+  are never used, and the hosts actually contacted are kept for the records. ``zarr_hosts.Fence`` is
+  the second line, a socket-level audit hook for the run.
 
 ``eegprep_lean`` and ``eegprep`` are imported where they are used, so this module (and the tests of
 the attestation) import without them.
@@ -187,17 +189,18 @@ class ResponseTooLarge(OSError):
     """A response longer than the limit it was read under."""
 
 
-def redirect_target(current: str, location: str | None) -> str:
-    """Where a redirect from ``current`` may go: ``https://`` on a data host, else ``RedirectRefused``.
+def redirect_target(current: str, location: str | None, data_host: str) -> str:
+    """Where a redirect from ``current`` may go: ``https://`` on ``data_host``, else ``RedirectRefused``.
 
-    ``location`` is the ``Location`` header, read as a relative reference to ``current``, so a path on
-    the Zarr host itself, a scheme-relative address, ``http://``, any other scheme, an address with a
-    user name or a port, and an IP literal are all refused: only the host names in
-    ``zarr_hosts.ZARR_DATA_HOSTS`` are allowed, exactly.
+    ``data_host`` is the data host of the pair the run is bound to (``zarr_hosts.data_host_of``), never
+    a host of the other pair. ``location`` is the ``Location`` header, read as a relative reference to
+    ``current``, so a path on the Zarr host itself, a scheme-relative address, ``http://``, any other
+    scheme, an address with a user name or a port, and an IP literal are all refused: only that one
+    host name is allowed, exactly.
     """
     target = urljoin(current, location or "")  # no Location is the address itself: refused below
-    if zarr_hosts.https_host(target, zarr_hosts.ZARR_DATA_HOSTS) is None:
-        raise RedirectRefused("the redirect leads to a place that is not an allowed data host")
+    if zarr_hosts.https_host(target, (data_host,)) is None:
+        raise RedirectRefused("the redirect leads to a place that is not the pair's data host")
     return target
 
 
@@ -270,9 +273,10 @@ def read_cap(start: int | None, end: int | None, limit: int | None) -> int:
 class GuardedTransport:
     """eegprep-lean's transport, limited to the allowlist, with one redirect, counting what it reads.
 
-    The first request is to the Zarr host (``--zarr-base``, which must be on
-    ``zarr_hosts.ZARR_HOSTS``). If the answer is a redirect it is followed once, to ``https://`` on
-    ``ZARR_DATA_HOSTS`` (``redirect_target``); a second redirect is refused. Every request is made by
+    The transport is bound to one pair of ``zarr_hosts.ZARR_HOST_PAIRS``, the one whose Zarr host is
+    ``--zarr-base``. The first request is to that Zarr host. If the answer is a redirect it is
+    followed once, to ``https://`` on the data host of the same pair (``redirect_target``); a second
+    redirect is refused, and so is a request to a host of the other pair. Every request is made by
     ``fetch`` (``fetch_https``, looked up when called, unless a caller gives another: the tests give
     a stand-in for the external hosts), with eegprep-lean's native User-Agent and a ``Range`` header
     when a range is asked for, and a ranged request answered in full is refused. A reply longer than
@@ -285,6 +289,8 @@ class GuardedTransport:
         if host is None:
             raise ValueError("the base is not an https address on a Zarr host")
         self.host = host
+        self.data_host = zarr_hosts.data_host_of(host)
+        self.pair = zarr_hosts.pair_name(host)
         self._fetch = fetch
         self.bytes_read = 0
         self.requests = 0
@@ -330,7 +336,7 @@ class GuardedTransport:
         cap = read_cap(start, end, limit)
         current, hops = url, 0
         while True:
-            allowed = zarr_hosts.ZARR_HOSTS if hops == 0 else zarr_hosts.ZARR_DATA_HOSTS
+            allowed = (self.host,) if hops == 0 else (self.data_host,)
             host = zarr_hosts.https_host(current, allowed)
             if host is None:
                 raise TransportError("request refused: not an allowed https host", url=current)
@@ -344,7 +350,9 @@ class GuardedTransport:
                         "a second redirect was refused", url=current, status=reply.status
                     )
                 try:
-                    current = redirect_target(current, reply.headers.get("location"))
+                    current = redirect_target(
+                        current, reply.headers.get("location"), self.data_host
+                    )
                 except RedirectRefused as error:
                     raise TransportError(str(error), url=current, status=reply.status) from error
                 hops = 1
@@ -512,8 +520,8 @@ class ZarrSource:
         """Read the index and check it; ``SourceRefused`` when it cannot serve this run.
 
         Nothing but the index is requested here, and nothing is read from a store until every check
-        has passed: the shape of the document, a ``data_base`` on the allowlist, the contract base,
-        the commit, and the count of stores.
+        has passed: the shape of the document, a ``data_base`` on the data host of the base's pair, the
+        contract base, the commit, and the count of stores.
         """
         from eegprep_lean import read_index
 
@@ -528,11 +536,12 @@ class ZarrSource:
             document = json.loads(body)
             validate_document(document)
             if (
-                zarr_hosts.https_host(str(document.get("data_base")), zarr_hosts.ZARR_DATA_HOSTS)
+                zarr_hosts.https_host(str(document.get("data_base")), (self.transport.data_host,))
                 is None
             ):
                 raise SourceRefused(
-                    "the index's data_base is not an https address on an allowed data host"
+                    "the index's data_base is not an https address on the data host of the Zarr "
+                    "host's pair"
                 )
             index = asyncio.run(
                 read_index(
@@ -736,6 +745,7 @@ class ZarrSource:
             "kind": "zarr",
             "profile": "serving",
             "zarr_base": self.base,
+            "zarr_pair": self.transport.pair,
             "dataset_id": self.dataset_id,
             "version": self.dataset_version,
             "source_commit": attestation.source_commit,

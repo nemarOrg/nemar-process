@@ -164,6 +164,7 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):  # 
         "kind": "zarr",
         "profile": "serving",
         "zarr_base": z.ORIGIN,
+        "zarr_pair": "production",
         "dataset_id": z.DATASET,
         "version": z.VERSION,
         "source_commit": z.SOURCE_COMMIT,
@@ -190,6 +191,7 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):  # 
         assert mine["profile"] == "recording"
         assert mine["recipe"] == {"id": "nemar-floor-zarr", "version": "1.0.0"}
         assert mine["input"]["stores"] == [path]
+        assert mine["input"]["zarr_pair"] == "production"
         assert mine["input"]["index_sha256"] == served.index_sha256
         assert mine["input"]["source_commit"] == z.SOURCE_COMMIT
         assert mine["input"]["tag_commit"] == z.TAG_COMMIT

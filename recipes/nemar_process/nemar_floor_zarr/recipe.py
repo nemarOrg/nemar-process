@@ -54,8 +54,9 @@ OPTIONS = (
         "--zarr-base",
         str,
         None,
-        "the https:// origin of the Zarr serving copy; it must be on the fixed allowlist of Zarr "
-        "hosts (zarr_hosts.py), else the run is refused before any request",
+        "the https:// origin of the Zarr serving copy, exactly the Zarr host of one of NEMAR's "
+        "environments in the fixed list of host pairs (zarr_hosts.py), else the run is refused "
+        "before any request; the index's data_base must be that environment's data host",
     ),
     Option(
         "tag_commit",

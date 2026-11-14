@@ -74,11 +74,11 @@ PUBLIC = address(0x08080808)
 
 
 def test_the_allowlist_is_fixed_in_code():
+    """The allowlist is the pairs of ``zarr_hosts`` (their own tests are in ``test_floor_zarr_pairs.py``)."""
     assert isinstance(zarr_hosts.ZARR_HOSTS, frozenset)
     assert isinstance(zarr_hosts.ZARR_DATA_HOSTS, frozenset)
-    assert len(zarr_hosts.ZARR_HOSTS) == 1
-    assert len(zarr_hosts.ZARR_DATA_HOSTS) == 1
-    assert {"zarr.nemar.org"} == zarr_hosts.ZARR_HOSTS
+    assert frozenset(zarr_hosts.ZARR_HOST_PAIRS) == zarr_hosts.ZARR_HOSTS
+    assert frozenset(zarr_hosts.ZARR_HOST_PAIRS.values()) == zarr_hosts.ZARR_DATA_HOSTS
     assert not zarr_hosts.ZARR_HOSTS & zarr_hosts.ZARR_DATA_HOSTS
     assert zarr_hosts.ALLOWED_HOSTS == zarr_hosts.ZARR_HOSTS | zarr_hosts.ZARR_DATA_HOSTS
     assert all(host == host.lower() for host in zarr_hosts.ALLOWED_HOSTS)
@@ -121,7 +121,10 @@ def test_https_host_accepts_exactly_a_listed_host_over_https_in_any_case():
     [
         ("https://zarr.nemar.org", "https://zarr.nemar.org"),
         ("https://zarr.nemar.org/", "https://zarr.nemar.org"),
-        ("https://" + z.ZARR_HOST.upper(), "https://" + z.ZARR_HOST),
+        ("https://" + z.ZARR_HOST.upper(), None),  # exactly the host of a pair: no other case
+        ("HTTPS://" + z.ZARR_HOST, None),
+        ("https://" + z.STAGING_ZARR_HOST, "https://" + z.STAGING_ZARR_HOST),
+        ("https://" + z.STAGING_DATA_HOST, None),
         ("https://zarr.nemar.org/nm000274", None),
         ("https://zarr.nemar.org?x=1", None),
         ("https://zarr.nemar.org#x", None),
@@ -157,13 +160,15 @@ REDIRECTS_REFUSED = {
 @pytest.mark.parametrize("label", sorted(REDIRECTS_REFUSED))
 def test_a_redirect_that_is_not_https_on_a_data_host_is_refused(label):
     with pytest.raises(zarr_input.RedirectRefused):
-        zarr_input.redirect_target(CHUNK, REDIRECTS_REFUSED[label] or None)
+        zarr_input.redirect_target(CHUNK, REDIRECTS_REFUSED[label] or None, z.DATA_HOST)
 
 
 def test_a_redirect_to_a_data_host_over_https_is_followed():
-    assert zarr_input.redirect_target(CHUNK, ON_DATA) == ON_DATA
+    assert zarr_input.redirect_target(CHUNK, ON_DATA, z.DATA_HOST) == ON_DATA
     # a reference relative to the data host stays on it
-    assert zarr_input.redirect_target(ON_DATA, "/y") == "https://{}/y".format(z.DATA_HOST)
+    assert zarr_input.redirect_target(ON_DATA, "/y", z.DATA_HOST) == "https://{}/y".format(
+        z.DATA_HOST
+    )
 
 
 def transport(stand_in) -> zarr_input.GuardedTransport:
@@ -567,6 +572,12 @@ BASES = {
     "a path": "https://zarr.nemar.org/xx000001",
     "a suffix host": "https://zarr.nemar.org.elsewhere.example.test",
     "the data host": "https://" + z.DATA_HOST,
+    "the staging data host": "https://" + z.STAGING_DATA_HOST,
+    "upper case": "https://" + z.ZARR_HOST.upper(),
+    "an upper-case scheme": "HTTPS://" + z.ZARR_HOST,
+    "a trailing dot": "https://" + z.ZARR_HOST + ".",
+    "a staging host with a port": "https://" + z.STAGING_ZARR_HOST + ":8443",
+    "a staging host with a path": "https://" + z.STAGING_ZARR_HOST + "/xx000001",
     "empty": "",
 }
 
