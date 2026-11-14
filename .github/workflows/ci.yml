@@ -64,10 +64,12 @@ jobs:
         python: ["3.9", "3.12"]
     env:
       # In CI neither the container tests nor the drift comparison nor the signature tests (which need the
-      # real cosign and the public registry) may be skipped unnoticed.
+      # real cosign and the public registry) nor the check of the service units by systemd-analyze may be
+      # skipped unnoticed.
       NEMAR_REQUIRE_APPTAINER: "1"
       NEMAR_REQUIRE_DRIFT: "1"
       NEMAR_REQUIRE_COSIGN: "1"
+      NEMAR_REQUIRE_SYSTEMD: "1"
       NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
       NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
     steps:

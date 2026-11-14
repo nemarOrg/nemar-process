@@ -385,6 +385,12 @@ def test_ci_installs_the_cosign_the_image_workflow_signs_with():
         assert re.fullmatch(r"[0-9a-f]{40}", pinned), "the installer is pinned by commit"
 
 
+def test_ci_does_not_let_the_service_unit_check_skip():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("\n  launcher:") : ci.index("\n  docker:")]
+    assert 'NEMAR_REQUIRE_SYSTEMD: "1"' in job
+
+
 def test_ci_does_not_let_the_cosign_tests_skip():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     job = ci[ci.index("\n  launcher:") : ci.index("\n  docker:")]
