@@ -1,14 +1,17 @@
-"""L1: the container child dies with the launcher.
+"""L1: the container child is tied to the launcher's life.
 
 The container child is started so that the kernel signals it when the launcher dies, SIGKILL of the
-launcher included (Linux ``prctl(PR_SET_PDEATHSIG)``): SIGKILL under Apptainer (the starter's death
-ends the container) and SIGTERM under Docker and Podman (the engine's client forwards it to the
-container). Tested with real processes and the repository's stand-in runtimes.
+launcher included (Linux ``prctl(PR_SET_PDEATHSIG)``): SIGKILL under Apptainer and SIGTERM under
+Docker and Podman. Tested with real processes and the repository's stand-in runtimes.
 
-What these tests cannot prove is what the REAL runtimes do with the signal: the stand-ins exec the
-entry in the child's own process, so a signal for the child is a signal for the entry. That the real
-Apptainer starter takes its container with it, and that a real Docker client forwards SIGTERM, are
-the continuous integration jobs that run real runtimes.
+WHAT THESE TESTS PROVE: the child the launcher starts is sent that signal when the launcher is
+killed, and which signal it is for each runtime. The stand-ins exec the entry in the child's own
+process, so a signal for the child is a signal for the entry.
+
+WHAT THEY DO NOT PROVE: what a real runtime does with the signal. Whether a real Apptainer starter
+takes its container with it (a setuid-mode install clears the signal on exec of its set-user-ID
+starter) and whether a real Docker client passes SIGTERM on (and a container whose entry ignores it
+stays) are not tested here: the real-runtime kill is checked in the staging drills (S2D).
 """
 
 from __future__ import annotations
@@ -230,7 +233,7 @@ def kill_the_launcher_and_watch_the_entry(rig, spec: dict, **extra: str) -> int:
 
 
 @needs_linux
-def test_a_launcher_killed_with_sigkill_leaves_no_apptainer_container_behind(rig):
+def test_a_launcher_killed_with_sigkill_leaves_no_sigkill_child_behind(rig):
     kill_the_launcher_and_watch_the_entry(rig, rig.script_spec(IGNORES_TERM))
     assert not (rig.out / "work" / "got-term").exists()
 
