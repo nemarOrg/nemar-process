@@ -41,11 +41,14 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
   passed: the engine numbers the GPUs it hands over from zero.
 * The engine process itself is given ``run.runtime_environment``'s short allowlist, never the
   launcher's environment (so ``DOCKER_HOST``, ``CONTAINER_HOST`` and the like are not honored).
-* ``--cpu-shares 2`` (the lowest CPU weight, so that a person's processes on a shared host always go
-  first) is added only when the engine says it can apply CPU shares (``Assessment.cpu_shares``: Docker's
-  ``info`` field ``CPUShares``; Podman: cgroup v2 with the ``cpu`` controller); otherwise the launcher's
-  log says so and the container keeps the default weight. A container the Docker daemon starts is not a
-  descendant of the runner, so the runner's own niceness never reaches it: the weight is what does.
+* ``--cpu-shares 2`` (the lowest CPU weight) is added only when the engine says it can apply CPU shares
+  (``Assessment.cpu_shares``: Docker's ``info`` field ``CPUShares``; Podman: cgroup v2 with the ``cpu``
+  controller); otherwise the launcher's log says so and the container keeps the default weight. A
+  container the Docker daemon starts is not a descendant of the runner, so the runner's own niceness
+  never reaches it: the weight is what does. A weight only competes with the sibling control groups
+  under the same parent: a Docker container's scope sits under ``system.slice``, so the lowest weight
+  lowers its share against the daemon's other containers and services, and not against a person's
+  processes under ``user.slice``, which the two slices share a contended CPU with by their own weights.
   No ``--blkio-weight``: Docker refuses to start a container on a kernel without it.
 * Limits come from ``NEMAR_CPUS`` and ``NEMAR_MEMORY_MB``, both required under an engine
   (``settings.read_settings`` has already refused a launch without them); the launch specification

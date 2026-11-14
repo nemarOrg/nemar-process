@@ -136,8 +136,9 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
   A missing or unusable `NEMAR_CPUS`, a missing or unusable `NEMAR_MEMORY_MB`, or a memory below Docker's minimum of 6 MB ends the launch at the start with exit 13 and detail `invalid_spec`.
   The launch specification carries neither value.
   `--cpus` is `NEMAR_CPUS`, `--memory` and `--memory-swap` are `NEMAR_MEMORY_MB` followed by `m` (no swap beyond the memory), and `--pids-limit` is a fixed 4096, far above what an EEG recipe's thread pools need and far below a fork bomb.
-- On a host that other people use the job must yield to them, and the runner's own niceness and idle input and output (I/O) class do not reach a container that the Docker daemon starts, because that container is not the runner's descendant.
+- On a host that other people use the job should take as little as it can, and the runner's own niceness and idle input and output (I/O) class do not reach a container that the Docker daemon starts, because that container is not the runner's descendant.
   So the launcher gives the container the lowest CPU weight, `--cpu-shares 2` (right after `--cpus`), when the preflight found that the engine can apply it; the weight only matters while the processors are contended, and `--cpus` stays the hard cap.
+  A weight competes only with the sibling control groups under the same parent: the container's scope sits under `system.slice`, so the lowest weight lowers its share against the daemon's other containers and services, and not against a person's processes, which sit under `user.slice` and share a contended CPU with `system.slice` by the two slices' own weights.
   There is no `--blkio-weight`: Docker refuses to start a container on a kernel without it.
   Apptainer and rootless Podman containers are descendants of the runner and inherit its niceness and I/O class instead ([the runner](runner.md#sharing-a-workstation)).
 - When the container's client exits, the launcher kills whatever is left in its process group before it reaps the client (`waitid` with `WNOWAIT` on Linux), so the group id cannot have been reused when the kill is sent.
@@ -197,7 +198,7 @@ Every Apptainer isolation flag has a counterpart, and the engine adds restrictio
 | the invoking user's host network | `--network=bridge`, stricter | see the residual below |
 | no privilege gain for an unprivileged user | `--cap-drop ALL` and `--security-opt no-new-privileges` | stricter |
 | the image's own entry point is ignored by `exec` | Docker: `--entrypoint ""`; both: `--no-healthcheck` | Podman's documentation does not say that an empty value resets the entry point, so it is not passed there (unverified) |
-| `--cpus`, `--memory` | `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, applied by the daemon and checked by the preflight; and `--cpu-shares 2` when the engine can apply it | the weight is the lowest, so a person's processes on a shared host go first ([What differs](#what-differs-from-the-apptainer-path)) |
+| `--cpus`, `--memory` | `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, applied by the daemon and checked by the preflight; and `--cpu-shares 2` when the engine can apply it | the weight is the lowest, which counts against the container's siblings under `system.slice` and not against a person's processes under `user.slice` ([What differs](#what-differs-from-the-apptainer-path)) |
 | the PID namespace preflight (`run.require_pid_namespace`, which refuses a runtime configured without one) | the Podman flags above, which override whatever the site's `containers.conf` says about the PID, IPC, UTS and cgroup namespaces and the host environment | the Apptainer check reads the configuration and probes; the flags make the configuration moot |
 
 Residuals, stated plainly:

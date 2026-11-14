@@ -253,6 +253,11 @@ A part that cannot be applied is logged as `priority_unavailable` and the runner
 A container the Docker daemon starts is not the runner's descendant, so neither reaches it: the launcher gives that container the lowest CPU weight, `--cpu-shares 2`, when the engine can apply it ([the launcher](launcher.md#what-differs-from-the-apptainer-path)).
 A container's hard `--cpus` and `--memory` limits and its `--oom-score-adj=1000` stay, so under memory pressure the kernel ends the job before a person's process.
 
+These are relative and only as far as the kernel compares.
+Niceness weighs a process against the other tasks competing in the same scheduling group (the same control group, or the same autogroup on a kernel with autogrouping when the task is in the root CPU group; `man 7 sched`), and a control group's CPU weight competes only with its sibling groups.
+A person's login session is under `user.slice` and the Docker daemon's containers are under `system.slice`, and two slices share a contended CPU by their own weights, so neither the niceness nor `--cpu-shares 2` by itself puts the runner behind a person's processes in another slice.
+Where the CPU is not contended, as on most workstations, none of this costs anything, and the memory rules above are the ones that protect people.
+
 ### Configuration
 
 An optional `availability` object in the configuration file.
