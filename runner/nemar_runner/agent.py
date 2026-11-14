@@ -55,7 +55,8 @@ class Agent:
         # runner exits 0 once it holds no job, so that systemd starts the new version (idle switch)
         self.update_to: str | None = None
         self._update_logged: str | None = None
-        self._switch_on: bool | None = None  # decided once: does this process run the installed code?
+        # decided once: does this process run the code installed under install_prefix?
+        self._switch_on: bool | None = None
         self.runner_label: str | None = None  # the registration id, under an engine only
         self.python: str | None = None  # the launcher's python3, pinned at start
 
