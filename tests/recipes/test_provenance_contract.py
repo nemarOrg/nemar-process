@@ -334,7 +334,7 @@ def test_a_build_file_that_contradicts_itself_ends_the_run_and_writes_no_record(
     )
     out = tmp_path / "product"
     assert run_bids(out) != 0
-    assert not list(out.rglob("*signalJourney.json"))
+    assert not out.exists()  # ended before anything was created, not recording by recording
 
 
 # ---- the aggregate states the build of the rows, never its own --------------------------------
