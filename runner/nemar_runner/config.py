@@ -28,7 +28,13 @@ CONFIG_KEYS = (
     "arch",
     "max_scratch_gb",
 )
-OPTIONAL_KEYS = ("launcher_dir", "default_job_memory_mb", "sif_pull")
+OPTIONAL_KEYS = (
+    "launcher_dir",
+    "default_job_memory_mb",
+    "sif_pull",
+    "verify_images",
+    "cosign_path",
+)
 ENGINES = ("docker", "podman")
 
 # What a job's launcher is run with: no PATH of the user's, so the launcher and the container
@@ -55,7 +61,14 @@ class Config:
     max_scratch_gb: int
     launcher_dir: str
     default_job_memory_mb: int | None = None
-    sif_pull: bool = False
+    # Pulled images are checked (`verify.py`), so pulling is on unless the operator turns it off.
+    sif_pull: bool = True
+    # The signature of an image is verified before it is pulled or run (`verify.py`, docs/runner.md);
+    # false is refused unless `api_base` is a loopback http address (the local stack and CI).
+    verify_images: bool = True
+    # The cosign binary, an absolute path checked like python3; required when `cosign` is not on the
+    # launch PATH.
+    cosign_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +94,11 @@ class Tuning:
     retry_cap_seconds: float = 60.0
     token_margin_seconds: float = 60.0
     launch_path: str = LAUNCH_PATH
+    # `cosign verify` of an image, and how long a verification is believed (docs/runner.md, "The image")
+    cosign_timeout_seconds: float = 120.0
+    verified_ttl_seconds: float = 24 * 3600.0
+    # where the SIF artifact's manifest is read (a test points it at a loopback stand-in)
+    registry_base: str = "https://ghcr.io"
 
 
 def default_config_path(environ: dict[str, str] | None = None) -> str:
@@ -149,6 +167,12 @@ def _api_base(value: Any) -> str:
     return value.rstrip("/")
 
 
+def _loopback_http(api_base: str) -> bool:
+    """Whether ``api_base`` (already checked by ``_api_base``) is an `http://` address on loopback."""
+    parts = urlsplit(api_base)
+    return parts.scheme == "http" and parts.hostname in _LOOPBACK
+
+
 def _path(value: Any, key: str) -> str:
     if not isinstance(value, str) or not value or "\0" in value:
         raise ConfigError("{} must be a path".format(key))
@@ -209,9 +233,15 @@ def load_config(path: str) -> Config:
         raise ConfigError("default_job_memory_mb is required when runtime is {}".format(runtime))
     if default_memory is not None:
         default_memory = _int(default_memory, "default_job_memory_mb", 1, 16_777_216)
-    sif_pull = document.get("sif_pull", False)
+    sif_pull = document.get("sif_pull", True)
     if not isinstance(sif_pull, bool):
         raise ConfigError("sif_pull must be true or false")
+    verify_images = document.get("verify_images", True)
+    if not isinstance(verify_images, bool):
+        raise ConfigError("verify_images must be true or false")
+    cosign_path = document.get("cosign_path")
+    if cosign_path is not None:
+        cosign_path = _path(cosign_path, "cosign_path")
     config = Config(
         api_base=_api_base(document["api_base"]),
         secret_file=_path(document["secret_file"], "secret_file"),
@@ -224,7 +254,13 @@ def load_config(path: str) -> Config:
         launcher_dir=_path(document.get("launcher_dir", default_launcher_dir()), "launcher_dir"),
         default_job_memory_mb=default_memory,
         sif_pull=sif_pull,
+        verify_images=verify_images,
+        cosign_path=cosign_path,
     )
+    if not config.verify_images and not _loopback_http(config.api_base):
+        raise ConfigError(
+            "verify_images may be false only when api_base is a loopback http address"
+        )
     problem = root_problem(config.root)
     if problem is not None:
         raise ConfigError("root {}".format(problem))

@@ -6,7 +6,9 @@ The steps, each with its own way to stop:
    here, as `runtime_error` `invalid_spec`, the answer the launcher would give);
 2. a heartbeat thread starts and renews the lease every 60 seconds, and wakes at once when the
    launcher has written `out/launcher/result.json` to say `uploading`;
-3. the image is made available (an Apptainer pull when the file is absent);
+3. the image is proven to have been signed by the image workflow (`verify.py`) and made available
+   (an Apptainer pull of the signed artifact when the file is absent); a job whose image does not
+   verify ends here, as `runtime_error` `image_unverified`, and the launcher never starts;
 4. the launcher runs in a new process group with an environment built from nothing but the card's
    keys; the supervisor reaps it with `os.wait4` (so usage is measured by the kernel), sends SIGTERM
    at the deadline (`NEMAR_JOB_END_TIME` plus 60 s), on a cancel, on a lost lease, when the runner is
@@ -32,7 +34,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from . import containers, contract, images, pids, scratch, usage, wire
+from . import containers, contract, images, pids, scratch, usage, verify, wire
 from .api import Api, ApiError
 from .config import ENGINES, Config, Tuning
 from .logs import Log
@@ -262,7 +264,9 @@ class JobRunner:
         stop: threading.Event,
         runner_label: str | None = None,
         python: str | None = None,
+        verifier: verify.Verifier | None = None,
     ) -> None:
+        self.verifier = verifier or verify.Verifier(config, tuning, log)
         self.runner_label = runner_label
         self.python = python  # pinned at the runner's start; looked up again only when not given
         self._began = time.monotonic()
@@ -367,8 +371,16 @@ class JobRunner:
         if document.get("job_id") != job.id:
             return "job_mismatch"
         image = document.get("image")
-        if isinstance(image, dict) and image.get("sif") != job.image_sif:
-            return "image_mismatch"
+        if isinstance(image, dict):
+            # the launcher runs what the launch value names (a Docker or Podman pull is of its
+            # `image.uri`), and the runner verifies the claim's: they must be the same image
+            if image.get("sif") != job.image_sif:
+                return "image_mismatch"
+            if image.get("digest", job.image_digest) != job.image_digest:
+                return "image_mismatch"
+            uri = image.get("uri", job.image_uri)
+            if not isinstance(uri, str) or verify.bare(uri) != verify.bare(job.image_uri):
+                return "image_mismatch"
         return None
 
     def _stop_reason(self) -> str | None:
@@ -393,34 +405,55 @@ class JobRunner:
         job, config, tuning = self.job, self.config, self.tuning
         term_at = self._term_deadline()
         sif: str | None = None
-        if config.runtime == "apptainer":
-            try:
+        digest = job.digest_hex
+
+        def interrupted() -> str | None:
+            return self._interrupt(term_at)
+
+        def prove() -> images.SifProof:
+            return self.verifier.sif_proof(job.id, digest, interrupted)
+
+        try:
+            if config.runtime == "apptainer":
                 sif = images.ensure_sif(
                     config,
                     tuning,
                     self.log,
                     self.locks,
-                    job.digest_hex,
+                    digest,
                     job.id,
                     dirs.scratch,
                     dirs.home,
                     lambda argv, env, label: self._run_helper(argv, env, label, dirs, term_at),
-                    lambda: self._interrupt(term_at),
+                    interrupted,
+                    prove if config.verify_images else None,
                 )
-            except images.Interrupted as stopped:
-                if self.lease_lost.is_set():
-                    return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
-                self.log.info("job_stopped_before_launch", job=job.id, reason=str(stopped))
-                return refusal("terminated")
-            except images.ImageError as error:
-                self.log.error("image_unavailable", job=job.id, reason=str(error))
-                return refusal("image_missing")
-            if time.monotonic() - self._began > tuning.lease_abandon_seconds:
-                # No heartbeat has been sent (none exists before the launcher), so the lease is
-                # about to run out or has: leave it to expire so the job waits again, unstarted.
-                # The image stays where it is.
-                self.log.warn("claim_abandoned_during_pull", job=job.id)
-                return Outcome(0, None, None, usage.ZERO, False, abandoned=True)
+            elif config.verify_images:
+                # Docker and Podman pull by digest inside the launcher, after this: so the digest the
+                # launcher will pull is proven signed first
+                self.verifier.verify_image(job.id, job.image_uri, digest, interrupted)
+        except images.Interrupted as stopped:
+            if self.lease_lost.is_set():
+                return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
+            self.log.info("job_stopped_before_launch", job=job.id, reason=str(stopped))
+            return refusal("terminated")
+        except images.ImageError as error:
+            self.log.error("image_unavailable", job=job.id, reason=str(error))
+            return refusal("image_missing")
+        except images.Unverified as error:
+            fields = {"why": error.why} if error.why else {}
+            self.log.error(
+                "image_unverified", job=job.id, digest=digest, reason=error.reason, **fields
+            )
+            return refusal("image_unverified")
+        if (config.runtime == "apptainer" or config.verify_images) and (
+            time.monotonic() - self._began > tuning.lease_abandon_seconds
+        ):
+            # No heartbeat has been sent (none exists before the launcher), so the lease is
+            # about to run out or has: leave it to expire so the job waits again, unstarted.
+            # The image stays where it is.
+            self.log.warn("claim_abandoned_during_pull", job=job.id)
+            return Outcome(0, None, None, usage.ZERO, False, abandoned=True)
         enforce = sif is not None and self.limits.proven(sif, dirs.home)
         env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label)
         argv = [
