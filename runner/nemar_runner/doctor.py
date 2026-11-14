@@ -27,6 +27,7 @@ from .config import (
     read_secret,
     root_problem,
 )
+from .install import InstallError, find_cosign
 from .logs import Log
 
 Check = tuple[str, bool, str]
@@ -65,10 +66,11 @@ def _signature_checks(
     """`cosign` (found, trusted, version 3 or newer) and, under Apptainer, `signature <hex>` for each
     image file in `sif_root`: cosign verified the SIF artifact and the file hashes to its signed layer.
     The cache is not asked: this is the check that says whether the next job's would pass."""
-    binary, why = verify.find_cosign(config.cosign_path, tuning)
     usable = False
-    if binary is None:
-        add("cosign", False, why or "not found")
+    try:
+        binary = find_cosign(config.cosign_path, tuning)
+    except InstallError as error:
+        add("cosign", False, str(error))
     else:
         try:
             home = verify.cosign_home(config)

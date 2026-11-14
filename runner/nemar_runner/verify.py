@@ -50,7 +50,8 @@ from typing import Any
 
 from . import __version__, contract
 from .config import Config, ConfigError, Tuning, _read_private
-from .images import Interrupted, SifProof, Unverified, trusted_which
+from .images import Interrupted, SifProof, Unverified
+from .install import InstallError, find_cosign
 from .logs import Log
 
 # The signed repositories and who must have signed them. Constants of this file: production code has no
@@ -111,50 +112,17 @@ def check_reference(uri: str, digest_hex: str) -> str:
 # ---- cosign: the binary, its version, its answer ----------------------------------------------------------
 
 
-def cosign_problem(path: str) -> str | None:
-    """Why ``path`` cannot be the cosign binary, or None: not absolute, a link, not a regular
-    executable file, or the file or its directory is not the user's or root's, or can be written by
-    group or others (the rule `python3` gets, docs/runner.md)."""
-    if not os.path.isabs(path):
-        return "is not an absolute path"
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return "cannot be read"
-    if stat.S_ISLNK(info.st_mode):
-        return "is a link"
-    if not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK):
-        return "is not an executable file"
-    for target in (path, os.path.dirname(os.path.realpath(path))):
-        sub = os.stat(target)
-        if sub.st_uid not in (0, os.getuid()):
-            return "{} is owned by someone else".format("it" if target == path else "its directory")
-        if sub.st_mode & 0o022:
-            return "{} can be written by group or others".format(
-                "it" if target == path else "its directory"
-            )
-    return None
-
-
-def find_cosign(explicit: str | None, tuning: Tuning) -> tuple[str | None, str | None]:
-    """``(path, None)`` of the cosign binary, or ``(None, why)``: ``explicit`` (the `cosign_path` of the
-    configuration) when given, else `cosign` on the trusted launch PATH."""
-    if explicit is not None:
-        problem = cosign_problem(explicit)
-        if problem is not None:
-            return None, "cosign_path {}".format(problem)
-        return explicit, None
-    return trusted_which("cosign", tuning)
-
-
 def start_problem(config: Config, tuning: Tuning) -> str | None:
-    """Why the runner cannot start with verification on, or None: no cosign it can trust."""
-    found, why = find_cosign(config.cosign_path, tuning)
-    if found is not None:
-        return None
-    if config.cosign_path is not None:
-        return why
-    return "cosign_path is required: {}".format(why)
+    """Why the runner cannot start with verification on, or None: no cosign it can trust. The cosign is
+    found as `self-update` finds its own (`install.find_cosign`): `cosign_path` when it is set, which is
+    then used instead of any cosign on the launch PATH, else `cosign` on the trusted launch PATH."""
+    try:
+        find_cosign(config.cosign_path, tuning)
+    except InstallError as error:
+        if config.cosign_path is not None:
+            return str(error)
+        return "cosign_path is required: {}".format(error)
+    return None
 
 
 def cosign_home(config: Config) -> str:
@@ -461,21 +429,21 @@ class Verifier:
             self._turn.release()
 
     def _cosign(self, reference: str, interrupted: Interrupt) -> bytes:
-        binary, _why = find_cosign(self._config.cosign_path, self._tuning)
-        if binary is None:
-            raise Unverified("cosign_missing")
+        try:
+            binary = find_cosign(self._config.cosign_path, self._tuning)
+        except InstallError:
+            raise Unverified("cosign_missing") from None
         home = cosign_home(self._config)
         return run_cosign(binary, reference, home, self._tuning, interrupted)
 
     def _cosign_version(self) -> str:
         if self._version is None:
-            binary, _why = find_cosign(self._config.cosign_path, self._tuning)
             found = None
-            if binary:
-                try:
-                    found = cosign_version(binary, self._tuning, cosign_home(self._config))
-                except Unverified:
-                    found = None
+            try:
+                binary = find_cosign(self._config.cosign_path, self._tuning)
+                found = cosign_version(binary, self._tuning, cosign_home(self._config))
+            except (InstallError, Unverified):
+                found = None
             self._version = found or "unknown"
         return self._version
 

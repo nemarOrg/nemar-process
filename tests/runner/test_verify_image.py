@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import pytest
-from nemar_runner import contract, doctor, images, verify
+from nemar_runner import contract, doctor, images, install, verify
 from nemar_runner.agent import Agent
 from nemar_runner.config import Config, ConfigError, Tuning, load_config
 from nemar_runner.logs import Log
@@ -651,8 +651,8 @@ def test_a_configured_cosign_that_is_a_link_or_not_there_is_refused(tmp_path):
 
 
 def test_a_cosign_path_that_is_not_a_file_or_not_absolute_is_a_problem(tmp_path):
-    assert verify.cosign_problem("relative/cosign") == "is not an absolute path"
-    assert verify.cosign_problem(str(tmp_path)) == "is not an executable file"
+    assert install.cosign_problem("relative/cosign") == "is not an absolute path"
+    assert install.cosign_problem(str(tmp_path)) == "is not an executable file"
 
 
 # ---- what cosign is asked, and how ------------------------------------------------------------------------
