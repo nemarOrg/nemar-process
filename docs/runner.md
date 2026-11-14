@@ -199,6 +199,90 @@ A timestamp that has the right shape and a date the calendar refuses (`2026-02-3
 Under Docker or Podman the runner reads its registration id from `GET /compute/runners/me` at start (the answer's `runner_id`) and refuses to start if it cannot.
 Redirects are never followed, so a credential cannot be sent elsewhere.
 
+## Sharing a workstation
+
+A workstation is often not dedicated to this runner: other people compute on it, their processor use is rare, their memory use can be large, and a deadline can make the graphics processing unit (GPU) busy for days.
+The runner is built to be a good neighbor there.
+The registration is still the ceiling (NEMAR never hands this runner more than it registered, and this section changes no route and no protocol field); what follows only makes the runner claim, and start, less.
+Nothing preempts a job: a job that has started runs to its end, its deadline, a cancel or a revoke.
+
+### Before each claim
+
+The runner reads the host's live state before it asks for work, and sends no claim at all unless every rule holds, so a decline costs nothing and the Worker counts nothing.
+
+| Rule | Idle means | Reason when it fails |
+|---|---|---|
+| free scratch | free space under `root` is at least `max_scratch_gb` (always checked, even with `enabled` false) | `scratch` |
+| memory | `MemAvailable` less `reserve_memory_mb` is at least `claim_memory_mb` | `memory`, or `memory_unknown` when `/proc/meminfo` has no `MemAvailable` |
+| load | the one-minute load average divided by the CPUs this process may use is at most `max_load_per_core` | `load`, or `load_unknown` |
+| pause | no entry named `pause` is in any reservation directory | `paused` |
+| backoff | no job was given up for lack of room less than `backoff_seconds` ago | `backoff` |
+
+A reading that cannot be taken counts as busy.
+The readings are Linux's: `/proc/meminfo` and `/proc/loadavg` (the load comes from `os.getloadavg()` where there is no `/proc/loadavg`), the CPU count from the process's affinity mask where there is one.
+Where there is no `/proc/meminfo` (macOS) the host is always busy for memory unless `enabled` is false, so a workstation runner is a Linux one.
+`claim_memory_mb` is the largest memory a claim can hand this runner: set it to the memory the runner was registered with.
+The reserve is the memory always left to people, the larger of 8 GiB and a tenth of the host's memory, unless set.
+
+A decline is logged as `claim_skipped` with `reason` and the numbers it was judged on (`free_gb`, `mem_available_mb`, `mem_total_mb`, `reserve_mb`, `need_mb`, `load_per_core`, `max_load_per_core`, `cpus`), once each time the reason changes and not on every poll; the first claim that follows is `claim_resumed` with `after` the last reason.
+The runner then polls again after the usual 15 seconds.
+
+### Just before a claimed job starts
+
+The same rules, except the backoff (which is about claiming), are asked again after the image step and before the launcher starts, for the job's own memory (`default_job_memory_mb` for a job the claim gave none under Docker or Podman, `claim_memory_mb` under Apptainer).
+While they fail the runner asks again every 15 seconds (`start_waiting` once per reason, `start_resumed` when there is room) until 540 seconds after the claim, the lease less a minute, or the job's own deadline if that comes first.
+Then no heartbeat has been sent and none will be, so the job is abandoned exactly as a pull that outlasted the lease is: nothing is completed, the lease expires, and the Worker releases the claim and counts it (a job has three).
+The log line is `claim_abandoned` with the reason and the numbers, and the runner sets a backoff: no claim for `backoff_seconds` (half an hour), so one busy host never spends the same job's three claims in a row.
+A job whose wait ends because the runner is stopping is refused as it is when a stop reaches it during a pull.
+
+### Pausing it
+
+A person who needs the machine creates an entry named `pause` in a reservation directory, whatever it is (`touch <reservation directory>/pause`), and removes it when done.
+The runner only looks at the name with `lstat`: it never opens, reads or follows it, so a file, a link, a directory or a pipe of that name all pause it, and so does a reservation directory it cannot search, since a pause it cannot see is respected.
+A running job is not stopped, a claimed job that has not started waits as above, and no new claim goes out.
+Who can pause the runner is whoever can create a file in a reservation directory: make a shared one the way the lab decides (a directory the lab's group can write), and name it in `reservation_dirs`.
+The default is the `reservations` directory beside the configuration file, which the runner never creates.
+The card for the GPU reads the same directories.
+
+### Priority
+
+At start the runner raises its own niceness to 19 (it never lowers it) and puts its input and output (I/O) scheduling class in idle, so that every process it starts afterwards inherits both: the launcher, image pulls, and Apptainer and rootless Podman containers (`priority_set` in the log).
+The I/O class is set by `ioprio_set` through `ctypes` on Linux for x86-64, arm64 and RISC-V, and by `ionice -c 3 -p <own pid>` from the launch PATH's trusted directories otherwise.
+A part that cannot be applied is logged as `priority_unavailable` and the runner goes on.
+A container the Docker daemon starts is not the runner's descendant, so neither reaches it: the launcher gives that container the lowest CPU weight, `--cpu-shares 2`, when the engine can apply it ([the launcher](launcher.md#what-differs-from-the-apptainer-path)).
+A container's hard `--cpus` and `--memory` limits and its `--oom-score-adj=1000` stay, so under memory pressure the kernel ends the job before a person's process.
+
+### Configuration
+
+An optional `availability` object in the configuration file.
+Without it these defaults apply, so a configuration written before it existed keeps working, now with the live check; a key left out has its default, and an unknown key is refused as the top level's are.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` turns off the memory, load, pause and backoff rules and the check before a job starts; the free-scratch rule stays |
+| `max_load_per_core` | `0.9` | the most load per CPU that still leaves room (a number above 0 and at most 1024) |
+| `reserve_memory_mb` | the larger of 8192 and a tenth of the host's memory | memory always left to people, megabytes |
+| `claim_memory_mb` | `default_job_memory_mb` when set, else `4096` | the memory a claim may hand this runner, megabytes; set it to the registered memory |
+| `backoff_seconds` | `1800` | how long claims stop after a job was given up |
+| `reservation_dirs` | the `reservations` directory beside the configuration file | a list of at most 16 absolute paths searched for `pause` |
+
+For example, to leave 16 GiB to people on a 128 GiB workstation registered for jobs of up to 32 GiB, with a lab-wide pause directory:
+
+```json
+"availability": {
+  "reserve_memory_mb": 16384,
+  "claim_memory_mb": 32768,
+  "reservation_dirs": ["/path/to/shared/reservations"]
+}
+```
+
+### What it prints
+
+`python3 -m nemar_runner availability` (with `--config <file>` before or after the command) prints one line and exits 0 when the host has room for a claim now and 1 when it does not:
+`availability: idle` or `availability: busy reason=<word>`, then the numbers it was judged on, never a path or a secret.
+It cannot know a backoff, which lives in a running runner.
+`doctor` adds two informational lines, `availability` (`yes`, or `no (reason=<word>)`) and `priority` (`yes` when a process of its own can take niceness 19 and the idle I/O class on this host), and neither changes the exit status.
+
 ## Logs
 
 JSON lines, one object per line, to `<root>/runner.log` (mode 0600) and to standard error.
@@ -224,8 +308,10 @@ One line each, `<check>: yes` or `no`, with a fixed phrase after a no:
 | `token exchange` | the secret buys a token |
 | `limits` (Apptainer only) | `apptainer exec --memory 64M --cpus 1 <an image in sif_root> true` works, which proves cgroup delegation |
 | `engine limits enforceable`, `engine mode accepted` (Docker and Podman only; asked only when `launcher`, `launcher_dir trusted` and `launcher python` are yes, because the preflight imports the launcher's code) | the two answers of the launcher's own engine preflight (`nemar_launch.runtime.engine_preflight(engine_path, engine_name)`, called in a child process run as the launcher is), so `doctor` and the launcher cannot disagree about an engine; rootless Docker without enforceable limits answers no |
+| `availability` (informational) | the host has room for a claim now ([Sharing a workstation](#sharing-a-workstation)); a no names the reason and is not a failure |
+| `priority` (informational) | a process of its own can take niceness 19 and the idle I/O class on this host |
 
-Exit 0 only if every line but the Apptainer `limits` line is yes: a host that cannot enforce limits still runs jobs, with the watchdog.
+Exit 0 only if every line but the Apptainer `limits` line and the two informational ones is yes: a host that cannot enforce limits still runs jobs, with the watchdog, and a host that is busy right now or cannot lower its priority still runs them.
 `run` and `once` run the same probe the first time an image is available and set `NEMAR_ENFORCE_LIMITS` from it; Docker and Podman are never claimed, because the launcher owns their flags and checks them with the preflight.
 
 ## Developing

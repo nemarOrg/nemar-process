@@ -103,6 +103,8 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Podman reports cgroup v2 with the `cpu`, `memory` and `pids` controllers available to it; a rootless Podman on cgroup v1 ignores the limits.
   Otherwise `runtime_unusable`.
   A Docker daemon without swap accounting is allowed, with a warning in the log: the memory limit holds, the swap limit does not.
+- Whether the engine can apply CPU shares is read from the same document (Docker's `CPUShares`; Podman: cgroup v2 with the `cpu` controller), and is never a refusal.
+  The log says `engine: can apply CPU shares, the job gets the lowest CPU weight` or `engine: cannot apply CPU shares, the job keeps the default CPU weight`, and `--cpu-shares 2` follows only in the first case ([What differs](#what-differs-from-the-apptainer-path)).
 - `NEMAR_CPUS` is at most the engine's CPU count; above it the engine refuses to start, which would be charged to the user.
   Detail `invalid_spec`.
 - `NEMAR_RUNNER_LABEL` is a runner registration id, exactly `rnr_` and 24 lowercase hexadecimal digits: it becomes the container label `nemar.runner`.
@@ -134,6 +136,10 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
   A missing or unusable `NEMAR_CPUS`, a missing or unusable `NEMAR_MEMORY_MB`, or a memory below Docker's minimum of 6 MB ends the launch at the start with exit 13 and detail `invalid_spec`.
   The launch specification carries neither value.
   `--cpus` is `NEMAR_CPUS`, `--memory` and `--memory-swap` are `NEMAR_MEMORY_MB` followed by `m` (no swap beyond the memory), and `--pids-limit` is a fixed 4096, far above what an EEG recipe's thread pools need and far below a fork bomb.
+- On a host that other people use the job must yield to them, and the runner's own niceness and idle input and output (I/O) class do not reach a container that the Docker daemon starts, because that container is not the runner's descendant.
+  So the launcher gives the container the lowest CPU weight, `--cpu-shares 2` (right after `--cpus`), when the preflight found that the engine can apply it; the weight only matters while the processors are contended, and `--cpus` stays the hard cap.
+  There is no `--blkio-weight`: Docker refuses to start a container on a kernel without it.
+  Apptainer and rootless Podman containers are descendants of the runner and inherit its niceness and I/O class instead ([the runner](runner.md#sharing-a-workstation)).
 - When the container's client exits, the launcher kills whatever is left in its process group before it reaps the client (`waitid` with `WNOWAIT` on Linux), so the group id cannot have been reused when the kill is sent.
 - The container is named `nemar-launch-<random>`, carries the labels `nemar.job=<job id>` and `nemar.runner=<NEMAR_RUNNER_LABEL>`, and has no `--rm`.
   The launcher logs the name, in one line, `container: named <name>`; the labels are the two above and are not logged separately.
@@ -163,7 +169,7 @@ run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --
              --env-host=false --read-only-tmpfs=false --image-volume=ignore]
     --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
     [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
-    --cpus <NEMAR_CPUS> --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
+    --cpus <NEMAR_CPUS> [--cpu-shares 2] --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
     --pids-limit 4096 --oom-score-adj=1000
     --mount type=bind,src=<out>/work,dst=/work  --mount type=bind,src=<scratch>/tmp,dst=/tmp
     [--mount type=bind,src=<scratch>/code,dst=/code,readonly]
@@ -191,7 +197,7 @@ Every Apptainer isolation flag has a counterpart, and the engine adds restrictio
 | the invoking user's host network | `--network=bridge`, stricter | see the residual below |
 | no privilege gain for an unprivileged user | `--cap-drop ALL` and `--security-opt no-new-privileges` | stricter |
 | the image's own entry point is ignored by `exec` | Docker: `--entrypoint ""`; both: `--no-healthcheck` | Podman's documentation does not say that an empty value resets the entry point, so it is not passed there (unverified) |
-| `--cpus`, `--memory` | `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, applied by the daemon and checked by the preflight | |
+| `--cpus`, `--memory` | `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, applied by the daemon and checked by the preflight; and `--cpu-shares 2` when the engine can apply it | the weight is the lowest, so a person's processes on a shared host go first ([What differs](#what-differs-from-the-apptainer-path)) |
 | the PID namespace preflight (`run.require_pid_namespace`, which refuses a runtime configured without one) | the Podman flags above, which override whatever the site's `containers.conf` says about the PID, IPC, UTS and cgroup namespaces and the host environment | the Apptainer check reads the configuration and probes; the flags make the configuration moot |
 
 Residuals, stated plainly:
@@ -204,7 +210,7 @@ Residuals, stated plainly:
 
 ### Tests
 
-`tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a duplicate mount point).
+`tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a `--cpu-shares` below 2, a duplicate mount point).
 `tests/launcher/test_runtime_podman_refused.py` shows Podman failing closed with a stand-in `podman` on `PATH` recording no call, and `tests/launcher/test_group_kill.py` the group kill with a real child and grandchild.
 `tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`.
 It skips where there is no usable daemon and fails in the CI job that sets `NEMAR_REQUIRE_DOCKER=1`.
