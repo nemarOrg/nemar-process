@@ -140,7 +140,7 @@ A pull that fails, or one that writes nothing, ends the job as `image_missing`.
 With `sif_pull` false a missing file ends the job as `image_missing` before anything is verified, and a placed file is still hashed against the signed layer.
 A pull happens before any heartbeat: if the image took longer than the lease less 60 seconds, the runner abandons that job without completing it (`claim_abandoned_during_pull`), so the lease expires and the job waits again, unstarted; the pulled file stays.
 
-**What was proven is remembered**, in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed): the image digest, its `kind` (`image`, a digest cosign verified, or `sif`, the SIF artifact cosign verified, which proves nothing of the image digest itself and so never satisfies the other kind), the SIF artifact's manifest and layer digests (`sif`), the identity, cosign's version and the time.
+**What was proven is remembered**, in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed): the image digest, its `kind` (`image`, a digest cosign verified, or `sif`, the SIF artifact cosign verified, which proves nothing of the image digest itself and so never satisfies the other kind), the SIF artifact's manifest and layer digests (`sif`), the identity, a fingerprint of the whole policy (identity, issuer and repository, so that tightening any of them discards every older proof at once), cosign's version and the time.
 An entry is believed for 24 hours and only if its identity is the current one; after that the job verifies again.
 An entry never vouches for a file: the file is hashed every time it is used.
 A damaged, linked, group-readable or foreign entry is ignored and written again.
