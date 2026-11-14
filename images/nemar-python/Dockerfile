@@ -1,5 +1,7 @@
-# nemar-python, CPU flavor: Python 3.12 with eegprep, MNE-Python, NumPy, SciPy, pamica (CPU) and the
-# signalJourney validator, installed from the committed root lock (uv.lock) and nothing else.
+# nemar-python, CPU flavor: Python 3.12 with eegprep, MNE-Python, NumPy, SciPy, pamica (CPU), the
+# signalJourney validator and pAMICA's native `amica15` binary, installed from the committed root lock
+# (uv.lock) and one checked download, and nothing else. The CUDA flavor is Dockerfile.cuda, the same
+# stages with a different torch (docs/images.md).
 #
 # Build from the repository root; the build names itself (a dev build for anything that is not a
 # release, see "The build" below), and a build that does not is refused:
@@ -13,6 +15,11 @@
 # written twice, in the builder and in the final stage, and both must be changed together (the
 # virtual environment is copied between them; a test requires the two to be equal).
 # uv 0.13.4, image index as of 2026-11-04.
+# amica15: the `amica15-linux-x64` asset of pAMICA v0.4.0 (the release pamica 0.4.0 resolves), SHA-256
+# below. It needs GLIBC_2.38 (the trixie base has 2.41) and the OpenMP runtime libgomp.so.1, which the
+# slim base lacks: the final stage installs libgomp1, at the version the base's dated apt snapshot
+# serves (14.2.0-19, the gcc-14 build of the base's own libgcc-s1). tests/images/test_dockerfile.py
+# keeps the two Dockerfiles in step and the smoke test runs `ldd` on the binary.
 #
 # There is no MATLAB, no Octave and no eegprep `eeglab` extra here, by rule (see AGENTS.md).
 
@@ -28,6 +35,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /uvx /bin/
+
+# pAMICA's native AMICA binary. It is downloaded to a scratch path, refused unless its SHA-256 is the
+# pinned one, and only then installed; the final stage copies the verified file and its digest, and
+# the smoke test checks them again. Python's standard library downloads it: this stage has no curl.
+RUN python -c 'import socket, sys, urllib.request; socket.setdefaulttimeout(120); urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
+        https://github.com/sccn/pAMICA/releases/download/v0.4.0/amica15-linux-x64 /tmp/amica15.download \
+    && echo "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a  /tmp/amica15.download" | sha256sum --check --strict - \
+    && mkdir -p /opt/amica \
+    && install -m 0755 /tmp/amica15.download /opt/amica/amica15 \
+    && sha256sum /opt/amica/amica15 | cut -d' ' -f1 > /opt/amica/amica15.sha256 \
+    && rm /tmp/amica15.download
 
 # The base's own interpreter, never a download; the environment lives where the final image expects it.
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
@@ -73,7 +91,7 @@ ARG NEMAR_PROCESS_COMMIT=
 ARG NEMAR_PROCESS_BUILD=dev
 ARG LOCK_SHA256=unverified
 LABEL org.opencontainers.image.title="nemar-python" \
-      org.opencontainers.image.description="NEMAR runtime image, CPU flavor: Python 3.12, eegprep, MNE-Python, pamica, signalJourney validator" \
+      org.opencontainers.image.description="NEMAR runtime image, CPU flavor: Python 3.12, eegprep, MNE-Python, pamica, amica15, signalJourney validator" \
       org.opencontainers.image.source="https://github.com/nemarOrg/nemar-process" \
       org.opencontainers.image.version="${NEMAR_PROCESS_VERSION}" \
       org.opencontainers.image.revision="${NEMAR_PROCESS_COMMIT}" \
@@ -84,16 +102,30 @@ LABEL org.opencontainers.image.title="nemar-python" \
 # No `org.opencontainers.image.licenses` label: the repository's code is MIT, but the image also
 # holds eegprep, MNE-Python, pamica, torch and others under their own licences (docs/images.md).
 
+# The OpenMP runtime the native AMICA binary links (libgomp.so.1). The slim base has none. The
+# version is the one the base's dated apt snapshot serves; if that snapshot ever stops serving it, the
+# step fails rather than install another.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libgomp1=14.2.0-19 \
+    && rm -rf /var/lib/apt/lists/*
+
 # A non-root user. Apptainer runs as the invoking user whatever this says; Docker honours it.
 RUN groupadd --system --gid 10001 nemar \
     && useradd --system --uid 10001 --gid nemar --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin nemar
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder --chmod=0755 /opt/amica/amica15 /opt/amica/amica15
+COPY --from=builder --chmod=0644 /opt/amica/amica15.sha256 /opt/amica/amica15.sha256
 
 # The build file, written as root into a directory the job's user cannot change. The writer refuses an
 # empty version or commit, a build that is not release or dev, a release whose version has a -devN
 # suffix and a dev build whose version has none (nemar_process.common.build).
 RUN /opt/venv/bin/python -m nemar_process.common.build write /opt/nemar/build.json
+
+# The flavor, one word, written as root beside the build file: `nemar-recipe version` and the smoke
+# test read it (the label io.nemar.flavor says the same).
+RUN printf '%s\n' cpu > /opt/nemar/flavor
+
 COPY images/nemar-python/smoke.py /opt/smoke.py
 COPY tests/fixtures/smoke/ /opt/smoke-fixture/
 
