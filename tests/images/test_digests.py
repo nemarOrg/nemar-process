@@ -202,10 +202,19 @@ def test_the_cuda_record_is_of_the_cuda_tag_lists_the_architectures_and_has_no_s
         "arch_list": ARCHS,
         "arch_source": "torch._C._cuda_getArchFlags",
     }
-    assert made["sif"] is None  # a GPU host builds one from the verified digest
-    # the image object a launch specification names is still valid: the file name is the digest's
-    assert made["launch_image"]["sif"] == "ab" * 32 + ".sif"
     assert made["versions"]["torch"] == "2.12.1+cu129"
+
+
+def test_the_cuda_record_says_no_sif_exists_and_names_no_file():
+    made = cuda_record()
+    # no SIF is published and none may be built by hand (the runner refuses one): nothing is named
+    assert made["sif"] is None
+    assert made["launch_image"] is None
+    assert "No SIF is published" in made["sif_note"]
+    assert "Docker or Podman" in made["sif_note"]
+    # no file name of the form <hex>.sif appears anywhere in the record
+    assert ".sif" not in json.dumps(made)
+    assert "apptainer build" not in json.dumps(made)
 
 
 def test_the_cpu_record_has_no_cuda_block_and_still_has_its_sif(sif_file):
@@ -215,10 +224,11 @@ def test_the_cpu_record_has_no_cuda_block_and_still_has_its_sif(sif_file):
     assert made["image"]["tag"] == "0.1.0-cpu"
 
 
-def test_the_flavors_launch_images_are_accepted_by_the_launchers_own_rules(sif_file):
+def test_the_cpu_launch_image_is_accepted_by_the_launchers_own_rules(sif_file):
     schema = spec.load_schema()["properties"]["image"]
-    for made in (record(sif_file), cuda_record()):
-        assert spec.validate(made["launch_image"], schema) == []
+    made = record(sif_file)
+    assert spec.validate(made["launch_image"], schema) == []
+    assert "sif_note" not in made  # only a flavor without a SIF carries the note
 
 
 @pytest.mark.parametrize(

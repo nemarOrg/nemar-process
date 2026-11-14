@@ -553,3 +553,17 @@ def test_the_dispatch_input_names_both_tags():
     description = triggers(workflow())["workflow_dispatch"]["inputs"]["version"]["description"]
     assert "<version>-cpu" in description
     assert "<version>-cuda" in description
+
+
+def test_the_docs_say_the_cuda_flavor_has_no_sif_and_runs_under_docker_not_apptainer():
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    # no host builds a SIF: the runner runs only the signed artifact's layer and refuses anything else
+    assert "a GPU host builds" not in docs
+    assert "apptainer build <hex>.sif" not in docs
+    assert "The CUDA flavor publishes none, and none may be built by hand" in docs
+    assert "runs under Docker or Podman" in docs
+    assert "refuses it under Apptainer (`image_unverified`)" in docs
+    # nothing in the workflow tells a host to build one either
+    text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
+    assert "a GPU host builds" not in text
+    assert "refuses one built by hand" in re.sub(r"\s*\n#\s*", " ", text)

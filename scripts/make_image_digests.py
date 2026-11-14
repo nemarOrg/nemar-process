@@ -4,10 +4,11 @@ There is one record per flavor (``cpu`` and ``cuda``). It names the image by dig
 reference a consumer uses), what the image holds (the native AMICA binary's SHA-256, the CPU fit's
 SHA-256 reading and, for the CUDA flavor, torch's CUDA build and the GPU architectures it lists), and
 the Singularity Image Format (SIF) file the launcher looks for. The CPU flavor's SIF is published and
-the record names its registry artifact; the CUDA flavor publishes no SIF (a GPU host builds one from
-the verified image digest), so its record has ``"sif": null`` and ``launch_image`` names the file a
-host is to build.
-The SIF is named by the image digest: ``<64 lowercase hexadecimal digits>.sif``, in the directory
+signed, and the record names its registry artifact. The CUDA flavor publishes no SIF and no SIF exists
+for it: its record has ``"sif": null`` and ``"launch_image": null`` and names no file (a SIF built on a
+host is refused by the runner, which runs only the signed artifact's layer), so the CUDA image runs
+under Docker or Podman by its verified digest until CI publishes and signs a CUDA SIF.
+The CPU SIF is named by the image digest: ``<64 lowercase hexadecimal digits>.sif``, in the directory
 the Tapis application sets as ``NEMAR_SIF_ROOT`` (the launcher refuses a specification whose
 ``image.sif`` is not that name for ``image.digest``). ``launch_image`` is the ``image`` object of a
 launch specification for this release, ready to copy.
@@ -31,6 +32,10 @@ SIF_REPOSITORY = "ghcr.io/nemarorg/nemar-python-sif"
 NAME = "nemar-python"
 FLAVORS = ("cpu", "cuda")
 AMICA15_RELEASE = "0.4.0"
+CUDA_SIF_NOTE = (
+    "No SIF is published for the cuda flavor and none may be built by hand: the runner runs only the "
+    "signed SIF artifact's layer. Run this image under Docker or Podman by its digest."
+)
 SIF_ROOT_ENV = "NEMAR_SIF_ROOT"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -147,13 +152,18 @@ def build_record(
             "reference": image_reference,
         },
         "sif": sif,
-        # the `image` object of a launch specification for this release; for the CUDA flavor the
-        # file is the one a GPU host builds from the verified digest
-        "launch_image": {
-            "uri": "docker://" + image_reference,
-            "digest": image_digest,
-            "sif": sif_name(image_digest),
-        },
+        # the `image` object of a launch specification for this release. The CUDA flavor has no SIF:
+        # nothing is named, because no file of that name exists and none may be built by hand.
+        "launch_image": (
+            {
+                "uri": "docker://" + image_reference,
+                "digest": image_digest,
+                "sif": sif_name(image_digest),
+            }
+            if sif is not None
+            else None
+        ),
+        **({} if sif is not None else {"sif_note": CUDA_SIF_NOTE}),
         **facts,
         "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
         "versions": {"python": smoke.get("python"), **{n: installed[n] for n in VERSIONED}},

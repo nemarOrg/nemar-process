@@ -5,8 +5,8 @@ name: image-nemar-python
 # Singularity Image Format (SIF) file under Apptainer), and, on a version tag or a manual dispatch from
 # main, pushed to GHCR, smoke-tested again by digest, signed with cosign (keyless), recorded in a
 # release asset per flavor. The CPU flavor is also turned into a SIF from its digest, pushed again as an
-# OCI artifact and signed again; the CUDA flavor publishes no SIF (a GPU host builds one from the
-# verified digest).
+# OCI artifact and signed again; the CUDA flavor publishes no SIF (none exists, and the runner refuses
+# one built by hand), so it runs under Docker or Podman by its verified digest.
 #
 #   pull request              the `test` job only: build both flavors without pushing, smoke test.
 #                             No job that pushes, signs or releases runs on a pull request.
@@ -512,8 +512,9 @@ jobs:
             --output "nemar-python-${VERSION}-cpu-digests.json"
           cat "nemar-python-${VERSION}-cpu-digests.json"
 
-      # The CUDA flavor publishes no SIF: the record is of the image digest, its smoke document (the
-      # container form, run with no GPU visible) and the GPU architectures torch lists.
+      # The CUDA flavor publishes no SIF and its record names none: the record is of the image digest,
+      # its smoke document (the container form, run with no GPU visible) and the GPU architectures
+      # torch lists.
       - name: Write the digest record (cuda)
         if: matrix.flavor == 'cuda'
         env:
