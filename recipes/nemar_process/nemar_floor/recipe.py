@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from nemar_process.common import qc
 from nemar_process.common.recipe import Column, DatasetStep, Distribution, Recipe
 from nemar_process.nemar_floor import outputs, steps
@@ -41,16 +43,15 @@ DISTRIBUTIONS = (
 )
 
 
-def dataset_steps() -> list[DatasetStep]:
+def steps_with_load(load_function: str, load_parameters: dict[str, Any]) -> list[DatasetStep]:
     """The recipe's steps with their recipe-level parameters: a constant, never read from a recording.
 
-    The load step is the BIDS route (a set goes to ``pop_loadset``) and the bad-channel step is the
-    RANSAC branch (the other is ``clean_channels_nolocs``); each recording's record says which ran.
+    Only the load step differs between the floor on a dataset directory and the floor on a Zarr
+    serving copy (``nemar-floor-zarr``), which passes its own. The bad-channel step is the RANSAC
+    branch (the other is ``clean_channels_nolocs``); each recording's record says which ran.
     """
-    from nemar_process.common import io
-
     table = [
-        ("load", io.BIDS_FUNCTION, io.bids_parameters()),
+        ("load", load_function, load_parameters),
         ("signal_channels", steps.SELECT_FUNCTION, {"channel_types": steps.SIGNAL_CHANNEL_TYPES}),
         ("flatline", steps.FLATLINE_FUNCTION, steps.FLATLINE_CALL),
         ("drift", steps.DRIFT_FUNCTION, steps.DRIFT_CALL),
@@ -67,6 +68,14 @@ def dataset_steps() -> list[DatasetStep]:
         DatasetStep(step_id, function, dict(parameters), steps.DESCRIPTIONS[step_id])
         for step_id, function, parameters in table
     ]
+
+
+def dataset_steps() -> list[DatasetStep]:
+    """The floor's steps on a dataset directory: the load step is the BIDS route (a set goes to
+    ``pop_loadset``)."""
+    from nemar_process.common import io
+
+    return steps_with_load(io.BIDS_FUNCTION, io.bids_parameters())
 
 
 RECIPE = Recipe(

@@ -498,7 +498,10 @@ def test_the_version_is_one_json_line(cli):
     assert code == 0
     document = json.loads(out)
     assert out.count("\n") == 1
-    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
+    assert document["recipes"] == {
+        "nemar-floor": PINNED_RECIPE_VERSION,
+        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
+    }
     assert document["common"] == PINNED_COMMON_VERSION
     assert set(document) == {"recipes", "common", "eegprep", "python", "numpy"}
 

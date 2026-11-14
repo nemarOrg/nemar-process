@@ -62,6 +62,7 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "numeric_null": "floats",
     },
     "eegprep.pop_loadset": {"dtype": "str", "loadmode": "str", "memmap": "any"},
+    "eegprep_lean.load_recording": {"group": "any", "max_bytes": "int"},
     "eegprep.pop_select": {"channel_types": "strs"},
     "eegprep.clean_flatlines": {"max_flatline_duration": "float", "max_allowed_jitter": "float"},
     "eegprep.clean_drifts": {"transition": "floats", "attenuation": "float", "method": "str"},
@@ -146,11 +147,18 @@ def typed(function: str, parameters: dict[str, Any]) -> dict[str, Any]:
 
 
 def software_of(function: str) -> dict[str, Any]:
-    """The ``software`` of a step: eegprep at its installed version, or this layer."""
+    """The ``software`` of a step: eegprep (or its Zarr reader) at its installed version, or this layer."""
     if function.startswith("eegprep."):
         return {
             "name": "eegprep",
             "version": metadata.version("eegprep"),
+            "url": EEGPREP_URL,
+            "functionCall": function,
+        }
+    if function.startswith("eegprep_lean."):
+        return {
+            "name": "eegprep-lean",
+            "version": metadata.version("eegprep-lean"),
             "url": EEGPREP_URL,
             "functionCall": function,
         }

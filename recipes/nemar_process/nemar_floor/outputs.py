@@ -189,6 +189,7 @@ def write_product(
     info: RecipeInfo | None = None,
     extra_products: Sequence[Product] = (),
     summary_extra: Mapping[str, Any] | None = None,
+    nemar_extra: Mapping[str, Any] | None = None,
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
@@ -196,8 +197,9 @@ def write_product(
     files are then named with its label, stamped with its name and version and described by its
     record, and ``result.plan`` is expected to be that recipe's plan. ``extra_products`` are its
     own files, written after the floor's and listed after them (each belongs to a step of the plan),
-    and ``summary_extra`` its own summary metrics, which may not replace one of the floor's. The
-    identity is looked up when called, not when defined, so a caller that replaces ``INFO`` is
+    and ``summary_extra`` its own summary metrics, which may not replace one of the floor's.
+    ``nemar_extra`` are keys it adds to ``extensions.nemar`` (a recipe with a remote input says where
+    the data came from). The identity is looked up when called, not when defined, so a caller that replaces ``INFO`` is
     honored.
     """
     info = INFO if info is None else info
@@ -281,6 +283,7 @@ def write_product(
         ],
         summary_metrics=metrics,
         context=context,
+        nemar_extra=nemar_extra,
     )
     problems = records.problems_of(record, context.validator)
     if problems:

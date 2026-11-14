@@ -46,6 +46,12 @@ runtime = [
     "eegprep[mne,pybids,picard,torch]==0.5.0",
     "mne==1.13.2",
     "pamica==0.4.0",
+    # The Zarr reader of the `nemar-floor-zarr` recipe (docs/recipes.md). A separate distribution
+    # from eegprep (eegprep stays 0.5.0, the engine the records name) installed from the head of
+    # sccn/eegprep#616 until it merges; move the pin to the merge commit or the release then, and
+    # `uv lock`. zarr is pinned to the version the reader's `zarr` extra was written against.
+    "zarr==3.4.0",
+    "eegprep-lean[zarr] @ git+https://github.com/sccn/eegprep@14ba46e8da5340cd7ae6adb644cda24fb3f5e483#subdirectory=packages/eegprep-lean",
     "numpy",
     "scipy",
     # The recipes pin the BLAS thread pools to one and record what they found (docs/recipes.md).
@@ -87,6 +93,7 @@ pythonpath = ["launcher", "observer", "runner", "recipes", "scripts", "tests/sta
 addopts = "-ra --strict-markers"
 markers = [
     "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
+    "network: reads NEMAR's public Zarr serving copy over the internet; skipped unless selected with `-m network`",
 ]
 
 [tool.coverage.run]
@@ -119,6 +126,7 @@ include = [
     "tests/recipes/**",
     "tests/recipe_plugin.py",
     "tests/recipe_support.py",
+    "tests/zarr_support.py",
 ]
 
 [tool.ty.overrides.rules]
@@ -130,4 +138,5 @@ import-not-found = "ignore"
 # `build-constraint-dependencies` above.
 [tool.nemar-process.build-backends]
 docopt = "setuptools"
+eegprep-lean = "setuptools"
 signaljourney-validator = "setuptools"
