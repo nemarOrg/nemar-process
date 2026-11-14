@@ -272,12 +272,20 @@ def shell_commands(text: str) -> list[list[str]]:
 
 def list_commands(source: str) -> list[list[str]]:
     """Argument vectors written as Python lists of strings (``["uv", "sync", ...]``)."""
-    found = []
+    found: list[list[str]] = []
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.List):
-            items = [e.value if isinstance(e, ast.Constant) else "<value>" for e in node.elts]
-            if all(isinstance(i, str) for i in items):
-                found.append(items)
+        if not isinstance(node, ast.List):
+            continue
+        items: list[str] = []
+        for element in node.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                items.append(element.value)
+            elif isinstance(element, ast.Constant):
+                break  # a number or None: not an argument vector
+            else:
+                items.append("<value>")  # a call or a name, e.g. uv_binary()
+        else:
+            found.append(items)
     return found
 
 
