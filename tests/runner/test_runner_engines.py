@@ -459,6 +459,7 @@ def diagnose(rig, runtime):
         "launcher_dir": str(rig.launcher),
         "default_job_memory_mb": 512,
         "availability": {"enabled": False},  # how busy this host is must not decide these tests
+        "verify_images": False,  # the stand-in NEMAR is on loopback
     }
     write_private(rig.config_file, json.dumps(document))
     out = io.StringIO()

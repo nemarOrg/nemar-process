@@ -126,13 +126,13 @@ def test_a_pull_inside_the_lease_goes_on_to_run(tmp_path):
         rig.close()
 
 
-# ---- sif_pull is off by default -------------------------------------------------------------------------------------
+# ---- the rig's sif_pull is off; the configuration's default is on -------------------------------------------------------------------------------------
 
 
 def test_with_sif_pull_off_a_missing_image_fails_the_job_and_no_pull_is_run(tmp_path):
     rig = Rig(
         tmp_path, launcher=make_launcher(tmp_path / "launcher", "pass")
-    )  # sif_pull defaults off
+    )  # the rig turns sif_pull off, as an operator may
     try:
         rig.sif_root.mkdir()
         rig.install("apptainer", FAKE_RUNTIME.format(python=sys.executable, record=RECORD))
@@ -149,7 +149,7 @@ def test_with_sif_pull_off_a_missing_image_fails_the_job_and_no_pull_is_run(tmp_
         rig.close()
 
 
-def test_sif_pull_defaults_to_false_and_must_be_a_boolean(tmp_path):
+def test_sif_pull_defaults_to_true_and_must_be_a_boolean(tmp_path):
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
     secret = tmp_path / "secret"
@@ -166,9 +166,9 @@ def test_sif_pull_defaults_to_false_and_must_be_a_boolean(tmp_path):
     }
     path = tmp_path / "config.json"
     write_private(path, json.dumps(document))
+    assert config_mod.load_config(str(path)).sif_pull is True  # a pulled image is verified now
+    write_private(path, json.dumps({**document, "sif_pull": False}))
     assert config_mod.load_config(str(path)).sif_pull is False
-    write_private(path, json.dumps({**document, "sif_pull": True}))
-    assert config_mod.load_config(str(path)).sif_pull is True
     for bad in ("yes", 1, None):
         write_private(path, json.dumps({**document, "sif_pull": bad}))
         with pytest.raises(config_mod.ConfigError, match="sif_pull must be true or false"):
@@ -341,6 +341,7 @@ def cli_runner(tmp_path):
         "max_scratch_gb": 1,
         "launcher_dir": str(rig.launcher),
         "availability": {"enabled": False},  # this test is not about the host's room
+        "verify_images": False,  # the stand-in NEMAR is on loopback
     }
     write_private(rig.config_file, json.dumps(document))
     rig.routes.claims.append({"jobs": [claim_job(1)], "min_runner_version": "0.1.0"})

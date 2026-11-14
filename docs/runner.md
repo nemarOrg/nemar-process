@@ -32,7 +32,7 @@ SIGTERM, SIGHUP or SIGINT stops claiming, terminates the jobs still running (SIG
 ## Configuration
 
 A JSON file at `$XDG_CONFIG_HOME/nemar-runner/config.json` (default `~/.config/nemar-runner/config.json`; an empty or relative `XDG_CONFIG_HOME` is ignored, as the specification says).
-Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `availability` and the three keys of [the service](#running-it-as-a-service) is required, and an unknown key is refused.
+Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_images`, `availability` and the three keys of [the service](#running-it-as-a-service) is required, and an unknown key is refused.
 
 | Key | Meaning |
 |---|---|
@@ -45,7 +45,9 @@ Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `availability
 | `arch` | `amd64` or `arm64` |
 | `max_scratch_gb` | the runner does not claim while free space under `root` is below this |
 | `default_job_memory_mb` | a positive whole number of megabytes: the memory size of a job that the claim gives none, REQUIRED when `runtime` is `docker` or `podman` (the runner refuses to start without it), optional under Apptainer, where it is never applied |
-| `sif_pull` | optional boolean, default `false`: when false the runner never pulls an image and a missing image fails the job as `image_missing` (the operator places the image and verifies it); true is for development only ([The image](#the-image)) |
+| `sif_pull` | optional boolean, default `true`: a missing Apptainer image is pulled, and the pulled file is checked against its signature before it is used; when false the runner never pulls and a missing image fails the job as `image_missing` ([The image](#the-image)) |
+| `verify_images` | optional boolean, default `true`: before an image is pulled or run, the runner proves with cosign that the image workflow signed it, and a job whose image does not verify ends as `image_unverified`; `false` is refused unless `api_base` is a loopback `http://` address (the local stack and CI) ([The image](#the-image)) |
+| `cosign_path` | optional absolute path of the `cosign` binary that the verification of an image ([The image](#the-image)) and `self-update` run: when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and it is required when `cosign` is not on `/usr/local/bin:/usr/bin:/bin`; `install` ignores it and takes `--cosign-path` ([a configuration for the service](#a-configuration-for-the-service)) |
 | `launcher_dir` | optional: the directory that holds the `nemar_launch` package and its `schema` directory (default: the `launcher` directory of this checkout) |
 | `availability` | optional object: when the runner claims on a workstation other people use (memory reserve, load, pause files, backoff); every key has a default, so leaving it out is the defaults ([Sharing a workstation](#sharing-a-workstation)) |
 
@@ -59,6 +61,7 @@ Nothing else that runs jobs, or that you do not trust, may run as that account.
 **What it will not run.**
 At start the runner also refuses a `launcher_dir` with any file or directory that is a link, is owned by someone other than the user or root, or that group or others can write; a `sif_root` that is not the user's own directory or that group or others can write; and a `python3` on the launch PATH (the first of `/usr/local/bin:/usr/bin:/bin`) that, or whose directory, group or others can write, that is owned by someone else, or that is older than Python 3.9.
 Every directory of the launch PATH up to the one holding `python3` (and the runtime) must be the user's or root's and not writable by group or others, the `python3` path is resolved once at start and pinned for every job, and the runtime binary gets the same check.
+With `verify_images` true the runner also refuses to start without a `cosign` it can trust, found as `self-update` finds its own: when `cosign_path` is set it is the cosign (and any cosign on the launch PATH is ignored), and it must be an absolute path to a regular file, not a link, owned by the user or root, with neither it nor its directory writable by group or others; when it is not set the cosign is the first `cosign` on the launch PATH, which gets the `python3` check (every directory of the PATH up to it, and the program, the user's or root's and not writable by group or others).
 Engine helpers (`ps`, `inspect`, `rm`, `--version`, the preflight) run with `PATH` and `LANG` only, so the engine's default socket is the one used; a rootless engine, a non-default `DOCKER_HOST` or `XDG_RUNTIME_DIR` is unsupported (the launcher does not support a rootless daemon either).
 
 ## What a job gets
@@ -103,20 +106,66 @@ Nothing of the runner's own environment reaches the launcher.
 
 A claim's `launch_spec_env` is checked by the schema for its alphabet and length only, so the runner decodes it with the seven rules of the launcher's decoder (`runner/nemar_runner/wire.py`, replayed against the launcher's table of wire cases) before it does anything for the job.
 A value that fails ends the job without launching: exit 13, `runtime_error`, detail `invalid_spec`, the answer the launcher would give.
-So does a specification whose `job_id` is not the claimed job's, or whose image file is not the claim's.
+So does a specification whose `job_id` is not the claimed job's, or whose image is not the claim's: the file, the digest, or the reference (a Docker or Podman launcher pulls the specification's `image.uri`, and the runner verifies the claim's, so they must be the same, with or without `docker://`).
 The decoded text holds the job token and is never logged.
 
 ### The image
 
-For Apptainer the file `<sif_root>/<hex>.sif` must exist, where `<hex>` is the image digest.
-With `sif_pull` false (the default) the runner never pulls: a missing image ends the job without launching, exit 13, `runtime_error`, detail `image_missing`, zero usage, and the operator places and verifies the image.
+**Before an image is pulled or run the runner proves, with cosign, that it was signed by this repository's image workflow** ([images.md](images.md#verifying-a-signature)): `.github/workflows/image-nemar-python.yml`, run for `main` or for a tag `image-nemar-python-vX.Y.Z`, and no other workflow, repository or ref.
+The identity is a constant of `runner/nemar_runner/verify.py` (with the issuer `https://token.actions.githubusercontent.com`), and a test holds it equal to the workflow's own `SIGNING_IDENTITY`.
+A tag is never an identity.
+The check is on unless `verify_images` is false, which the runner allows only for a loopback `http://` `api_base`.
+**Which cosign.** The file `cosign_path` names when it is set (and then no cosign on the launch PATH is looked for), else the first `cosign` on the launch PATH, vetted as `python3` is ([Configuration](#configuration)); the runner looks again before every verification, and a cosign that is not there or not trusted any more ends the job (`cosign_missing`).
 
-With `sif_pull` true (development only) the runner runs `apptainer pull <sif_root>/.<hex>.sif.<pid>.part oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>` (`singularity` when there is no `apptainer`), with its cache and temporary directories inside the job's `scratch/`, then renames the part file into place.
-The pull is by a mutable tag and the runner checks no digest and no signature of what it pulled: `docs/images.md` signs only the digest, so a pull by tag is trusted as far as the registry is.
-The part name is unique to the process, a lock file beside the image (`.<hex>.sif.lock`, an advisory lock held across jobs and runner processes) makes two jobs or two runners pull one image once, a part file of a dead run is deleted under the lock, and waiting for the lock stops when the job is stopped or its deadline passes.
-A failed pull, or one that writes nothing, ends the job as `image_missing`.
+**The reference.**
+The only reference the runner hands cosign is exactly `ghcr.io/nemarorg/nemar-python@sha256:` and 64 lowercase hexadecimal digits, with `docker://` allowed in front, whose digits are the claim's `image.digest`.
+A tag, another repository or registry, or another digest ends the job (`reference_refused`) before cosign runs.
+
+**Docker and Podman.**
+The runner runs `cosign verify <reference> --certificate-identity-regexp <identity> --certificate-oidc-issuer <issuer> --certificate-github-workflow-repository nemarOrg/nemar-process --output json` (the repository of the certificate's GitHub Workflow Repository extension is asked as well as the identity; no trigger is, because the image workflow runs for a tag and for a manual dispatch, and it is not a reusable workflow, whose caller would inherit the identity) with `PATH` (the launch PATH) and a `HOME` of its own, `<root>/cosign` (mode 0700, where cosign keeps the Sigstore trust root it fetches the first time), and nothing else in the environment, one cosign at a time, with a limit of 120 seconds.
+It passes only when cosign exits 0 and every entry of the answer names the digest in `critical.image.docker-manifest-digest`.
+The launcher then pulls that digest, and the engine checks the pulled bytes against it.
+
+**Apptainer.**
+The file `<sif_root>/<hex>.sif` is run only if it hashes to the one layer of the SIF artifact whose signature was verified:
+
+1. cosign verifies `ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>` the same way, and the manifest digest it names (`critical.image.docker-manifest-digest`, the same in every entry) is the one the rest depends on: the tag is only how cosign finds the artifact.
+2. The runner reads that manifest from the registry by its digest, with an anonymous pull token, and requires that its bytes hash to the digest cosign named and that it holds exactly one layer.
+3. A file already in `sif_root` is hashed (`sha256`, a megabyte at a time, and the job's stop ends it) and must equal that layer, or the job ends (`layer_mismatch`) and the file is left alone: the runner never deletes or replaces an image it did not write.
+   A file an operator built is therefore refused, because a SIF is not byte-reproducible.
+4. A missing file is pulled (with `sif_pull` true): `apptainer pull <sif_root>/.<hex>.sif.<pid>.part oras://ghcr.io/nemarorg/nemar-python-sif@sha256:<manifest digest>` (`singularity` when there is no `apptainer`), with its cache and temporary directories inside the job's `scratch/`, never by a tag.
+   The part file must hash to the layer before it is renamed into place, or it is deleted and the job ends (`layer_mismatch`).
+
+The part name is unique to the process, a lock file beside the image (`.<hex>.sif.lock`, an advisory lock held across jobs and runner processes) makes two jobs or two runners pull one image once, a part file of a dead run is deleted under the lock, and waiting for the lock, for cosign and for the hash stops when the job is stopped or its deadline passes.
+A pull that fails, or one that writes nothing, ends the job as `image_missing`.
+With `sif_pull` false a missing file ends the job as `image_missing` before anything is verified, and a placed file is still hashed against the signed layer.
 A pull happens before any heartbeat: if the image took longer than the lease less 60 seconds, the runner abandons that job without completing it (`claim_abandoned_during_pull`), so the lease expires and the job waits again, unstarted; the pulled file stays.
-Docker and Podman pull by digest inside the launcher, after `started`, so the runner does nothing for them.
+
+**What was proven is remembered**, in `<root>/verified/<hex>.json` (mode 0600, written to a temporary name and renamed): the image digest, its `kind` (`image`, a digest cosign verified, or `sif`, the SIF artifact cosign verified, which proves nothing of the image digest itself and so never satisfies the other kind), the SIF artifact's manifest and layer digests (`sif`), the identity, a fingerprint of the whole policy (identity, issuer and repository, so that tightening any of them discards every older proof at once), cosign's version and the time.
+An entry is believed for 24 hours and only if its identity is the current one; after that the job verifies again.
+An entry never vouches for a file: the file is hashed every time it is used.
+A damaged, linked, group-readable or foreign entry is ignored and written again.
+
+**A job whose image does not verify** ends without launching: exit 13, `launcher_failure_code` `runtime_error`, `launcher_detail` `image_unverified`, zero usage, its directory deleted, and the log line `image_unverified` with `job`, `digest` (the 64 digits) and `reason`, one of:
+
+| Reason | Meaning |
+|---|---|
+| `reference_refused` | the reference is not the image repository at the claimed digest |
+| `digest_mismatch` | cosign exited 0 but named another digest (or, for the SIF artifact, no digest, or two) |
+| `cosign_missing` | no cosign the runner can trust is there now |
+| `cosign_failed` | cosign exited non-zero (no signature, another identity or repository, no network), could not be started, or its answer is not a list of entries that name a digest; or `<root>/cosign` is not a directory the runner can use (`why` `home_unsafe`) |
+| `cosign_timeout` | cosign took longer than 120 seconds and was killed |
+| `manifest_mismatch` | the registry could not give the artifact's manifest, or gave one that does not hash to the digest cosign named, or one that does not hold exactly one layer |
+| `layer_mismatch` | a file, placed or pulled, does not hash to the signed layer |
+
+A second field, `why`, may add a word (`exit_1`, `http_404`, `hash`).
+What cosign wrote is never logged.
+The detail is a platform fault, so the job is refunded.
+
+**What a passing check does not prove.**
+That anyone reviewed the commit ([images.md](images.md#verifying-a-signature)), and, under Apptainer, that the SIF artifact tagged `sha256-<hex>` was built from the image `<hex>`: nothing in a signature says so, and the digest file of the workflow is not signed, so the tag the workflow wrote is trusted as far as write access to the registry is.
+
+With `verify_images` false (a loopback stack only) nothing is verified: a missing Apptainer image is pulled with `sif_pull` true by the mutable tag `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, and the runner checks no digest and no signature of what it pulled.
 
 The readiness probe of [`doctor`](#doctor) runs `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths --memory 64M --cpus 1 <image> true`, so the image never runs with the host's home directory or environment (and the runner's secret).
 
@@ -243,8 +292,11 @@ The runner then polls again after the usual 15 seconds.
 
 ### Just before a claimed job starts
 
-The same rules, except the backoff (which is about claiming), are asked again after the image step and before the launcher starts, for the job's own memory (`default_job_memory_mb` for a job the claim gave none under Docker or Podman, `claim_memory_mb` under Apptainer).
-While they fail the runner asks again every 15 seconds (`start_waiting` once per reason, `start_resumed` when there is room) until 540 seconds after the claim, the lease less a minute, or the job's own deadline if that comes first.
+The order is fixed.
+A claim is declined for lack of room before any image work: nothing is verified or pulled for a claim that is not sent.
+A job that was claimed has its image verified (and, under Apptainer, pulled) first, as [The image](#the-image) says, and only then waits for room and passes its start check, so no job waits for room, or holds a promise of memory, for an image that has not been proven.
+The same rules, except the backoff (which is about claiming), are asked again at that point, after the image step and before the launcher starts, for the job's own memory (`default_job_memory_mb` for a job the claim gave none under Docker or Podman, `claim_memory_mb` under Apptainer).
+While they fail the runner asks again every 15 seconds (`start_waiting` once per reason, `start_resumed` when there is room) until 540 seconds after the claim, the lease less a minute (the verification and the pull use part of it), or the job's own deadline if that comes first.
 Then no heartbeat has been sent and none will be, so the job is abandoned exactly as a pull that outlasted the lease is: nothing is completed, the lease expires, and the Worker releases the claim and counts it (a job has three).
 The log line is `claim_abandoned` with the reason and the numbers, and the runner sets a backoff: no claim for `backoff_seconds` (half an hour), so one busy host never spends the same job's three claims in a row.
 The backoff lives only in the running process: a restart clears it, so the service's restart after an exit, its daily update's restart and every `once` start with none.
@@ -325,12 +377,14 @@ One line each, `<check>: yes` or `no`, with a fixed phrase after a no:
 | `sif_root writable` | `sif_root` is the user's, not writable by others, and a file can be made in it |
 | `egress to api_base` | the host answers HTTP |
 | `token exchange` | the secret buys a token |
+| `cosign` (only with `verify_images`) | a `cosign` is on the launch PATH or at `cosign_path`, is trusted as above, and says its version is 3 or newer |
+| `signature <hex>` (only with `verify_images` under Apptainer, one per image file in `sif_root`) | cosign verified the SIF artifact of that digest and the file hashes to its signed layer; the cache is not asked, so this says what the next job would find |
 | `limits` (Apptainer only) | `apptainer exec --memory 64M --cpus 1 <an image in sif_root> true` works, which proves cgroup delegation |
 | `engine limits enforceable`, `engine mode accepted` (Docker and Podman only; asked only when `launcher`, `launcher_dir trusted` and `launcher python` are yes, because the preflight imports the launcher's code) | the two answers of the launcher's own engine preflight (`nemar_launch.runtime.engine_preflight(engine_path, engine_name)`, called in a child process run as the launcher is), so `doctor` and the launcher cannot disagree about an engine; rootless Docker without enforceable limits answers no |
 | `availability` (informational) | the host has room for a claim now ([Sharing a workstation](#sharing-a-workstation)); a no names the reason and is not a failure |
 | `priority` (informational) | a process of its own can take niceness 19 and the idle I/O class on this host |
 
-Exit 0 only if every line but the Apptainer `limits` line and the two informational ones is yes: a host that cannot enforce limits still runs jobs, with the watchdog, and a host that is busy right now or cannot lower its priority still runs them.
+Exit 0 only if every line but the Apptainer `limits` line and the two informational ones is yes (the `cosign` and `signature` lines are asked for only when `verify_images` is true): a host that cannot enforce limits still runs jobs, with the watchdog, and a host that is busy right now or cannot lower its priority still runs them.
 `run` and `once` run the same probe the first time an image is available and set `NEMAR_ENFORCE_LIMITS` from it; Docker and Podman are never claimed, because the launcher owns their flags and checks them with the preflight.
 
 ## Running it as a service
@@ -369,7 +423,7 @@ The tag in the certificate is any release tag, so the installer also requires th
 cd runner && python3 -m nemar_runner install --version X.Y.Z --prefix <prefix> --write-units
 ```
 
-`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign is the file `--cosign-path` names when it is given and otherwise `cosign` on the launch PATH; `install` does not read the configuration, so the configuration's `cosign_path` is for `self-update` alone; cosign sees only `PATH`, `LANG` and a `HOME` inside the prefix, so it uses none of the account's proxy settings or credentials), and refuses on any failure: nothing is unpacked, written or switched.
+`install` downloads the two release files over HTTPS (a redirect is followed only to another HTTPS address), runs `cosign verify-blob` with the identity above (cosign is the file `--cosign-path` names when it is given and otherwise `cosign` on the launch PATH; `install` does not read the configuration, so the configuration's `cosign_path` serves `self-update` and image verification, never `install`; cosign sees only `PATH`, `LANG` and a `HOME` inside the prefix, so it uses none of the account's proxy settings or credentials), and refuses on any failure: nothing is unpacked, written or switched.
 Only then it unpacks the bytes it verified into `<prefix>/versions/X.Y.Z/` and writes `<prefix>/current` (through a temporary name and a rename).
 Unpacking accepts plain files and directories under `runner/`, `launcher/` and `deploy/` and nothing else: a link, a device, an absolute name, a `..` component, a duplicate or an oversized file refuses the whole bundle.
 Files are mode 0600 (0700 where the archive marks them executable) and directories 0700, so the tree passes the checks the runner makes of `launcher_dir`.
@@ -453,13 +507,13 @@ Without it the launcher is the one in the same signed bundle (`<prefix>/versions
 | `install_prefix` | optional: where `install` put the runner; the running runner watches `<install_prefix>/current` (absent: it never switches versions). It must be the user's own directory that group and others cannot write, or the runner will not start |
 | `self_update` | optional boolean, default `true`: `false` turns the daily update off, so `self-update` does nothing and asks GitHub nothing; this is the opt-out for a machine of another institution, which then updates by `install --version X.Y.Z` when its owner decides |
 | `availability` | optional object: the host-room rules of a shared workstation, all keys optional with the defaults of [Sharing a workstation](#sharing-a-workstation) (the memory the people who share the machine keep, the memory a claim may hand this runner, the load, the backoff and the directories searched for `pause`) |
-| `cosign_path` | optional absolute path of the cosign binary that `self-update` verifies with; when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and without it `self-update` looks on the launch PATH; `install` ignores this key and takes `--cosign-path` instead. It must not be a link, and its directory and the file must be the user's or root's and not writable by group or others |
+| `cosign_path` | optional absolute path of the cosign binary that `self-update` and the verification of an image ([The image](#the-image)) run; when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and without it they look on the launch PATH; `install` ignores this key and takes `--cosign-path` instead. It must not be a link, and its directory and the file must be the user's or root's and not writable by group or others |
 
 ### What the account's owner does
 
 Neither step needs more than a few minutes, and neither is done from this repository.
 
-- Install cosign for the account (a user-local, pinned, checksum-verified binary), and name it in `cosign_path` for `self-update` and with `--cosign-path` for `install` if it is not on the launch PATH.
+- Install cosign for the account (a user-local, pinned, checksum-verified binary), and name it in `cosign_path` for `self-update` and for the verification of images, and with `--cosign-path` for `install`, if it is not on the launch PATH.
 - Enable lingering, so a user service runs with nobody logged in: `loginctl enable-linger <account>` (needs root, once).
 - As the account: `systemctl --user daemon-reload && systemctl --user enable --now nemar-runner.service nemar-runner-update.timer`; the log is `journalctl --user -u nemar-runner.service`.
 
@@ -477,6 +531,8 @@ uv run ty check --python-version 3.9 launcher observer runner
 ```
 
 The tests run real child processes and real HTTP; NEMAR's Worker is a recording stand-in that answers fixtures and checks each request body against the pinned schema, and the container runtime is a stand-in executable where a test is about how it is called.
+`tests/runner/test_verify_image.py` runs cosign and Apptainer as stand-in executables and the registry as a stand-in HTTP server on loopback, for everything the runner decides (the reference, the identity constant against the workflow, the answers cosign can give, the manifest and layer checks, the cache, the refusal, `doctor`), and then, against the real cosign and the public registry, checks that the demo image's digest verifies, that the same digest with another identity or issuer does not, that a tag is refused, that a corrupted file in `sif_root` is `layer_mismatch`, and (with Apptainer) that the signed SIF artifact is pulled by its digest and hashes to its signed layer.
+The tests that need the real cosign skip where it is absent; with `NEMAR_REQUIRE_COSIGN=1` (the `launcher` CI job, which installs the pinned cosign) a skip is a failure.
 The one exception is `tests/e2e/test_runner_stack.py`, described next, which runs against NEMAR's real routes and a real container runtime.
 The runner against NEMAR's real routes is `tests/e2e/test_runner_stack.py` (marker `runner_stack`): it starts nemar-cli's local stack (`backend/scripts/compute-local-stack.ts serve --seed-fixture`) from a full checkout named by `NEMAR_CLI_DIR` (at the pinned commit, with `bun install --frozen-lockfile --ignore-scripts` run in its root and in `backend/`), registers a runner with the stored owner key, dispatches `nemar-floor-zarr` with `executor: "runner"` with the stored administrator key, runs `once`, and asserts what the Worker's own job record says.
 One case takes the job to `finished` in a real Apptainer container (the tiny image of `tests/images/tiny-recipe`, built into `<NEMAR_E2E_SIF_DIR>/<image id>.sif`, default `.cache/runner-stack-sif`); the other, with an empty `sif_root`, ends `failed` with `image_missing` before any container starts.

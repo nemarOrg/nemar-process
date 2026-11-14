@@ -63,13 +63,25 @@ jobs:
       matrix:
         python: ["3.9", "3.12"]
     env:
-      # In CI neither the container tests nor the drift comparison may be skipped unnoticed.
+      # In CI neither the container tests nor the drift comparison nor the signature tests (which need the
+      # real cosign and the public registry) nor the check of the service units by systemd-analyze may be
+      # skipped unnoticed.
       NEMAR_REQUIRE_APPTAINER: "1"
       NEMAR_REQUIRE_DRIFT: "1"
+      NEMAR_REQUIRE_COSIGN: "1"
+      NEMAR_REQUIRE_SYSTEMD: "1"
       NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
       NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version the image workflow signs with (image-nemar-python.yml). The action is pinned by commit
+      # and checks the binary it installs against the checksums and the signature it carries; the
+      # signature tests (tests/runner/test_verify_image.py) run the installed cosign against the public
+      # registry.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: "v3.1.4"
 
       - name: Read the nemar-cli pin
         id: pin

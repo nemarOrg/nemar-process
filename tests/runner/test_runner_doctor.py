@@ -35,6 +35,7 @@ def rig(tmp_path):
         "max_scratch_gb": 1,
         "launcher_dir": str(made.launcher),
         "availability": {"enabled": False},  # how busy this host is must not decide these tests
+        "verify_images": False,  # the stand-in NEMAR is on loopback; test_verify_image.py has it on
     }
     made.document.update(document)
     write_private(made.config_file, json.dumps(document))

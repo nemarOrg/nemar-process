@@ -312,6 +312,10 @@ def make_runner_host(tmp: Path, stack: Stack) -> RunnerHost:
                 "max_scratch_gb": 1,
                 # the stack's job must not wait on how busy the CI host is: the check has its own tests
                 "availability": {"enabled": False},
+                # the stack is on loopback and the image was built here, unsigned; and the missing-image
+                # case must end `image_missing`, not pull
+                "verify_images": False,
+                "sif_pull": False,
             }
         ),
         encoding="utf-8",

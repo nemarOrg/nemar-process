@@ -15,7 +15,17 @@ import os
 import threading
 import time
 
-from . import __version__, availability, containers, contract, images, pids, priority, scratch
+from . import (
+    __version__,
+    availability,
+    containers,
+    contract,
+    images,
+    pids,
+    priority,
+    scratch,
+    verify,
+)
 from .api import Api, ApiError
 from .config import ENGINES, Config, ConfigError, Tuning
 from .install import read_current
@@ -48,6 +58,7 @@ class Agent:
         self.stop = threading.Event()
         self.locks = images.PullLocks()
         self.limits = images.Limits(config, self.tuning, log)
+        self.verifier = verify.Verifier(config, self.tuning, log)
         self.gate = availability.Gate(config, self.tuning)
         self._skipping: str | None = None  # why the last claim was declined, until one is sent
         self._threads: dict[str, threading.Thread] = {}  # by lease id
@@ -125,6 +136,10 @@ class Agent:
         if problem is not None:
             raise ConfigError(problem)
         self.python = images.resolve_python(self.tuning)
+        if self.config.verify_images:
+            problem = verify.start_problem(self.config, self.tuning)
+            if problem is not None:
+                raise ConfigError(problem)
         if self.config.install_prefix is not None:
             problem = images.dir_problem(self.config.install_prefix)
             if problem is not None:
@@ -211,6 +226,7 @@ class Agent:
             self.runner_label,
             self.python,
             gate=self.gate,
+            verifier=self.verifier,
         )
         self.gate.claimed(job.lease_id, effective_memory_mb(job, self.config))
 

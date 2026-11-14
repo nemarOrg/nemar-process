@@ -90,6 +90,7 @@ def reporting_rig(tmp_path):
                 "launcher_dir": str(rig.launcher),
                 "sif_pull": True,
                 "availability": {"enabled": False},  # this test is not about the host's room
+                "verify_images": False,  # the stand-in NEMAR is on loopback
             }
         ),
     )
@@ -261,6 +262,7 @@ def test_doctor_has_a_priority_line_that_never_changes_the_exit_status(tmp_path)
                     "max_scratch_gb": 1,
                     "launcher_dir": str(rig.launcher),
                     "availability": {"enabled": False},
+                    "verify_images": False,  # the stand-in NEMAR is on loopback
                 }
             ),
         )

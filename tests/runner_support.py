@@ -387,8 +387,12 @@ class Rig:
         runtime: str = "apptainer",
         launcher: Path | None = None,
         sif_pull: bool = False,
+        verify_images: bool = False,
     ) -> None:
         self.sif_pull = sif_pull
+        # off by default: the stand-in NEMAR is on loopback, which is the one place the runner allows it
+        # (docs/runner.md, "The image"); the signature tests turn it on
+        self.verify_images = verify_images
         self.tmp = tmp
         self.routes = RunnerRoutes()
         self.server = StandinServer(self.routes).start()
@@ -430,6 +434,7 @@ class Rig:
             "sif_pull": self.sif_pull,
             # a test that is not about the host's room does not depend on how busy the host is
             "availability": Availability(enabled=False),
+            "verify_images": self.verify_images,
         }
         values.update(changes)
         return Config(**values)
