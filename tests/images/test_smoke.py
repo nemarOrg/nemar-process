@@ -177,7 +177,8 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
     assert document["recipe_command"]["via"] == "python -m nemar_process"
     assert document["recipe_command"]["version"]["eegprep"] == PINNED_EEGPREP_VERSION
     assert document["recipe_command"]["version"]["recipes"] == {
-        "nemar-floor": PINNED_RECIPE_VERSION
+        "nemar-floor": PINNED_RECIPE_VERSION,
+        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
     }
     # every pinned package was imported, not only installed
     for module in ("eegprep", "mne", "pamica", "numpy", "scipy", "torch", "picard", "bids"):

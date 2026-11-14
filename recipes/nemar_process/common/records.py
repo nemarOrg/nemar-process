@@ -141,10 +141,15 @@ def build_recording_record(
     outputs: list[dict[str, Any]],
     summary_metrics: dict[str, Any],
     context: RunContext,
+    nemar_extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The per-recording record: the plan as executed, its hash, and what was read and written."""
+    """The per-recording record: the plan as executed, its hash, and what was read and written.
+
+    ``nemar_extra`` are keys a recipe adds to ``extensions.nemar`` (where a remote input came from);
+    one the record already has is refused.
+    """
     identity = context.identity
-    return {
+    record = {
         "sj_version": SJ_VERSION,
         "schema_version": SCHEMA_VERSION,
         "description": recipe.recording_description,
@@ -183,6 +188,16 @@ def build_recording_record(
             }
         },
     }
+    add_extras(record["extensions"]["nemar"], nemar_extra)
+    return record
+
+
+def add_extras(nemar: dict[str, Any], extra: Mapping[str, Any] | None) -> None:
+    """Add a recipe's keys to ``extensions.nemar``, refusing one the record already has."""
+    for name, value in (extra or {}).items():
+        if name in nemar:
+            raise ValueError("{} is a key the record already has".format(name))
+        nemar[name] = value
 
 
 def content_sha256(record: Mapping[str, Any]) -> str:
@@ -400,6 +415,7 @@ def build_dataset_record(
     ignored_datatypes: Mapping[str, int],
     started_utc: str,
     finished_utc: str,
+    nemar_extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The dataset-level record: counts, distributions, plan variants, the report envelope, rows.
 
@@ -465,6 +481,7 @@ def build_dataset_record(
         "recordings": cells,
         "run_id": identity.run_id,
     }
+    add_extras(nemar, nemar_extra)
     record: dict[str, Any] = {
         "sj_version": SJ_VERSION,
         "schema_version": SCHEMA_VERSION,

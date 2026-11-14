@@ -83,6 +83,9 @@ class Recording:
     extension: str
     entities: dict[str, str]
     companions: tuple[str, ...]
+    # A recording read over the network from a Zarr serving copy (nemar-floor-zarr): there is no file
+    # under ``root``, ``path`` is the recording's source path in the index, and it is always supported.
+    streamed: bool = False
 
     @property
     def abs_path(self) -> Path:
@@ -90,7 +93,7 @@ class Recording:
 
     @property
     def supported(self) -> bool:
-        return self.extension in SUPPORTED
+        return self.streamed or self.extension in SUPPORTED
 
     @property
     def format(self) -> str:
