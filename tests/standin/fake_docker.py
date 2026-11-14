@@ -10,8 +10,8 @@ It is strict on purpose, about names and about values. ``run`` accepts exactly t
 launcher is documented to pass and exits 125 (the engine's own usage error) on anything else:
 Podman-only options under the name ``docker``; a ``--user`` that is not ``uid:gid``; a
 ``--security-opt`` that is not ``no-new-privileges``; an ``--env`` without ``=``; ``--cpus`` above the
-engine's CPU count or not positive; ``--memory`` below 6 MB, or a ``--memory-swap`` below it; a
-duplicate mount point. ``--mount`` is read as a CSV record, strictly, as the engines read it, and
+engine's CPU count or not positive; ``--cpu-shares`` below 2; ``--memory`` below 6 MB, or a
+``--memory-swap`` below it; a duplicate mount point. ``--mount`` is read as a CSV record, strictly, as the engines read it, and
 ``--env`` is read as it is.
 
 What it does (``<rec>`` is the record file baked into the wrapper):
@@ -71,6 +71,7 @@ VALUED = {
     "--workdir",
     "--entrypoint",
     "--cpus",
+    "--cpu-shares",
     "--memory",
     "--memory-swap",
     "--pids-limit",
@@ -101,6 +102,7 @@ def default_info(name: str) -> dict:
         "CpuCfsQuota": True,
         "PidsLimit": True,
         "SwapLimit": True,
+        "CPUShares": True,
         "NCPU": 8,
         "SecurityOptions": ["name=seccomp,profile=builtin", "name=cgroupns"],
     }
@@ -188,6 +190,8 @@ def _bad_run_option(name: str, option: str, value: str, ncpu: int) -> str | None
             return "invalid cpus"
         if cpus <= 0 or cpus > ncpu:
             return "Range of CPUs is from 0.01 to {}.00".format(ncpu)
+    if option == "--cpu-shares" and not (value.isdigit() and int(value) >= 2):
+        return "invalid cpu shares"  # the kernel's weights start at 2
     if option in {"--memory", "--memory-swap"}:
         found = MEMORY.fullmatch(value)
         if found is None:

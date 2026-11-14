@@ -22,7 +22,7 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
                  --env-host=false --read-only-tmpfs=false --image-volume=ignore]
         --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
         [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
-        --cpus <NEMAR_CPUS> --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
+        --cpus <NEMAR_CPUS> [--cpu-shares 2] --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
         --pids-limit 4096 --oom-score-adj=1000
         --mount type=bind,src=<host>,dst=/work  --mount type=bind,src=<host>,dst=/tmp
         [--mount type=bind,src=<host>,dst=/code,readonly]
@@ -41,6 +41,12 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
   passed: the engine numbers the GPUs it hands over from zero.
 * The engine process itself is given ``run.runtime_environment``'s short allowlist, never the
   launcher's environment (so ``DOCKER_HOST``, ``CONTAINER_HOST`` and the like are not honored).
+* ``--cpu-shares 2`` (the lowest CPU weight, so that a person's processes on a shared host always go
+  first) is added only when the engine says it can apply CPU shares (``Assessment.cpu_shares``: Docker's
+  ``info`` field ``CPUShares``; Podman: cgroup v2 with the ``cpu`` controller); otherwise the launcher's
+  log says so and the container keeps the default weight. A container the Docker daemon starts is not a
+  descendant of the runner, so the runner's own niceness never reaches it: the weight is what does.
+  No ``--blkio-weight``: Docker refuses to start a container on a kernel without it.
 * Limits come from ``NEMAR_CPUS`` and ``NEMAR_MEMORY_MB``, both required under an engine
   (``settings.read_settings`` has already refused a launch without them); the launch specification
   carries none. Whether the engine can really enforce them is what ``preflight`` checks: an engine
@@ -111,6 +117,8 @@ RUNNER_LABEL = "nemar.runner"
 UNSUPPORTED_ENGINES = ("podman",)
 _SCHEME = "docker://"
 _CONTROLLERS = ("cpu", "memory", "pids")
+# The lowest CPU weight an engine takes (the kernel's own minimum): a job yields to anything else.
+CPU_SHARES = 2
 
 
 def selected(env: Env) -> str:
@@ -191,8 +199,12 @@ def build_argv(
     binds: list[Bind],
     limits: Limits,
     runner_label: str,
+    cpu_shares: bool = False,
 ) -> list[str]:
-    """The whole engine command line (see the module docstring for what each flag is for)."""
+    """The whole engine command line (see the module docstring for what each flag is for).
+
+    ``cpu_shares`` is what ``preflight`` found: True only when the engine can apply CPU shares, and
+    then ``--cpu-shares 2`` follows ``--cpus``."""
     if limits.memory_mb is None:  # read_settings refuses this earlier; never run without a size
         raise Failure("runtime_error", "invalid_spec", "the memory size to enforce is not valid")
     uid, gid = current_user()
@@ -242,9 +254,10 @@ def build_argv(
         # was killed stays (stopped) until the runner's sweep, and its log would stay with it. The
         # attached `run` still streams the output to the launcher, and `container inspect` is unaffected.
         argv.append("--log-driver=none")
+    argv += ["--cpus", str(limits.cpus)]
+    if cpu_shares:
+        argv += ["--cpu-shares", str(CPU_SHARES)]
     argv += [
-        "--cpus",
-        str(limits.cpus),
         "--memory",
         memory,
         "--memory-swap",
@@ -328,13 +341,15 @@ class Assessment(NamedTuple):
     """What an engine's ``info`` document says: ``mode`` is False for a mode that is refused (rootless
     Docker, Docker with user-namespace remapping), ``limits`` is False when a controller is missing
     or the engine does not say its CPU count (a launch needs that number to check ``NEMAR_CPUS``),
-    ``cpus`` is the engine's CPU count (None when it does not say) and ``swap`` is False for a
-    Docker daemon without swap accounting."""
+    ``cpus`` is the engine's CPU count (None when it does not say), ``swap`` is False for a
+    Docker daemon without swap accounting and ``cpu_shares`` is False when the engine does not say it
+    can apply CPU shares (Docker's ``CPUShares``; Podman: cgroup v2 with the ``cpu`` controller)."""
 
     mode: bool
     limits: bool
     cpus: int | None
     swap: bool
+    cpu_shares: bool = False
 
 
 def info_argv(engine: str, engine_path: str) -> list[str]:
@@ -362,6 +377,7 @@ def assess(engine: str, info: dict[str, Any]) -> Assessment:
         limits = all(info.get(key) is True for key in ("MemoryLimit", "CpuCfsQuota", "PidsLimit"))
         cpus = info.get("NCPU")
         swap = info.get("SwapLimit") is True
+        shares = info.get("CPUShares") is True
         mode = not rootless
     else:
         host = info.get("host")
@@ -370,9 +386,10 @@ def assess(engine: str, info: dict[str, Any]) -> Assessment:
         limits = host.get("cgroupVersion") == "v2" and all(c in controllers for c in _CONTROLLERS)
         cpus = host.get("cpus")
         swap = True
+        shares = host.get("cgroupVersion") == "v2" and "cpu" in controllers
         mode = True
     count = cpus if isinstance(cpus, int) and not isinstance(cpus, bool) and cpus >= 1 else None
-    return Assessment(mode, limits and count is not None, count, swap)
+    return Assessment(mode, limits and count is not None, count, swap, shares)
 
 
 def engine_preflight(engine_path: str, engine_name: str) -> tuple[bool, bool]:
@@ -402,9 +419,10 @@ def engine_preflight(engine_path: str, engine_name: str) -> tuple[bool, bool]:
 
 def preflight(
     engine: str, engine_path: str, limits: Limits, env: Env, stop: threading.Event, log: Log
-) -> None:
+) -> Assessment:
     """Before an image is pulled or user code runs: prove this launcher and engine can enforce what
-    the job needs. Every refusal is a platform detail (refunded), none is the submitter's.
+    the job needs. Every refusal is a platform detail (refunded), none is the submitter's. Returns
+    what the engine's ``info`` said (``build_argv`` takes ``cpu_shares`` from it).
 
     * not root (``current_user``): the container runs as the launcher's own user, which is only a
       restriction when that is not uid 0;
@@ -417,6 +435,9 @@ def preflight(
       rootless Podman on cgroup v1 ignores the limits);
     * ``NEMAR_CPUS`` is at most the engine's CPU count (above it the engine refuses to start, which
       the user would otherwise be charged for): ``invalid_spec``.
+
+    Not being able to apply CPU shares is no refusal: the job runs with the default CPU weight and the
+    log says so (``--cpu-shares`` on an engine that cannot would be an error or ignored).
     """
     refuse_unsupported(engine, log)
     if current_user()[0] == 0:
@@ -436,6 +457,11 @@ def preflight(
     if limits.cpus > found.cpus:
         raise _refused("invalid_spec", "the CPU count to enforce exceeds the engine's")
     log.info("engine: can enforce cpu, memory and pids limits")
+    if found.cpu_shares:
+        log.info("engine: can apply CPU shares, the job gets the lowest CPU weight")
+    else:
+        log.warning("engine: cannot apply CPU shares, the job keeps the default CPU weight")
+    return found
 
 
 def _volumes_declared(output: bytes) -> bool:
