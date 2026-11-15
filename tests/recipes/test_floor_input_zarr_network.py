@@ -48,7 +48,14 @@ CHOSEN_INDEX_SHA256 = "61e73a86b6a541d060786f5433c6eb90aef68e584a6d71856a8010352
 STORES = 4
 CHANNEL_SAMPLES = 16_384_000
 IMAGE = "sha256:" + "0" * 64
-PRODUCT = ("channels.tsv", "badsegments.tsv", "filters.json", "qc.json", "signalJourney.json")
+PRODUCT = (
+    "channels.tsv",
+    "badsegments.tsv",
+    "samplemask.tsv",
+    "filters.json",
+    "qc.json",
+    "signalJourney.json",
+)
 
 
 def live_index() -> tuple[bytes, dict]:
@@ -184,6 +191,28 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
         assert (metrics["nChannelsInput"], metrics["samplingRateHz"]) == (32, 200.0)
         total += metrics["nChannelsInput"] * round(metrics["durationS"] * metrics["samplingRateHz"])
     assert total == CHANNEL_SAMPLES
+
+    # the sample masks sit on the serving grid, and are the bad segments multiplied out by its rate
+    for path in stores:
+        stem = path.removesuffix("_eeg.edf")
+        mine = json.loads((out / "{}_desc-nemarfloor_signalJourney.json".format(stem)).read_text())
+        grid = mine["extensions"]["nemar"]["mask_grid"]
+        assert grid["profile"] == "serving"
+        assert grid["rate"] == mine["summaryMetrics"]["samplingRateHz"] == 200.0
+        assert grid["n_samples"] == round(mine["summaryMetrics"]["durationS"] * grid["rate"])
+        masks = (out / "{}_desc-nemarfloor_samplemask.tsv".format(stem)).read_text().splitlines()
+        segments = (
+            (out / "{}_desc-nemarfloor_badsegments.tsv".format(stem)).read_text().splitlines()
+        )
+        assert masks[0].split("\t") == ["start_sample", "stop_sample", "label", "nemar_reason"]
+        assert len(masks) == len(segments)
+        for mask, segment in zip(masks[1:], segments[1:], strict=True):
+            start, stop, *_ = mask.split("\t")
+            onset, duration, *_ = segment.split("\t")
+            assert "{:.6f}".format(int(start) / grid["rate"]) == onset
+            assert "{:.6f}".format((int(stop) - int(start)) / grid["rate"]) == duration
+            assert int(stop) <= grid["n_samples"]
+
 
     # the network rule: only the Zarr host and the bucket it redirects reads to
     assert watch.names <= allowed, watch.names

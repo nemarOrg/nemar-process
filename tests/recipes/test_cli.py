@@ -89,6 +89,7 @@ def test_a_run_on_the_fixture_exits_zero_and_writes_the_product_tree(first_run):
             base + "channels.tsv",
             base + "filters.json",
             base + "qc.json",
+            base + "samplemask.tsv",
             base + "signalJourney.json",
         ]
     )

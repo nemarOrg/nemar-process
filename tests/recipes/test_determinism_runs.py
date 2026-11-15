@@ -19,6 +19,7 @@ EXCLUDED_STEP = "executionDateTime"
 STATE_SUFFIXES = (
     "_channels.tsv",
     "_badsegments.tsv",
+    "_samplemask.tsv",
     "_filters.json",
     "_qc.json",
     "_recordings.tsv",
@@ -91,13 +92,13 @@ def names(directory: Path, endings=("",)):
 def test_two_separate_processes_write_the_same_files(two_runs):
     first, second = two_runs
     assert names(first) == names(second)
-    assert len(names(first)) == 7
+    assert len(names(first)) == 8  # the table, two records and five state files
 
 
 def test_every_tsv_and_state_file_is_byte_identical(two_runs):
     first, second = two_runs
     state = names(first, STATE_SUFFIXES)
-    assert len(state) == 5
+    assert len(state) == 6
     for name in state:
         assert (first / name).read_bytes() == (second / name).read_bytes(), name
 
@@ -141,3 +142,4 @@ def test_a_different_thread_environment_changes_nothing_because_the_run_pins_its
         assert (first / name).read_bytes() == (other_threads_run / name).read_bytes(), name
     for name in names(first, ("_signalJourney.json",)):
         assert without_clock(first / name) == without_clock(other_threads_run / name), name
+

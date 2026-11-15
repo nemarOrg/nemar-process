@@ -17,7 +17,13 @@ import re
 import pytest
 from nemar_process import sj
 from nemar_process.common import files, plan, records
-from recipe_support import DATASET, RECORDING, floor_literals
+from recipe_support import (
+    DATASET,
+    PINNED_COMMON_VERSION,
+    PINNED_RECIPE_VERSION,
+    RECORDING,
+    floor_literals,
+)
 
 
 @pytest.fixture(scope="module")
@@ -154,6 +160,7 @@ def test_every_output_checksum_and_size_is_that_of_the_file_on_disk(floor_produc
     assert {o["role"] for o in outputs} == {
         "channels.tsv",
         "badsegments.tsv",
+        "samplemask.tsv",
         "filters.json",
         "qc.json",
     }
@@ -175,6 +182,7 @@ def test_the_product_is_beside_the_recording_with_the_label_last(floor_product):
             base + "channels.tsv",
             base + "filters.json",
             base + "qc.json",
+            base + "samplemask.tsv",
             base + "signalJourney.json",
         ]
     )
@@ -184,12 +192,12 @@ def test_the_record_names_the_pipeline_and_the_run(record, nemar):
     info = record["pipelineInfo"]
     assert (info["name"], info["version"], info["pipelineType"]) == (
         "nemar-floor",
-        "1.0.0",
+        PINNED_RECIPE_VERSION,
         "quality-control",
     )
     assert (record["sj_version"], record["schema_version"]) == ("0.1.0", "0.1.0")
     assert nemar["profile"] == "recording"
-    assert nemar["recipe"] == {"id": "nemar-floor", "version": "1.0.0"}
+    assert nemar["recipe"] == {"id": "nemar-floor", "version": PINNED_RECIPE_VERSION}
     assert nemar["dataset"] == {
         "id": "on007823",
         "version": "v1.0.0",
@@ -205,7 +213,7 @@ def test_the_record_names_the_pipeline_and_the_run(record, nemar):
     assert engine["package"] == "eegprep"
     assert engine["threads"] == 1
     assert "threadpools" in engine
-    assert engine["commonLayer"] == "1.0.0"
+    assert engine["commonLayer"] == PINNED_COMMON_VERSION
 
 
 def test_the_inputs_are_the_recording_and_the_sidecars_with_their_checksums(nemar):
@@ -261,6 +269,7 @@ def test_each_file_target_is_on_the_step_that_produced_it(record):
     assert where == {
         "channels.tsv": "bad_channels",
         "badsegments.tsv": "bad_windows",
+        "samplemask.tsv": "bad_windows",
         "filters.json": "line_noise_measure",
         "qc.json": "qc",
     }

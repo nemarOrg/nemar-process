@@ -29,7 +29,13 @@ from harness import IMAGE_DIGEST, SIF_NAME, Rig
 from recipe_support import DATASET, DATASET_ID, DATASET_VERSION, ROOT, require_runtime
 
 PRODUCT = "product"
-STATE_SUFFIXES = ("_channels.tsv", "_badsegments.tsv", "_filters.json", "_qc.json")
+STATE_SUFFIXES = (
+    "_channels.tsv",
+    "_badsegments.tsv",
+    "_samplemask.tsv",
+    "_filters.json",
+    "_qc.json",
+)
 INCLUDE = [
     "dataset_description.json",
     "sub-*/eeg/*_eeg.edf",
@@ -128,6 +134,7 @@ def test_the_job_leaves_the_product_tree_under_work_outputs(floor_launch):
             base + "channels.tsv",
             base + "filters.json",
             base + "qc.json",
+            base + "samplemask.tsv",
             base + "signalJourney.json",
         ]
     )
@@ -148,7 +155,7 @@ def test_the_manifest_lists_every_product_file_with_the_sha256_of_the_file_on_di
     listed = {f["path"]: f for f in launch.manifest["files"]}
     on_disk = {name: outputs / name for name in product_names(outputs)}
     assert sorted(listed) == sorted(on_disk)
-    assert len(listed) == 7
+    assert len(listed) == 8  # five state files, two records and the table
     for name, path in on_disk.items():
         assert listed[name]["sha256"] == sha256(path), name
         assert listed[name]["size"] == path.stat().st_size, name

@@ -53,6 +53,7 @@ IN_INDEX_ORDER = [
 PRODUCT_SUFFIXES = (
     "channels.tsv",
     "badsegments.tsv",
+    "samplemask.tsv",
     "filters.json",
     "qc.json",
     "signalJourney.json",
