@@ -292,3 +292,76 @@ def test_the_containers_output_reaches_the_launcher_though_the_daemon_keeps_no_l
         assert containers_left() == ""
     finally:
         rig.close()
+
+
+def test_a_cpu_decision_for_a_gpu_job_tells_the_recipe_cpu_and_hands_over_no_gpu(tmp_path):
+    """The card L3 case: a job that asked for a GPU, on a host with none (this daemon), whose runner
+    decided the CPU. The launcher passes no `--gpus` (which a daemon without one would refuse), hides every
+    GPU, and the recipe, inside a real container, reads `cpu` and the reason."""
+    engine_ready()
+    rig = Rig(tmp_path, "docker")
+    try:
+        probe = (
+            "import json, os\n"
+            "seen = {k: v for k, v in os.environ.items() if k.startswith(('NEMAR_', 'NVIDIA_', 'CUDA_'))}\n"
+            "with open(os.path.join(os.environ['NEMAR_OUT'], 'device.json'), 'w') as handle:\n"
+            "    json.dump(seen, handle)\n"
+        )
+        bundle = rig.set_bundle(make_bundle({"device.py": probe}))
+        spec = image_spec(
+            rig, runtime="python", entry="device.py", bundle=bundle, resources={"gpus": 1}
+        )
+        launch = rig.launch(
+            spec,
+            NEMAR_CONTAINER_RUNTIME=ENGINE,
+            NEMAR_CPUS="1",
+            NEMAR_MEMORY_MB="256",
+            NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+            NEMAR_RUNNER_LABEL=RUNNER_LABEL,
+            NEMAR_DEVICE="cpu",
+            NEMAR_DEVICE_REASON="gpu_busy",
+        )
+        assert launch.exit == 0, launch.log + launch.stderr
+        seen = json.loads((launch.out / "work" / "outputs" / "device.json").read_text())
+        assert seen["NEMAR_DEVICE"] == "cpu"
+        assert seen["NEMAR_DEVICE_REASON"] == "gpu_busy"
+        assert seen["NVIDIA_VISIBLE_DEVICES"] == "void"
+        assert "NEMAR_GPU_MEMORY_MB" not in seen
+        assert "CUDA_VISIBLE_DEVICES" not in seen
+        assert launch.provenance is not None
+        assert launch.provenance["device"] == {
+            "device": "cpu",
+            "reason": "gpu_busy",
+            "gpu_index": None,
+            "memory_mb": None,
+        }
+        assert containers_left() == ""
+    finally:
+        rig.close()
+
+
+def test_docker_reads_the_flag_that_names_one_gpu_by_its_identifier(tmp_path):
+    """What the launcher passes for a `cuda` decision is `--gpus device=<GPU identifier>`. A daemon without
+    a GPU refuses to start such a container, for the lack of one; what this pins is that the client reads the
+    flag (a malformed value is a refusal of the flag itself). Where there is a GPU the container may run."""
+    engine_ready()
+    if ENGINE != "docker":
+        pytest.skip("only Docker's reading of --gpus is asked here")
+    done = subprocess.run(
+        [
+            ENGINE,
+            "run",
+            "--rm",
+            "--pull=never",
+            "--gpus",
+            "device=GPU-3a23c669-1f69-c64e-cf85-44e04bf4c3d4",
+            IMAGE_URI[len("docker://") :],
+            "true",
+        ],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+        timeout=120,
+    )
+    assert 'for "--gpus" flag' not in done.stderr, done.stderr
