@@ -83,11 +83,11 @@ Public wording only: "a processing pipeline wants X".
 
 ### The Zarr reader (`nemar-floor --input zarr`, 2026-11-13)
 
-The recipe reads the serving copy with eegprep-lean from the head of sccn/eegprep#616, installed from a pinned commit (see [recipes.md](recipes.md)).
+The recipe reads the serving copy with eegprep-lean from the merge commit of sccn/eegprep#616 on `develop`, installed from a pinned commit (see [recipes.md](recipes.md)).
 The first pinned commit refused the unit the live index uses for microvolts, the micro sign (`µV`), so every real store failed; the recipe renamed the label to `uV` until the commit 14ba46e8 of that pull request accepted the micro sign and the Greek mu.
-The pin is that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
+The pin is the merge commit (`af9145121ed8a69eab86bc2f5c425a6bdcced5cc`), which contains that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
 
-Patch note for sccn/eegprep#616: `load_recording` should check each array's `zarr.json` (shape, chunk and shard grid, data type) against the index's declared channels and samples before it decodes anything, so that a store whose metadata disagrees with its index is refused by the reader and not left to the caller's size bound.
+Patch note for the reader that sccn/eegprep#616 merged (still true at its merge commit and on `develop`, where the package has not changed since): `load_recording` checks the size the index declares against `max_bytes` before it reads, and the shape of what it read afterwards (a store shorter than its index is refused), but it should also check each array's `zarr.json` (shape, chunk and shard grid, data type) against the index's declared channels and samples before it decodes anything, so that a store whose metadata disagrees with its index is refused by the reader and not left to the caller's size bound.
 
 The rank test of the location guard (sccn/eegprep#539) uses NumPy's default tolerance, which is of the order of machine precision times the number of channels.
 A montage that is flat to a picometer therefore has numerical rank 3 and passes, and `clean_channels` still returns a degraded answer for it: with the 19 positions of the reproduction in that issue flattened onto a plane (thickness 1e-9 mm to 0.1 mm), it removed 2 of 19 channels from data that lose none with the true positions.
