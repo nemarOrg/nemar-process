@@ -59,7 +59,7 @@ nemar-recipe version
   It then copies every per-recording file byte for byte (the sample masks among them) into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, rebuilds the QC summary from the merged table and record (an input's own summary is never copied), and moves everything into place at the end.
   The merged summary equals the summary of one run over the same recordings, apart from `record_sha256`.
   A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.
-  It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
+  It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above); with `--resume` the remainder of a cut run is the one input that is left out of the sum (below).
 - A recipe can declare options of its own (`Recipe.options`), such as `--time-budget-s N` or the choice of a decomposition engine.
   The command accepts a flag only for a recipe that declares it (exit 2 for any other), fills in the default of one that is not given, and hands the values to the recipe's hooks and to `run_recording` (`RunContext.options`).
   The floor declares `--input`, and its Zarr input four more (below); a flag of the Zarr input is refused with `--input bids` (exit 2), as it would be for a recipe that never declared it.
@@ -77,9 +77,14 @@ nemar-recipe version
   Every other duplicate is still exit 1 with the path, found before anything is copied: two real rows, two budget rows, a duplicated file, and a recording that three inputs name (so that the outcome never depends on the order the inputs were given in).
   A remainder that covers only some of the budget rows is merged too, and the rest stay: `pending_count` counts the `time_budget` rows left and the exit is 9 while one is left.
   The merged product is an input like another, so a run of the rest completes it with a second `--resume`.
-  A remainder that was itself cut short cannot be merged with the first product, because both hold a budget row for the same recording (two budget rows are an error): run the recordings that are left out again, and merge in turn.
+  A remainder that was itself cut short (R1) cannot be merged with the first product, because both hold a budget row for the same recording (two budget rows are an error).
+  Merge it in two steps instead: run the recordings R1 left out (R2), merge R1 with R2 by `--resume`, which leaves no budget row, and then merge the first product with that merge by `--resume`.
+  The result equals one run of all the recordings, with `resumed` counting what the last merge replaced (`tests/recipes/test_aggregate_resume.py` runs exactly this sequence).
   Every refusal `aggregate` makes about the inputs' agreement (the dataset identity, the recipe and its version, the engine stamp, the seeds, the build and the image tag) applies to every input first, so a remainder made by another build or engine cannot complete a product (exit 6, nothing written).
-  A remainder's own `ignored_datatypes` are not added when every row of its table replaced a budget row, because the product it completes already counted them: a run counts the other datatypes of the subjects it owns, and the recordings of a remainder are recordings of that run, so it owns no subject the first run did not (an input that also holds recordings of its own is summed as before).
+  A remainder's own `ignored_datatypes` are not added when every row of its table replaced a budget row, because the product it completes already counted them: a run counts the other datatypes of the subjects it owns, and the recordings of a remainder are recordings of that run, so it owns no subject the first run did not.
+  An input that has recordings of its own as well as rows that replace budget rows (a run of the cut recording and of a new one) is refused (exit 6, nothing written, named by its position): its count holds the other datatypes of both, and which of them the first product already counted cannot be told from the record (a count of 5 where one run counts 4 in the test).
+  Keep a remainder to the cut recordings only, and merge a run of other recordings as a separate step.
+  An input none of whose rows replace a budget row, and one with no rows at all, is summed as it always was.
   The merged dataset record states `extensions.nemar.report.resumed`, the number of budget rows this merge replaced (0 when `--resume` replaced none), and a merge without `--resume` states none.
   Apart from that field, the clock and the run id, a completed product is what one run of all the recordings writes, file for file, and the order of the `--in` options changes nothing.
 - A recipe's `preflight` checks, once, that its engine can run here: it raises `EngineUnavailable` with one fixed word.
