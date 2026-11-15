@@ -972,6 +972,11 @@ def merge_rows(
     the two rows is ``skipped`` with the code ``time_budget``, and then the other row is taken and
     the budget row is dropped. Two real rows, two budget rows, and a recording that three inputs
     name (the pairs could be taken in more than one order) are still errors.
+
+    An input all of whose rows replace budget rows is a remainder. One that has recordings of its
+    own as well as rows that replace, is refused (``InputUnusable``, by its position): its record
+    counts the other datatypes of the cut recordings' subjects and of its own recordings' together,
+    and nothing in it says which of them the product it completes did not count already.
     """
     named: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for number, item in enumerate(inputs):
@@ -989,6 +994,13 @@ def merge_rows(
             raise DuplicateRecording("two inputs name the same recording: {}".format(path))
         winner, merged[path] = real[0]
         replaced[winner] += 1
+    for number, item in enumerate(inputs):
+        if 0 < replaced[number] < len(item.rows):
+            raise InputUnusable(
+                "input {} holds recordings of its own as well as rows that replace budget rows: "
+                "keep a remainder to the cut recordings only, and merge a run of other "
+                "recordings as a separate step".format(number + 1)
+            )
     return merged, replaced
 
 
@@ -1058,6 +1070,9 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
     except DuplicateRecording as error:
         print(error, file=sys.stderr)
         return EXIT_INTERNAL
+    except InputUnusable as error:
+        print(error, file=sys.stderr)
+        return EXIT_DATASET_UNREADABLE
     targets: dict[str, Path] = {}
     ignored: dict[str, int] = {}
     for number, item in enumerate(inputs):
@@ -1066,9 +1081,10 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 print("two inputs hold the same file: {}".format(relative), file=sys.stderr)
                 return EXIT_INTERNAL
             targets[relative] = source
-        if item.rows and replaced[number] == len(item.rows):
-            # a remainder: every row replaced a budget row, so the product it completes already
-            # counted the other datatypes of every subject it owns (it ran those recordings too)
+        if replaced[number]:
+            # a remainder (an input that only partly replaces is refused by ``merge_rows``): every
+            # row replaced a budget row, so the product it completes already counted the other
+            # datatypes of every subject it owns (it ran those recordings too)
             continue
         for datatype, count in item.ignored.items():
             ignored[datatype] = ignored.get(datatype, 0) + count

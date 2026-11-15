@@ -69,6 +69,11 @@ def recording(subject):
     return "{0}/eeg/{0}_task-COVID_eeg.edf".format(subject)
 
 
+def smoke(subject):
+    """A recording of the short synthetic dataset."""
+    return "{0}/eeg/{0}_task-smoke_eeg.set".format(subject)
+
+
 def rows_of(product):
     lines = (product / TABLE).read_text(encoding="utf-8").splitlines()
     names = lines[0].split("\t")
@@ -480,7 +485,24 @@ def mixed(tmp_path_factory):
     assert len(rest) == 2
     assert floor_run(dataset, base / "rest", "rest", *rest)[0] == 0
     assert floor_run(dataset, base / "whole", "whole")[0] == 0
-    return {name: base / name for name in ("cut", "rest", "whole")}
+    # a chunk of three recordings of which the budget cut the last, and runs that continue it: the
+    # recording it left out alone, a new recording alone, and the two together
+    first_three = [smoke(subject) for subject in ("sub-01", "sub-02", "sub-03")]
+    third, fourth = smoke("sub-03"), smoke("sub-04")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(command, "CLOCK", clock)
+        register(patch, "toy", options=(TIME_BUDGET_S,), run_recording=timed(clock, 10))
+        extra = ["--time-budget-s", "25"]
+        assert (
+            floor_run(dataset, base / "chunk", "chunk", *first_three, recipe="toy", extra=extra)[0]
+            == 9
+        )
+    assert budget_paths(base / "chunk") == [third]
+    for name, paths in (("replacing", [third]), ("own", [fourth]), ("both", [third, fourth])):
+        assert floor_run(dataset, base / name, name, *paths)[0] == 0
+    return {
+        name: base / name for name in ("cut", "rest", "whole", "chunk", "replacing", "own", "both")
+    }
 
 
 def test_the_files_of_other_datatypes_are_counted_once_in_a_resumed_product(mixed, tmp_path):
@@ -506,3 +528,30 @@ def test_an_input_with_no_recordings_still_adds_its_other_datatypes(mixed, tmp_p
     out = tmp_path / "out"
     assert merge(out, mixed["cut"], mixed["rest"], tmp_path / "none")[0] == 0
     assert nemar_of(out)["ignored_datatypes"] == {"ieeg": 5}
+
+
+def test_an_input_with_recordings_of_its_own_and_replacements_is_refused(mixed, tmp_path):
+    """A run of the cut recording and of a new one counts the other datatypes of both, and those of
+    the cut recording's subject are in the first product too (5 where one run counts 4). Which of
+    its counts are new cannot be told from the record, so the merge refuses it, in either order."""
+    assert nemar_of(mixed["chunk"])["ignored_datatypes"] == {"ieeg": 3}
+    assert nemar_of(mixed["both"])["ignored_datatypes"] == {"ieeg": 2}
+    for name, order in (("one", ("chunk", "both")), ("two", ("both", "chunk"))):
+        out = tmp_path / name
+        code, _, err = merge(out, *[mixed[item] for item in order])
+        assert code == 6
+        assert "holds recordings of its own as well as rows that replace budget rows" in err
+        assert "keep a remainder to the cut recordings only" in err
+        assert "merge a run of other recordings as a separate step" in err
+        assert not out.exists()
+
+
+def test_the_two_steps_the_refusal_asks_for_count_every_datatype_once(mixed, tmp_path):
+    half, out = tmp_path / "half", tmp_path / "out"
+    assert merge(half, mixed["chunk"], mixed["replacing"])[0] == 0  # the cut recording, alone
+    nemar = nemar_of(half)
+    assert nemar["report"]["resumed"] == 1
+    assert nemar["ignored_datatypes"] == {"ieeg": 3}
+    assert merge(out, half, mixed["own"], resume=False)[0] == 0  # then the new recording
+    assert nemar_of(out)["ignored_datatypes"] == {"ieeg": 4}
+    assert comparable(out) == comparable(mixed["whole"])
