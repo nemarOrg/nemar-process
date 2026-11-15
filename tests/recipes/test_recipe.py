@@ -55,7 +55,7 @@ def test_a_variant_that_is_another_recipe_or_another_version_is_refused():
     (zarr,) = RECIPE.variants
     for info in (
         replace(zarr.info, id="nemar-floor-zarr"),
-        replace(zarr.info, version="1.0.1"),
+        replace(zarr.info, version="9.9.9"),
         replace(zarr.info, label="nemarfloorzarr"),
     ):
         with pytest.raises(ValueError, match="same recipe"):

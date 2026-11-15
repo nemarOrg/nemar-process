@@ -24,7 +24,7 @@ import pytest
 import zarr_support as z
 from nemar_process import sj
 from nemar_process.common import records, zarr_input
-from recipe_support import PINNED_EEGPREP_VERSION, ROOT
+from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION, ROOT
 from zarr_support import no_fence, routing, served  # noqa: F401  fixtures
 
 ARGS = [
@@ -197,7 +197,7 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):  # 
         assert records.check(record, validator) == [], path
         mine = record["extensions"]["nemar"]
         assert mine["profile"] == "recording"
-        assert mine["recipe"] == {"id": "nemar-floor", "version": "1.0.0"}
+        assert mine["recipe"] == {"id": "nemar-floor", "version": PINNED_RECIPE_VERSION}
         assert mine["input"]["stores"] == [path]
         assert mine["input"]["zarr_pair"] == "production"
         assert mine["input"]["index_sha256"] == served.index_sha256

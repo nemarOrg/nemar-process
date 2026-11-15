@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from nemar_process.common import zarr_input
 from nemar_process.common.zarr_input import attest
+from recipe_support import PINNED_RECIPE_VERSION
 
 S = "a" * 40
 T = "b" * 40
@@ -199,7 +200,11 @@ def test_the_floor_is_one_recipe_with_two_inputs_that_share_its_name_version_and
     with pytest.raises(ValueError, match="does not read tapis"):
         floor.reading("tapis")
     assert zarr.input == "zarr"
-    assert (zarr.id, zarr.version, zarr.label) == ("nemar-floor", "1.0.0", "nemarfloor")
+    assert (zarr.id, zarr.version, zarr.label) == (
+        "nemar-floor",
+        PINNED_RECIPE_VERSION,
+        "nemarfloor",
+    )
     assert (zarr.id, zarr.version, zarr.label) == (floor.id, floor.version, floor.label)
     assert {option.flag for option in floor.options} == {"--input"}
     assert {option.flag for option in zarr.options} == {

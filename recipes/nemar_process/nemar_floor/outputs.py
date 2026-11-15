@@ -57,14 +57,13 @@ INFO = RecipeInfo(
         "QC (eegprep)."
     ),
     recording_description=(
-        "nemar-floor 1.0.0: annotation of one EEG recording "
+        "nemar-floor {}: annotation of one EEG recording "
         "(bad channels, bad windows, filters, QC); no samples are written."
-    ),
+    ).format(steps.RECIPE_VERSION),
     dataset_pipeline_description="NEMAR quality floor, dataset level.",
     dataset_description=(
-        "nemar-floor 1.0.0: dataset-level quality record "
-        "(aggregates and per-recording summary table)."
-    ),
+        "nemar-floor {}: dataset-level quality record (aggregates and per-recording summary table)."
+    ).format(steps.RECIPE_VERSION),
 )
 
 
