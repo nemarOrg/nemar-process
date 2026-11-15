@@ -134,11 +134,11 @@ def _processing_steps(
 def provenance() -> tuple[dict[str, Any], str | None]:
     """What ``extensions.nemar`` says about the build: its ``process`` block and the image's tag.
 
-    Read from the image's build file (``common/build.py``), so the version, the commit and the tag
-    are the image's own and never an argument a caller can give.
+    Read from the image's build file and flavor file (``common/build.py``), so the version, the commit
+    and the tag are the image's own and never an argument a caller can give.
     """
-    info = build.build_info()
-    return dict(info), build.image_tag(info)
+    info, tag = build.image_provenance()
+    return dict(info), tag
 
 
 def build_recording_record(

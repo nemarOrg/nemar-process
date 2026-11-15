@@ -21,6 +21,7 @@ import check_smoke_pins
 import pytest
 import yaml
 from image_support import clean_env
+from nemar_process.common import build as process_build
 from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
 from repo_paths import (
     CI_WORKFLOW,
@@ -340,6 +341,27 @@ def pamica_pin() -> str:
     group = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["dependency-groups"]["runtime"]
     (pin,) = [g for g in group if isinstance(g, str) and g.startswith("pamica==")]
     return pin.split("==", 1)[1]
+
+
+FLAVOR_WRITER = re.compile(r"printf '%s\\n' (\S+) > /opt/nemar/flavor")
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_word_a_dockerfile_writes_is_a_flavor_the_records_tag_can_name(flavor):
+    """A record's tag is `<version>-<word>` for the word in `/opt/nemar/flavor` (PX-06b), so the
+    word each Dockerfile writes must be one the aggregate accepts, and the label must say the same."""
+    (step,) = [r for k, r in final_rows(flavor) if k == "RUN" and "/opt/nemar/flavor" in r]
+    written = FLAVOR_WRITER.fullmatch(step)
+    assert written, step
+    word = written.group(1)
+    assert word in process_build.IMAGE_FLAVORS
+    assert word == flavor
+    labels = " ".join(rest for k, rest in final_rows(flavor) if k == "LABEL")
+    assert 'io.nemar.flavor="{}"'.format(word) in labels
+
+
+def test_every_flavor_the_records_can_name_has_a_dockerfile_and_the_reverse():
+    assert sorted(process_build.IMAGE_FLAVORS) == sorted(BOTH)
 
 
 @pytest.mark.parametrize("flavor", BOTH)

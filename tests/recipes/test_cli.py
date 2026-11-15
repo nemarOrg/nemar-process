@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from nemar_process import cli as command
-from nemar_process.common import files, records
+from nemar_process.common import build, files, records
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from recipe_support import (
     DATASET,
@@ -495,9 +495,12 @@ def test_the_image_digest_is_the_argument_else_the_environment_else_unknown(
 
 @pytest.fixture
 def image_files(tmp_path, monkeypatch):
-    """Point the two files an image writes at files of the test (nothing there: not in an image)."""
+    """Point the two files an image writes at files of the test (nothing there: not in an image).
+
+    The flavor file is read by the one reader in `common/build.py`, so that is where it is pointed.
+    """
     flavor, digest = tmp_path / "flavor", tmp_path / "amica15.sha256"
-    monkeypatch.setattr(command, "FLAVOR_FILE", flavor)
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavor)
     monkeypatch.setattr(command, "AMICA15_SHA256_FILE", digest)
     return flavor, digest
 
@@ -611,6 +614,15 @@ def test_a_symbolic_link_or_an_unreadable_file_is_refused_never_followed(
     code, out, err = cli("version")
     assert code == command.EXIT_INTERNAL
     assert "cannot be read" in err
+
+
+def test_a_refused_flavor_file_gives_the_same_line_and_code_through_the_shared_reader(
+    cli, image_files
+):
+    image_files[0].write_text("rocm\n", encoding="ascii")
+    code, out, err = cli("version")
+    assert (code, out) == (command.EXIT_INTERNAL, "")
+    assert err == "the flavor file does not hold what its writer writes\n"
 
 
 def test_a_read_only_dataset_is_read_and_never_written(tmp_path, cli):
