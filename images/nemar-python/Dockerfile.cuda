@@ -1,0 +1,151 @@
+# nemar-python, CUDA flavor: the CPU flavor's stages (Dockerfile) with torch 2.12.1 built for CUDA 12.9,
+# from the PyTorch cu129 index (the cu128 index stops at torch 2.11.0, below pamica 0.4.0's floor),
+# installed from the same root lock with `--extra cuda`. It carries the same `amica15` binary and runs
+# the CPU engine correctly with no GPU visible: the runner fixes the image by digest before it chooses
+# the device, so a job it keeps off the GPU still runs here (docs/images.md). The two Dockerfiles differ
+# only in the lines tests/images/test_dockerfile.py names; change them together.
+#
+# Build from the repository root; the build names itself (a dev build for anything that is not a
+# release, see "The build" below), and a build that does not is refused:
+#   docker build -f images/nemar-python/Dockerfile.cuda \
+#     --build-arg NEMAR_PROCESS_VERSION=<X.Y.Z-devN> --build-arg NEMAR_PROCESS_COMMIT=<40 hex digits> .
+#   docker run --rm --env NVIDIA_VISIBLE_DEVICES=void <image> python /opt/smoke.py --no-gpu
+#
+# Every base is a digest: a tag moves, a digest does not. Bump a digest together with its tag in the
+# comment, and the uv version together with UV_VERSION in .github/workflows (a test compares them).
+# python:3.12-slim (Python 3.12.16, Debian trixie), image index as of 2026-11-04. Its digest is
+# written twice, in the builder and in the final stage, and both must be changed together (the
+# virtual environment is copied between them; a test requires the two to be equal).
+# uv 0.13.4, image index as of 2026-11-04.
+# amica15: the `amica15-linux-x64` asset of pAMICA v0.4.0 (the release pamica 0.4.0 resolves), SHA-256
+# below. It needs GLIBC_2.38 (the trixie base has 2.41) and the OpenMP runtime libgomp.so.1, which the
+# slim base lacks: the final stage installs libgomp1 at the version the live trixie archive served
+# when it was pinned (14.2.0-19, the gcc-14 build of the base's own libgcc-s1). The pin is not a
+# snapshot: the base's apt sources point at the live archive, so the step fails closed when the archive
+# moves on, and the pin is bumped together with the base digest. tests/images/test_dockerfile.py keeps
+# the two Dockerfiles in step and the smoke test runs `ldd` on the binary.
+#
+# There is no MATLAB, no Octave and no eegprep `eeglab` extra here, by rule (see AGENTS.md).
+
+FROM ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b AS uv
+
+# ---- builder: the virtual environment ---------------------------------------------------------
+FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS builder
+
+# git is needed in this stage only: the signalJourney validator is installed from a pinned commit of
+# its repository (it is not on PyPI with its schema), and uv fetches a git source with git.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /uvx /bin/
+
+# pAMICA's native AMICA binary. It is downloaded to a scratch path, refused unless its SHA-256 is the
+# pinned one, and only then installed; the final stage copies the verified file and its digest, and
+# the smoke test checks them again. Python's standard library downloads it: this stage has no curl.
+RUN python -c 'import socket, sys, urllib.request; socket.setdefaulttimeout(120); urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
+        https://github.com/sccn/pAMICA/releases/download/v0.4.0/amica15-linux-x64 /tmp/amica15.download \
+    && echo "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a  /tmp/amica15.download" | sha256sum --check --strict - \
+    && mkdir -p /opt/amica \
+    && install -m 0755 /tmp/amica15.download /opt/amica/amica15 \
+    && sha256sum /opt/amica/amica15 | cut -d' ' -f1 > /opt/amica/amica15.sha256 \
+    && rm /tmp/amica15.download
+
+# The base's own interpreter, never a download; the environment lives where the final image expects it.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON_PREFERENCE=only-system \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /build
+COPY pyproject.toml uv.lock .python-version ./
+
+# When the build is given the lock's hash it must be the hash of the lock that was copied; without
+# one the check is skipped and the label says "unverified". The build still has to name itself: a
+# build without the version and the commit is refused further down, in the final stage.
+ARG LOCK_SHA256=unverified
+RUN if [ "$LOCK_SHA256" != "unverified" ]; then echo "$LOCK_SHA256  uv.lock" | sha256sum --check --strict -; fi
+
+RUN uv sync --frozen --no-dev --group runtime --extra cuda
+
+# The recipes package: the signalJourney validator wrapper with the vendored schema, the common layer
+# and the recipes themselves (nemar_process.nemar_floor). Every signal-processing call in it is an
+# eegprep function from the environment above.
+COPY recipes/nemar_process /tmp/nemar_process
+RUN site="$(/opt/venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    && cp -R /tmp/nemar_process "$site/nemar_process" \
+    && /opt/venv/bin/python -m compileall -q "$site/nemar_process"
+
+# The recipe command, so that a launch specification can say ["nemar-recipe", "run", "nemar-floor", ...]
+# as an argument vector (the container has /opt/venv/bin first on PATH, also under --cleanenv). It is
+# `python -m nemar_process` with a name; tests/images/test_dockerfile.py runs the script written here.
+RUN printf '%s\n' '#!/opt/venv/bin/python' 'from nemar_process.cli import main' 'raise SystemExit(main())' > /opt/venv/bin/nemar-recipe \
+    && chmod 755 /opt/venv/bin/nemar-recipe
+
+# ---- final: the runtime image -----------------------------------------------------------------
+FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS final
+
+# The build. The defaults make an unnamed build impossible: the version and the commit are empty, so
+# the RUN step below refuses, and the build is `dev` unless the publish job says `release`. The
+# version, the commit and the build are written into /opt/nemar/build.json, which every record reads
+# (nemar_process.common.build), and mirrored in the labels.
+ARG NEMAR_PROCESS_VERSION=
+ARG NEMAR_PROCESS_COMMIT=
+ARG NEMAR_PROCESS_BUILD=dev
+ARG LOCK_SHA256=unverified
+LABEL org.opencontainers.image.title="nemar-python" \
+      org.opencontainers.image.description="NEMAR runtime image, CUDA 12.9 flavor: Python 3.12, eegprep, MNE-Python, pamica, amica15, signalJourney validator" \
+      org.opencontainers.image.source="https://github.com/nemarOrg/nemar-process" \
+      org.opencontainers.image.version="${NEMAR_PROCESS_VERSION}" \
+      org.opencontainers.image.revision="${NEMAR_PROCESS_COMMIT}" \
+      io.nemar.build="${NEMAR_PROCESS_BUILD}" \
+      io.nemar.lock-sha256="${LOCK_SHA256}" \
+      io.nemar.flavor="cuda"
+
+# No `org.opencontainers.image.licenses` label: the repository's code is MIT, but the image also
+# holds eegprep, MNE-Python, pamica, torch and others under their own licences (docs/images.md).
+
+# The OpenMP runtime the native AMICA binary links (libgomp.so.1). The slim base has none. The
+# version is the one the live trixie archive served when it was pinned (the base's apt sources point at
+# the live archive, not at a snapshot); when the archive moves on, this step fails rather than install
+# another, and the pin is bumped together with the base digest.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libgomp1=14.2.0-19 \
+    && rm -rf /var/lib/apt/lists/*
+
+# A non-root user. Apptainer runs as the invoking user whatever this says; Docker honours it.
+RUN groupadd --system --gid 10001 nemar \
+    && useradd --system --uid 10001 --gid nemar --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin nemar
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder --chmod=0755 /opt/amica/amica15 /opt/amica/amica15
+COPY --from=builder --chmod=0644 /opt/amica/amica15.sha256 /opt/amica/amica15.sha256
+
+# The build file, written as root into a directory the job's user cannot change. The writer refuses an
+# empty version or commit, a build that is not release or dev, a release whose version has a -devN
+# suffix and a dev build whose version has none (nemar_process.common.build).
+RUN /opt/venv/bin/python -m nemar_process.common.build write /opt/nemar/build.json
+
+# The flavor, one word, written as root beside the build file: `nemar-recipe version` and the smoke
+# test read it (the label io.nemar.flavor says the same).
+RUN printf '%s\n' cuda > /opt/nemar/flavor
+
+COPY images/nemar-python/smoke.py /opt/smoke.py
+COPY tests/fixtures/smoke/ /opt/smoke-fixture/
+
+# One thread per math library and a fixed hash seed make a run repeatable; a recipe that wants more
+# threads sets them itself. A container started with --cleanenv keeps these: they are the image's own.
+# MPLBACKEND and MNE_DONTWRITE_HOME keep matplotlib and MNE-Python from needing a home directory.
+ENV PATH=/opt/venv/bin:$PATH \
+    VIRTUAL_ENV=/opt/venv \
+    OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    PYTHONHASHSEED=0 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MPLBACKEND=Agg \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    MNE_DONTWRITE_HOME=true
+
+USER nemar:nemar
+CMD ["python"]

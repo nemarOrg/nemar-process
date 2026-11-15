@@ -35,9 +35,11 @@ HEX = DIGEST.split(":", 1)[1]
 EXPRESSIONS = {
     "${{ steps.version.outputs.version }}": "1.2.3",
     "${{ needs.publish.outputs.version }}": "1.2.3",
-    "${{ needs.publish.outputs.digest }}": DIGEST,
+    "${{ needs.publish.outputs[format('digest_{0}', matrix.flavor)] }}": DIGEST,
     "${{ github.actor }}": "an-actor",
     "${{ secrets.GITHUB_TOKEN }}": "a-token",
+    "${{ github.ref_name }}": "image-nemar-python-v1.2.3",
+    "${{ github.repository }}": "nemarOrg/nemar-process",
 }
 
 VERSION_STEP = ("publish", "Refuse to overwrite an existing version tag")
@@ -62,13 +64,17 @@ def find_step(job: str, name: str) -> tuple[dict, dict]:
     raise AssertionError("no step named {!r} in job {}".format(name, job))
 
 
-def declared_env(job: dict, step: dict) -> dict[str, str]:
-    """The workflow's, the job's and the step's `env:`, with each expression replaced."""
+def declared_env(job: dict, step: dict, flavor: str = "cpu") -> dict[str, str]:
+    """The workflow's, the job's and the step's `env:`, with each expression replaced.
+
+    The publish and sign jobs run once per flavor: `flavor` is the matrix leg being run.
+    """
     merged: dict[str, str] = {}
+    expressions = {**EXPRESSIONS, "${{ matrix.flavor }}": flavor}
     for source in (workflow().get("env", {}), job.get("env", {}), step.get("env", {})):
         for key, value in source.items():
             text = str(value)
-            for expression, replacement in EXPRESSIONS.items():
+            for expression, replacement in expressions.items():
                 text = text.replace(expression, replacement)
             assert "${{" not in text, "this test does not know the expression in {}: {}".format(
                 key, text
@@ -220,10 +226,10 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def tag_check(which: str, registry_url: str, tmp_path: Path, **override: str):
+def tag_check(which: str, registry_url: str, tmp_path: Path, flavor: str = "cpu", **override: str):
     job_name, step_name, _repository, _tag = TAG_STEPS[which]
     job, step = find_step(job_name, step_name)
-    env = {**declared_env(job, step), "REGISTRY_URL": registry_url, **override}
+    env = {**declared_env(job, step, flavor), "REGISTRY_URL": registry_url, **override}
     return run_body(step, env, ROOT, tmp_path)
 
 
@@ -260,6 +266,26 @@ def test_the_registry_is_asked_about_the_right_tag_with_the_workflows_credential
     assert method == "HEAD"
     assert path == "/v2/{}/manifests/{}".format(repository, tag)
     assert headers["Authorization"] == "Bearer stand-in-token"
+
+
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_the_version_tag_asked_about_is_the_one_of_the_flavor_being_published(
+    flavor, registry, tmp_path
+):
+    # one step runs in both publish legs; each asks the registry for its own flavor's tag, never the other's
+    assert tag_check("version tag", registry.url, tmp_path, flavor).returncode == 0
+    (_token, manifest_request) = registry.requests
+    assert manifest_request[1] == "/v2/nemarorg/nemar-python/manifests/1.2.3-" + flavor
+
+
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_a_flavor_whose_tag_exists_is_refused_whatever_the_other_flavors_state(
+    flavor, registry, tmp_path
+):
+    registry.manifest = (200, b"")
+    done = tag_check("version tag", registry.url, tmp_path, flavor)
+    assert done.returncode != 0
+    assert "1.2.3-" + flavor in output_of(done)
 
 
 def test_the_sif_tag_asked_about_contains_404():
@@ -369,3 +395,129 @@ def test_the_steps_run_the_script_the_tests_exercise():
         assert "scripts/check_tag_absent.py" in step["run"]
         assert repository in step["run"]
         assert re.search(r"\bREGISTRY_TOKEN\b", " ".join(step["env"]))
+
+
+# ---- the release step: a re-run after a partial upload ------------------------------------------------
+
+RELEASE_STEP = ("release", "Attach the files to the release of the tag")
+CPU_FILE = "nemar-python-1.2.3-cpu-digests.json"
+CUDA_FILE = "nemar-python-1.2.3-cuda-digests.json"
+
+# A stand-in for the GitHub command line (an external tool, outside this repository): a release is a
+# directory of assets, `view` lists them, `download` prints one, `upload` refuses a name that is taken
+# (as the real command does without --clobber) and `create` makes the release. Every call is logged.
+FAKE_GH = """#!/bin/sh
+state="$FAKE_GH_STATE"
+echo "$@" >> "$state/calls"
+case "$1 $2" in
+  "release view")
+    [ -f "$state/exists" ] || exit 1
+    case "$*" in *"--json assets"*) ls "$state/assets" ;; esac
+    exit 0 ;;
+  "release create") touch "$state/exists"; echo "$@" > "$state/created"; exit 0 ;;
+  "release download") cat "$state/assets/$5"; exit 0 ;;
+  "release upload")
+    shift 3
+    for f in "$@"; do
+      if [ -e "$state/assets/$f" ]; then echo "asset already exists: $f" >&2; exit 1; fi
+      cp "$f" "$state/assets/$f"
+    done
+    exit 0 ;;
+esac
+exit 2
+"""
+
+
+class Release:
+    def __init__(self, tmp_path: Path):
+        self.state = tmp_path / "state"
+        (self.state / "assets").mkdir(parents=True)
+        self.work = tmp_path / "work"
+        self.work.mkdir()
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        gh = self.bin / "gh"
+        gh.write_text(FAKE_GH, encoding="utf-8")
+        gh.chmod(0o755)
+        for name, flavor in ((CPU_FILE, "cpu"), (CUDA_FILE, "cuda")):
+            document = {"image": {"digest": "sha256:" + ("a" if flavor == "cpu" else "b") * 64}}
+            (self.work / name).write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    def attach(self, name: str, content: str | None = None) -> None:
+        """An asset already on the release (default: the file this run holds)."""
+        (self.state / "exists").touch()
+        body = (self.work / name).read_text(encoding="utf-8") if content is None else content
+        (self.state / "assets" / name).write_text(body, encoding="utf-8")
+
+    def assets(self) -> dict[str, str]:
+        return {
+            p.name: p.read_text(encoding="utf-8") for p in sorted((self.state / "assets").iterdir())
+        }
+
+    def calls(self) -> list[str]:
+        path = self.state / "calls"
+        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    def run(self, tmp_path: Path):
+        job, step = find_step(*RELEASE_STEP)
+        env = {
+            **declared_env(job, step),
+            "FAKE_GH_STATE": str(self.state),
+            "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+        }
+        return run_body(step, env, self.work, tmp_path)
+
+
+@pytest.fixture
+def release(tmp_path):
+    return Release(tmp_path)
+
+
+def test_a_first_run_creates_the_release_naming_both_digests_and_uploads_both_files(
+    release, tmp_path
+):
+    done = release.run(tmp_path)
+    assert done.returncode == 0, output_of(done)
+    created = (release.state / "created").read_text(encoding="utf-8")
+    assert "sha256:" + "a" * 64 in created
+    assert "sha256:" + "b" * 64 in created
+    assert sorted(release.assets()) == [CPU_FILE, CUDA_FILE]
+
+
+def test_a_rerun_after_a_partial_upload_uploads_only_the_missing_file(release, tmp_path):
+    release.attach(CPU_FILE)  # the cpu file went up, the run failed before the cuda file did
+    done = release.run(tmp_path)
+    assert done.returncode == 0, output_of(done)
+    assert sorted(release.assets()) == [CPU_FILE, CUDA_FILE]
+    uploads = [c for c in release.calls() if c.startswith("release upload")]
+    assert uploads == ["release upload image-nemar-python-v1.2.3 " + CUDA_FILE]
+    assert CPU_FILE + " is already attached and identical" in output_of(done)
+
+
+def test_a_rerun_with_everything_attached_uploads_nothing_and_succeeds(release, tmp_path):
+    release.attach(CPU_FILE)
+    release.attach(CUDA_FILE)
+    done = release.run(tmp_path)
+    assert done.returncode == 0, output_of(done)
+    assert not [c for c in release.calls() if c.startswith("release upload")]
+
+
+@pytest.mark.parametrize("which", [CPU_FILE, CUDA_FILE])
+def test_an_attached_file_that_differs_is_never_replaced_and_fails_the_run(
+    which, release, tmp_path
+):
+    other = CUDA_FILE if which == CPU_FILE else CPU_FILE
+    release.attach(other)
+    release.attach(which, content='{"image": {"digest": "sha256:' + "c" * 64 + '"}}\n')
+    before = release.assets()
+    done = release.run(tmp_path)
+    assert done.returncode != 0
+    assert which + " is already attached" in output_of(done)
+    assert "differs" in output_of(done)
+    assert release.assets() == before  # nothing replaced
+    assert not any("--clobber" in c for c in release.calls())
+
+
+def test_the_release_step_names_no_overwrite_flag():
+    _job, step = find_step(*RELEASE_STEP)
+    assert "--clobber" not in step["run"]
