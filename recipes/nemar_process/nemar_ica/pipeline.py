@@ -233,7 +233,12 @@ def process(loaded: Loaded, settings: Settings, resolution: device.Resolution) -
     plan = result.plan
     # the floor's decisions have the hash they would have had as the floor's own plan
     floor_plan_hash = plan.hash_as(floor_steps.RECIPE_ID, floor_steps.RECIPE_VERSION, "qc")
-    eeg, result.work = result.work, {}  # the floor's copy is dropped as soon as ASR has it
+    # The floor's samples are dropped as soon as ASR has them (a long recording is gigabytes a copy);
+    # its header stays, because the floor's writer reads it (`pnts` for `mask_grid`).
+    eeg, result.work = (
+        result.work,
+        {key: value for key, value in result.work.items() if key != "data"},
+    )
 
     with guarded("ica"):
         good = io.channel_labels(eeg)

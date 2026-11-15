@@ -51,15 +51,15 @@ INFO = RecipeInfo(
         "pAMICA's independent components and ICLabel (eegprep)."
     ),
     recording_description=(
-        "nemar-ica 1.0.0: the independent-component decomposition of one EEG recording, computed "
+        "nemar-ica {}: the independent-component decomposition of one EEG recording, computed "
         "by pAMICA through eegprep (or by the AMICA binary, recorded as such), with ASR's state "
         "and ICLabel's probabilities; no samples are written."
-    ),
+    ).format(steps.RECIPE_VERSION),
     dataset_pipeline_description="NEMAR decomposition, dataset level.",
     dataset_description=(
-        "nemar-ica 1.0.0: dataset-level record of the decompositions "
+        "nemar-ica {}: dataset-level record of the decompositions "
         "(aggregates and per-recording summary table)."
-    ),
+    ).format(steps.RECIPE_VERSION),
     pipeline_type="ica",
 )
 

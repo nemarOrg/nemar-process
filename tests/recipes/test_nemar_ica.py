@@ -145,6 +145,7 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
             "ica.json",
             "mixing.tsv",
             "qc.json",
+            "samplemask.tsv",
             "signalJourney.json",
             "sphere.tsv",
             "unmixing.tsv",
