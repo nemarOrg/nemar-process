@@ -15,7 +15,9 @@ paths sort by code point. Each vector is also computed here from the definition 
 from __future__ import annotations
 
 import hashlib
+import re
 import struct
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -43,6 +45,11 @@ INPUT_DIGEST = "sha256:bea77ea8a233ae2507f192e48548af37b8acf01c8abb0e65143ac3178
 # in code point order; compared as UTF-16 units, U+1F600 (a surrogate pair) would come first
 CODE_POINT_PATHS = ("sub-01/｡", "sub-01/\U0001f600")
 CODE_POINT_DIGEST = "sha256:4bf7b0ab0a746ebe769759f4989df1ac1c810eaea360c891d76abd6162508c53"
+# the eighth vector: one value, digital 3 with scale 0.1 and offset -0.3, at 250 Hz, with no text.
+# `3 * 0.1` rounds to 0.30000000000000004 and the separately rounded add gives 5.55e-17; a fused
+# multiply-add rounds once and gives 2.78e-17, which is another digest
+SEPARATELY_ROUNDED = "2aa312ed5d306f1f4e3331f7eff09a23972ae2b8bf8792732a79c6e156c3cb0b"
+FUSED = "ebb90d19f4a23ee757676711f168ad69e2564e98267005d526941eb49dffc536"
 HEADER = (
     "nemar.store-content.v1\nshape 2 3\nrate 406f400000000000\nunit µV\n"
     "label Fz\nlabel Cz\ndata float64-le\n"
@@ -67,6 +74,21 @@ def reference_digest(unit: str | None, labels: tuple[str, str] | None) -> str:
     values = DIGITAL.astype(np.float64) * np.array([[0.1], [0.25]]) + np.array([[0.0], [-12.5]])
     body = b"".join(values[row].astype("<f8").tobytes() for row in range(2))
     return hashlib.sha256("".join(line + "\n" for line in lines).encode("utf-8") + body).hexdigest()
+
+
+def one_value_digest(value: float) -> str:
+    """The eighth vector's digest from the definition alone, for one channel and one sample."""
+    lines = ["nemar.store-content.v1", "shape 1 1", "rate " + struct.pack(">d", RATE).hex()]
+    lines += ["unit", "label", "data float64-le"]
+    header = "".join(line + "\n" for line in lines).encode("utf-8")
+    return hashlib.sha256(header + struct.pack("<d", value)).hexdigest()
+
+
+def one_value(digital, scale: float = 0.1, offset: float = -0.3, dtype=np.int16) -> np.ndarray:
+    """What eegprep-lean's own ``to_physical`` makes of one digital value (a 1 by 1 array)."""
+    attributes = {**ARRAY, "scale": [scale], "offset": [offset]}
+    with np.errstate(all="ignore"):  # a value that overflows is what some of the tests are about
+        return to_physical(np.array([[digital]], dtype=dtype), attributes, [0])
 
 
 def window(
@@ -195,6 +217,94 @@ def test_a_changed_value_changes_the_digest():
     changed = physical()
     changed[1, 2] = np.nextafter(changed[1, 2], np.inf)
     assert z.store_content_sha256(changed, RATE, UNITS, LABELS) != WITH_METADATA
+
+
+# ---- the multiply and the add are two roundings, never one ------------------------------------
+
+
+def test_the_eighth_vector_is_a_separately_rounded_multiply_then_add():
+    """Digital 3, scale 0.1, offset -0.3: the platform's value, from eegprep-lean's own conversion."""
+    values = one_value(3)
+    assert z.store_content_sha256(values, RATE, None, None) == SEPARATELY_ROUNDED
+    assert (
+        z.window_content_sha256(window(data=values, unit=None, labels=None)) == SEPARATELY_ROUNDED
+    )
+    # and from the definition alone: the product rounded, then the sum rounded
+    separate = (float(3) * 0.1) + (-0.3)
+    assert one_value_digest(separate) == SEPARATELY_ROUNDED
+    assert float(values[0, 0]) == separate == 5.551115123125783e-17
+
+
+def test_a_fused_multiply_add_is_another_digest_so_the_vector_tells_them_apart():
+    # one rounding of the exact value 3 * 0.1 + -0.3 (the doubles' exact values), as a fused
+    # multiply-add computes it; Python's math.fma would give the same on a version that has it
+    fused = float(Fraction(3) * Fraction(0.1) + Fraction(-0.3))
+    assert fused != float(3) * 0.1 + (-0.3)
+    assert one_value_digest(fused) == FUSED != SEPARATELY_ROUNDED
+    assert z.store_content_sha256(np.array([[fused]]), RATE, None, None) == FUSED
+
+
+# ---- what is not finite has no digest ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf], ids=["NaN", "inf", "-inf"])
+def test_a_value_that_is_not_finite_has_no_digest(bad):
+    values = physical()
+    values[1, 2] = bad
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(values, RATE, UNITS, LABELS)
+    with pytest.raises(z.Undigestable):
+        z.window_content_sha256(window(data=values))
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf], ids=["NaN", "inf", "-inf"])
+@pytest.mark.parametrize("rate", [None, "250"], ids=["no rate", "a rate that is text"])
+def test_a_rate_that_is_not_a_finite_number_has_no_digest(bad, rate):
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(physical(), bad, UNITS, LABELS)
+    with pytest.raises(z.Undigestable):
+        z.window_content_sha256(window(rate=bad))
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(physical(), rate, UNITS, LABELS)
+
+
+@pytest.mark.parametrize(
+    ("what", "values"),
+    [
+        ("a scale that is NaN", one_value(3, scale=np.nan)),
+        ("a scale that is infinity", one_value(3, scale=np.inf)),
+        ("an offset that is NaN", one_value(3, offset=np.nan)),
+        ("an offset that is infinity", one_value(3, offset=-np.inf)),
+        ("a digital value that is NaN", one_value(np.nan, dtype=np.float64)),
+        ("a digital value that is infinity", one_value(np.inf, dtype=np.float64)),
+        ("a product that overflows", one_value(32767, scale=1e308)),
+        ("an infinite scale on a zero count", one_value(0, scale=np.inf)),
+    ],
+)
+def test_what_eegprep_lean_makes_of_a_scale_an_offset_or_a_value_that_is_not_finite_has_no_digest(
+    what, values
+):
+    """The recipe sees the physical values, so each of these is a value that is not finite."""
+    assert not np.isfinite(values).all(), what
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(values, RATE, None, None)
+
+
+@pytest.mark.parametrize(
+    "shape", [(0, 3), (2, 0), (0, 0)], ids=["no channel", "no sample", "neither"]
+)
+def test_a_group_with_no_channel_or_no_sample_has_no_digest(shape):
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(np.zeros(shape), RATE, None, None)
+    with pytest.raises(z.Undigestable):
+        z.store_content_header(shape, RATE, None, None)
+    with pytest.raises(z.Undigestable):
+        z.window_content_sha256(window(data=np.zeros(shape), unit=None, labels=None))
+
+
+def test_a_finite_group_of_one_channel_and_one_sample_has_a_digest():
+    digest = z.store_content_sha256(np.zeros((1, 1)), RATE, None, None)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
 
 
 # ---- the text is the text: no normalization, no trimming --------------------------------------
@@ -365,7 +475,55 @@ def test_the_input_digest_hashes_each_text_as_given_and_refuses_what_is_no_text_
 
 
 def test_the_input_digest_of_no_rows_is_the_digest_of_no_text():
+    """Not refused here: a key consumer checks for a non-empty `stores_content` before it looks."""
     assert z.input_digest([]) == "sha256:" + hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            row("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64),
+            row("sub-01/eeg/a_eeg.edf", "eeg", "b" * 64),
+        ],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64)] * 2,
+        [row("", "eeg", "a" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "", "a" * 64)],
+        [row("sub-01/eeg/a\t_eeg.edf", "eeg", "a" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "ee\tg", "a" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "A" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "a" * 63)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "a" * 65)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64 + "\n")],  # `$` would accept this
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "\n" + "a" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "sha256:" + "a" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "g" * 64)],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", "")],
+        [row("sub-01/eeg/a_eeg.edf", "eeg", 1234)],
+        [row(5, "eeg", "a" * 64)],
+    ],
+    ids=[
+        "a path repeated with another digest",
+        "a path repeated",
+        "an empty path",
+        "an empty group",
+        "a tab in a path",
+        "a tab in a group",
+        "an upper-case digest",
+        "a digest of 63 digits",
+        "a digest of 65 digits",
+        "a digest with a trailing line feed",
+        "a digest with a leading line feed",
+        "a digest with its prefix",
+        "a digest that is not hexadecimal",
+        "an empty digest",
+        "a digest that is not text",
+        "a path that is not text",
+    ],
+)
+def test_a_row_that_is_not_one_of_the_input_digests_is_refused(rows):
+    with pytest.raises(ValueError):
+        z.input_digest(rows)
 
 
 # ---- the rows of a record ---------------------------------------------------------------------

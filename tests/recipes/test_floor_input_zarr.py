@@ -132,7 +132,9 @@ def test_every_eeg_store_is_processed_or_counted(ran):
     assert rows[z.MISSING]["step"] == "load"
     assert rows[z.MISSING]["detail"] == "ArrayNotFoundError"  # a class name, never the address
     assert rows[z.BAD_UNIT]["detail"] == "ValueError"
-    assert rows[z.NON_FINITE]["detail"] == "non_finite_samples"  # the loader's word, not its class
+    # a scale so large that the values overflow: refused when the read is named by its content, which
+    # is before the loader's own check of the values (`non_finite_samples`) is reached
+    assert rows[z.NON_FINITE]["detail"] == "undigestable_metadata"
     assert rows[z.FLAT]["step"] == "flatline"
 
 
@@ -262,18 +264,18 @@ def test_the_watch_can_fail(ran, served):  # noqa: F811
 # ---- what the records say was read ------------------------------------------------------------
 
 # What each store of the stand-in holds, as the stand-in wrote it: (seed or None for zeros, unit,
-# scale). The three stores that failed after a complete read are digested too: the digest is of what
-# was read, whatever the floor then made of it; the two that were never read have none.
+# scale). The two stores that failed after a complete read are digested too: the digest is of what
+# was read, whatever the floor then made of it. The two that were never read have none, and neither
+# has the one whose values are not finite (the digest of a value that is infinity is refused).
 CONTENT = {
     z.EEG_ONE: (1, "uV", 0.5),
     z.EEG_TWO: (2, z.MICRO_SIGN, 0.5),
     z.EEG_MU: (3, z.GREEK_MU, 0.5),
     z.BAD_UNIT: (4, "kV", 0.5),
     z.FLAT: (None, "uV", 0.5),
-    z.NON_FINITE: (5, "uV", 1e308),
 }
 READ_IN_FULL = sorted(CONTENT)
-UNREAD = sorted([z.HUGE, z.MISSING])
+UNREAD = sorted([z.HUGE, z.MISSING, z.NON_FINITE])
 GROUP = "eeg_250hz"
 
 

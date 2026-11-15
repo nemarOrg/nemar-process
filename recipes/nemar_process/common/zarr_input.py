@@ -472,12 +472,16 @@ def validate_document(document: Any) -> None:
 
 STORE_CONTENT_FORMAT = "nemar.store-content.v1"
 LINE_BREAKS = ("\r", "\n")
+ROW_BREAKS = (*LINE_BREAKS, "\t")  # a row's pieces are tab-separated lines
+# Matched whole with ``fullmatch``: a ``$`` would accept a trailing line feed.
+CONTENT_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class Undigestable(ValueError):
-    """A store whose unit or labels cannot be written as the lines of the digest's header (a line
-    feed or a carriage return, a lone surrogate, a list that is not one per channel): it has no
-    digest, never a digest of a guess."""
+    """A store, or a row of a dataset, that has no digest, never a digest of a guess: a unit or label
+    that cannot be a line of the header (a line feed or a carriage return, a lone surrogate), a list
+    that is not one per channel, a value or a rate that is not finite, no channel or no sample, or a
+    row that is not one of the input digest's."""
 
 
 class StoreContent(NamedTuple):
@@ -543,6 +547,10 @@ def store_content_header(
     digest (``Undigestable``).
     """
     channels, samples = shape
+    if channels < 1 or samples < 1:
+        raise Undigestable("the group has no channel or no sample")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+        raise Undigestable("the rate is not a finite number")
     each_unit = _per_channel(units, channels, "units")
     each_label = _per_channel(labels, channels, "labels")
     shared = each_unit[0] if each_unit and each_unit[0] and len(set(each_unit)) == 1 else None
@@ -568,7 +576,11 @@ def store_content_sha256(
 
     The values are the physical ones, ``data`` as channels by samples, written as little-endian
     binary64 in C order (all of channel 0, then channel 1): what is hashed is the values and not how
-    an array lays them out in memory. ``Undigestable`` for what has no digest.
+    an array lays them out in memory. ``Undigestable`` for what has no digest: no channel or no
+    sample, a rate that is not finite, a value that is not finite. A non-finite scale, offset or
+    digital value, or a product that overflows, is a non-finite value here, because ``data`` is
+    what eegprep-lean made of them (``physical = digital * scale + offset``, two separately rounded
+    operations, never fused).
     """
     values = np.asarray(data)
     if values.ndim != 2:
@@ -576,7 +588,10 @@ def store_content_sha256(
     shape = (values.shape[0], values.shape[1])
     hasher = hashlib.sha256(store_content_header(shape, rate, units, labels))
     for channel in values:  # one at a time: the same bytes as the whole array, with no second copy
-        hasher.update(np.ascontiguousarray(channel, dtype="<f8").tobytes(order="C"))
+        row = np.ascontiguousarray(channel, dtype="<f8")
+        if not np.isfinite(row).all():
+            raise Undigestable("a value is not finite")
+        hasher.update(row.tobytes(order="C"))
     return hasher.hexdigest()
 
 
@@ -603,10 +618,12 @@ def content_rows(read: Mapping[str, Sequence[str]]) -> list[dict[str, str]]:
 
 
 def _row_text(name: str, text: Any) -> str:
-    """A row's path, group or digest as a piece of a line: text as the unit and labels are, so a line
-    feed or a carriage return or a lone surrogate in it has no digest."""
+    """A row's path or group as a piece of a tab-separated line: non-empty text with no tab, no line
+    feed, no carriage return and no lone surrogate."""
     _utf8(name, text)
-    if any(character in text for character in LINE_BREAKS):
+    if not text:
+        raise Undigestable("the {} is empty".format(name))
+    if any(character in text for character in ROW_BREAKS):
         raise Undigestable("the {} cannot be a piece of a line".format(name))
     return text
 
@@ -614,17 +631,26 @@ def _row_text(name: str, text: Any) -> str:
 def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
     """``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
     store read in full, sorted by path in code point order (the order of the paths' UTF-8 bytes,
-    whatever order ``rows`` come in), each text as it is given."""
+    whatever order ``rows`` come in), each text as it is given.
+
+    ``Undigestable`` (a ``ValueError``) for a row that is not one: a path repeated, an empty path or
+    group, a tab, a line feed, a carriage return or a lone surrogate in a path or group, or a
+    ``content_sha256`` that is not 64 lower-case hexadecimal digits. No rows is the digest of no text,
+    and is not refused here (the key consumer's check for a non-empty ``stores_content`` comes first).
+    """
     ordered = sorted(rows, key=lambda row: _utf8("path", row["path"]))
-    text = "".join(
-        "{}\t{}\t{}\n".format(
-            _row_text("path", row["path"]),
-            _row_text("group", row["group"]),
-            _row_text("content_sha256", row["content_sha256"]),
-        )
-        for row in ordered
-    )
-    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    lines = []
+    seen = set()
+    for row in ordered:
+        path, group = _row_text("path", row["path"]), _row_text("group", row["group"])
+        digest = row["content_sha256"]
+        if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest):
+            raise Undigestable("a content_sha256 is not 64 lower-case hexadecimal digits")
+        if path in seen:
+            raise Undigestable("a path is repeated")
+        seen.add(path)
+        lines.append("{}\t{}\t{}\n".format(path, group, digest))
+    return "sha256:" + hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
 # ---- the source -------------------------------------------------------------------------------
