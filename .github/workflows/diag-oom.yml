@@ -1,0 +1,40 @@
+name: diag-oom (temporary, card L4; never merged)
+
+# Measures, on GitHub's hosted runners, how long after a container's exit the engine reports that it was
+# killed for memory (issue 31). Runs only on the draft pull request that carries it, only when this file
+# or the harness changes, and is deleted before review.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/diag-oom.yml"
+      - "tests/e2e/diag_oom_harness.py"
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.13.4"
+
+jobs:
+  measure:
+    name: measure (${{ matrix.image }})
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-latest, ubuntu-24.04]
+    env:
+      NEMAR_REQUIRE_DOCKER: "1"
+      DIAG_IMAGE_LABEL: ${{ matrix.image }}
+      DIAG_ITERATIONS: "300"
+      DIAG_BUDGET_SECONDS: "840"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Docker version
+        run: docker version
+      - name: Measure the memory-kill read
+        run: uv run --frozen pytest tests/e2e/diag_oom_harness.py -s -q -p no:cacheprovider
