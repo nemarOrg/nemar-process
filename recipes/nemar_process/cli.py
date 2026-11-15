@@ -1039,9 +1039,50 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
 # ---- version ----------------------------------------------------------------------------------
 
 
+# What an image says about itself, in two files it writes as root at build time (docs/images.md):
+# the flavor, one word, and the SHA-256 of the native AMICA binary it carries. Module attributes so
+# that a test points them at files of its own; outside an image there is no file and the value is null.
+FLAVOR_FILE = Path("/opt/nemar/flavor")
+AMICA15_SHA256_FILE = Path("/opt/amica/amica15.sha256")
+IMAGE_FLAVORS = ("cpu", "cuda")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+class ImageFactRefused(ValueError):
+    """A file an image writes that is there and is not what its writer writes: a broken image."""
+
+
+def read_image_fact(path: Path, valid: Any, what: str) -> str | None:
+    """The one word in ``path``, None where there is no file; a file that is there must be valid.
+
+    A symbolic link is refused, never followed, and so is anything but a single valid word.
+    """
+    if not os.path.lexists(path):
+        return None
+    if path.is_symlink():
+        raise ImageFactRefused("the {} file is a symbolic link".format(what))
+    try:
+        word = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as error:
+        raise ImageFactRefused(
+            "the {} file cannot be read ({})".format(what, type(error).__name__)
+        ) from error
+    if not valid(word):
+        raise ImageFactRefused("the {} file does not hold what its writer writes".format(what))
+    return word
+
+
 def version_command() -> int:
     import numpy
 
+    try:
+        flavor = read_image_fact(FLAVOR_FILE, lambda word: word in IMAGE_FLAVORS, "flavor")
+        amica15 = read_image_fact(
+            AMICA15_SHA256_FILE, lambda word: bool(HEX64.fullmatch(word)), "amica15 digest"
+        )
+    except ImageFactRefused as error:
+        print(error, file=sys.stderr)
+        return EXIT_INTERNAL
     versions = {
         "recipes": {key: REGISTRY[key].version for key in sorted(REGISTRY)},
         "inputs": {key: list(REGISTRY[key].inputs) for key in sorted(REGISTRY)},
@@ -1049,6 +1090,8 @@ def version_command() -> int:
         "eegprep": metadata.version("eegprep"),
         "python": platform.python_version(),
         "numpy": numpy.__version__,
+        "flavor": flavor,
+        "amica15_sha256": amica15,
     }
     print(json.dumps(versions, sort_keys=True))
     return EXIT_OK

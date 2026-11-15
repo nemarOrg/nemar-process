@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from typing import Any
 
 import make_image_digests as digests
 import pytest
@@ -16,13 +17,31 @@ IMAGE = "sha256:" + "ab" * 32
 SIF = "sha256:" + "cd" * 32
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 RUN_URL = "https://github.com/nemarOrg/nemar-process/actions/runs/1"
+AMICA15 = "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a"
+CPUFIT = "ef" * 32
+ARCHS = ["sm_75", "sm_80", "sm_90", "compute_90"]
 SMOKE = {
     "python": "3.12.16",
+    "flavor": "cpu",
     "distributions": {
         "eegprep": "0.5.0",
         "pamica": "0.4.0",
         "torch": "2.15.0+cpu",
         "mne": "1.13.2",
+    },
+    "torch": {"version": "2.15.0+cpu", "cuda": None, "arch_list": []},
+    "amica15": {"path": "/opt/amica/amica15", "sha256": AMICA15},
+    "cpu_fit": {"sha256": CPUFIT},
+}
+CUDA_SMOKE = {
+    **SMOKE,
+    "flavor": "cuda",
+    "distributions": {**SMOKE["distributions"], "torch": "2.12.1+cu129"},
+    "torch": {
+        "version": "2.12.1+cu129",
+        "cuda": "12.9",
+        "arch_list": ARCHS,
+        "arch_source": "torch._C._cuda_getArchFlags",
     },
 }
 
@@ -35,7 +54,7 @@ def sif_file(tmp_path):
 
 
 def record(sif_file, **changes):
-    arguments = {
+    arguments: dict[str, Any] = {
         "version": "0.1.0",
         "image_digest": IMAGE,
         "sif_digest": SIF,
@@ -141,3 +160,159 @@ def test_the_command_line_writes_the_file(tmp_path, sif_file):
     assert done.returncode == 0, done.stderr
     assert json.loads(out.read_text(encoding="utf-8"))["image"]["digest"] == IMAGE
     assert out.read_text(encoding="utf-8").endswith("\n")
+
+
+# ---- the two flavors: one record each -----------------------------------------------------------------
+
+
+def cuda_record(**changes):
+    arguments: dict[str, Any] = {
+        "version": "0.1.0",
+        "flavor": "cuda",
+        "image_digest": IMAGE,
+        "lock": LOCK,
+        "smoke": CUDA_SMOKE,
+        "run_url": RUN_URL,
+        "commit": COMMIT,
+    }
+    arguments.update(changes)
+    return digests.build_record(**arguments)
+
+
+def test_both_flavors_record_the_binary_and_the_cpu_fit_reading(sif_file):
+    cpu = record(sif_file)
+    cuda = cuda_record()
+    for made in (cpu, cuda):
+        assert made["amica15"] == {
+            "release": "0.4.0",
+            "path": "/opt/amica/amica15",
+            "sha256": AMICA15,
+        }
+        assert made["cpu_fit_sha256"] == CPUFIT
+        assert made["image"]["digest"] == IMAGE
+
+
+def test_the_cuda_record_is_of_the_cuda_tag_lists_the_architectures_and_has_no_sif():
+    made = cuda_record()
+    assert made["flavor"] == "cuda"
+    assert made["image"]["tag"] == "0.1.0-cuda"
+    assert made["image"]["reference"] == "ghcr.io/nemarorg/nemar-python@" + IMAGE
+    assert made["cuda"] == {
+        "torch_cuda": "12.9",
+        "arch_list": ARCHS,
+        "arch_source": "torch._C._cuda_getArchFlags",
+    }
+    assert made["versions"]["torch"] == "2.12.1+cu129"
+
+
+def test_the_cuda_record_says_no_sif_exists_and_names_no_file():
+    made = cuda_record()
+    # no SIF is published and none may be built by hand (the runner refuses one): nothing is named
+    assert made["sif"] is None
+    assert made["launch_image"] is None
+    assert "No SIF is published" in made["sif_note"]
+    assert "Docker or Podman" in made["sif_note"]
+    # no file name of the form <hex>.sif appears anywhere in the record
+    assert ".sif" not in json.dumps(made)
+    assert "apptainer build" not in json.dumps(made)
+
+
+def test_the_cpu_record_has_no_cuda_block_and_still_has_its_sif(sif_file):
+    made = record(sif_file)
+    assert "cuda" not in made
+    assert made["sif"]["oras_digest"] == SIF
+    assert made["image"]["tag"] == "0.1.0-cpu"
+
+
+def test_the_cpu_launch_image_is_accepted_by_the_launchers_own_rules(sif_file):
+    schema = spec.load_schema()["properties"]["image"]
+    made = record(sif_file)
+    assert spec.validate(made["launch_image"], schema) == []
+    assert "sif_note" not in made  # only a flavor without a SIF carries the note
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"sif_digest": SIF}, "publishes no SIF"),
+        ({"smoke": SMOKE}, "flavor"),  # the cpu document is not the cuda image's
+        ({"flavor": "rocm"}, "flavor is not valid"),
+        ({"smoke": {**CUDA_SMOKE, "amica15": None}}, "native AMICA"),
+        ({"smoke": {**CUDA_SMOKE, "cpu_fit": {}}}, "CPU fit"),
+        ({"smoke": {**CUDA_SMOKE, "torch": {"cuda": "12.9", "arch_list": []}}}, "architecture"),
+        ({"smoke": {**CUDA_SMOKE, "torch": {"cuda": "12.9"}}}, "architecture"),
+    ],
+)
+def test_a_cuda_record_is_refused_without_what_a_cuda_image_must_show(changes, message):
+    with pytest.raises(ValueError, match=message):
+        cuda_record(**changes)
+
+
+def test_the_cpu_flavor_needs_its_sif_and_a_document_of_its_own_flavor(sif_file):
+    with pytest.raises(ValueError, match="publishes a SIF"):
+        digests.build_record(
+            version="0.1.0",
+            image_digest=IMAGE,
+            lock=LOCK,
+            smoke=SMOKE,
+            run_url=RUN_URL,
+            commit=COMMIT,
+        )
+    with pytest.raises(ValueError, match="flavor"):
+        record(sif_file, smoke=CUDA_SMOKE)
+
+
+def test_the_command_line_writes_the_cuda_record_without_any_sif_argument(tmp_path):
+    smoke_path = tmp_path / "smoke.json"
+    smoke_path.write_text(json.dumps(CUDA_SMOKE), encoding="utf-8")
+    out = tmp_path / "nemar-python-0.1.0-cuda-digests.json"
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "make_image_digests.py"),
+            "--version", "0.1.0",
+            "--flavor", "cuda",
+            "--image-digest", IMAGE,
+            "--lock", str(LOCK),
+            "--smoke", str(smoke_path),
+            "--run-url", RUN_URL,
+            "--commit", COMMIT,
+            "--output", str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["flavor"] == "cuda"
+    assert written["cuda"]["arch_list"] == ARCHS
+    assert written["sif"] is None
+
+
+def test_the_command_line_refuses_a_cuda_record_that_is_given_a_sif(tmp_path, sif_file):
+    smoke_path = tmp_path / "smoke.json"
+    smoke_path.write_text(json.dumps(CUDA_SMOKE), encoding="utf-8")
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "make_image_digests.py"),
+            "--version", "0.1.0",
+            "--flavor", "cuda",
+            "--image-digest", IMAGE,
+            "--sif-digest", SIF,
+            "--sif-file", str(sif_file),
+            "--smoke", str(smoke_path),
+            "--run-url", RUN_URL,
+            "--commit", COMMIT,
+            "--output", str(tmp_path / "out.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )  # fmt: skip
+    assert done.returncode == 1
+    assert "publishes no SIF" in done.stderr
+    assert not (tmp_path / "out.json").exists()

@@ -1,12 +1,14 @@
 name: image-nemar-python
 
-# The nemar-python runtime image, CPU flavor: built from the root lock, smoke-tested as a container
-# image and as a Singularity Image Format (SIF) file under Apptainer, and, on a version tag or a
-# manual dispatch from main, pushed to GHCR, smoke-tested again by digest, signed with cosign
-# (keyless), turned into a SIF from its digest, pushed again as an OCI artifact, signed again and
-# recorded in a release asset.
+# The nemar-python runtime image in two flavors, `cpu` and `cuda` (a matrix in the test, publish and
+# sign jobs): built from the root lock, smoke-tested as a container image (the CPU flavor also as a
+# Singularity Image Format (SIF) file under Apptainer), and, on a version tag or a manual dispatch from
+# main, pushed to GHCR, smoke-tested again by digest, signed with cosign (keyless), recorded in a
+# release asset per flavor. The CPU flavor is also turned into a SIF from its digest, pushed again as an
+# OCI artifact and signed again; the CUDA flavor publishes no SIF (none exists, and the runner refuses
+# one built by hand), so it runs under Docker or Podman by its verified digest.
 #
-#   pull request              the `test` job only: build without pushing, smoke test in both forms.
+#   pull request              the `test` job only: build both flavors without pushing, smoke test.
 #                             No job that pushes, signs or releases runs on a pull request.
 #   tag image-nemar-python-v* the whole chain, but only for a commit that is reachable from main:
 #                             the first step of `publish` fails otherwise. The first publication
@@ -44,7 +46,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version as MAJOR.MINOR.PATCH; the tag is <version>-cpu"
+        description: "Image version as MAJOR.MINOR.PATCH; the tags are <version>-cpu and <version>-cuda"
         required: true
         type: string
 
@@ -65,11 +67,34 @@ env:
 
 jobs:
   test:
-    name: build and smoke test (container and SIF)
+    name: build and smoke test (${{ matrix.flavor }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # One leg per flavor; a flavor that fails does not stop the other from reporting. The CUDA flavor
+    # has no GitHub Actions cache: its layers are several gigabytes and would push the CPU flavor's
+    # (and the repository's other caches) out of the 10 GB the repository gets.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: cpu
+            dockerfile: images/nemar-python/Dockerfile
+            cache_from: type=gha,scope=nemar-python-cpu
+            cache_to: type=gha,scope=nemar-python-cpu,mode=max
+          - flavor: cuda
+            dockerfile: images/nemar-python/Dockerfile.cuda
+            cache_from: ""
+            cache_to: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Free disk space for the CUDA build
+        if: matrix.flavor == 'cuda'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -99,7 +124,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: images/nemar-python/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: false
           load: true
@@ -109,26 +134,47 @@ jobs:
             NEMAR_PROCESS_COMMIT=${{ github.sha }}
             NEMAR_PROCESS_BUILD=dev
             LOCK_SHA256=${{ steps.lock.outputs.sha256 }}
-          cache-from: type=gha,scope=nemar-python-cpu
-          cache-to: type=gha,scope=nemar-python-cpu,mode=max
+          cache-from: ${{ matrix.cache_from }}
+          cache-to: ${{ matrix.cache_to }}
 
-      - name: Smoke test the container image
+      - name: Smoke test the container image (cpu)
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           docker run --rm nemar-python:ci python /opt/smoke.py > smoke-container.json
-          python3 scripts/check_smoke_pins.py --image smoke-container.json
+          python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-container.json
+
+      # The way a job the runner kept off the GPU runs: no GPU is visible (a hosted runner has none,
+      # and the variable says so to the container runtime), so torch.cuda.is_available() is false and
+      # the CPU engine must run, in the CUDA image, correctly. The document is checked for exactly that.
+      - name: Smoke test the container image (cuda, no GPU visible)
+        if: matrix.flavor == 'cuda'
+        run: |
+          set -euo pipefail
+          docker run --rm --env NVIDIA_VISIBLE_DEVICES=void nemar-python:ci python /opt/smoke.py --no-gpu > smoke-container.json
+          python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-container.json
+
+      - name: Report the image size and the smoke readings
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          set -euo pipefail
+          echo "image size (${FLAVOR}): $(docker image inspect --format '{{ .Size }}' nemar-python:ci) bytes"
+          python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print("flavor", d["flavor"], "torch", d["torch"]["version"], "cuda", d["torch"]["cuda"], "arch_list", d["torch"]["arch_list"], "amica15", d["amica15"]["sha256"], "CPUFIT", d["cpu_fit"]["sha256"])' smoke-container.json
 
       - name: Check the labels against the lock and the commit
         env:
           LOCK_SHA256: ${{ steps.lock.outputs.sha256 }}
+          FLAVOR: ${{ matrix.flavor }}
         run: |
           set -euo pipefail
           label() { docker inspect --format "{{ index .Config.Labels \"${1}\" }}" nemar-python:ci; }
           test "$(label io.nemar.lock-sha256)" = "$LOCK_SHA256"
           test "$(label org.opencontainers.image.revision)" = "$GITHUB_SHA"
-          test "$(label io.nemar.flavor)" = "cpu"
+          test "$(label io.nemar.flavor)" = "$FLAVOR"
 
       - name: Install Apptainer
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -139,18 +185,21 @@ jobs:
           apptainer --version
 
       - name: Build a SIF from the local image
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           docker save nemar-python:ci --output nemar-python.tar
           apptainer build nemar-python.sif docker-archive:nemar-python.tar
 
       - name: Smoke test the SIF under Apptainer, isolated as the launcher runs it
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
-          python3 scripts/check_smoke_pins.py --image smoke-sif.json
+          python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        if: matrix.flavor == 'cpu'
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -159,6 +208,7 @@ jobs:
       # stand-in outputs routes. The test needs the runtime environment to compare the result with a
       # direct run of the same fixture.
       - name: Run the floor through the launcher, in the SIF
+        if: matrix.flavor == 'cpu'
         env:
           NEMAR_REQUIRE_APPTAINER: "1"
           NEMAR_REQUIRE_RECIPE_SIF: "1"
@@ -167,7 +217,7 @@ jobs:
         run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m apptainer -v
 
   publish:
-    name: push the image to GHCR
+    name: push the ${{ matrix.flavor }} image to GHCR
     needs: test
     if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/image-nemar-python-v') || github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
@@ -175,9 +225,24 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # One leg per flavor, both behind the same guards below: a leg that fails does not stop the other,
+    # and "Re-run failed jobs" runs only the leg that failed. Every leg writes the output of its own
+    # flavor and leaves the other empty, which the run keeps from the leg that set it (the pattern the
+    # GitHub documentation gives for matrix outputs).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: cpu
+            dockerfile: images/nemar-python/Dockerfile
+            cache_from: type=gha,scope=nemar-python-cpu
+          - flavor: cuda
+            dockerfile: images/nemar-python/Dockerfile.cuda
+            cache_from: ""
     outputs:
       version: ${{ steps.version.outputs.version }}
-      digest: ${{ steps.build.outputs.digest }}
+      digest_cpu: ${{ matrix.flavor == 'cpu' && steps.build.outputs.digest || '' }}
+      digest_cuda: ${{ matrix.flavor == 'cuda' && steps.build.outputs.digest || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -230,6 +295,14 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      - name: Free disk space for the CUDA build
+        if: matrix.flavor == 'cuda'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
@@ -242,16 +315,18 @@ jobs:
         id: lock
         run: echo "sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      # A version is published once: the tag <version>-cpu is never moved to a new image. Only a
-      # manifest HEAD answered with exactly 404 lets the run go on; any other reply stops it.
+      # A version is published once: the tags <version>-cpu and <version>-cuda are never moved to a
+      # new image. Only a manifest HEAD answered with exactly 404 lets the run go on; any other reply
+      # stops it.
       - name: Refuse to overwrite an existing version tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          FLAVOR: ${{ matrix.flavor }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          python3 scripts/check_tag_absent.py nemarorg/nemar-python "${VERSION}-cpu"
+          python3 scripts/check_tag_absent.py nemarorg/nemar-python "${VERSION}-${FLAVOR}"
 
       # No provenance or SBOM attestation: either would make the pushed manifest an index, and the
       # digest every consumer pins is then the index's, not the image's.
@@ -260,24 +335,30 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: images/nemar-python/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           provenance: false
           sbom: false
-          tags: ghcr.io/nemarorg/nemar-python:${{ steps.version.outputs.version }}-cpu
+          tags: ghcr.io/nemarorg/nemar-python:${{ steps.version.outputs.version }}-${{ matrix.flavor }}
           build-args: |
             NEMAR_PROCESS_VERSION=${{ steps.version.outputs.version }}
             NEMAR_PROCESS_COMMIT=${{ github.sha }}
             NEMAR_PROCESS_BUILD=release
             LOCK_SHA256=${{ steps.lock.outputs.sha256 }}
-          cache-from: type=gha,scope=nemar-python-cpu
+          cache-from: ${{ matrix.cache_from }}
 
   sign:
-    name: sign, build the SIF from the digest, sign it
+    name: sign the ${{ matrix.flavor }} image (the cpu leg also builds the SIF and signs it)
     needs: publish
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # One leg per flavor, each with the digest its own publish leg pushed. A leg that fails does not
+    # stop the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu, cuda]
     # The only job with the OIDC token: cosign keyless exchanges it for a short-lived certificate
     # that names this workflow and ref.
     permissions:
@@ -286,9 +367,26 @@ jobs:
       id-token: write
     env:
       VERSION: ${{ needs.publish.outputs.version }}
-      IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+      FLAVOR: ${{ matrix.flavor }}
+      IMAGE_DIGEST: ${{ needs.publish.outputs[format('digest_{0}', matrix.flavor)] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Refuse an empty or malformed image digest
+        run: |
+          set -euo pipefail
+          if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::the ${FLAVOR} publish leg left no image digest: '${IMAGE_DIGEST}'"
+            exit 1
+          fi
+
+      - name: Free disk space for the CUDA image
+        if: matrix.flavor == 'cuda'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
@@ -306,11 +404,19 @@ jobs:
 
       # The pushed digest passes its smoke test BEFORE it is signed: a signature means this workflow
       # built the image and the image passed, not only that this workflow built it.
-      - name: Smoke test the pushed image by digest (container form)
+      - name: Smoke test the pushed image by digest (container form, cpu)
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           docker run --rm "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" python /opt/smoke.py > smoke-container.json
-          python3 scripts/check_smoke_pins.py --image smoke-container.json
+          python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-container.json
+
+      - name: Smoke test the pushed image by digest (container form, cuda, no GPU visible)
+        if: matrix.flavor == 'cuda'
+        run: |
+          set -euo pipefail
+          docker run --rm --env NVIDIA_VISIBLE_DEVICES=void "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" python /opt/smoke.py --no-gpu > smoke-container.json
+          python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-container.json
 
       - name: Sign the image digest and verify the signature
         run: |
@@ -321,6 +427,7 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
       - name: Install Apptainer
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -331,6 +438,7 @@ jobs:
           apptainer --version
 
       - name: Build the SIF from the image digest
+        if: matrix.flavor == 'cpu'
         env:
           APPTAINER_DOCKER_USERNAME: ${{ github.actor }}
           APPTAINER_DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -339,13 +447,15 @@ jobs:
           apptainer build nemar-python.sif "docker://ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"
 
       - name: Smoke test the SIF under Apptainer (SIF form)
+        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
-          python3 scripts/check_smoke_pins.py --image smoke-sif.json
+          python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json
 
       # The same rule for the SIF's tag, which is the image digest.
       - name: Refuse to overwrite an existing SIF tag
+        if: matrix.flavor == 'cpu'
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -357,6 +467,7 @@ jobs:
       # looks for <64 hex digits of the image digest>.sif under NEMAR_SIF_ROOT.
       - name: Push the SIF to GHCR as an OCI artifact
         id: push-sif
+        if: matrix.flavor == 'cpu'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -372,6 +483,7 @@ jobs:
           echo "digest=${sif_digest}" >> "$GITHUB_OUTPUT"
 
       - name: Sign the SIF artifact digest and verify the signature
+        if: matrix.flavor == 'cpu'
         env:
           SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
         run: |
@@ -381,7 +493,8 @@ jobs:
             --certificate-identity-regexp "$SIGNING_IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-      - name: Write the digest record
+      - name: Write the digest record (cpu)
+        if: matrix.flavor == 'cpu'
         env:
           SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -389,6 +502,7 @@ jobs:
           set -euo pipefail
           python3 scripts/make_image_digests.py \
             --version "$VERSION" \
+            --flavor cpu \
             --image-digest "$IMAGE_DIGEST" \
             --sif-digest "$SIF_DIGEST" \
             --sif-file nemar-python.sif \
@@ -398,10 +512,30 @@ jobs:
             --output "nemar-python-${VERSION}-cpu-digests.json"
           cat "nemar-python-${VERSION}-cpu-digests.json"
 
+      # The CUDA flavor publishes no SIF and its record names none: the record is of the image digest,
+      # its smoke document (the container form, run with no GPU visible) and the GPU architectures
+      # torch lists.
+      - name: Write the digest record (cuda)
+        if: matrix.flavor == 'cuda'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/make_image_digests.py \
+            --version "$VERSION" \
+            --flavor cuda \
+            --image-digest "$IMAGE_DIGEST" \
+            --smoke smoke-container.json \
+            --run-url "$RUN_URL" \
+            --commit "$GITHUB_SHA" \
+            --output "nemar-python-${VERSION}-cuda-digests.json"
+          cat "nemar-python-${VERSION}-cuda-digests.json"
+
+      # One artifact per flavor: a name may be used once per run.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nemar-python-digests
-          path: nemar-python-${{ env.VERSION }}-cpu-digests.json
+          name: nemar-python-digests-${{ matrix.flavor }}
+          path: nemar-python-${{ env.VERSION }}-${{ matrix.flavor }}-digests.json
           if-no-files-found: error
 
   release:
@@ -414,9 +548,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: nemar-python-digests
+          pattern: nemar-python-digests-*
+          merge-multiple: true
 
-      - name: Attach the file to the release of the tag
+      - name: Attach the files to the release of the tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -424,10 +559,28 @@ jobs:
           VERSION: ${{ needs.publish.outputs.version }}
         run: |
           set -euo pipefail
-          file="nemar-python-${VERSION}-cpu-digests.json"
+          cpu="nemar-python-${VERSION}-cpu-digests.json"
+          cuda="nemar-python-${VERSION}-cuda-digests.json"
           if ! gh release view "$TAG" > /dev/null 2>&1; then
-            digest="$(jq -r .image.digest "$file")"
-            gh release create "$TAG" --title "nemar-python ${VERSION} (cpu)" --notes "Runtime image ghcr.io/nemarorg/nemar-python@${digest}. See docs/images.md for how to verify it."
+            cpu_digest="$(jq -r .image.digest "$cpu")"
+            cuda_digest="$(jq -r .image.digest "$cuda")"
+            gh release create "$TAG" --title "nemar-python ${VERSION} (cpu, cuda)" --notes "Runtime images ghcr.io/nemarorg/nemar-python@${cpu_digest} (cpu) and ghcr.io/nemarorg/nemar-python@${cuda_digest} (cuda). See docs/images.md for how to verify them."
           fi
-          # no overwrite flag: the digest file is the record of a release, and a second upload must fail
-          gh release upload "$TAG" "$file"
+          # No overwrite flag: a digest file is the record of a release and is never replaced. A re-run
+          # after a partial upload skips a file that is already attached and byte for byte the same
+          # (compared by SHA-256), uploads the one that is missing, and fails on a file that is
+          # attached and differs.
+          for file in "$cpu" "$cuda"; do
+            attached="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            if grep -Fxq -- "$file" <<< "$attached"; then
+              remote="$(gh release download "$TAG" --pattern "$file" --output - | sha256sum | cut -d' ' -f1)"
+              mine="$(sha256sum "$file" | cut -d' ' -f1)"
+              if [ "$remote" != "$mine" ]; then
+                echo "::error::${file} is already attached to ${TAG} and differs from this run's file: it is never replaced"
+                exit 1
+              fi
+              echo "${file} is already attached and identical: nothing to upload"
+              continue
+            fi
+            gh release upload "$TAG" "$file"
+          done
