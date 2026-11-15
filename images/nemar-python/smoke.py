@@ -237,6 +237,34 @@ def image_flavor() -> str | None:
     return word
 
 
+def check_image_tag(flavor: str | None) -> str | None:
+    """In an image: a record would name this flavor's tag. None where there is no flavor file.
+
+    The recipes read the flavor with their own reader (``nemar_process.common.build``), and the tag a
+    record names for a release is made from what it reads. Fails unless that reader returns the flavor
+    read here and the tag of a release of version 0.0.0 is ``0.0.0-<flavor>``, so both flavors are
+    proven in the real image on every pull request, before the first release is the first real read.
+    Prints nothing on standard output and adds no key to the document.
+    """
+    if flavor is None:
+        return None
+    from nemar_process.common import build
+
+    release = {"version": "0.0.0", "commit": "0" * 40, "build": "release"}
+    try:
+        read = build.image_flavor()
+        if read != flavor:
+            fail("the recipes read flavor {!r} and this test read {!r}".format(read, flavor))
+        tag = build.image_tag(release, read)
+    except build.BuildRefused as error:
+        fail("the recipes' flavor reader refused the image: {}".format(error))
+    expected = "{}-{}".format(release["version"], flavor)
+    if tag != expected:
+        fail("a release of the {} image is tagged {!r}, not {!r}".format(flavor, tag, expected))
+    note("image tag check: a release of the {} image is tagged {}".format(flavor, tag))
+    return tag
+
+
 def fit_matrix():
     """The matrix both fits use: Laplace sources, mixed by a random matrix, from one seeded stream."""
     import numpy as np
@@ -385,6 +413,7 @@ def collect(fixture: str, no_gpu: bool = False) -> dict:
     imports = import_everything()
     distributions = {normalize(d.metadata["Name"]): d.version for d in metadata.distributions()}
     flavor = image_flavor()
+    check_image_tag(flavor)
     torch_state = cuda_build(flavor)
     if no_gpu and torch_state["cuda_available"]:
         fail("--no-gpu was given and torch sees a GPU: the CPU path is not what ran")
