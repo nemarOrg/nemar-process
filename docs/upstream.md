@@ -83,9 +83,9 @@ Public wording only: "a processing pipeline wants X".
 
 ### The Zarr reader (`nemar-floor-zarr`, 2026-11-13)
 
-The recipe reads the serving copy with eegprep-lean from the head of sccn/eegprep#616, installed from a pinned commit (see [recipes.md](recipes.md)).
+The recipe reads the serving copy with eegprep-lean from the merge commit of sccn/eegprep#616 on `develop`, installed from a pinned commit (see [recipes.md](recipes.md)).
 The first pinned commit refused the unit the live index uses for microvolts, the micro sign (`µV`), so every real store failed; the recipe renamed the label to `uV` until the commit 14ba46e8 of that pull request accepted the micro sign and the Greek mu.
-The pin is that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
+The pin is the merge commit (`af9145121ed8a69eab86bc2f5c425a6bdcced5cc`), which contains that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
 
 Patch note for sccn/eegprep#616: `load_recording` should check each array's `zarr.json` (shape, chunk and shard grid, data type) against the index's declared channels and samples before it decodes anything, so that a store whose metadata disagrees with its index is refused by the reader and not left to the caller's size bound.
 
