@@ -17,9 +17,11 @@ import io as stdlib_io
 import json
 
 import pytest
+import zarr
 import zarr_support as z
 from nemar_process import cli as command
 from nemar_process.common import zarr_hosts, zarr_input
+from zarr.storage import LocalStore
 from zarr_support import served  # noqa: F401  fixture
 
 LINE_FEED = "sub-10/eeg/sub-10_task-rest_eeg.edf"  # a unit with a line feed in it
@@ -27,6 +29,9 @@ CARRIAGE_RETURN = "sub-11/eeg/sub-11_task-rest_eeg.edf"  # and one with a carria
 OTHER_GROUP = "sub-12/eeg/sub-12_task-rest_eeg.edf"  # whose channel group is not named eeg_250hz
 EARLY_MISSING = "sub-00/eeg/sub-00_task-rest_eeg.edf"  # in the index after the others, no store
 GROUP = "eeg"  # the name the vectors of the platform's definition use
+PARTLY_LABELED = "sub-13/eeg/sub-13_task-rest_eeg.edf"  # one channel has no label
+MIXED_UNITS = "sub-14/eeg/sub-14_task-rest_eeg.edf"  # one channel is in another unit than the rest
+EMPTY_UNIT = "sub-15/eeg/sub-15_task-rest_eeg.edf"  # every channel states an empty unit
 EMPTY_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
 ARGS = [
     "--zarr-base",
@@ -45,12 +50,20 @@ ARGS = [
 @pytest.fixture(scope="module")
 def extended(served):  # noqa: F811
     """The stand-in with more EEG stores in its index: two whose units cannot be a line, one whose
-    channel group has another name, and one that is listed after the others and has a path before
-    them all (and no store behind it)."""
+    channel group has another name, one that is listed after the others and has a path before them
+    all (and no store behind it), and three whose labels or units the two rules of the digest decide
+    (one channel without a label, one in another unit, every unit empty)."""
     base = served.root / z.DATASET / "zarr"
     z._store(base, LINE_FEED, {"eeg_250hz": ("EEG", "u\nV", z._signal(10))})
     z._store(base, CARRIAGE_RETURN, {"eeg_250hz": ("EEG", "u\rV", z._signal(11))})
     z._store(base, OTHER_GROUP, {GROUP: ("EEG", "uV", z._signal(12))})
+    for path, seed, fields in (
+        (PARTLY_LABELED, 13, {"unit": "uV", "labels": ("", *z.LABELS[1:])}),
+        (MIXED_UNITS, 14, {"unit": "uV", "units": ("uV",) * (z.N_CHANNELS - 1) + ("mV",)}),
+        (EMPTY_UNIT, 15, {"unit": ""}),
+    ):
+        root = zarr.create_group(store=LocalStore(base / z.zarr_name(path)), overwrite=True)
+        z.write_group(root, "eeg_250hz", modality="EEG", data=z._signal(seed), **fields)
     document = z.index_document()
     eeg = z.group_entry("eeg_250hz", "EEG", z.RATE, z.N_CHANNELS, z.N_SAMPLES)
     named = z.group_entry(GROUP, "EEG", z.RATE, z.N_CHANNELS, z.N_SAMPLES)
@@ -59,6 +72,9 @@ def extended(served):  # noqa: F811
         (CARRIAGE_RETURN, eeg),
         (OTHER_GROUP, named),
         (EARLY_MISSING, eeg),
+        (PARTLY_LABELED, eeg),
+        (MIXED_UNITS, eeg),
+        (EMPTY_UNIT, eeg),
     ):
         document["stores"].append({"path": path, "zarr": z.zarr_name(path), "groups": [group]})
     document["store_count"] = len(document["stores"])
@@ -155,3 +171,22 @@ def test_a_record_names_the_group_that_was_read_whatever_it_is_called(extended, 
     )
     mine = record["extensions"]["nemar"]["input"]
     assert (mine["group"], mine["content_sha256"]) == (GROUP, digest)
+
+
+def test_a_store_that_states_labels_or_units_for_some_channels_only_is_digested_by_the_two_rules(
+    extended, tmp_path
+):
+    """Labels are all or none and the unit is shared or none, as the recipe reads them through
+    eegprep-lean: a store with one channel unlabeled has bare ``label`` lines whatever the others are
+    called, one with two units has no unit, and an empty unit is no unit and not ``unit`` and a space."""
+    _, nemar, _ = run(extended, tmp_path / "o", PARTLY_LABELED, MIXED_UNITS, EMPTY_UNIT)
+    content = {row["path"]: row["content_sha256"] for row in nemar["stores_content"]}
+    assert content == {
+        PARTLY_LABELED: z.reference_content_sha256(13, "uV", labels=None),
+        MIXED_UNITS: z.reference_content_sha256(14, None),
+        EMPTY_UNIT: z.reference_content_sha256(15, None),
+    }
+    # and each is another digest than the one the same values would have with the text left in
+    assert content[PARTLY_LABELED] != z.reference_content_sha256(13, "uV")
+    assert content[MIXED_UNITS] != z.reference_content_sha256(14, "uV")
+    assert content[EMPTY_UNIT] != z.reference_content_sha256(15, "")  # `unit ` and a space

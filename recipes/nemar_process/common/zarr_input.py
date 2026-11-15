@@ -476,8 +476,8 @@ LINE_BREAKS = ("\r", "\n")
 
 class Undigestable(ValueError):
     """A store whose unit or labels cannot be written as the lines of the digest's header (a line
-    feed or a carriage return, a lone surrogate, a count of labels that is not the count of
-    channels): it has no digest, never a digest of a guess."""
+    feed or a carriage return, a lone surrogate, a list that is not one per channel): it has no
+    digest, never a digest of a guess."""
 
 
 class StoreContent(NamedTuple):
@@ -487,46 +487,82 @@ class StoreContent(NamedTuple):
     sha256: str
 
 
-def _line(name: str, text: str | None) -> str:
-    """``name`` alone when there is no text, else ``name``, a space and the text; ``Undigestable``
-    when the text could not be a line."""
-    if text is None:
-        return name
-    if not isinstance(text, str) or any(character in text for character in LINE_BREAKS):
-        raise Undigestable("the {} cannot be a line of the header".format(name))
+def _utf8(name: str, text: Any) -> bytes:
+    """The text as the UTF-8 bytes it is hashed as, exactly as given (no normalization, no trimming);
+    ``Undigestable`` when it is not text or has no UTF-8 (a lone surrogate)."""
+    if not isinstance(text, str):
+        raise Undigestable("the {} is not text".format(name))
     try:
-        text.encode("utf-8")
+        return text.encode("utf-8")
     except UnicodeEncodeError as error:
         raise Undigestable("the {} is not text in UTF-8".format(name)) from error
+
+
+def _line(name: str, text: str | None) -> str:
+    """``name`` alone when there is no text, else ``name``, a space and the text; ``Undigestable``
+    when the text could not be a line. Only text that enters the header is looked at."""
+    if text is None:
+        return name
+    _utf8(name, text)
+    if any(character in text for character in LINE_BREAKS):
+        raise Undigestable("the {} cannot be a line of the header".format(name))
     return "{} {}".format(name, text)
 
 
+def _per_channel(values: Sequence[str | None] | None, channels: int, name: str) -> list[Any]:
+    """One entry per channel as the store states it (text, empty or absent); a list absent as a whole
+    is every channel absent, and one that is not one per channel is refused."""
+    if values is None:
+        return [None] * channels
+    if isinstance(values, (str, bytes)) or len(values) != channels:
+        raise Undigestable("the {} are not one per channel".format(name))
+    for value in values:
+        if value is not None and not isinstance(value, str):
+            raise Undigestable("a channel's {} is not text".format(name))
+    return list(values)
+
+
 def store_content_header(
-    shape: tuple[int, int], rate: float, unit: str | None, labels: Sequence[str] | None
+    shape: tuple[int, int],
+    rate: float,
+    units: Sequence[str | None] | None,
+    labels: Sequence[str | None] | None,
 ) -> bytes:
     """The header lines of ``nemar.store-content.v1``, each ending in a line feed, as UTF-8.
 
     ``nemar.store-content.v1``; ``shape C S`` (channels and samples); ``rate H``, the 16 lower-case
     hexadecimal digits of the rate (the serving rate, never the archived one) as an IEEE-754 binary64,
-    big-endian; ``unit`` and the unit (or ``unit`` alone when there is none); one ``label`` line per
-    channel (``label`` alone when the group supplied none); ``data float64-le``.
+    big-endian; ``unit`` and the unit; one ``label`` line per channel; ``data float64-le``.
+
+    ``units`` and ``labels`` are each channel's, as the store states them, and two rules decide the
+    text. The unit is shared or none: ``unit`` carries text only when every channel states the same
+    non-empty unit, and otherwise is ``unit`` alone, so an empty unit is no unit and never ``unit``
+    and a space. Labels are all or none: the ``label`` lines carry labels only when every channel has
+    a non-empty one, and otherwise every line is ``label`` alone. Text the rules drop is never looked
+    at; text that enters the header with a carriage return, a line feed or a lone surrogate has no
+    digest (``Undigestable``).
     """
     channels, samples = shape
-    if labels is not None and len(labels) != channels:
-        raise Undigestable("the labels are not one per channel")
+    each_unit = _per_channel(units, channels, "units")
+    each_label = _per_channel(labels, channels, "labels")
+    shared = each_unit[0] if each_unit and each_unit[0] and len(set(each_unit)) == 1 else None
+    named = each_label if each_label and all(each_label) else [None] * channels
     lines = [
         STORE_CONTENT_FORMAT,
         "shape {} {}".format(int(channels), int(samples)),
         "rate " + struct.pack(">d", float(rate)).hex(),
-        _line("unit", unit),
-        *(_line("label", label) for label in (labels if labels is not None else [None] * channels)),
+        _line("unit", shared),
+        *(_line("label", label) for label in named),
         "data float64-le",
     ]
     return "".join(line + "\n" for line in lines).encode("utf-8")
 
 
 def store_content_sha256(
-    data: Any, rate: float, unit: str | None, labels: Sequence[str] | None
+    data: Any,
+    rate: float,
+    units: Sequence[str | None] | None,
+    labels: Sequence[str | None] | None,
 ) -> str:
     """The content digest of one channel group: SHA-256 of the header, then the values.
 
@@ -537,38 +573,56 @@ def store_content_sha256(
     values = np.asarray(data)
     if values.ndim != 2:
         raise Undigestable("the data is not channels by samples")
-    hasher = hashlib.sha256(
-        store_content_header((values.shape[0], values.shape[1]), rate, unit, labels)
-    )
-    for (
-        channel
-    ) in values:  # one channel at a time: the same bytes as the whole array, no second copy of it
+    shape = (values.shape[0], values.shape[1])
+    hasher = hashlib.sha256(store_content_header(shape, rate, units, labels))
+    for channel in values:  # one at a time: the same bytes as the whole array, with no second copy
         hasher.update(np.ascontiguousarray(channel, dtype="<f8").tobytes(order="C"))
     return hasher.hexdigest()
 
 
 def window_content_sha256(window: Any) -> str:
-    """The digest of an eegprep-lean ``Window``: its data, rate, unit and labels. Its
-    ``original_rate`` is the rate the recording was acquired at and is never read."""
-    return store_content_sha256(window.data, window.rate, window.unit, window.labels)
+    """The digest of an eegprep-lean ``Window``: its data, rate, unit and labels. The window states
+    the unit its channels share (or None) and the labels all of them have (or None), which are the
+    same two rules, so they are passed on as every channel's. Its ``original_rate`` is the rate the
+    recording was acquired at and is never read."""
+    values = np.asarray(window.data)
+    channels = values.shape[0] if values.ndim == 2 else 0  # any other shape is refused below
+    units = None if window.unit is None else [window.unit] * channels
+    return store_content_sha256(values, window.rate, units, window.labels)
 
 
 def content_rows(read: Mapping[str, Sequence[str]]) -> list[dict[str, str]]:
     """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256"}`` for
-    each store read in full, sorted by path. ``read`` maps a path to its group and its digest."""
+    each store read in full, sorted by path in code point order. ``read`` maps a path to its group
+    and its digest."""
     rows = []
-    for path in sorted(read):
+    for path in sorted(read):  # a str sorts by code point, which is the order of its UTF-8 bytes
         group, digest = read[path]
         rows.append({"path": path, "group": group, "content_sha256": digest})
     return rows
 
 
+def _row_text(name: str, text: Any) -> str:
+    """A row's path, group or digest as a piece of a line: text as the unit and labels are, so a line
+    feed or a carriage return or a lone surrogate in it has no digest."""
+    _utf8(name, text)
+    if any(character in text for character in LINE_BREAKS):
+        raise Undigestable("the {} cannot be a piece of a line".format(name))
+    return text
+
+
 def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
     """``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
-    store read in full, in path order (whatever order ``rows`` come in)."""
-    ordered = sorted(rows, key=lambda row: row["path"])
+    store read in full, sorted by path in code point order (the order of the paths' UTF-8 bytes,
+    whatever order ``rows`` come in), each text as it is given."""
+    ordered = sorted(rows, key=lambda row: _utf8("path", row["path"]))
     text = "".join(
-        "{}\t{}\t{}\n".format(row["path"], row["group"], row["content_sha256"]) for row in ordered
+        "{}\t{}\t{}\n".format(
+            _row_text("path", row["path"]),
+            _row_text("group", row["group"]),
+            _row_text("content_sha256", row["content_sha256"]),
+        )
+        for row in ordered
     )
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 

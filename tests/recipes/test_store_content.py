@@ -5,11 +5,17 @@ vectors, in Python, NumPy and Bun), so these values are never edited here: a vec
 match is a finding, not a fixture to regenerate. The digest is of what the recipe read, so it is
 computed from the window eegprep-lean returned (real ``Window`` values, converted to physical units
 by eegprep-lean's own ``to_physical``), never from the index file.
+
+Two rules decide the header's text: labels are all or none, and the unit is shared or none (an empty
+unit is no unit). Text is hashed exactly as given, with no Unicode normalization and no trimming, and
+paths sort by code point. Each vector is also computed here from the definition alone (``struct`` and
+``hashlib``, in ``reference_digest``), apart from the recipe's own functions.
 """
 
 from __future__ import annotations
 
 import hashlib
+import struct
 
 import numpy as np
 import pytest
@@ -23,17 +29,27 @@ ARRAY = {
     "offset": [0.0, -12.5],
 }
 RATE = 250.0
-MICRO_VOLT = "µV"
+MICRO_SIGN = "µV"
+GREEK_MU = "μV"
+UNITS = (MICRO_SIGN, MICRO_SIGN)
 LABELS = ("Fz", "Cz")
 
 # the platform's vectors (card V1, item 9), computed in three languages by the lead
 WITH_METADATA = "0c268ca3444e5c884afb5475ae13b6bc3170869776b2e4b0118205f2f08f84cd"
 WITHOUT_METADATA = "6bff43f9934204b3bf515734cc563ef72da392cc594dc2cdcbd317d9e98f58fd"
+PARTLY_LABELED = "424c2a59e3e313b591c3b5516e8522717df6add915d6508646f323338d95adc0"
 INPUT_ROW = ("sub-01/eeg/sub-01_task-rest_eeg.edf", "eeg", WITH_METADATA)
 INPUT_DIGEST = "sha256:bea77ea8a233ae2507f192e48548af37b8acf01c8abb0e65143ac3178e44bc0b"
+# in code point order; compared as UTF-16 units, U+1F600 (a surrogate pair) would come first
+CODE_POINT_PATHS = ("sub-01/｡", "sub-01/\U0001f600")
+CODE_POINT_DIGEST = "sha256:4bf7b0ab0a746ebe769759f4989df1ac1c810eaea360c891d76abd6162508c53"
 HEADER = (
     "nemar.store-content.v1\nshape 2 3\nrate 406f400000000000\nunit µV\n"
     "label Fz\nlabel Cz\ndata float64-le\n"
+)
+PARTLY_HEADER = (
+    "nemar.store-content.v1\nshape 2 3\nrate 406f400000000000\nunit µV\n"
+    "label\nlabel\ndata float64-le\n"
 )
 
 
@@ -41,8 +57,20 @@ def physical() -> np.ndarray:
     return to_physical(DIGITAL, ARRAY, [0, 1])
 
 
+def reference_digest(unit: str | None, labels: tuple[str, str] | None) -> str:
+    """A vector from the definition alone: the lines of the header, then the values as little-endian
+    binary64, channel-major. ``unit`` and ``labels`` are what the header carries, already decided."""
+    lines = ["nemar.store-content.v1", "shape 2 3", "rate " + struct.pack(">d", RATE).hex()]
+    lines.append("unit" if unit is None else "unit " + unit)
+    lines += ["label", "label"] if labels is None else ["label " + label for label in labels]
+    lines.append("data float64-le")
+    values = DIGITAL.astype(np.float64) * np.array([[0.1], [0.25]]) + np.array([[0.0], [-12.5]])
+    body = b"".join(values[row].astype("<f8").tobytes() for row in range(2))
+    return hashlib.sha256("".join(line + "\n" for line in lines).encode("utf-8") + body).hexdigest()
+
+
 def window(
-    *, unit: str | None = MICRO_VOLT, labels: tuple[str, ...] | None = LABELS, **fields
+    *, unit: str | None = MICRO_SIGN, labels: tuple[str, ...] | None = LABELS, **fields
 ) -> Window:
     """A real eegprep-lean window: the group's rate is 250 Hz, and the recording came from 500 Hz."""
     values = {
@@ -68,22 +96,64 @@ def sha(text: str) -> str:
 
 
 def test_the_header_is_the_lines_of_the_definition_each_ending_in_a_line_feed():
-    header = z.store_content_header((2, 3), RATE, MICRO_VOLT, LABELS)
+    header = z.store_content_header((2, 3), RATE, UNITS, LABELS)
     assert header == HEADER.encode("utf-8")
 
 
+def test_the_platforms_vectors_agree_with_a_digest_written_from_the_definition_alone():
+    assert reference_digest(MICRO_SIGN, LABELS) == WITH_METADATA
+    assert reference_digest(None, None) == WITHOUT_METADATA
+    assert reference_digest(MICRO_SIGN, None) == PARTLY_LABELED
+
+
 def test_the_digest_of_a_store_with_a_unit_and_labels_is_the_platforms_vector():
-    assert z.store_content_sha256(physical(), RATE, MICRO_VOLT, LABELS) == WITH_METADATA
+    assert z.store_content_sha256(physical(), RATE, UNITS, LABELS) == WITH_METADATA
 
 
 def test_the_digest_of_a_store_with_no_unit_and_no_labels_is_the_platforms_vector():
     # a channel without a label is a `label` line alone, one per channel
     assert z.store_content_sha256(physical(), RATE, None, None) == WITHOUT_METADATA
+    assert z.store_content_sha256(physical(), RATE, [None, None], [None, None]) == WITHOUT_METADATA
     assert (
         z.store_content_header((2, 3), RATE, None, None)
         .decode()
         .endswith("unit\nlabel\nlabel\ndata float64-le\n")
     )
+
+
+def test_labels_are_all_or_none_so_a_partly_labeled_group_has_bare_label_lines():
+    """The platform's vector: labels Fz and none, with the unit, give ``label`` alone twice."""
+    header = z.store_content_header((2, 3), RATE, UNITS, ("Fz", None))
+    assert header == PARTLY_HEADER.encode("utf-8")
+    assert b"label Fz\nlabel\n" not in header
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("Fz", None)) == PARTLY_LABELED
+    # an empty label is no label, as an absent one is, wherever it is
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("Fz", "")) == PARTLY_LABELED
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("", "Cz")) == PARTLY_LABELED
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("", "")) == PARTLY_LABELED
+    assert z.store_content_sha256(physical(), RATE, UNITS, (None, None)) == PARTLY_LABELED
+
+
+def test_the_unit_is_shared_or_none_so_units_that_differ_have_no_unit():
+    """The platform's vector: units micro volt and milli volt give the vector with no unit."""
+    none = z.store_content_sha256(physical(), RATE, None, None)
+    assert z.store_content_sha256(physical(), RATE, (MICRO_SIGN, "mV"), None) == none
+    assert z.store_content_sha256(physical(), RATE, (MICRO_SIGN, None), None) == none
+    assert z.store_content_sha256(physical(), RATE, (MICRO_SIGN, ""), None) == none
+    assert z.store_content_sha256(physical(), RATE, ("", MICRO_SIGN), None) == none
+    # and the unit that every channel states, with labels dropped by the other rule, is the partly
+    # labeled vector, so the two rules are independent
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("Fz", "")) == PARTLY_LABELED
+
+
+def test_an_empty_unit_is_no_unit_and_never_a_unit_and_a_space():
+    """Both units empty and labels Fz and an empty one: the vector with no unit and no labels."""
+    assert z.store_content_sha256(physical(), RATE, ("", ""), ("Fz", "")) == WITHOUT_METADATA
+    assert z.store_content_sha256(physical(), RATE, ("", ""), None) == WITHOUT_METADATA
+    header = z.store_content_header((2, 3), RATE, ("", ""), None).decode().split("\n")
+    assert header[3] == "unit"  # not "unit " with a trailing space
+    assert z.store_content_header((2, 3), RATE, None, None).decode().split("\n")[3] == "unit"
+    assert b"unit \n" not in z.store_content_header((2, 3), RATE, ("", ""), LABELS)
 
 
 def test_the_digest_of_a_window_is_the_same_vector_and_never_reads_the_archived_rate():
@@ -93,6 +163,12 @@ def test_the_digest_of_a_window_is_the_same_vector_and_never_reads_the_archived_
     for archived in (0.0, 250.0, 500.0, 1000.0):
         assert z.window_content_sha256(window(original_rate=archived)) == found
     assert z.window_content_sha256(window(unit=None, labels=None)) == WITHOUT_METADATA
+
+
+def test_a_window_follows_the_same_two_rules():
+    assert z.window_content_sha256(window(labels=("Fz", ""))) == PARTLY_LABELED
+    assert z.window_content_sha256(window(unit="", labels=None)) == WITHOUT_METADATA
+    assert z.window_content_sha256(window(unit="", labels=("Fz", ""))) == WITHOUT_METADATA
 
 
 def test_the_rate_is_the_serving_rate_as_big_endian_binary64():
@@ -112,40 +188,115 @@ def test_the_rate_is_the_serving_rate_as_big_endian_binary64():
     ids=["fortran order", "big endian", "strided"],
 )
 def test_the_digest_is_of_the_values_and_not_of_how_they_are_laid_out_in_memory(variation):
-    assert z.store_content_sha256(variation(physical()), RATE, MICRO_VOLT, LABELS) == WITH_METADATA
+    assert z.store_content_sha256(variation(physical()), RATE, UNITS, LABELS) == WITH_METADATA
 
 
 def test_a_changed_value_changes_the_digest():
     changed = physical()
     changed[1, 2] = np.nextafter(changed[1, 2], np.inf)
-    assert z.store_content_sha256(changed, RATE, MICRO_VOLT, LABELS) != WITH_METADATA
+    assert z.store_content_sha256(changed, RATE, UNITS, LABELS) != WITH_METADATA
+
+
+# ---- the text is the text: no normalization, no trimming --------------------------------------
+
+
+def test_units_that_differ_only_in_the_micro_sign_spelling_have_different_digests():
+    micro = z.store_content_sha256(physical(), RATE, (MICRO_SIGN, MICRO_SIGN), LABELS)
+    greek = z.store_content_sha256(physical(), RATE, (GREEK_MU, GREEK_MU), LABELS)
+    assert micro == WITH_METADATA
+    assert greek != micro  # U+00B5 and U+03BC are two texts, and no normalization joins them
+    assert b"unit \xc2\xb5V\n" in z.store_content_header((2, 3), RATE, (MICRO_SIGN,) * 2, LABELS)
+    assert b"unit \xce\xbcV\n" in z.store_content_header((2, 3), RATE, (GREEK_MU,) * 2, LABELS)
+
+
+def test_labels_that_differ_only_in_their_unicode_form_have_different_digests():
+    composed, decomposed = ("é", "Cz"), ("é", "Cz")
+    assert z.store_content_sha256(physical(), RATE, UNITS, composed) != z.store_content_sha256(
+        physical(), RATE, UNITS, decomposed
+    )
+
+
+def test_text_is_never_trimmed():
+    header = z.store_content_header((2, 3), RATE, (" V ", " V "), (" Fz", "Cz "))
+    assert header.endswith(b"unit  V \nlabel  Fz\nlabel Cz \ndata float64-le\n")
+    spaced = z.store_content_sha256(physical(), RATE, (" V ", " V "), LABELS)
+    assert spaced != z.store_content_sha256(physical(), RATE, ("V", "V"), LABELS)
+    # a unit of spaces is text, not an empty unit
+    assert (
+        z.store_content_header((2, 3), RATE, (" ", " "), None).decode().split("\n")[3] == "unit  "
+    )
+
+
+# ---- what has no digest -----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("unit", "labels"),
+    ("units", "labels"),
     [
-        ("u\nV", LABELS),
-        ("u\rV", LABELS),
-        (MICRO_VOLT, ("Fz", "C\nz")),
-        (MICRO_VOLT, ("F\rz", "Cz")),
-        ("\ud800V", LABELS),  # a lone surrogate has no UTF-8
-        (MICRO_VOLT, ("Fz", "\udfffz")),
+        (("u\nV", "u\nV"), LABELS),
+        (("u\rV", "u\rV"), LABELS),
+        (UNITS, ("Fz", "C\nz")),
+        (UNITS, ("F\rz", "Cz")),
+        (("\ud800V", "\ud800V"), LABELS),  # a lone surrogate has no UTF-8
+        (UNITS, ("Fz", "\udfffz")),
     ],
     ids=["unit LF", "unit CR", "label LF", "label CR", "unit surrogate", "label surrogate"],
 )
-def test_a_unit_or_label_that_cannot_be_a_line_has_no_digest(unit, labels):
+def test_a_unit_or_label_that_enters_the_header_and_cannot_be_a_line_has_no_digest(units, labels):
     with pytest.raises(z.Undigestable):
-        z.store_content_sha256(physical(), RATE, unit, labels)
+        z.store_content_sha256(physical(), RATE, units, labels)
 
 
-def test_a_count_of_labels_that_is_not_the_count_of_channels_has_no_digest():
+def test_text_the_two_rules_drop_is_never_examined():
+    """A label with a line feed beside an absent one never enters the header, and neither does a
+    unit with one beside a different unit, so neither is refused and neither is hashed."""
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("F\nz", None)) == PARTLY_LABELED
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("F\nz", "")) == PARTLY_LABELED
+    assert z.store_content_sha256(physical(), RATE, UNITS, ("\ud800", None)) == PARTLY_LABELED
+    assert z.store_content_sha256(physical(), RATE, ("u\nV", "mV"), None) == WITHOUT_METADATA
+    assert z.store_content_sha256(physical(), RATE, ("u\nV", ""), None) == WITHOUT_METADATA
+    dropped = z.store_content_sha256(physical(), RATE, ("u\nV", None), ("F\rz", None))
+    assert dropped == WITHOUT_METADATA
+    # while the same text, entering the header, is refused
     with pytest.raises(z.Undigestable):
-        z.store_content_sha256(physical(), RATE, MICRO_VOLT, ("Fz",))
+        z.store_content_sha256(physical(), RATE, UNITS, ("F\nz", "Cz"))
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(physical(), RATE, ("u\nV", "u\nV"), None)
 
 
-def test_an_empty_unit_is_a_unit_and_not_the_absence_of_one():
-    assert z.store_content_header((2, 3), RATE, "", None).decode().split("\n")[3] == "unit "
-    assert z.store_content_header((2, 3), RATE, None, None).decode().split("\n")[3] == "unit"
+@pytest.mark.parametrize(
+    ("units", "labels"),
+    [
+        (None, ("Fz",)),
+        (None, ("Fz", "Cz", "Pz")),
+        (("uV",), None),
+        (("uV", "uV", "uV"), None),
+        ("uV", None),  # a string is not a list of units
+        (None, "FzCz"),
+        ((1, 1), None),  # not text
+        (None, ("Fz", 3)),
+    ],
+    ids=[
+        "one label",
+        "three labels",
+        "one unit",
+        "three units",
+        "a string of units",
+        "a string of labels",
+        "a unit that is not text",
+        "a label that is not text",
+    ],
+)
+def test_a_list_that_is_not_one_entry_per_channel_of_text_is_refused(units, labels):
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(physical(), RATE, units, labels)
+
+
+def test_data_that_is_not_channels_by_samples_has_no_digest():
+    with pytest.raises(z.Undigestable):
+        z.store_content_sha256(physical()[0], RATE, None, None)
+    with pytest.raises(z.Undigestable):
+        z.window_content_sha256(window(data=physical()[0]))
 
 
 # ---- the input digest -------------------------------------------------------------------------
@@ -175,6 +326,23 @@ def test_the_input_digest_is_over_the_rows_in_path_order_whatever_order_they_com
     assert z.input_digest(sorted(rows, key=lambda r: r["content_sha256"], reverse=True)) == expected
 
 
+def test_paths_sort_by_code_point_and_not_by_utf16_unit():
+    """The platform's vector: U+FF61 comes before U+1F600 by code point (and by UTF-8 bytes), while
+    JavaScript's default sort, which compares UTF-16 units, would put U+1F600 first."""
+    first, second = (row(path, "eeg", WITH_METADATA) for path in CODE_POINT_PATHS)
+    assert z.input_digest([first, second]) == CODE_POINT_DIGEST
+    assert z.input_digest([second, first]) == CODE_POINT_DIGEST
+    # computed from the definition alone, the U+FF61 row first
+    ordered = "".join("{}\teeg\t{}\n".format(path, WITH_METADATA) for path in CODE_POINT_PATHS)
+    assert "sha256:" + sha(ordered) == CODE_POINT_DIGEST
+    reverse = "".join(
+        "{}\teeg\t{}\n".format(path, WITH_METADATA) for path in reversed(CODE_POINT_PATHS)
+    )
+    assert "sha256:" + sha(reverse) != CODE_POINT_DIGEST  # the other order is another digest
+    by_utf16 = sorted(CODE_POINT_PATHS, key=lambda path: path.encode("utf-16-be"))
+    assert by_utf16 != list(CODE_POINT_PATHS)  # which is the order the vector exists to refuse
+
+
 def test_the_input_digest_depends_on_each_field_of_a_row():
     base = row(*INPUT_ROW)
     seen = {z.input_digest([base])}
@@ -185,6 +353,15 @@ def test_the_input_digest_depends_on_each_field_of_a_row():
     ):
         seen.add(z.input_digest([{**base, field: value}]))
     assert len(seen) == 4
+
+
+def test_the_input_digest_hashes_each_text_as_given_and_refuses_what_is_no_text_of_a_line():
+    base = row(*INPUT_ROW)
+    assert z.input_digest([{**base, "group": "eeg "}]) != z.input_digest([base])  # no trimming
+    for field in ("path", "group", "content_sha256"):
+        for text in ("a\nb", "a\rb", "a\ud800b"):
+            with pytest.raises(z.Undigestable):
+                z.input_digest([{**base, field: text}])
 
 
 def test_the_input_digest_of_no_rows_is_the_digest_of_no_text():
@@ -209,3 +386,10 @@ def test_the_rows_of_a_record_are_in_path_order_whatever_order_the_stores_were_r
     }
     assert list(rows[0]) == ["path", "group", "content_sha256"]
     assert z.content_rows({}) == []
+
+
+def test_the_rows_of_a_record_sort_by_code_point_too():
+    read = dict.fromkeys(reversed(CODE_POINT_PATHS), ("eeg", WITH_METADATA))
+    rows = z.content_rows(read)
+    assert [r["path"] for r in rows] == list(CODE_POINT_PATHS)
+    assert z.input_digest(rows) == CODE_POINT_DIGEST
