@@ -283,14 +283,17 @@ A record that fails its own checks is never written (the recording ends `failed`
 Both records state the nemar-process build that made them, in `extensions.nemar` because `pipelineInfo` is closed to new keys:
 
 - `process`: `{"version", "commit", "build"}`, where `build` is `release` (a plain `X.Y.Z`), `dev` (an `X.Y.Z-devN`) or `source` (a run from a working tree, with the `pyproject.toml` version and `commit: null`);
-- `image`: `{"digest", "tag"}`, the tag being `<version>-cpu` for a release image and null otherwise;
+- `image`: `{"digest", "tag"}`, the tag being `<version>-<flavor>` for a release image (the flavor is the word in the image's `/opt/nemar/flavor`, `cpu` or `cuda`) and null otherwise;
 - the recipe's id and version (also `pipelineInfo.name` and `pipelineInfo.version`) and the engine versions, now including `torch` and `pamica` when installed.
 
 The image carries `/opt/nemar/build.json`; `nemar_process.common.build.build_info()` reads it with no network call, refuses a file that contradicts itself (a `release` with a `-devN` version, a `dev` without one), and never takes an unreadable file for a source run.
 A refusal ends the run before anything is written (exit 1, with the message `the build file was refused: ` and the part that is wrong, never a path or a value; the engine stamp is where the file is first read).
 A symbolic link at the build path, or a file that is not UTF-8 text, is refused the same way; a project file that is not nemar-process's is not read for the source version.
+Beside the build file every image carries `/opt/nemar/flavor`, one word, and `nemar_process.common.build.image_flavor()` is the one reader of it (`nemar-recipe version` prints the same word as `flavor`).
+Whenever a build file exists, release or dev, the flavor file must exist and hold `cpu` or `cuda`, and a build file without a valid flavor file (no file, a symbolic link, text that is not ASCII, an empty file, any other word) ends the run before anything is written, in the same way and with a message that names the flavor file and never a path or a value; a defaulted flavor would name a CUDA image as a CPU one.
+A dev build reads the file too (its tag stays null), so every pull request's image build exercises the read; outside an image there is no build file, the flavor file is not read, and the tag is null.
 `aggregate` runs no step, so it states the build of its inputs, which must agree, and not the build that merges them; a record that predates the block merges as a null `process`.
-Every input's `process` block and `image.tag` are checked by the rules the writer and the reader apply (a release is `X.Y.Z`, a dev build `X.Y.Z-devN`, the tag of a release is `<version>-cpu` and any other build has none, a source block has no commit and no tag), and an input that fails is refused by its position (`input 2 states a build that is not one`, exit 6) before anything is merged.
+Every input's `process` block and `image.tag` are checked by the rules the writer and the reader apply (a release is `X.Y.Z`, a dev build `X.Y.Z-devN`, the tag of a release is `<version>-cpu` or `<version>-cuda` and any other build has none, a source block has no commit and no tag), and an input that fails is refused by its position (`input 2 states a build that is not one`, exit 6) before anything is merged.
 `tests/recipes/test_provenance_contract.py` runs every registered recipe on the repository's fixtures and checks both documents.
 
 ### The resolved plan and `plan_hash`
@@ -483,6 +486,7 @@ A change under `common/` that alters a byte of the floor fixture's pinned output
 Until a layer is released, a change that alters no byte of a product does not bump it: the version names released code, and a record that says `1.0.0` is the same bytes either way.
 A bump is also skipped when a change only adds fields to a record shape that no released (recipe, version, input) ever wrote, because no record of that shape exists to be told apart from the new one.
 This change is that case: the records of `nemar-floor` with the Zarr input are new (the Zarr input was a recipe of its own, `nemar-floor-zarr`, and no released `nemar-floor` 1.0.0 wrote one), and the records of the directory input are byte-identical to what they were, so `COMMON_VERSION` and `RECIPE_VERSION` stay `1.0.0`.
+The image tag of a CUDA release image is the same case: the only new value is `<version>-cuda`, which only a record written in a CUDA release image can name, a record shape that no released image ever wrote (the one published image predates the build file and writes no tag), while every record the CPU image writes, in a source run, a dev build and a release, is byte-identical to what it was on the floor fixture (clock aside), so `COMMON_VERSION` and `RECIPE_VERSION` stay `1.0.0`.
 The hooks below were added to the unreleased `1.0.0` that way, and the floor fixture's whole product tree (records and engine stamp included, clock aside) was compared before and after.
 
 A second recipe that embeds the floor uses these, none of which the floor sets:

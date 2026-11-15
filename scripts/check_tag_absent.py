@@ -1,8 +1,9 @@
 """Exit 0 only when a registry tag is known to be ABSENT; stop the run in every other case.
 
-The image workflow publishes a version once: ``<version>-cpu`` and the SIF's ``sha256-<hex>`` tag
-are never moved to something new. Before it pushes, it asks the registry whether the tag exists
-with one request, a manifest ``HEAD``, and reads only the HTTP status:
+The image workflow publishes a version once per flavor: ``<version>-cpu``, ``<version>-cuda`` (the
+workflow checks one per flavor) and the SIF's ``sha256-<hex>`` tag are never moved to something new.
+Before it pushes, it asks the registry whether the tag exists with one request, a manifest
+``HEAD``, and reads only the HTTP status:
 
     404      the tag is absent: exit 0, the run goes on
     200      the tag exists: exit 1, "already exists"
@@ -19,6 +20,7 @@ The environment gives ``REGISTRY_USER`` and ``REGISTRY_TOKEN``; ``REGISTRY_URL``
 (plain http is refused for any other host). The standard library only.
 
     python scripts/check_tag_absent.py nemarorg/nemar-python 1.2.3-cpu
+    python scripts/check_tag_absent.py nemarorg/nemar-python 1.2.3-cuda
 """
 
 from __future__ import annotations

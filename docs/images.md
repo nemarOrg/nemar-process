@@ -165,7 +165,7 @@ The defaults are an empty version, an empty commit and `dev`, so a plain `docker
 The writer, and the reader (`nemar_process.common.build.build_info`), refuse a `release` whose version has a `-devN` suffix, a `dev` whose version has none, a commit that is not 40 lowercase hexadecimal digits, and any `build` other than `release` or `dev`.
 Outside an image there is no file and the run is a `source` run: the `pyproject.toml` version beside the package and no commit.
 
-Every signalJourney record then carries `extensions.nemar.process` (`version`, `commit`, `build`) and `extensions.nemar.image` (`digest`, and `tag`, `<version>-cpu` for a release and null otherwise), read from inside the image with no network call ([recipes.md](recipes.md)).
+Every signalJourney record then carries `extensions.nemar.process` (`version`, `commit`, `build`) and `extensions.nemar.image` (`digest`, and `tag`, `<version>-<flavor>` for a release, `<version>-cpu` or `<version>-cuda` as the image's `/opt/nemar/flavor` says, and null otherwise), read from inside the image with no network call ([recipes.md](recipes.md)).
 
 ### When a run fails after the image was pushed
 
@@ -239,7 +239,6 @@ The first images are published from `main` (a manual dispatch, or a version tag 
 
 - **The CUDA flavor and the native binary have run only where CI runs them.** No Docker is available where this was written, so the first build of both flavors, the `ldd` lines, the architecture list, the CUDA flavor's CPU fit with no GPU visible and both `CPUFIT` readings are those of the pull request's `test` job; this page records none of them.
 - **A workstation's driver and GPU are not read here.** Whether a workstation's NVIDIA driver runs CUDA 12.9 wheels, and what the GPU path then does, is for the operator's preflight on that machine; the CUDA flavor is proven here on the CPU only.
-- **A record written inside the CUDA image names the `<version>-cpu` tag.** `extensions.nemar.image.tag` comes from `nemar_process.common.build`, which does not yet read the flavor; the digest is the identity, and the tag is only a name.
 - **The hosted runner's disk.** The CUDA build frees disk space first and keeps no cache; if a run still runs out of disk, a larger runner is the owner's to provide.
 - **The git tag the version step needs does not exist yet.** At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0, so the `publish` job refuses every version until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
