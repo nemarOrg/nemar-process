@@ -8,7 +8,7 @@ directories into one, ``version``.
     nemar-recipe run <recipe> --input zarr --zarr-base https://HOST --dataset-id ID
                               --dataset-version TAG --source-commit SHA [--out DIR]
                               [--recording STORE ...] [...]
-    nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
+    nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [--resume] [identity options]
     nemar-recipe version
 
 ``--input bids|zarr`` says what a recipe that reads more than one input reads (default ``bids``, a
@@ -55,7 +55,9 @@ Each recording runs inside one failure boundary: its files are written into a pr
 under ``--out`` and moved into place only when every file and the record exist, so a failed
 recording leaves no partial files, and its row is appended to the table in every case.
 ``aggregate`` reads and checks every input before it writes anything, stages its output under
-``--out`` and moves it into place at the end.
+``--out`` and moves it into place at the end. With ``--resume`` a run of the recordings that a time
+budget left out (exit 9) completes the product it continues: its rows replace the ``time_budget``
+rows of the other input, and any other recording that two inputs name is still an error.
 """
 
 from __future__ import annotations
@@ -274,6 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="a product directory; repeatable",
     )
     aggregate.add_argument("--out", required=True)
+    aggregate.add_argument(
+        "--resume",
+        action="store_true",
+        help="a later run of the recordings a time budget left out replaces their time_budget rows "
+        "(any other recording that two inputs name is still an error)",
+    )
     add_identity(aggregate)
     commands.add_parser("version", help="print the versions as one JSON line")
     return parser
@@ -427,13 +435,16 @@ def finalize(
     ignored: dict[str, int],
     started_utc: str,
     built_by: tuple[dict[str, Any] | None, str | None] | None = None,
+    resumed: int | None = None,
 ) -> tuple[dict[str, Any], int, int]:
     """Build and write the dataset record from the table in ``out``, and the recipe's QC summary.
 
     Returns the record, how many of the recordings in the table were skipped for their format, and
     how many were left out by the time budget, which with the counts in the record tell the exit
     code apart (``exit_for``). ``built_by`` is the build of the rows when they were made elsewhere
-    (the aggregate); a run states its own.
+    (the aggregate); a run states its own. ``resumed`` is how many ``time_budget`` rows a merge
+    with ``--resume`` replaced (zero when it replaced none); it is None, and the record has no such
+    field, for a run and for a merge that was not asked to resume.
     """
     label = recipe.label
     table_path = out / naming.dataset_path(label, "recordings", "tsv")
@@ -450,6 +461,8 @@ def finalize(
         nemar_extra=recipe.dataset_extras(context),
         built_by=built_by,
     )
+    if resumed is not None:  # beside pending_count, which counts the budget rows still left
+        record["extensions"]["nemar"]["report"]["resumed"] = resumed
     problems = records.check(record, context.validator)
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
@@ -940,6 +953,45 @@ def agreed_identity(given: Identity, inputs: list[ProductInput]) -> Identity:
     )
 
 
+class DuplicateRecording(Exception):
+    """Two inputs name one recording, and no replacement the merge was asked for resolves it."""
+
+
+def is_budget_row(row: Mapping[str, Any]) -> bool:
+    """A recording the time budget left unstarted: the one row a later run may replace."""
+    return row["status"] == "skipped" and row["code"] == TIME_BUDGET
+
+
+def merge_rows(
+    inputs: Sequence[ProductInput], resume: bool
+) -> tuple[dict[str, dict[str, Any]], list[int]]:
+    """The rows of the merged table by path, and how many rows of each input replaced a budget row.
+
+    A recording that two inputs name is an error (``DuplicateRecording``), whichever order they were
+    given in. With ``resume`` there is one exception: exactly two inputs name it and exactly one of
+    the two rows is ``skipped`` with the code ``time_budget``, and then the other row is taken and
+    the budget row is dropped. Two real rows, two budget rows, and a recording that three inputs
+    name (the pairs could be taken in more than one order) are still errors.
+    """
+    named: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for number, item in enumerate(inputs):
+        for row in item.rows:
+            named.setdefault(row["path"], []).append((number, row))
+    merged: dict[str, dict[str, Any]] = {}
+    replaced = [0] * len(inputs)
+    for path in sorted(named):
+        found = named[path]
+        if len(found) == 1:
+            merged[path] = found[0][1]
+            continue
+        real = [(number, row) for number, row in found if not is_budget_row(row)]
+        if not (resume and len(found) == 2 and len(real) == 1 and found[0][0] != found[1][0]):
+            raise DuplicateRecording("two inputs name the same recording: {}".format(path))
+        winner, merged[path] = real[0]
+        replaced[winner] += 1
+    return merged, replaced
+
+
 def copy_file(source: Path, target: Path) -> None:
     """Copy a file; a source that cannot be read is an input problem, a target that cannot be
     written is an output problem."""
@@ -1001,15 +1053,14 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
     except InputUnusable as error:
         print(error, file=sys.stderr)
         return EXIT_DATASET_UNREADABLE
-    merged: dict[str, dict[str, Any]] = {}
+    try:
+        merged, replaced = merge_rows(inputs, args.resume)
+    except DuplicateRecording as error:
+        print(error, file=sys.stderr)
+        return EXIT_INTERNAL
     targets: dict[str, Path] = {}
     ignored: dict[str, int] = {}
     for item in inputs:
-        for row in item.rows:
-            if row["path"] in merged:
-                print("two inputs name the same recording: {}".format(row["path"]), file=sys.stderr)
-                return EXIT_INTERNAL
-            merged[row["path"]] = row
         for relative, source in item.files.items():
             if relative in targets:
                 print("two inputs hold the same file: {}".format(relative), file=sys.stderr)
@@ -1034,7 +1085,13 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 for path in sorted(merged):
                     writer.append(merged[path])
             record, unsupported, unfinished = finalize(
-                recipe, staging, context, dict(sorted(ignored.items())), started, built_by
+                recipe,
+                staging,
+                context,
+                dict(sorted(ignored.items())),
+                started,
+                built_by,
+                resumed=sum(replaced) if args.resume else None,
             )
             files.move_into_place(
                 staging, out, [*sorted(targets), table_name, record_name, *dataset_files(recipe)]
