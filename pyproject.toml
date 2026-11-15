@@ -50,11 +50,12 @@ runtime = [
     "mne==1.13.2",
     "pamica==0.4.0",
     # The Zarr reader of the `nemar-floor-zarr` recipe (docs/recipes.md). A separate distribution
-    # from eegprep (eegprep stays 0.5.0, the engine the records name) installed from the head of
-    # sccn/eegprep#616 until it merges; move the pin to the merge commit or the release then, and
-    # `uv lock`. zarr is pinned to the version the reader's `zarr` extra was written against.
+    # from eegprep (eegprep stays 0.5.0, the engine the records name) installed from the merge
+    # commit of sccn/eegprep#616 on `develop`; the next move is to the eegprep release that
+    # contains it, by the card that pins that release, and `uv lock`. zarr is pinned to the version
+    # the reader's `zarr` extra was written against.
     "zarr==3.4.0",
-    "eegprep-lean[zarr] @ git+https://github.com/sccn/eegprep@14ba46e8da5340cd7ae6adb644cda24fb3f5e483#subdirectory=packages/eegprep-lean",
+    "eegprep-lean[zarr] @ git+https://github.com/sccn/eegprep@af9145121ed8a69eab86bc2f5c425a6bdcced5cc#subdirectory=packages/eegprep-lean",
     "numpy",
     "scipy",
     # The recipes pin the BLAS thread pools to one and record what they found (docs/recipes.md).
