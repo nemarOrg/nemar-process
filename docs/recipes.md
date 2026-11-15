@@ -79,6 +79,7 @@ nemar-recipe version
   The merged product is an input like another, so a run of the rest completes it with a second `--resume`.
   A remainder that was itself cut short cannot be merged with the first product, because both hold a budget row for the same recording (two budget rows are an error): run the recordings that are left out again, and merge in turn.
   Every refusal `aggregate` makes about the inputs' agreement (the dataset identity, the recipe and its version, the engine stamp, the seeds, the build and the image tag) applies to every input first, so a remainder made by another build or engine cannot complete a product (exit 6, nothing written).
+  A remainder's own `ignored_datatypes` are not added when every row of its table replaced a budget row, because the product it completes already counted them: a run counts the other datatypes of the subjects it owns, and the recordings of a remainder are recordings of that run, so it owns no subject the first run did not (an input that also holds recordings of its own is summed as before).
   The merged dataset record states `extensions.nemar.report.resumed`, the number of budget rows this merge replaced (0 when `--resume` replaced none), and a merge without `--resume` states none.
   Apart from that field, the clock and the run id, a completed product is what one run of all the recordings writes, file for file, and the order of the `--in` options changes nothing.
 - A recipe's `preflight` checks, once, that its engine can run here: it raises `EngineUnavailable` with one fixed word.

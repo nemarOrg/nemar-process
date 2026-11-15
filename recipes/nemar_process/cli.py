@@ -1060,12 +1060,16 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         return EXIT_INTERNAL
     targets: dict[str, Path] = {}
     ignored: dict[str, int] = {}
-    for item in inputs:
+    for number, item in enumerate(inputs):
         for relative, source in item.files.items():
             if relative in targets:
                 print("two inputs hold the same file: {}".format(relative), file=sys.stderr)
                 return EXIT_INTERNAL
             targets[relative] = source
+        if item.rows and replaced[number] == len(item.rows):
+            # a remainder: every row replaced a budget row, so the product it completes already
+            # counted the other datatypes of every subject it owns (it ran those recordings too)
+            continue
         for datatype, count in item.ignored.items():
             ignored[datatype] = ignored.get(datatype, 0) + count
     try:

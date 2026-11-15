@@ -18,7 +18,7 @@ from nemar_process import cli as command
 from nemar_process.common import determinism
 from nemar_process.common.recipe import TIME_BUDGET_S
 from recipe_support import DATASET
-from test_hooks import Clock, register, timed
+from test_hooks import Clock, dataset_of, register, timed
 
 SUBJECTS = ("sub-S01", "sub-S02", "sub-S03", "sub-S04")
 IDENTITY = [
@@ -432,3 +432,46 @@ def test_a_resume_flag_belongs_to_aggregate_and_not_to_run(products, tmp_path):
         floor_run(products["dataset"], tmp_path / "out", "x", extra=["--resume"])
     assert caught.value.code == 2
     assert not (tmp_path / "out").exists()
+
+
+# ---- what the remainder's run counted is not counted twice ---------------------------------------
+
+
+@pytest.fixture(scope="module")
+def mixed(tmp_path_factory):
+    """Short recordings with files of another datatype beside them, run whole, cut and as a
+    remainder: the whole run counts every one of them, so a remainder's own count of the subjects
+    it owns is a count of files that are already in the first product."""
+    base = tmp_path_factory.mktemp("mixed")
+    dataset = dataset_of(base / "on007823", 4)
+    for subject in ("sub-01", "sub-02", "sub-03", "sub-04"):
+        target = dataset / subject / "ieeg" / "{}_task-smoke_ieeg.edf".format(subject)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"")
+    clock = Clock()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(command, "CLOCK", clock)
+        register(patch, "toy", options=(TIME_BUDGET_S,), run_recording=timed(clock, 10))
+        assert (
+            floor_run(dataset, base / "cut", "cut", recipe="toy", extra=["--time-budget-s", "25"])[
+                0
+            ]
+            == 9
+        )
+    rest = [row["path"] for row in rows_of(base / "cut") if row["code"] == "time_budget"]
+    assert len(rest) == 2
+    assert floor_run(dataset, base / "rest", "rest", *rest)[0] == 0
+    assert floor_run(dataset, base / "whole", "whole")[0] == 0
+    return {name: base / name for name in ("cut", "rest", "whole")}
+
+
+def test_the_files_of_other_datatypes_are_counted_once_in_a_resumed_product(mixed, tmp_path):
+    assert nemar_of(mixed["whole"])["ignored_datatypes"] == {"ieeg": 4}
+    assert nemar_of(mixed["cut"])["ignored_datatypes"] == {
+        "ieeg": 4
+    }  # a run of everything counts all
+    assert nemar_of(mixed["rest"])["ignored_datatypes"] == {"ieeg": 2}  # the subjects it owns
+    out = tmp_path / "out"
+    assert merge(out, mixed["cut"], mixed["rest"])[0] == 0
+    assert nemar_of(out)["ignored_datatypes"] == {"ieeg": 4}
+    assert comparable(out, resumed=2) == comparable(mixed["whole"])
