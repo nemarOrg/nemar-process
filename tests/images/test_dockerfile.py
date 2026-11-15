@@ -22,7 +22,7 @@ import pytest
 import yaml
 from image_support import clean_env
 from nemar_process.common import build as process_build
-from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
+from recipe_support import PINNED_EEGPREP_TEXT, PINNED_RECIPE_VERSION
 from repo_paths import (
     CI_WORKFLOW,
     CUDA_DOCKERFILE,
@@ -220,9 +220,9 @@ def test_the_script_the_dockerfile_writes_runs_the_command(runtime_python, tmp_p
     )
     assert done.returncode == 0, done.stderr[-2000:]
     document = json.loads(done.stdout)
-    assert document["eegprep"] == PINNED_EEGPREP_VERSION
-    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
-    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"]}
+    assert document["eegprep"] == PINNED_EEGPREP_TEXT
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION, "nemar-ica": "1.0.0"}
+    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"], "nemar-ica": ["bids", "zarr"]}
 
 
 def test_the_build_context_is_an_allow_list_that_names_what_the_build_copies():

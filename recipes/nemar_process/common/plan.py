@@ -33,7 +33,7 @@ from typing import Any
 # sccn/eegprep#537: the design function is reachable only through a private module of eegprep.
 from eegprep.plugins.firfilt._filtering import design_eegfiltnew
 
-from nemar_process.common import COMMON_VERSION
+from nemar_process.common import COMMON_VERSION, versions
 from nemar_process.common.determinism import canonical_json, rounded, utc_now
 from nemar_process.common.params import cast
 
@@ -121,6 +121,40 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "rules": {"short_recording_s": "float"},
     },
     "nemar_process.qc.floor_metrics": {"spectrum_hz": "ints", "robust_amplitude": "str"},
+    # nemar-ica's four steps after the floor's (docs/recipes.md). `pop_runica` takes the keywords of
+    # the engine that was asked for: pamica's (`n_models`, `n_mix`, `block_size`, `seed`, `device`,
+    # `threads`) or the binary's (`num_models`, `num_mix_comps`, `max_threads`, `amica_binary`).
+    "eegprep.clean_asr": {
+        "cutoff": "float",
+        "window_len": "float",
+        "step_size": "int",
+        "max_dims": "float",
+        "ref_maxbadchannels": "float",
+        "ref_tolerances": "floats",
+        "ref_wndlen": "float",
+        "use_gpu": "bool",
+        "useriemannian": "str",
+        "maxmem": "int",
+        "return_state": "bool",
+    },
+    "eegprep.pop_reref": {"ref": "any"},
+    "eegprep.pop_runica": {
+        "icatype": "str",
+        "reorder": "str",
+        "n_models": "int",
+        "n_mix": "int",
+        "max_iter": "int",
+        "block_size": "int",
+        "seed": "int",
+        "device": "str",
+        "threads": "int",
+        "pcakeep": "int",
+        "num_models": "int",
+        "num_mix_comps": "int",
+        "max_threads": "int",
+        "amica_binary": "str",
+    },
+    "eegprep.pop_iclabel": {"icversion": "str"},
 }
 
 
@@ -147,11 +181,14 @@ def typed(function: str, parameters: dict[str, Any]) -> dict[str, Any]:
 
 
 def software_of(function: str) -> dict[str, Any]:
-    """The ``software`` of a step: eegprep (or its Zarr reader) at its installed version, or this layer."""
+    """The ``software`` of a step: eegprep (or its Zarr reader) at its installed version, or this layer.
+
+    eegprep's version carries the commit it was installed from (``versions.distribution_version``).
+    """
     if function.startswith("eegprep."):
         return {
             "name": "eegprep",
-            "version": metadata.version("eegprep"),
+            "version": versions.distribution_version("eegprep"),
             "url": EEGPREP_URL,
             "functionCall": function,
         }

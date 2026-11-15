@@ -76,7 +76,6 @@ import uuid
 import warnings
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from importlib import metadata
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -91,6 +90,7 @@ from nemar_process.common import (
     naming,
     records,
     table,
+    versions,
     zarr_hosts,
     zarr_input,
 )
@@ -1058,17 +1058,18 @@ def version_command() -> int:
     except build.BuildRefused as error:
         print(error, file=sys.stderr)
         return EXIT_INTERNAL
-    versions = {
+    document = {
         "recipes": {key: REGISTRY[key].version for key in sorted(REGISTRY)},
         "inputs": {key: list(REGISTRY[key].inputs) for key in sorted(REGISTRY)},
         "common": COMMON_VERSION,
-        "eegprep": metadata.version("eegprep"),
+        # with the commit it was installed from, as the engine stamp and every step name it
+        "eegprep": versions.distribution_version("eegprep"),
         "python": platform.python_version(),
         "numpy": numpy.__version__,
         "flavor": flavor,
         "amica15_sha256": amica15,
     }
-    print(json.dumps(versions, sort_keys=True))
+    print(json.dumps(document, sort_keys=True))
     return EXIT_OK
 
 

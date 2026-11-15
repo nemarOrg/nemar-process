@@ -20,7 +20,13 @@ import sys
 import check_smoke_pins as pins
 import pytest
 from image_support import clean_env
-from recipe_support import PINNED_COMMON_VERSION, PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
+from recipe_support import (
+    PINNED_COMMON_VERSION,
+    PINNED_EEGPREP_COMMIT,
+    PINNED_EEGPREP_TEXT,
+    PINNED_EEGPREP_VERSION,
+    PINNED_RECIPE_VERSION,
+)
 from repo_paths import LOCK, PYPROJECT, RECIPES, ROOT, SMOKE
 
 IMAGE_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "PYTHONHASHSEED": "0"}
@@ -52,7 +58,7 @@ def expected_document(flavor: str = "cpu", no_gpu: bool = False) -> dict:
                 "recipes": {"nemar-floor": PINNED_RECIPE_VERSION},
                 "inputs": {"nemar-floor": ["bids", "zarr"]},
                 "common": PINNED_COMMON_VERSION,
-                "eegprep": PINNED_EEGPREP_VERSION,
+                "eegprep": PINNED_EEGPREP_TEXT,
                 "python": "3.12.16",
                 "numpy": "2.5.4",
                 "flavor": flavor,
@@ -174,6 +180,38 @@ def test_the_recipe_command_must_have_been_run_and_say_the_pinned_eegprep():
     assert any("nemar-floor" in p for p in pins.check(unknown, PYPROJECT, LOCK))
 
 
+def test_the_recipe_command_names_eegprep_with_the_commit_it_was_taken_from():
+    """eegprep is one commit of `develop` that says 0.5.0, so every record names the commit too: the
+    bare version is what an index install says, and an image of this pin must not."""
+    assert pins.declared_commits(PYPROJECT)["eegprep"] == PINNED_EEGPREP_COMMIT
+    assert pins.recorded_versions(PYPROJECT, {"eegprep": {"0.5.0"}, "mne": {"1.13.2"}}) == {
+        "eegprep": {PINNED_EEGPREP_TEXT},
+        "mne": {"1.13.2"},
+    }
+    bare = copy.deepcopy(expected_document())
+    bare["recipe_command"]["version"]["eegprep"] = PINNED_EEGPREP_VERSION
+    problems = pins.check(bare, PYPROJECT, LOCK)
+    assert any("nemar-recipe says eegprep 0.5.0 " in p for p in problems)
+    short = copy.deepcopy(expected_document())
+    short["recipe_command"]["version"]["eegprep"] = (
+        PINNED_EEGPREP_VERSION + "+" + PINNED_EEGPREP_COMMIT[:12]
+    )
+    assert any("nemar-recipe says eegprep" in p for p in pins.check(short, PYPROJECT, LOCK))
+    # the installed distribution's own version stays the bare one: the commit is in the text of records
+    assert pins.check(expected_document(), PYPROJECT, LOCK) == []
+
+
+def test_a_requirement_that_is_not_a_git_commit_names_no_commit(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[dependency-groups]\nruntime = ["eegprep[mne]==0.5.0", "x @ git+https://example.org/x@'
+        + "ab" * 20
+        + '#subdirectory=y", "z @ git+https://example.org/z@main"]\n',
+        encoding="utf-8",
+    )
+    assert pins.declared_commits(pyproject) == {"x": "ab" * 20}  # a branch or a short hash is none
+
+
 def test_in_an_image_the_recipe_command_is_the_script_on_the_path_not_the_module():
     document = expected_document()
     assert pins.check(document, PYPROJECT, LOCK, image=True) == []
@@ -219,11 +257,16 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
     assert document["torch"]["cuda"] is None
     # the recipe command ran; the lock's environment has no script on its path, so it was the module
     assert document["recipe_command"]["via"] == "python -m nemar_process"
-    assert document["recipe_command"]["version"]["eegprep"] == PINNED_EEGPREP_VERSION
+    # eegprep's own version is 0.5.0, and the recipe command names the commit it was installed from
+    assert document["recipe_command"]["version"]["eegprep"] == PINNED_EEGPREP_TEXT
     assert document["recipe_command"]["version"]["recipes"] == {
-        "nemar-floor": PINNED_RECIPE_VERSION
+        "nemar-floor": PINNED_RECIPE_VERSION,
+        "nemar-ica": "1.0.0",
     }
-    assert document["recipe_command"]["version"]["inputs"] == {"nemar-floor": ["bids", "zarr"]}
+    assert document["recipe_command"]["version"]["inputs"] == {
+        "nemar-floor": ["bids", "zarr"],
+        "nemar-ica": ["bids", "zarr"],
+    }
     # every pinned package was imported, not only installed
     for module in ("eegprep", "mne", "pamica", "numpy", "scipy", "torch", "picard", "bids"):
         assert document["imports"][module], module

@@ -37,7 +37,12 @@ DATASET_VERSION = "v1.0.0"
 # these lines (and of the places that declare them), not a search through the tests.
 PINNED_RECIPE_VERSION = "1.0.0"
 PINNED_COMMON_VERSION = "1.0.0"
+# eegprep is taken from one commit of sccn/eegprep `develop`, which still says 0.5.0 like the PyPI
+# release that lacks what it holds: the distribution's own version is `0.5.0`, and every record, stamp
+# and `nemar-recipe version` names the commit too (`0.5.0+<commit>`, common/versions.py).
 PINNED_EEGPREP_VERSION = "0.5.0"
+PINNED_EEGPREP_COMMIT = "edf694c8344b9c4c68672eac3acf9a819f1462a8"
+PINNED_EEGPREP_TEXT = "{}+{}".format(PINNED_EEGPREP_VERSION, PINNED_EEGPREP_COMMIT)
 
 
 def require_runtime() -> None:
@@ -67,11 +72,14 @@ def write_set(
     types: list[str] | None = None,
     etc=None,
     locations: dict[str, tuple[float, float, float]] | None = None,
+    all_coordinates: bool = False,
 ) -> Path:
     """A real EEGLAB set file written by eegprep's own ``pop_saveset``, for the loader and floor.
 
     ``etc=None`` leaves ``etc`` empty, which is the case that matters: eegprep reads an empty
-    ``etc`` back as an array (docs/upstream.md, sccn/eegprep#533).
+    ``etc`` back as an array (docs/upstream.md, sccn/eegprep#533). ``all_coordinates`` gives every
+    located channel the polar and spherical coordinates a scalp map needs (eegprep's own
+    ``convertlocs``), as a set that EEGLAB saved has; the floor needs only X, Y and Z.
     """
     import logging
 
@@ -89,6 +97,10 @@ def write_set(
         if locations is not None and name in locations:
             entry["X"], entry["Y"], entry["Z"] = (float(v) for v in locations[name])
         chanlocs.append(entry)
+    if all_coordinates:
+        from eegprep import convertlocs
+
+        chanlocs = convertlocs(chanlocs, "cart2all")
     eeg = eeg_emptyset()
     eeg.update(
         {
@@ -477,3 +489,53 @@ def floor_literals() -> dict:
             {"spectrum_hz": [1, 70], "robust_amplitude": "1.4826*MAD"},
         ),
     }
+
+
+# ---- the E1R comparison of nemar-ica's two engines (tests/e2e/test_ica_launch.py) ---------------
+#
+# Written again from the test of sccn/eegprep#617 (`tests/test_pop_runica_pamica.py`, with the Amari index of
+# `tests/test_ds003061_stage_parity.py`), because eegprep's tests are not installed. Informational:
+# nothing asserts on what they return for the two engines (the owner's ruling).
+
+E1_REFERENCE = {"min_correlation": 0.95, "median_correlation": 0.99, "max_amari": 0.05}
+
+
+def matched_correlations(left, right):
+    """Absolute correlations of the Hungarian-matched rows of two unmixing matrices."""
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    count = left.shape[0]
+    correlation = np.abs(np.corrcoef(left, right)[:count, count:])
+    rows, columns = linear_sum_assignment(-correlation)
+    return correlation[rows, columns]
+
+
+def amari_distance(unmixing, mixing) -> float:
+    """The Amari index of ``unmixing @ mixing`` (0 for a signed permutation)."""
+    import numpy as np
+
+    magnitude = np.abs(np.asarray(unmixing, dtype=float) @ np.asarray(mixing, dtype=float))
+    width = magnitude.shape[0]
+    row_scale, column_scale = magnitude.max(axis=1), magnitude.max(axis=0)
+    row_term = np.sum(magnitude / row_scale[:, None]) - width
+    column_term = np.sum(magnitude / column_scale[None, :]) - width
+    return float((row_term + column_term) / (2 * width))
+
+
+def e1_statistics(pamica_unmixing, amica_unmixing) -> tuple[float, float, float]:
+    """The minimum and median matched correlation and the Amari distance, as that test computes
+    them: ``amari_distance(pamica_unmixing, pinv(amica_unmixing))``."""
+    import numpy as np
+
+    matched = matched_correlations(pamica_unmixing, amica_unmixing)
+    amari = amari_distance(pamica_unmixing, np.linalg.pinv(amica_unmixing))
+    return float(matched.min()), float(np.median(matched)), float(amari)
+
+
+def read_matrix_tsv(path: Path):
+    """A matrix file of ``nemar-ica`` (a header of labels, then ``.17g`` rows) as a float64 array."""
+    import numpy as np
+
+    lines = path.read_text(encoding="utf-8").splitlines()[1:]
+    return np.array([[float(x) for x in line.split("\t")] for line in lines])
