@@ -190,6 +190,7 @@ def test_the_flavors_are_one_tuple_and_the_old_single_flavor_constant_is_gone():
     assert Path("/opt/nemar/flavor") == build.FLAVOR_FILE
     assert not hasattr(build, "IMAGE_FLAVOR")
     assert not hasattr(cli, "IMAGE_FLAVORS")  # `version` reads the shared tuple and reader
+    assert not hasattr(cli, "FLAVOR_FILE")  # and the one file attribute is the reader's
 
 
 # ---- the flavor file: one reader ---------------------------------------------------------------

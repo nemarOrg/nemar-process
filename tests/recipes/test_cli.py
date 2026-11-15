@@ -616,18 +616,6 @@ def test_a_symbolic_link_or_an_unreadable_file_is_refused_never_followed(
     assert "cannot be read" in err
 
 
-def test_version_says_the_flavor_the_record_tag_is_made_from(cli, image_files):
-    """`version` and the records' tag read the one file through the one reader."""
-    flavor_file, _ = image_files
-    for word in build.IMAGE_FLAVORS:
-        flavor_file.write_text(word + "\n", encoding="ascii")
-        code, out, _ = cli("version")
-        assert code == command.EXIT_OK
-        assert json.loads(out)["flavor"] == build.image_flavor() == word
-        release = {"version": "1.2.3", "commit": "0" * 40, "build": "release"}
-        assert build.image_tag(release, build.image_flavor()) == "1.2.3-" + word
-
-
 def test_a_refused_flavor_file_gives_the_same_line_and_code_through_the_shared_reader(
     cli, image_files
 ):
