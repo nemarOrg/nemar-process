@@ -56,7 +56,8 @@ nemar-recipe version
   The inputs must also agree about the recipe, the engine stamp and the seeds, and they must have been made by the version of the recipe that is running, because the merged record's steps are that recipe's.
   The merged record states the recipe, the engine and the seeds of its inputs, not those of the process that merges them, which ran none of the steps and may run on another machine.
   Two inputs that name the same recording, or hold the same file, are an error (exit 1, with the path), found before anything is copied.
-  It then copies every per-recording file byte for byte into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, and moves everything into place at the end.
+  It then copies every per-recording file byte for byte (the sample masks among them) into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, rebuilds the QC summary from the merged table and record (an input's own summary is never copied), and moves everything into place at the end.
+  The merged summary equals the summary of one run over the same recordings, apart from `record_sha256`.
   A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.
   It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
 - A recipe can declare options of its own (`Recipe.options`), such as `--time-budget-s N` or the choice of a decomposition engine.
@@ -189,7 +190,7 @@ Two things are decided from it.
 It is one billion values, which is 8 GB for a float64 copy and about 24 GB at the peak of three copies; 64 channels at 500 Hz for eight hours fits, 256 channels at 1 kHz for two hours does not.
 It is the arithmetic of the peak and not a measurement, and the scale measurement that replaces it is listed in `docs/unverified.md`.
 
-## `nemar-floor` 1.0.0: the steps
+## `nemar-floor` 1.0.1: the steps
 
 Every call is eegprep 0.5.0 (the lock pins it).
 The order is the plan's, which differs from the design's in one place (decision O1): flatline runs before the drift filter, on the unfiltered copy.
@@ -243,10 +244,12 @@ After a band-stop the spectrum is measured again, so `afterDb` is a measurement 
 product/
   desc-nemarfloor_signalJourney.json              dataset record (at most 256 KB)
   desc-nemarfloor_recordings.tsv                  every recording, one row each
+  desc-nemarfloor_qcsummary.json                  the dataset's QC in one small file (at most 65,536 bytes)
   sub-<id>/[ses-<id>/]eeg/
     <entities>_desc-nemarfloor_signalJourney.json
     <entities>_desc-nemarfloor_channels.tsv
     <entities>_desc-nemarfloor_badsegments.tsv    absent when bad_windows was skipped
+    <entities>_desc-nemarfloor_samplemask.tsv     the same windows as sample indices; absent likewise
     <entities>_desc-nemarfloor_filters.json
     <entities>_desc-nemarfloor_qc.json
 ```
@@ -265,14 +268,20 @@ Above 100 Hz a signal channel without coordinates is therefore judged on noise a
 The `bad_channels` step names these channels in its metrics (`noiseOnlyChannels` and `notAssessedChannels`).
 `_badsegments.tsv` has `onset`, `duration`, `label`, `nemar_reason`: one row per maximal run of False in the sample mask.
 It is absent when the window step was skipped, because an empty file would claim there are no bad segments.
+`_samplemask.tsv` is the same decision in samples, so that a consumer applies the bad windows to the samples the QC read without converting seconds:
+its columns are `start_sample` (the 0-based index of the first bad sample, in the samples the floor read), `stop_sample` (exclusive, so a row is the half-open range `[start_sample, stop_sample)`), `label` (`bad_window`) and `nemar_reason`, one row per maximal run of False in the window step's sample mask, in order.
+Each row is the matching `_badsegments.tsv` row multiplied out by the rate: `onset` is `start_sample / rate` and `duration` is `(stop_sample - start_sample) / rate`, each to six decimals.
+It holds indices of samples and never the samples, and it is absent whenever `_badsegments.tsv` is.
+The grid the indices count is in the recording's record: `extensions.nemar.mask_grid` is `{"n_samples", "rate", "profile"}`, the number of samples the floor read, their rate in hertz (for the Zarr input, the serving copy's rate) and the `profile`, `archive` (the floor read the archived recording itself) or `serving` (it read NEMAR's Zarr serving copy).
+Every recording that succeeded has a `mask_grid`, whether or not a mask file was written.
 `_filters.json` states the drift filter (with the kernel's SHA-256) and the line-noise measurements and the band-stops that were applied with their order, transition and cutoffs.
 `_qc.json` is described below.
 
 ### The per-recording record
 
-`pipelineInfo.name` is `nemar-floor` and `pipelineInfo.version` is `1.0.0`.
+`pipelineInfo.name` is `nemar-floor` and `pipelineInfo.version` is `1.0.1`.
 `processingSteps` has one entry per executed step in order, each with `stepId`, `name` (the function's dotted path; a test imports every one), `software`, `parameters` (what is hashed), `inputSources`, `outputTargets` (an in-memory target and, on the step that produced it, a file target), `dependsOn`, `executionDateTime` and `qualityMetrics`.
-`extensions.nemar` holds what the schema has no field for: the `recipe`, the `dataset` identity, the `recording`, the `inputs` and `outputs` with their size and SHA-256 (the schema's output targets have no checksum field), the `engine` (versions, the thread pin, the pools threadpoolctl found, the thread variables seen, the common layer's version, and `torch` and `pamica` when they are installed), the `process` block, the `image` (`digest` and `tag`), the `seeds`, the `rules` that fired, the `skipped_steps` with reasons, the `plan_hash` and the `run_id`.
+`extensions.nemar` holds what the schema has no field for: the `recipe`, the `dataset` identity, the `recording`, the `inputs` and `outputs` with their size and SHA-256 (the schema's output targets have no checksum field), the `engine` (versions, the thread pin, the pools threadpoolctl found, the thread variables seen, the common layer's version, and `torch` and `pamica` when they are installed), the `process` block, the `image` (`digest` and `tag`), the `seeds`, the `rules` that fired, the `skipped_steps` with reasons, the `plan_hash`, the `mask_grid` (above) and the `run_id`.
 
 Records validate against the signalJourney schema packaged with the validator release (pinned by its tree digest, [upstream.md](upstream.md)).
 That validator checks neither timestamps nor non-finite numbers nor references, so `records.check` does: timestamps match `YYYY-MM-DDTHH:MM:SSZ`, the writer refuses NaN and infinity, every `dependsOn` and `previousStepOutput` names an earlier step and one of its outputs, and the plan hash matches the steps.
@@ -335,14 +344,34 @@ A recording without a percentage is left out of the percent-good-channels histog
 
 `desc-nemarfloor_signalJourney.json` is a valid signalJourney record whose `processingSteps` are a constant list of the recipe's steps with the recipe-level parameters (never read from a recording), and whose `qualityMetrics` count the recordings that succeeded and the recordings that skipped each step for each reason.
 `summaryMetrics` has the counts and, for percent good channels, percent good samples and the line-noise excess before and after, `n`, `min`, `median`, `max` and a histogram with fixed edges (percentages every 10; dB at -10, -5, 0, 5, 10, 15, 20, 30, 40) where a value belongs to the bin `[edge_i, edge_i+1)`, the last bin is closed and values outside are counted as underflow and overflow.
-`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.0/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
+`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.1/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
 The record is at most 256 KB (262,144 bytes): rows are added in path order while the serialized record stays at or under 200,000 bytes, and the rest are counted in `rows_truncated` and live only in the table file; the report's `records` is capped at 200 entries with `records_truncated`.
 Both caps are deterministic.
 At about 420 bytes a row as indented JSON, roughly 300 rows fit; a larger dataset reads the remaining rows from the table file, and the counts, the distributions and the plan variants cover every recording.
 
+### The QC summary
+
+`desc-nemarfloor_qcsummary.json` is the dataset's quality control in one small file, so that NEMAR's catalog shows it without parsing the dataset record.
+It is valid against [`schemas/qc-summary.v1.json`](schemas/qc-summary.v1.json) (JSON Schema, draft 2020-12, every object closed) and is at most 65,536 bytes.
+`run` writes it after the dataset record, and `aggregate` rebuilds it from the merged table and record.
+It holds:
+
+- `format` (`nemar.qc-summary.v1`) and the identity: `dataset_id`, `dataset_version` (null when not given: identity is never guessed), `recipe`, `recipe_version`, `input_kind` (`bids` or `zarr`) and `profile` (`archive` or `serving`);
+- `describes`, one of two exact sentences, which the schema binds to the input.
+  For the Zarr input: "QC describes NEMAR's Zarr serving copy (EEG capped at 250 Hz, 16-bit), not the archived recordings."
+  For a dataset directory: "QC describes the dataset's recordings as archived."
+  Nothing in the file states an archived recording's rate: for a directory the floor read the archived files themselves, so each recording's `mask_grid` rate is the rate of what was read, and for the Zarr input it is the serving rate;
+- `counts`: `discovered`, `succeeded`, `failed` and `skipped`;
+- `distributions`: the four of the dataset record (`percentGoodChannels`, `percentGoodSamples`, `lineNoiseBeforeDb`, `lineNoiseAfterDb`), each with `n`, `min`, `median`, `max` and the same histogram bins, over every recording;
+- `not_processed`: the `path`, `status` and `code` of the recordings that failed or were skipped, in table order, at most 200 of them (fewer when long paths would pass the byte limit, cut where the next entry would not fit) with `not_processed_truncated` counting the rest;
+- `record_sha256`: the SHA-256 of the dataset record file's bytes.
+
+The summary holds no sampling rate at all, because a dataset's recordings can have been acquired at several rates: a rate lives only in each recording's `mask_grid`.
+It holds no clock either, but `record_sha256` is the digest of a file that does (the record's `executionDate`, `started_utc`, `finished_utc` and `run_id`), so it is the one value that differs between two runs of the same recordings, and between a merged product and one run over the same recordings.
+
 ### Determinism
 
-Two runs on one machine and one image are byte-identical in every TSV, `_filters.json`, `_qc.json`, the recordings table, and each JSON record after the clock and the run id are removed: `pipelineInfo.executionDate`, every `executionDateTime`, `extensions.nemar.run_id`, and in the dataset record `started_utc` and `finished_utc`.
+Two runs on one machine and one image are byte-identical in every TSV (the sample masks included), `_filters.json`, `_qc.json`, the recordings table, the QC summary apart from its `record_sha256` (the digest of a record file that holds the clock), and each JSON record after the clock and the run id are removed: `pipelineInfo.executionDate`, every `executionDateTime`, `extensions.nemar.run_id`, and in the dataset record `started_utc` and `finished_utc`.
 Nothing else in any file varies.
 `tests/recipes/test_determinism_runs.py` runs the command in separate processes, once more with different thread variables in the environment, and compares.
 
@@ -367,7 +396,7 @@ The window step removes about half of the samples at eegprep's defaults on this 
 
 `nemar-recipe run nemar-floor --input zarr --out DIR --dataset-id ID --dataset-version TAG --source-commit SHA --image-digest sha256:HEX --zarr-base https://zarr.nemar.org` runs the floor's steps, unchanged, on every EEG store of a dataset's Zarr serving copy, read whole over HTTPS, with nothing downloaded to disk.
 The input is the serving copy (EEG resampled to 250 Hz at most, 16-bit), not the archived recordings, and every record says so (`extensions.nemar.input.profile` is `serving`).
-It is the same recipe as the floor on a dataset directory: `pipelineInfo.name` is `nemar-floor`, the version is `1.0.0` for both inputs (a record of the directory input is the same bytes it was before the input became an argument, and no record of this name existed for the Zarr input), and the product label is `nemarfloor`.
+It is the same recipe as the floor on a dataset directory: `pipelineInfo.name` is `nemar-floor`, the version is `1.0.1` for both inputs (the sample masks, the QC summary and the `mask_grid` were added to the directory input's records, which a published image wrote at 1.0.0: a patch bump, below), and the product label is `nemarfloor`.
 `nemar-floor-zarr` was this input's name until the two converged: `nemar-recipe run nemar-floor-zarr ...` (and `aggregate`) now prints the one line `nemar-floor-zarr is now: nemar-floor --input zarr` and exits 2, and runs nothing.
 A published image that predates the change (`0.1.0-cpu`) still has the old name and not the argument.
 
@@ -375,7 +404,8 @@ A published image that predates the change (`0.1.0-cpu`) still has the old name 
   `--input zarr` chooses it.
   For `zarr`, `--dataset-dir` is refused and `--zarr-base` (an `https://` origin that is exactly the Zarr host of one NEMAR environment) and `--dataset-id`, `--dataset-version` and `--source-commit` are required (exit 2); `aggregate` is not offered (`aggregate nemar-floor --input zarr` is exit 2), because a merged record would have no input of its own to state.
 - **The chain is the floor's.** Per store the recipe reads the level-0 recording in physical units with eegprep-lean (`load_recording`, then `to_eeg`), runs `eegprep.eeg_checkset` and the floor's `process` and `write_product` with the floor's parameters.
-  The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv` and `desc-nemarfloor_signalJourney.json` for the dataset.
+  The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` and `_samplemask.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv`, `desc-nemarfloor_signalJourney.json` and `desc-nemarfloor_qcsummary.json` for the dataset.
+  A store's `mask_grid` names the serving rate and the profile `serving`, so a mask index counts the serving copy's level-0 samples.
   Nothing is written outside `--out`, and there is no cache directory.
   The serving copy carries no electrode coordinates and no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
   The unit is passed to eegprep-lean's `to_eeg` as the serving copy states it (`uV`, and the micro sign and the Greek mu that real indexes use, which eegprep-lean accepts from sccn/eegprep#616's commit 14ba46e8); a unit that is not a voltage makes the store `convert_failed`.
@@ -482,8 +512,10 @@ The driver adopted the plan's recommendations pending the owner; each is reversi
 A change under `common/` that alters a byte of the floor fixture's pinned outputs is a `nemar-floor` version bump; one that does not bumps only this version's patch.
 Until a layer is released, a change that alters no byte of a product does not bump it: the version names released code, and a record that says `1.0.0` is the same bytes either way.
 A bump is also skipped when a change only adds fields to a record shape that no released (recipe, version, input) ever wrote, because no record of that shape exists to be told apart from the new one.
-This change is that case: the records of `nemar-floor` with the Zarr input are new (the Zarr input was a recipe of its own, `nemar-floor-zarr`, and no released `nemar-floor` 1.0.0 wrote one), and the records of the directory input are byte-identical to what they were, so `COMMON_VERSION` and `RECIPE_VERSION` stay `1.0.0`.
+That was the case for the change that made the Zarr input a variant of the floor: the records of `nemar-floor` with the Zarr input were new (the Zarr input was a recipe of its own, `nemar-floor-zarr`, and no released `nemar-floor` 1.0.0 wrote one), and the records of the directory input were byte-identical to what they had been, so `COMMON_VERSION` and `RECIPE_VERSION` stayed `1.0.0` then.
 The hooks below were added to the unreleased `1.0.0` that way, and the floor fixture's whole product tree (records and engine stamp included, clock aside) was compared before and after.
+The sample masks, the QC summary and the `mask_grid` are not that case: they add files and fields to the directory input's records, which a released image wrote at 1.0.0, so a product with them and one without would both say 1.0.0 and nothing that names the recipe version could tell them apart.
+It is therefore the patch bump to `1.0.1` for both inputs (one recipe, one version; a patch, because nothing a 1.0.0 reader relies on changes), `COMMON_VERSION` stays `1.0.0` because nothing under `common/` changed, and the golden decisions moved only by the version and the plan hash, which covers the recipe's name and version: the channel table and the bad-segment table are byte-identical and `decisions.json` changes in `recipe.version` and `plan_hash` alone.
 
 A second recipe that embeds the floor uses these, none of which the floor sets:
 
