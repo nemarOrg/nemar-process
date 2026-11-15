@@ -57,13 +57,16 @@ def extended(served):  # noqa: F811
     z._store(base, LINE_FEED, {"eeg_250hz": ("EEG", "u\nV", z._signal(10))})
     z._store(base, CARRIAGE_RETURN, {"eeg_250hz": ("EEG", "u\rV", z._signal(11))})
     z._store(base, OTHER_GROUP, {GROUP: ("EEG", "uV", z._signal(12))})
-    for path, seed, fields in (
-        (PARTLY_LABELED, 13, {"unit": "uV", "labels": ("", *z.LABELS[1:])}),
-        (MIXED_UNITS, 14, {"unit": "uV", "units": ("uV",) * (z.N_CHANNELS - 1) + ("mV",)}),
-        (EMPTY_UNIT, 15, {"unit": ""}),
+    for path, seed, unit, labels, units in (
+        (PARTLY_LABELED, 13, "uV", ("", *z.LABELS[1:]), None),
+        (MIXED_UNITS, 14, "uV", None, ("uV",) * (z.N_CHANNELS - 1) + ("mV",)),
+        (EMPTY_UNIT, 15, "", None, None),
     ):
         root = zarr.create_group(store=LocalStore(base / z.zarr_name(path)), overwrite=True)
-        z.write_group(root, "eeg_250hz", modality="EEG", data=z._signal(seed), **fields)
+        data = z._signal(seed)
+        z.write_group(
+            root, "eeg_250hz", modality="EEG", unit=unit, data=data, labels=labels, units=units
+        )
     document = z.index_document()
     eeg = z.group_entry("eeg_250hz", "EEG", z.RATE, z.N_CHANNELS, z.N_SAMPLES)
     named = z.group_entry(GROUP, "EEG", z.RATE, z.N_CHANNELS, z.N_SAMPLES)
