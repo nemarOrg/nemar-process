@@ -190,7 +190,7 @@ def test_aggregate_is_not_offered_for_the_zarr_input(cli, tmp_path):
 def test_the_floor_is_one_recipe_with_two_inputs_that_share_its_name_version_and_label():
     from nemar_process.recipes import REGISTRY
 
-    assert sorted(REGISTRY) == ["nemar-floor"]
+    assert sorted(REGISTRY) == ["nemar-floor", "nemar-ica"]
     floor = REGISTRY["nemar-floor"]
     zarr = floor.reading("zarr")
     assert floor.input == "bids"

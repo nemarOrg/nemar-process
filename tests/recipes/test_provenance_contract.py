@@ -327,11 +327,15 @@ def test_a_recipe_cannot_reuse_an_optional_engine_field_name():
 IDENTITY = ["--dataset-id", DATASET_ID, "--dataset-version", DATASET_VERSION]
 
 
-def run_bids(out: Path) -> int:
+# nemar-ica is run for a few iterations: what is checked here is what the records say, not the fit
+FEW_ITERATIONS = {"nemar-ica": ["--ica-max-iter", "5"]}
+
+
+def run_bids(out: Path, recipe_id: str = "nemar-floor") -> int:
     return cli.main(
         [
             "run",
-            "nemar-floor",
+            recipe_id,
             "--dataset-dir",
             str(DATASET),
             "--out",
@@ -339,6 +343,7 @@ def run_bids(out: Path) -> int:
             *IDENTITY,
             "--image-digest",
             DIGEST,
+            *FEW_ITERATIONS.get(recipe_id, []),
         ]
     )
 
@@ -374,10 +379,19 @@ def run_zarr(out: Path, stand_in_port: int) -> int:
         patch.undo()
 
 
+# A recipe and input whose run writes no recording record on the serving copy: ICLabel needs a scalp
+# map, the serving copy has no electrode locations, and eegprep raises on a channel with none, so every
+# store of nemar-ica --input zarr ends `step_failed` at `iclabel` (tests/recipes/test_nemar_ica.py pins
+# it, and the dataset record it still writes). It joins the contract when that is decided.
+NO_RECORDING_RECORDS = {("nemar-ica", "zarr")}
+
 VARIANTS = sorted(
-    (recipe_id, kind) for recipe_id, recipe in REGISTRY.items() for kind in recipe.inputs
+    (recipe_id, kind)
+    for recipe_id, recipe in REGISTRY.items()
+    for kind in recipe.inputs
+    if (recipe_id, kind) not in NO_RECORDING_RECORDS
 )
-"""Every recipe with every input it reads, as (recipe id, input)."""
+"""Every recipe with every input it reads, as (recipe id, input), but the ones above."""
 
 
 @pytest.fixture(scope="module")
@@ -389,7 +403,7 @@ def products(served, tmp_path_factory):  # noqa: F811
     for recipe_id, kind in VARIANTS:
         recipe = REGISTRY[recipe_id].reading(kind)
         out = tmp_path_factory.mktemp("{}-{}".format(recipe.label, kind))
-        code = run_bids(out) if kind == "bids" else run_zarr(out, served.port)
+        code = run_bids(out, recipe_id) if kind == "bids" else run_zarr(out, served.port)
         assert code == 0, (recipe_id, kind)
         made[(recipe_id, kind)] = out
     return made

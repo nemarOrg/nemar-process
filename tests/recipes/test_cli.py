@@ -19,6 +19,7 @@ from nemar_process.common.errors import RecordingError, RecordingSkipped
 from recipe_support import (
     DATASET,
     PINNED_COMMON_VERSION,
+    PINNED_EEGPREP_TEXT,
     PINNED_RECIPE_VERSION,
     RECORDING,
     copy_fixture,
@@ -510,8 +511,9 @@ def test_the_version_is_one_json_line(cli, image_files):
     assert code == 0
     document = json.loads(out)
     assert out.count("\n") == 1
-    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
-    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"]}
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION, "nemar-ica": "1.0.0"}
+    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"], "nemar-ica": ["bids", "zarr"]}
+    assert document["eegprep"] == PINNED_EEGPREP_TEXT  # with the commit it was installed from
     assert document["common"] == PINNED_COMMON_VERSION
     assert set(document) == {
         "recipes",

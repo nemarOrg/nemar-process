@@ -18,17 +18,13 @@ from nemar_process.common import determinism
 from nemar_process.common.errors import EngineUnavailable
 from nemar_process.common.recipe import INPUT_OPTION, TIME_BUDGET_S, Option
 from nemar_process.nemar_floor import RECIPE, outputs
+from nemar_process.nemar_ica.options import ENGINE as ICA_ENGINE
 from nemar_process.recipes import REGISTRY
 from recipe_support import SMOKE_SET
 
-ENGINE = Option(
-    "ica_engine",
-    "--ica-engine",
-    str,
-    "pamica",
-    "which decomposition engine runs",
-    choices=("pamica", "amica15"),
-)
+# the recipe's own option: a flag two recipes declare is one option, and it is refused when they
+# declare it differently, so the toy recipes below use the real definition
+ENGINE = ICA_ENGINE
 
 
 class Clock:
