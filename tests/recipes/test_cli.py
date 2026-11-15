@@ -83,6 +83,7 @@ def test_a_run_on_the_fixture_exits_zero_and_writes_the_product_tree(first_run):
     base = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
     assert product_files(out) == sorted(
         [
+            "desc-nemarfloor_qcsummary.json",
             "desc-nemarfloor_recordings.tsv",
             "desc-nemarfloor_signalJourney.json",
             base + "badsegments.tsv",
@@ -547,6 +548,11 @@ def test_naming_the_bids_input_changes_nothing(tmp_path, cli):
             assert records.content_sha256(json.loads(plain.read_text())) == records.content_sha256(
                 json.loads(named.read_text())
             ), name
+        elif name == "desc-nemarfloor_qcsummary.json":  # its one value that follows the clock
+            assert {**json.loads(plain.read_text()), "record_sha256": None} == {
+                **json.loads(named.read_text()),
+                "record_sha256": None,
+            }, name
         else:
             assert plain.read_bytes() == named.read_bytes(), name
 

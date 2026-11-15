@@ -152,7 +152,8 @@ def test_the_floors_files_are_written_under_the_label_for_each_processed_store_o
         for suffix in PRODUCT_SUFFIXES:
             assert product(out, path, suffix).is_file(), (path, suffix)
     written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
-    assert len(written) == len(PROCESSED) * len(PRODUCT_SUFFIXES) + 2  # the table and the record
+    # the table, the record and the QC summary
+    assert len(written) == len(PROCESSED) * len(PRODUCT_SUFFIXES) + 3
     assert all("desc-nemarfloor" in name for name in written)
     assert all(
         name.endswith((".tsv", ".json")) for name in written

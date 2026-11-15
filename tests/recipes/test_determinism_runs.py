@@ -6,8 +6,10 @@ differ only in the clock, the run id and, for the dataset record, the start and 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +18,9 @@ import pytest
 from recipe_support import DATASET, ROOT
 
 EXCLUDED_STEP = "executionDateTime"
+SUMMARY = "desc-nemarfloor_qcsummary.json"
+RECORD = "desc-nemarfloor_signalJourney.json"
+DIGEST = re.compile(r'"record_sha256": "[0-9a-f]{64}"')
 STATE_SUFFIXES = (
     "_channels.tsv",
     "_badsegments.tsv",
@@ -92,7 +97,7 @@ def names(directory: Path, endings=("",)):
 def test_two_separate_processes_write_the_same_files(two_runs):
     first, second = two_runs
     assert names(first) == names(second)
-    assert len(names(first)) == 8  # the table, two records and five state files
+    assert len(names(first)) == 9  # the table, two records, the summary and five state files
 
 
 def test_every_tsv_and_state_file_is_byte_identical(two_runs):
@@ -143,3 +148,20 @@ def test_a_different_thread_environment_changes_nothing_because_the_run_pins_its
     for name in names(first, ("_signalJourney.json",)):
         assert without_clock(first / name) == without_clock(other_threads_run / name), name
 
+
+def test_the_qc_summary_is_the_same_bytes_in_every_run_but_for_the_digest_of_the_record_file(
+    two_runs, other_threads_run
+):
+    """The summary holds no clock, but ``record_sha256`` is the digest of a record file that does."""
+    first, second = two_runs
+    texts = [
+        (run / SUMMARY).read_text(encoding="utf-8") for run in (first, second, other_threads_run)
+    ]
+    assert DIGEST.search(texts[0])
+    assert texts[0] != texts[1]  # the records differ: the clock, the run id
+    assert DIGEST.sub("", texts[0]) == DIGEST.sub("", texts[1]) == DIGEST.sub("", texts[2])
+    for run, text in zip((first, second, other_threads_run), texts, strict=True):
+        assert (
+            json.loads(text)["record_sha256"]
+            == hashlib.sha256((run / RECORD).read_bytes()).hexdigest()
+        )

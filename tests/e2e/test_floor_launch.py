@@ -128,6 +128,7 @@ def test_the_job_leaves_the_product_tree_under_work_outputs(floor_launch):
     base = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
     assert product_names(product) == sorted(
         [
+            "desc-nemarfloor_qcsummary.json",
             "desc-nemarfloor_recordings.tsv",
             "desc-nemarfloor_signalJourney.json",
             base + "badsegments.tsv",
@@ -155,7 +156,7 @@ def test_the_manifest_lists_every_product_file_with_the_sha256_of_the_file_on_di
     listed = {f["path"]: f for f in launch.manifest["files"]}
     on_disk = {name: outputs / name for name in product_names(outputs)}
     assert sorted(listed) == sorted(on_disk)
-    assert len(listed) == 8  # five state files, two records and the table
+    assert len(listed) == 9  # five state files, two records, the table and the QC summary
     for name, path in on_disk.items():
         assert listed[name]["sha256"] == sha256(path), name
         assert listed[name]["size"] == path.stat().st_size, name
