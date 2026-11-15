@@ -90,7 +90,7 @@ def test_the_default_identity_is_looked_up_when_called_not_when_defined(
     assert caught.value.detail == "schema"
 
 
-def test_another_recipe_gets_the_floors_four_files_under_its_own_label_and_name(
+def test_another_recipe_gets_the_floors_files_under_its_own_label_and_name(
     fixture_result, recording, tmp_path
 ):
     result = replace(fixture_result, plan=own_plan(fixture_result))
@@ -110,6 +110,7 @@ def test_another_recipe_gets_the_floors_four_files_under_its_own_label_and_name(
             base + "channels.tsv",
             base + "filters.json",
             base + "qc.json",
+            base + "samplemask.tsv",
             base + "sphere.tsv",
             base + "signalJourney.json",
         ]

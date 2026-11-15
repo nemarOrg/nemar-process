@@ -905,6 +905,7 @@ def test_an_eeg_store_whose_products_cannot_be_named_is_a_skipped_row(
     assert documents.urls == [z.INDEX_URL]  # nothing was read
     written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
     assert written == [
+        "desc-nemarfloor_qcsummary.json",
         "desc-nemarfloor_recordings.tsv",
         "desc-nemarfloor_signalJourney.json",
     ]

@@ -24,6 +24,7 @@ from nemar_process.common import io, plan, qc
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from nemar_process.nemar_floor import outputs, process, steps
 from recipe_support import (
+    PINNED_RECIPE_VERSION,
     SMOKE_SET,
     correlated_channels,
     floor_literals,
@@ -68,7 +69,7 @@ def test_the_fixtures_plan_is_the_pinned_order(fixture_result):
         },
     ]
     assert plan.rules == ["signal-channels-typed", "locations-usable"]
-    assert (plan.recipe_id, plan.recipe_version) == ("nemar-floor", "1.0.0")
+    assert (plan.recipe_id, plan.recipe_version) == ("nemar-floor", PINNED_RECIPE_VERSION)
 
 
 def test_every_step_carries_the_literal_function_and_parameters(fixture_result):

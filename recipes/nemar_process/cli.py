@@ -113,6 +113,7 @@ from nemar_process.common.errors import (
     is_cuda_out_of_memory,
 )
 from nemar_process.common.recipe import INPUTS, Identity, Option, Recipe, RunContext
+from nemar_process.nemar_floor import qc_summary
 from nemar_process.recipes import REGISTRY, RETIRED
 
 EXIT_OK = 0
@@ -427,7 +428,7 @@ def finalize(
     started_utc: str,
     built_by: tuple[dict[str, Any] | None, str | None] | None = None,
 ) -> tuple[dict[str, Any], int, int]:
-    """Build and write the dataset record from the table in ``out``.
+    """Build and write the dataset record from the table in ``out``, and the recipe's QC summary.
 
     Returns the record, how many of the recordings in the table were skipped for their format, and
     how many were left out by the time budget, which with the counts in the record tell the exit
@@ -453,11 +454,20 @@ def finalize(
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
+    if qc_summary.applies(recipe):  # after the record: it names the record file by its digest
+        qc_summary.write(recipe, out, record, rows)
     return (
         record,
         sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT),
         sum(1 for row in rows if row["code"] == TIME_BUDGET),
     )
+
+
+def dataset_files(recipe: Recipe) -> list[str]:
+    """The files at the root of a product besides its table and its record: the QC summary of the
+    floor. ``run`` writes them from the table and the record, and ``aggregate`` writes them from the
+    merged table and record and never copies an input's."""
+    return [qc_summary.path(recipe)] if qc_summary.applies(recipe) else []
 
 
 def result_line(
@@ -876,7 +886,11 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
         ) from error
     for path in listed:
         relative = path.relative_to(directory)
-        if PARTIAL in relative.parts or relative.as_posix() in (table_name, record_name):
+        if PARTIAL in relative.parts or relative.as_posix() in (
+            table_name,
+            record_name,
+            *dataset_files(recipe),
+        ):
             continue
         if path.is_file():
             found.files[relative.as_posix()] = path
@@ -1022,7 +1036,9 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
             record, unsupported, unfinished = finalize(
                 recipe, staging, context, dict(sorted(ignored.items())), started, built_by
             )
-            files.move_into_place(staging, out, [*sorted(targets), table_name, record_name])
+            files.move_into_place(
+                staging, out, [*sorted(targets), table_name, record_name, *dataset_files(recipe)]
+            )
     except InputUnusable as error:
         print(error, file=sys.stderr)
         return EXIT_DATASET_UNREADABLE

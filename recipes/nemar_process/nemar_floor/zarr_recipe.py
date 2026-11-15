@@ -3,9 +3,10 @@
 nemar-floor's steps, unchanged, on a recording read whole from the Zarr serving copy: the chain is
 ``nemar_floor.pipeline.process`` and the files are ``nemar_floor.outputs.write_product``, so the
 decisions and the outputs have the floor's own definitions, and only the load step and the
-provenance of the input differ. This is the floor as a variant of itself: the same name, version and
-label (``nemar-floor``, ``1.0.0``, ``nemarfloor``), read on another input; ``--input zarr`` chooses
-it (``nemar_floor.RECIPE.reading``), and what each record says was read is in ``common/zarr_input``.
+provenance of the input differ. This is the floor as a variant of itself: the same name, version
+(``steps.RECIPE_VERSION``) and label (``nemar-floor``, ``nemarfloor``), read on another input;
+``--input zarr`` chooses it (``nemar_floor.RECIPE.reading``), and what each record says was read is
+in ``common/zarr_input``.
 """
 
 from __future__ import annotations
@@ -37,14 +38,14 @@ INFO = RecipeInfo(
         "bad channels, bad windows, QC (eegprep)."
     ),
     recording_description=(
-        "nemar-floor 1.0.0: annotation of one EEG recording read from NEMAR's Zarr serving copy "
+        "nemar-floor {}: annotation of one EEG recording read from NEMAR's Zarr serving copy "
         "(bad channels, bad windows, filters, QC); no samples are written."
-    ),
+    ).format(steps.RECIPE_VERSION),
     dataset_pipeline_description="NEMAR quality floor on the Zarr serving copy, dataset level.",
     dataset_description=(
-        "nemar-floor 1.0.0: dataset-level quality record of the Zarr serving copy "
+        "nemar-floor {}: dataset-level quality record of the Zarr serving copy "
         "(aggregates and per-recording summary table)."
-    ),
+    ).format(steps.RECIPE_VERSION),
 )
 
 OPTIONS = (
