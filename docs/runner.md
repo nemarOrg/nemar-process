@@ -15,6 +15,7 @@ This page is about the program; the integration with NEMAR's real routes is prov
 
 ```bash
 cd runner && python3 -m nemar_runner doctor      # check this host, one yes or no a line
+cd runner && python3 -m nemar_runner gpu-check   # take the GPU idle check once, a line per GPU
 cd runner && python3 -m nemar_runner once        # claim once, run what was claimed, exit
 cd runner && python3 -m nemar_runner run         # claim until stopped (SIGTERM or SIGINT)
 ```
@@ -32,7 +33,7 @@ SIGTERM, SIGHUP or SIGINT stops claiming, terminates the jobs still running (SIG
 ## Configuration
 
 A JSON file at `$XDG_CONFIG_HOME/nemar-runner/config.json` (default `~/.config/nemar-runner/config.json`; an empty or relative `XDG_CONFIG_HOME` is ignored, as the specification says).
-Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_images`, `availability` and the three keys of [the service](#running-it-as-a-service) is required, and an unknown key is refused.
+Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_images`, `availability`, `gpu` and the three keys of [the service](#running-it-as-a-service) is required, and an unknown key is refused.
 
 | Key | Meaning |
 |---|---|
@@ -50,6 +51,7 @@ Every key but `launcher_dir`, `default_job_memory_mb`, `sif_pull`, `verify_image
 | `cosign_path` | optional absolute path of the `cosign` binary that the verification of an image ([The image](#the-image)) and `self-update` run: when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and it is required when `cosign` is not on `/usr/local/bin:/usr/bin:/bin`; `install` ignores it and takes `--cosign-path` ([a configuration for the service](#a-configuration-for-the-service)) |
 | `launcher_dir` | optional: the directory that holds the `nemar_launch` package and its `schema` directory (default: the `launcher` directory of this checkout) |
 | `availability` | optional object: when the runner claims on a workstation other people use (memory reserve, load, pause files, backoff); every key has a default, so leaving it out is the defaults ([Sharing a workstation](#sharing-a-workstation)) |
+| `gpu` | optional object: when a job that asked for a GPU is given one (off by default, so such a job runs on the CPU; the memory cap, the idle thresholds, the samples); every key has a default ([A GPU, only when it is idle](#a-gpu-only-when-it-is-idle)) |
 
 The runner refuses to start when the configuration file or the secret file can be reached by group or others (any group or other permission bit: use mode 0600), is not the user's own regular file (a link is refused), or when `root` is not a directory the user owns, or can be written by group or others.
 A refusal names the key and never a value.
@@ -93,6 +95,8 @@ The launcher is started as `python3 -I -S -c '<boot line>' <launcher directory>`
 | `NEMAR_CPUS` | the job's `cores`, always | the claim answer |
 | `NEMAR_MEMORY_MB` | the job's `memory_mb`; under Docker or Podman always, `default_job_memory_mb` when the claim's is null (the log line is `memory_default_applied job=<id> mb=<n>`); under Apptainer only when the claim's is not null | the claim answer, the configuration |
 | `NEMAR_RUNNER_LABEL` | Docker and Podman only: the runner's registration id, `rnr_` and 24 lowercase hexadecimal digits, which the launcher puts on every container as `nemar.runner` | `GET /compute/runners/me`, read at start |
+| `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` | only for a job whose claim has `gpus` above zero: `cpu` or `cuda`, and the reason, one of the fixed words of [A GPU, only when it is idle](#a-gpu-only-when-it-is-idle); a job with no GPUs gets neither | the GPU check |
+| `NEMAR_GPU_ID`, `NEMAR_GPU_INDEX`, `NEMAR_GPU_MEMORY_MB` | only for a `cuda` decision: the one GPU's identifier as `nvidia-smi` prints it, its index, and the most of its memory the job may take | the GPU check |
 | `HOME` | `<job>/home` | the runner |
 | `PATH` | `/usr/local/bin:/usr/bin:/bin` | fixed |
 | `LANG` | `C.UTF-8` | fixed |
@@ -107,6 +111,7 @@ Nothing of the runner's own environment reaches the launcher.
 A claim's `launch_spec_env` is checked by the schema for its alphabet and length only, so the runner decodes it with the seven rules of the launcher's decoder (`runner/nemar_runner/wire.py`, replayed against the launcher's table of wire cases) before it does anything for the job.
 A value that fails ends the job without launching: exit 13, `runtime_error`, detail `invalid_spec`, the answer the launcher would give.
 So does a specification whose `job_id` is not the claimed job's, or whose image is not the claim's: the file, the digest, or the reference (a Docker or Podman launcher pulls the specification's `image.uri`, and the runner verifies the claim's, so they must be the same, with or without `docker://`).
+So does a specification whose `resources.gpus` is not the claim's `gpus` (the Worker fills both from one number): the count is the ceiling of the GPU decision, and a launch value that allowed another would skip the GPU check or turn a job that should run on the CPU away (log word `gpus_mismatch`).
 The decoded text holds the job token and is never logged.
 
 ### The image
@@ -352,7 +357,104 @@ For example, to leave 16 GiB to people on a 128 GiB workstation registered for j
 `python3 -m nemar_runner availability` (with `--config <file>` before or after the command) prints one line and exits 0 when the host has room for a claim now and 1 when it does not:
 `availability: idle` or `availability: busy reason=<word>`, then the numbers it was judged on, never a path or a secret.
 It cannot know a backoff, which lives in a running runner.
-`doctor` adds two informational lines, `availability` (`yes`, or `no (reason=<word>)`) and `priority` (`yes` when a process of its own can take niceness 19 and the idle I/O class on this host), and neither changes the exit status.
+`doctor` adds two informational lines, `availability` (`yes`, or `no (reason=<word>)`) and `priority` (`yes` when a process of its own can take niceness 19 and the idle I/O class on this host), and neither changes the exit status; a third, `gpu`, is described under [A GPU, only when it is idle](#a-gpu-only-when-it-is-idle).
+
+### A GPU, only when it is idle
+
+The CPU is the default path and the GPU a bonus.
+On a workstation where people compute, the GPU is often idle and sometimes the busiest thing in the room (a deadline), and a person who holds GPU memory while their own work is quiet is still using it.
+So a job that asked for a GPU gets one only when a conservative check finds it idle and nobody has reserved it, and otherwise runs on the CPU, with no wait and no failure.
+Nothing about the accounting changes: the Worker counted the job's `resources.gpus` against the registration (pool, cores, memory and GPUs), the runner may use fewer (the CPU, or one GPU of several) and never more, and there is no new route, field or failure word.
+
+**When.**
+The decision is made for each claimed job whose `gpus` is above zero, just before it starts: after its image is proven and made, and after the start check of [Just before a claimed job starts](#just-before-a-claimed-job-starts) found room.
+A job whose `gpus` is zero gets no decision, no variable, and no call of `nvidia-smi`.
+Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `gpus` the claim allowed, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index and `cap_mb`, and, when the reason is `gpu_check_failed`, a fixed word `why`.
+A GPU is never named in the log by its identifier.
+
+**The reason.**
+The CPU is chosen with the first of these that applies:
+
+| Reason | When |
+|---|---|
+| `gpu_disabled` | `gpu.enabled` is false, which is the default: a host turns the GPU on |
+| `gpu_unsupported_runtime` | the runtime is Podman: the launcher passes no GPU there yet |
+| `gpu_reserved` | an entry named `gpu<i>` or `gpu-all` is in a reservation directory (below), for the GPU with index `i` |
+| `gpu_check_failed` | `nvidia-smi` is missing, is not trusted, does not answer within 10 seconds a call, exits non-zero, or prints anything that cannot be read (no GPU, a field that is `[N/A]`, a process on a GPU the other call did not name, a GPU that appeared or went between samples); or the whole window cannot end before the time the lease leaves before the launcher starts (`lease_abandon_seconds` after the claim) or before the job's own deadline (below), or the runner is stopping |
+| `gpu_busy` | in some sample a compute process lists the GPU, or `memory.used` is above `max_used_mb` (memory held by a process that is quiet counts), or `utilization.gpu` is above `max_utilization_pct` |
+| `gpu_memory_short` | in some sample `memory.total` less `memory.used` is under the cap plus `headroom_mb`, where the cap is `floor(memory_fraction * memory.total)`; a cap under one megabyte is short too |
+| `gpu_in_use` | the GPU passed and another job of this runner holds it |
+
+A GPU is granted, with reason `gpu_idle`, only when `samples` readings taken `sample_seconds` apart ALL pass every rule, and the reservation is looked for in every one of them: one failing sample is the CPU.
+The limits are inclusive (`memory.used` equal to `max_used_mb` is idle).
+A GPU that is reserved or busy in a sample cannot become idle later in the window, so the window ends as soon as every GPU is, and a busy GPU costs a job no wait.
+With several GPUs the lowest index that passed and is free is given; when none is, the reason is the first of the table that any GPU has.
+A job is given one GPU, whatever its `gpus` allows.
+
+**The window ends before its deadline.**
+The check is given the time the lease leaves before the launcher starts (`lease_abandon_seconds`, 540 seconds, after the claim) or the job's own deadline, whichever comes first, and it never returns after it: a launcher that started after the lease had run out would lose the lease and spend a claim, which is not the CPU.
+The window is not started unless the gaps, `(samples - 1) * sample_seconds`, and the last sample at its slowest, two calls of 10 seconds each, all fit before the deadline, and a gap is not slept unless the next sample, at its slowest, still ends before it (the calls before it may have been slow).
+A window that cannot fit, because `sample_seconds` and `samples` are large or the claim was slow to start, is the CPU at once with reason `gpu_check_failed` and `why` `deadline`, not after a wait.
+With the defaults the window is 25 seconds of gaps and at most 20 of calls.
+
+**How it is asked.**
+Two calls per sample, `nvidia-smi --query-gpu=index,uuid,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits` and `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits`, each with a 10-second timeout (the program and its whole process group are killed), at most a megabyte of output, no input, and `PATH` and `LANG` only in the environment.
+The program is the first `nvidia-smi` in the launch PATH's directories (`/usr/local/bin:/usr/bin:/bin`), vetted as `python3` is ([Configuration](#configuration)): every directory up to it, and the program, the user's or root's and not writable by group or others.
+It is never named in the configuration file.
+What is kept and logged is counts and fixed words: no process id, no user name and no path.
+
+**Two jobs of one runner never share a GPU.**
+One lock per GPU, held from the decision until the job ends (after its container is removed, so its memory is free), and released when the job ends however it ends.
+A GPU another job of this runner holds is `gpu_in_use` for the next, with no waiting; when every GPU the runner has seen is held, the answer is given at once, without a window.
+The lock is the runner's: a second runner on the same host is a second user of the GPU, which the check treats like any other (its job's memory and process show in the samples).
+
+**Reserving the GPU.**
+A person who needs a GPU creates an entry named `gpu0` (the index) or `gpu-all` in a reservation directory (the `reservation_dirs` of [Configuration](#configuration), the same ones that hold `pause`), and removes it when done: `touch <reservation directory>/gpu0`.
+Only the name is looked at, with `lstat`: a file, a link, a directory or a pipe all reserve, nothing is opened, read or followed, and a directory that cannot be searched reserves, because a reservation that cannot be seen is respected.
+Reservations are read even when `availability.enabled` is false.
+A job that is already running on the GPU is not stopped (nothing preempts a job); the reservation keeps the next job off.
+`gpu-all` is looked for before `nvidia-smi` is run at all.
+
+**Configuration.**
+An optional `gpu` object in the configuration file, its keys checked as the top level's are (an unknown key is refused, and the message names the key only):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | `true` turns the GPU on: without it every GPU job runs on the CPU, reason `gpu_disabled` |
+| `memory_fraction` | `0.5` | the most of one GPU's memory a job may take, as a fraction above 0 and at most 1; the cap is told to the recipe |
+| `headroom_mb` | `2048` | memory that must remain free on top of the cap |
+| `max_used_mb` | `1024` | the memory other processes may hold on a GPU that still counts as idle (a desktop's), megabytes |
+| `max_utilization_pct` | `10` | the busiest `utilization.gpu` that still counts as idle, 0 to 100 |
+| `samples` | `6` | readings that must all pass, 2 to 120 |
+| `sample_seconds` | `5` | the gap between readings, above 0 and at most 60 |
+
+```json
+"gpu": {
+  "enabled": true,
+  "memory_fraction": 0.5
+}
+```
+
+**What it prints.**
+`python3 -m nemar_runner gpu-check` (with `--config <file>` before or after the command) takes the check once, every sample, whether or not `enabled` is true (a note on standard error says when it is not, so that a host can look before it turns the GPU on), and prints one line per GPU, `gpu<i>: idle` or `gpu<i>: busy reason=<word>`, then the sizes and, per sample, the number of compute processes, `memory.used` and `utilization.gpu`:
+
+```text
+gpu0: idle total_mb=24576 cap_mb=12288 processes=0,0,0,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
+gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 processes=1,1,1,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
+```
+
+It exits 0 when a GPU is idle and 1 when none is; when the check cannot be made the one line is `gpu: unavailable reason=gpu_check_failed why=<word>`.
+`doctor` adds an informational `gpu` line: `no (disabled)`, `no (gpu_unsupported_runtime)`, `no (gpu_check_failed (<word>))`, `no (tool found, GPUs seen: <n>, but <k> of <m> reservation directories do not exist)` (a reservation can only be made in a directory that is there, and a mistyped one would silently turn reservations off; the default one beside the configuration file is never created by the runner), or `yes (tool found, GPUs seen: <n>, reservations: <names>)`; it never changes the exit status.
+
+**What the recipe is told.**
+`NEMAR_DEVICE` (`cpu` or `cuda`), `NEMAR_DEVICE_REASON`, and for `cuda` `NEMAR_GPU_MEMORY_MB` (the cap), inside the container ([the launcher](launcher.md#the-device)).
+A recipe keeps to the cap, and a Compute Unified Device Architecture (CUDA) out-of-memory error or another process taking memory moves the recipe to the CPU for good and is recorded; that is the recipe's rule, not the runner's.
+
+**What is not guaranteed.**
+`nvidia-smi` lists compute processes of other accounts only where the host lets it (a container or `hidepid` can hide them), and `memory.used` and `utilization.gpu` are the backstop that still sees their use; the check is a reading of a moment, so a person who starts work a second after the window is not seen until the next one, and nothing stops the job then.
+Under Apptainer the one GPU is named by `CUDA_VISIBLE_DEVICES`, a request the CUDA runtime honors and a job's own code could undo, where under Docker only that device is handed to the container: Apptainer's `--nv` binds every GPU's device file, so on a host with several GPUs a job's code can reach a GPU it was not granted (the check protects against honest use, not against a job that undoes the request; `--nvccli` is the follow-up to look at before an Apptainer runner serves untrusted code on such a host).
+Podman gets the CPU until a later step.
+The real check against a GPU is an operator step on a workstation that has one, after the demo.
 
 ## Logs
 
@@ -383,8 +485,9 @@ One line each, `<check>: yes` or `no`, with a fixed phrase after a no:
 | `engine limits enforceable`, `engine mode accepted` (Docker and Podman only; asked only when `launcher`, `launcher_dir trusted` and `launcher python` are yes, because the preflight imports the launcher's code) | the two answers of the launcher's own engine preflight (`nemar_launch.runtime.engine_preflight(engine_path, engine_name)`, called in a child process run as the launcher is), so `doctor` and the launcher cannot disagree about an engine; rootless Docker without enforceable limits answers no |
 | `availability` (informational) | the host has room for a claim now ([Sharing a workstation](#sharing-a-workstation)); a no names the reason and is not a failure |
 | `priority` (informational) | a process of its own can take niceness 19 and the idle I/O class on this host |
+| `gpu` (informational) | the GPU check is on, `nvidia-smi` is found and trusted and answers, and how many GPUs it sees and which reservations are present ([A GPU, only when it is idle](#a-gpu-only-when-it-is-idle)); a no names why and is not a failure |
 
-Exit 0 only if every line but the Apptainer `limits` line and the two informational ones is yes (the `cosign` and `signature` lines are asked for only when `verify_images` is true): a host that cannot enforce limits still runs jobs, with the watchdog, and a host that is busy right now or cannot lower its priority still runs them.
+Exit 0 only if every line but the Apptainer `limits` line and the three informational ones is yes (the `cosign` and `signature` lines are asked for only when `verify_images` is true): a host that cannot enforce limits still runs jobs, with the watchdog, and a host that is busy right now, cannot lower its priority or has no GPU check still runs them (a job that asked for a GPU then runs on the CPU).
 `run` and `once` run the same probe the first time an image is available and set `NEMAR_ENFORCE_LIMITS` from it; Docker and Podman are never claimed, because the launcher owns their flags and checks them with the preflight.
 
 ## Running it as a service
@@ -507,6 +610,7 @@ Without it the launcher is the one in the same signed bundle (`<prefix>/versions
 | `install_prefix` | optional: where `install` put the runner; the running runner watches `<install_prefix>/current` (absent: it never switches versions). It must be the user's own directory that group and others cannot write, or the runner will not start |
 | `self_update` | optional boolean, default `true`: `false` turns the daily update off, so `self-update` does nothing and asks GitHub nothing; this is the opt-out for a machine of another institution, which then updates by `install --version X.Y.Z` when its owner decides |
 | `availability` | optional object: the host-room rules of a shared workstation, all keys optional with the defaults of [Sharing a workstation](#sharing-a-workstation) (the memory the people who share the machine keep, the memory a claim may hand this runner, the load, the backoff and the directories searched for `pause`) |
+| `gpu` | optional object: when a job that asked for a GPU is given one, all keys optional with the defaults of [A GPU, only when it is idle](#a-gpu-only-when-it-is-idle) (off, so such a job runs on the CPU, until a host sets `enabled`) |
 | `cosign_path` | optional absolute path of the cosign binary that `self-update` and the verification of an image ([The image](#the-image)) run; when it is set it is used and any cosign on the launch PATH is not (it is not a fallback), and without it they look on the launch PATH; `install` ignores this key and takes `--cosign-path` instead. It must not be a link, and its directory and the file must be the user's or root's and not writable by group or others |
 
 ### What the account's owner does
@@ -531,6 +635,7 @@ uv run ty check --python-version 3.9 launcher observer runner
 ```
 
 The tests run real child processes and real HTTP; NEMAR's Worker is a recording stand-in that answers fixtures and checks each request body against the pinned schema, and the container runtime is a stand-in executable where a test is about how it is called.
+`tests/runner/test_gpu.py` runs `nvidia-smi` as a stand-in executable that prints scripted samples in the format of `--format=csv,noheader,nounits` and refuses any arguments but the two queries above (no machine of the tests has a GPU), with real reservation entries, real clocks, a real runner and real launcher child processes; `tests/launcher/test_device.py` pins the launcher's command lines.
 `tests/runner/test_verify_image.py` runs cosign and Apptainer as stand-in executables and the registry as a stand-in HTTP server on loopback, for everything the runner decides (the reference, the identity constant against the workflow, the answers cosign can give, the manifest and layer checks, the cache, the refusal, `doctor`), and then, against the real cosign and the public registry, checks that the demo image's digest verifies, that the same digest with another identity or issuer does not, that a tag is refused, that a corrupted file in `sif_root` is `layer_mismatch`, and (with Apptainer) that the signed SIF artifact is pulled by its digest and hashes to its signed layer.
 The tests that need the real cosign skip where it is absent; with `NEMAR_REQUIRE_COSIGN=1` (the `launcher` CI job, which installs the pinned cosign) a skip is a failure.
 The one exception is `tests/e2e/test_runner_stack.py`, described next, which runs against NEMAR's real routes and a real container runtime.

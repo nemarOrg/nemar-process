@@ -9,6 +9,7 @@ real runtime:
          --bind <out>/work:/work  --bind <out>/work/tmp:/tmp
          [--bind <scratch>/code:/code:ro]  [--bind <dataset dir>:/data/<id>:ro ...]
          [--nv]  --env <allowlisted>=<value> ...  --env NEMAR_OUT=/work/outputs
+         [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
          <sif>  <entry or command> <args>
 
 * ``--containall`` (contain, clean environment, private PID and IPC namespaces), ``--cleanenv``
@@ -22,7 +23,12 @@ real runtime:
   value is read from the host. The runtime process itself is also given a short allowlist of host
   variables, not the launcher's environment, because ``APPTAINERENV_*`` / ``SINGULARITY_BIND``
   style variables in the launcher's environment would otherwise be honoured by the runtime.
-* ``--nv`` only when ``resources.gpus`` is above zero.
+* ``--nv`` only when ``resources.gpus`` is above zero, and, when a runner decided the device
+  (``settings.Device``), only for a ``cuda`` decision: ``--nv`` and ``CUDA_VISIBLE_DEVICES`` set to the
+  one GPU the runner named, never the scheduler's value; a ``cpu`` decision passes neither. The container
+  then also gets ``NEMAR_DEVICE``, ``NEMAR_DEVICE_REASON`` and, for ``cuda``, ``NEMAR_GPU_MEMORY_MB``
+  after ``NEMAR_OUT``: launcher-owned, the specification's allowlist cannot name them. Without a
+  decision (Tapis, SLURM, a job with no GPU) the command line is what it always was.
 
 After the container exits the launcher removes every symlink and special file under ``work/``
 (recorded in the log) and hashes ``work/outputs`` into the manifest itself: the container's own
@@ -53,6 +59,9 @@ from .codes import (
     CONTAINER_WORK,
     ENGINE_RUNTIMES,
     ENV_CONTAINER_RUNTIME,
+    ENV_DEVICE,
+    ENV_DEVICE_REASON,
+    ENV_GPU_MEMORY_MB,
     ENV_OUT,
     ENV_SIF_ROOT,
     LOG_FILE,
@@ -62,7 +71,7 @@ from .codes import (
     Stopped,
 )
 from .provenance import Log
-from .settings import Limits, read_settings
+from .settings import Device, Limits, check_device, read_settings
 from .stage import Staged
 
 # A SIGTERM within this many seconds of the job's end time is the time limit, not a cancellation.
@@ -253,7 +262,11 @@ def build_argv(
     binds: list[Bind],
     cuda: str | None = None,
     limits: Limits | None = None,
+    device: Device | None = None,
 ) -> list[str]:
+    check_device(device, job.gpus)
+    if device is not None:  # the runner's decision replaces the scheduler's own view of the GPUs
+        cuda = device.gpu_id if device.cuda else None
     argv = [runtime, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
     if limits is not None:  # the runtime's own cgroup limits, only when the runner proved them
         argv += ["--cpus", str(limits.cpus)]
@@ -261,15 +274,37 @@ def build_argv(
             argv += ["--memory", "{}M".format(limits.memory_mb)]
     for bind in binds:
         argv += ["--bind", bind.argument()]
-    if job.gpus > 0:
+    gpu = job.gpus > 0 if device is None else device.cuda
+    if gpu:
         argv.append("--nv")
     for name, value in job.env.items():
         argv += ["--env", env_argument(name, value)]
     if cuda is not None:
         argv += ["--env", env_argument("CUDA_VISIBLE_DEVICES", cuda)]
     argv += ["--env", env_argument(ENV_OUT, CONTAINER_OUTPUTS)]
+    argv += device_env_arguments(device)
     argv.append(sif)
     argv += entry_argv(job)
+    return argv
+
+
+def device_variables(device: Device | None) -> list[tuple[str, str]]:
+    """The variables the container gets for a runner's decision, in order, or none without one:
+    ``NEMAR_DEVICE``, ``NEMAR_DEVICE_REASON`` and, for ``cuda``, ``NEMAR_GPU_MEMORY_MB``. The recipe is
+    told the device and the cap and nothing about the host: no index, no host name."""
+    if device is None:
+        return []
+    found = [(ENV_DEVICE, device.device), (ENV_DEVICE_REASON, device.reason)]
+    if device.cuda:
+        found.append((ENV_GPU_MEMORY_MB, str(device.memory_mb)))
+    return found
+
+
+def device_env_arguments(device: Device | None) -> list[str]:
+    """``--env NAME=value`` for each of ``device_variables`` (Apptainer's CSV record form)."""
+    argv: list[str] = []
+    for name, value in device_variables(device):
+        argv += ["--env", env_argument(name, value)]
     return argv
 
 

@@ -27,8 +27,9 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
         --mount type=bind,src=<host>,dst=/work  --mount type=bind,src=<host>,dst=/tmp
         [--mount type=bind,src=<host>,dst=/code,readonly]
         [--mount type=bind,src=<host>,dst=/data/<id>,readonly ...]
-        [--gpus <n>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
-        --env NEMAR_OUT=/work/outputs  <image.uri>  <entry or command> <args>
+        [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
+        --env NEMAR_OUT=/work/outputs  [--env NEMAR_DEVICE=... --env NEMAR_DEVICE_REASON=...
+        [--env NEMAR_GPU_MEMORY_MB=...]]  <image.uri>  <entry or command> <args>
 
 * No ``--privileged``, no host network, PID, IPC or user namespace, no ``-v``, no ``--device`` and no
   ``--env-file``: each is absent on purpose and a test fails if one appears.
@@ -39,6 +40,13 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
   ``--env`` as it is, not as the CSV record Apptainer reads), together with what the engine and the
   image add: the image's own ``ENV``, ``HOSTNAME`` and ``HOME``. ``CUDA_VISIBLE_DEVICES`` is NOT
   passed: the engine numbers the GPUs it hands over from zero.
+* WHEN A RUNNER DECIDED THE DEVICE (``settings.Device``; without one everything above is as it was):
+  ``cuda`` passes ``--gpus device=<GPU id>`` (the one GPU the runner named, as ``nvidia-smi`` prints its
+  identifier) in place of ``--gpus <n>``, and a ``cpu`` decision passes no ``--gpus`` and sets
+  ``NVIDIA_VISIBLE_DEVICES=void``, whatever ``resources.gpus`` says. The container also gets
+  ``NEMAR_DEVICE``, ``NEMAR_DEVICE_REASON`` and, for ``cuda``, ``NEMAR_GPU_MEMORY_MB``, after
+  ``NEMAR_OUT``. A ``cuda`` decision for a specification whose ``resources.gpus`` is 0 is refused
+  (``settings.check_device``).
 * The engine process itself is given ``run.runtime_environment``'s short allowlist, never the
   launcher's environment (so ``DOCKER_HOST``, ``CONTAINER_HOST`` and the like are not honored).
 * ``--cpu-shares 2`` (the lowest CPU weight) is added only when the engine says it can apply CPU shares
@@ -92,10 +100,11 @@ from .run import (
     TERM_GRACE_SECONDS,
     Bind,
     check_bind_sources,
+    device_variables,
     entry_argv,
     runtime_environment,
 )
-from .settings import Limits
+from .settings import Device, Limits, check_device
 
 APPTAINER = "apptainer"
 # How long the engine may take to answer `info`, to answer `image inspect`, to pull an image, to
@@ -207,11 +216,14 @@ def build_argv(
     limits: Limits,
     runner_label: str,
     cpu_shares: bool = False,
+    device: Device | None = None,
 ) -> list[str]:
     """The whole engine command line (see the module docstring for what each flag is for).
 
     ``cpu_shares`` is what ``preflight`` found: True only when the engine can apply CPU shares, and
-    then ``--cpu-shares 2`` follows ``--cpus``."""
+    then ``--cpu-shares 2`` follows ``--cpus``. ``device`` is the runner's decision for a GPU job, if
+    it made one: with None the GPU flags are what they always were."""
+    check_device(device, job.gpus)
     if limits.memory_mb is None:  # read_settings refuses this earlier; never run without a size
         raise Failure("runtime_error", "invalid_spec", "the memory size to enforce is not valid")
     uid, gid = current_user()
@@ -275,13 +287,19 @@ def build_argv(
     ]
     for bind in binds:
         argv += ["--mount", mount_argument(bind)]
-    if job.gpus > 0:
-        argv += ["--gpus", str(job.gpus)]
+    if device is None:
+        if job.gpus > 0:
+            argv += ["--gpus", str(job.gpus)]
+    elif device.cuda:
+        argv += ["--gpus", "device={}".format(device.gpu_id)]
     for variable, value in job.env.items():
         argv += ["--env", "{}={}".format(variable, value)]
-    if job.gpus == 0:
+    hidden = job.gpus == 0 if device is None else not device.cuda
+    if hidden:
         argv += ["--env", "NVIDIA_VISIBLE_DEVICES=void"]
     argv += ["--env", "{}={}".format(ENV_OUT, CONTAINER_OUTPUTS)]
+    for variable, value in device_variables(device):
+        argv += ["--env", "{}={}".format(variable, value)]
     argv.append(reference)
     argv += entry_argv(job)
     return argv

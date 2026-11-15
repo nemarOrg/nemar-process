@@ -148,6 +148,10 @@ def test_gpus_add_nv_and_no_gpus_do_not(rig):
     gpu = rig.launch(entry_spec(rig, resources={"gpus": 2}))
     assert gpu.exit == 0
     assert "--nv" in rig.runtime_calls()[1]["argv"]
+    # no runner decided the device (Tapis and SLURM never do): nothing about a device is added
+    for call in rig.runtime_calls():
+        assert not any(part.startswith("NEMAR_DEVICE") for part in call["argv"])
+    assert "device" not in gpu.provenance
 
 
 def test_nothing_but_the_allowlist_and_the_output_path_is_passed_with_env(rig):
@@ -442,6 +446,8 @@ def test_cuda_visible_devices_is_passed_for_a_gpu_job_when_it_is_plain(rig):
     assert argv[argv.index('"CUDA_VISIBLE_DEVICES=0,1"') - 1] == "--env"
     # after the job's own variables, before NEMAR_OUT
     assert argv.index('"CUDA_VISIBLE_DEVICES=0,1"') < argv.index("NEMAR_OUT=/work/outputs")
+    # and nothing after NEMAR_OUT but the image and the entry: no decision, no device variable
+    assert argv[argv.index("NEMAR_OUT=/work/outputs") + 1] == str(rig.sif_root / SIF_NAME)
 
 
 @pytest.mark.parametrize(

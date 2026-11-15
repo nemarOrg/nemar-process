@@ -37,6 +37,16 @@ OPTIONAL_KEYS = (
     "install_prefix",
     "cosign_path",
     "availability",
+    "gpu",
+)
+GPU_KEYS = (
+    "enabled",
+    "memory_fraction",
+    "headroom_mb",
+    "max_used_mb",
+    "max_utilization_pct",
+    "samples",
+    "sample_seconds",
 )
 AVAILABILITY_KEYS = (
     "enabled",
@@ -82,6 +92,26 @@ class Availability:
 
 
 @dataclass(frozen=True)
+class Gpu:
+    """When a job that asked for a GPU is given one (docs/runner.md, "A GPU, only when it is idle"). A key
+    left out of the `gpu` object has the value below.
+
+    ``enabled`` False (the default: a host turns it on) gives every GPU job the CPU, reason `gpu_disabled`.
+    ``memory_fraction`` is the most of one GPU's memory a job may take (the cap the recipe is told).
+    ``headroom_mb`` is what must remain free on top of that cap; ``max_used_mb`` is the memory other
+    processes may hold on a GPU that still counts as idle (a desktop); ``max_utilization_pct`` the busiest
+    it may be. ``samples`` readings, ``sample_seconds`` apart, must ALL pass."""
+
+    enabled: bool = False
+    memory_fraction: float = 0.5
+    headroom_mb: int = 2048
+    max_used_mb: int = 1024
+    max_utilization_pct: int = 10
+    samples: int = 6
+    sample_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
 class Config:
     api_base: str
     secret_file: str
@@ -107,6 +137,7 @@ class Config:
     install_prefix: str | None = None
     cosign_path: str | None = None
     availability: Availability = Availability()
+    gpu: Gpu = Gpu()
 
 
 @dataclass(frozen=True)
@@ -148,6 +179,11 @@ class Tuning:
     verified_ttl_seconds: float = 24 * 3600.0
     # where the SIF artifact's manifest is read (a test points it at a loopback stand-in)
     registry_base: str = "https://ghcr.io"
+    # The GPU check (`gpu.py`): the program that is asked (None is `nvidia-smi` found, and vetted as
+    # `python3` is, in the launch PATH's directories; only a test names another and nothing reads it from
+    # the configuration file) and how long each of its calls may take.
+    gpu_tool: str | None = None
+    gpu_call_seconds: float = 10.0
 
 
 def default_config_path(environ: dict[str, str] | None = None) -> str:
@@ -289,6 +325,30 @@ def _availability(value: Any, config_path: str) -> Availability:
     )
 
 
+def _gpu(value: Any) -> Gpu:
+    """The `gpu` object: its keys are checked as the top level's are (an unknown key is refused, and the
+    message names the key, never a value)."""
+    if not isinstance(value, dict):
+        raise ConfigError("gpu must be an object")
+    unknown = sorted(set(value) - set(GPU_KEYS))
+    if unknown:
+        raise ConfigError("unknown gpu key {}".format(str(unknown[0])[:40]))
+    enabled = value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("gpu enabled must be true or false")
+    return Gpu(
+        enabled=enabled,
+        memory_fraction=_number(value.get("memory_fraction", 0.5), "gpu memory_fraction", 0, 1),
+        headroom_mb=_int(value.get("headroom_mb", 2048), "gpu headroom_mb", 0, 16_777_216),
+        max_used_mb=_int(value.get("max_used_mb", 1024), "gpu max_used_mb", 0, 16_777_216),
+        max_utilization_pct=_int(
+            value.get("max_utilization_pct", 10), "gpu max_utilization_pct", 0, 100
+        ),
+        samples=_int(value.get("samples", 6), "gpu samples", 2, 120),
+        sample_seconds=_number(value.get("sample_seconds", 5), "gpu sample_seconds", 0, 60),
+    )
+
+
 def default_launcher_dir() -> str:
     """The `launcher` directory beside this package's repository, when run from a checkout."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -350,6 +410,7 @@ def load_config(path: str) -> Config:
     if cosign_path is not None:
         cosign_path = _path(cosign_path, "cosign_path")
     availability = _availability(document.get("availability", {}), path)
+    gpu = _gpu(document.get("gpu", {}))
     config = Config(
         api_base=_api_base(document["api_base"]),
         secret_file=_path(document["secret_file"], "secret_file"),
@@ -367,6 +428,7 @@ def load_config(path: str) -> Config:
         install_prefix=install_prefix,
         cosign_path=cosign_path,
         availability=availability,
+        gpu=gpu,
     )
     if not config.verify_images and not _loopback_http(config.api_base):
         raise ConfigError(

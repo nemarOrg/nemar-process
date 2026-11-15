@@ -495,7 +495,9 @@ def test_each_engine_line_that_is_no_exits_one(tmp_path, limits, mode, failing):
         assert status == 1
         assert answers[failing] == "no"
         # `priority` is a fact about the host (macOS has no idle I/O class), never a failure here
-        assert [k for k, v in answers.items() if v == "no" and k != "priority"] == [failing]
+        assert [k for k, v in answers.items() if v == "no" and k not in ("priority", "gpu")] == [
+            failing
+        ]
     finally:
         rig.close()
 
