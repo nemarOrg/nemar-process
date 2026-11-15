@@ -288,8 +288,9 @@ def test_each_flavor_expects_its_own_torch():
     cpu = pins.expected_versions(PYPROJECT, LOCK, "cpu")["torch"]
     cuda = pins.expected_versions(PYPROJECT, LOCK, "cuda")["torch"]
     assert cuda == {"2.12.1+cu129"}
-    assert cpu
-    assert not any("+cu" in v for v in cpu)
+    # the CPU index's two builds of the one pinned version (Linux, macOS), never the PyPI torch that
+    # the resolution selecting no flavor locks
+    assert cpu == {"2.12.1", "2.12.1+cpu"}
     assert not cpu & cuda
     document = expected_document("cuda")
     document["distributions"]["torch"] = sorted(cpu)[0]
@@ -297,6 +298,10 @@ def test_each_flavor_expects_its_own_torch():
     document = expected_document("cpu")
     document["distributions"]["torch"] = "2.12.1+cu129"
     assert any("torch" in p for p in problems_of(document, "cpu"))
+    for locked_elsewhere in ("2.15.0", "2.15.0+cpu"):
+        document = expected_document("cpu")
+        document["distributions"]["torch"] = locked_elsewhere
+        assert any("torch" in p for p in problems_of(document, "cpu")), locked_elsewhere
 
 
 def test_the_cuda_flavor_must_be_the_cuda_12_9_build_with_architectures_listed():

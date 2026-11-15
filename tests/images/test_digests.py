@@ -26,10 +26,10 @@ SMOKE = {
     "distributions": {
         "eegprep": "0.5.0",
         "pamica": "0.4.0",
-        "torch": "2.15.0+cpu",
+        "torch": "2.12.1+cpu",
         "mne": "1.13.2",
     },
-    "torch": {"version": "2.15.0+cpu", "cuda": None, "arch_list": []},
+    "torch": {"version": "2.12.1+cpu", "cuda": None, "arch_list": []},
     "amica15": {"path": "/opt/amica/amica15", "sha256": AMICA15},
     "cpu_fit": {"sha256": CPUFIT},
 }
@@ -104,7 +104,7 @@ def test_the_record_carries_what_the_issue_lists(sif_file):
         "python": "3.12.16",
         "eegprep": "0.5.0",
         "pamica": "0.4.0",
-        "torch": "2.15.0+cpu",
+        "torch": "2.12.1+cpu",
     }
     assert made["run_url"] == RUN_URL
     assert made["source_commit"] == COMMIT

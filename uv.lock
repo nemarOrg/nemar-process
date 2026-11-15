@@ -704,10 +704,10 @@ pybids = [
     { name = "pybids" },
 ]
 torch = [
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
     { name = "torch", version = "2.12.1+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "extra == 'extra-13-nemar-process-cuda'" },
-    { name = "torch", version = "2.15.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
     { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'extra-13-nemar-process-cpu' and extra != 'extra-13-nemar-process-cuda') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
 ]
 
 [[package]]
@@ -1405,8 +1405,8 @@ source = { virtual = "." }
 
 [package.optional-dependencies]
 cpu = [
-    { name = "torch", version = "2.15.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
 ]
 cuda = [
     { name = "torch", version = "2.12.1+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" } },
@@ -1442,7 +1442,7 @@ signaljourney = [
 
 [package.metadata]
 requires-dist = [
-    { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.12.1", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "nemar-process", extra = "cpu" } },
+    { name = "torch", marker = "extra == 'cpu'", specifier = "==2.12.1", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "nemar-process", extra = "cpu" } },
     { name = "torch", marker = "extra == 'cuda'", specifier = "==2.12.1", index = "https://download.pytorch.org/whl/cu129", conflict = { package = "nemar-process", extra = "cuda" } },
 ]
 provides-extras = ["cpu", "cuda"]
@@ -1971,10 +1971,10 @@ dependencies = [
     { name = "numpy" },
     { name = "scipy" },
     { name = "threadpoolctl" },
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
     { name = "torch", version = "2.12.1+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "extra == 'extra-13-nemar-process-cuda'" },
-    { name = "torch", version = "2.15.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
     { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'extra-13-nemar-process-cpu' and extra != 'extra-13-nemar-process-cuda') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/27/669aae94fb90d0ef45280c9d502a0a195c1bb6b8b92a8f589e189f053daf/pamica-0.4.0.tar.gz", hash = "sha256:55f197eb2d9ed72dc12ba79c2e633278319bd106b5c98ef8ed69eed364c8b6d7", size = 299098, upload-time = "2026-09-24T09:56:50.495Z" }
@@ -2829,6 +2829,74 @@ wheels = [
 
 [[package]]
 name = "torch"
+version = "2.12.1"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'darwin'",
+    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
+    "python_full_version < '3.13' and sys_platform == 'darwin'",
+]
+dependencies = [
+    { name = "filelock", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "fsspec", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "jinja2", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "networkx", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "setuptools", version = "81.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "sympy", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "typing-extensions", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+]
+wheels = [
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:d2dd0f2c5f7ccbddaf34cade0deaf476808368f902b9cdb7f36a2ab42301bc0e", upload-time = "2026-06-17T15:44:03Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:c75e93173c700bccd6bfcc4a9d19ce242ab6dacd1f1781483027a16239b9e650", upload-time = "2026-06-17T15:44:09Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:e9b6f7d2dd66ea87a3ae620069d31335d594c06effb1a383bdd21cfe61e44ece", upload-time = "2026-06-17T15:44:16Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:2afbb2bdaa8a95040e733f05492ddf133c3967c9b7ce0abd218d704b6cab437d", upload-time = "2026-06-17T15:44:24Z" },
+]
+
+[[package]]
+name = "torch"
+version = "2.12.1+cpu"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
+    "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+dependencies = [
+    { name = "filelock", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "fsspec", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "jinja2", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "networkx", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "setuptools", version = "81.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "sympy", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+    { name = "typing-extensions", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
+]
+wheels = [
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-linux_s390x.whl", hash = "sha256:900b253fc8c739bebffb63d7f75abff4cd53d79947265a00c16cb53b68ecdb91", upload-time = "2026-06-18T01:57:23Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:d1620bc7bcf8087f3e48821b5db994a03e32ddb083d58c000b8e032f8a6e2d15", upload-time = "2026-06-18T01:57:29Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:ae4bb28409f5370852bd71af221066236c38d647f780d9b0a7240c330a9c12df", upload-time = "2026-06-18T01:57:35Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:51c6c6e26eaa0d64ed439ebdc9ce3b8cc2d5cfcc7cdd4e72f17831d80886b7f4", upload-time = "2026-06-18T01:57:42Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-linux_s390x.whl", hash = "sha256:4ca206a35f2aeba7da944a69ef857103358e8d4bc6b06b49b9e554dcfa57777d", upload-time = "2026-06-18T01:57:47Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:8d47e0cfc59679d4e367646c3df4cf433c7d1595b31307e0e7b2391c58ca2160", upload-time = "2026-06-18T01:57:52Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:77d049968c7817456dbdebf0aadcac0813e302218b0e857a8723463331339d55", upload-time = "2026-06-18T01:57:59Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-win_amd64.whl", hash = "sha256:06d13c354df07953ae0d150da22a071496cbbedd22d1b644961813c0f0fc3b23", upload-time = "2026-06-18T01:58:05Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-linux_s390x.whl", hash = "sha256:ef228ec70f5e73762c213f145c0fdb672e5770a6de760801c58b933b0d5b6957", upload-time = "2026-06-18T01:58:09Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:1b9ad70d0a300d6bd883fffc153a6c0f9bc64bf4190519aeeed0373807bffbcc", upload-time = "2026-06-18T01:58:15Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:618120d79360688595e61162147d37e1d69fc3f2e13d60584a1eb6a74c74735a", upload-time = "2026-06-18T01:58:22Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-win_amd64.whl", hash = "sha256:6354069774ce2d9c26d6d8612fc252586428467b7e4ced7c8bbbfb961fafb783", upload-time = "2026-06-18T01:58:29Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-linux_s390x.whl", hash = "sha256:0706eb7b53c4b1381b2acc418f6d89d6ed18a308677125ced7ca30519c57dc42", upload-time = "2026-06-18T01:58:33Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:21ed774c10a0fd24ab2cfaabfa98a9260fc28d518946c98c0151b6e447730250", upload-time = "2026-06-18T01:58:39Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:e3c3b5c275dd57cff1aa34a0ab8f84beab8976c63c8dc1d84f29430eac0590ea", upload-time = "2026-06-18T01:58:46Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-win_amd64.whl", hash = "sha256:03094411b20e85a221125a332211d59c099dc556afb1423e04193fcf1b4c1cbd", upload-time = "2026-06-18T01:58:52Z" },
+]
+
+[[package]]
+name = "torch"
 version = "2.12.1+cu129"
 source = { registry = "https://download.pytorch.org/whl/cu129" }
 resolution-markers = [
@@ -2870,33 +2938,6 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu129/torch-2.12.1%2Bcu129-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:9c7c93ea2ecf19d38f2b19987b3d78b0811d65b8ece312716a4c9f9bb8d41840", upload-time = "2026-06-18T02:30:38Z" },
     { url = "https://download-r2.pytorch.org/whl/cu129/torch-2.12.1%2Bcu129-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:d0ebb71e97699822e574e0c90b78a373e433309ae564644860fec8325a96a1e6", upload-time = "2026-06-18T02:31:22Z" },
     { url = "https://download-r2.pytorch.org/whl/cu129/torch-2.12.1%2Bcu129-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:e047f6763c2520699c4c21a6c43616fa37f9a6a826812ca6b7a63d13f0130ca2", upload-time = "2026-06-18T02:32:11Z" },
-]
-
-[[package]]
-name = "torch"
-version = "2.15.0"
-source = { registry = "https://download.pytorch.org/whl/cpu" }
-resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
-    "python_full_version < '3.13' and sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "filelock", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "fsspec", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "jinja2", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "networkx", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "setuptools", version = "84.2.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "sympy", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "typing-extensions", marker = "(sys_platform == 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-]
-wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:593e5fd0c204284890d1c3dff643be34e549e1d24523e13402510f960d4da438", upload-time = "2026-10-28T13:17:02Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:fbefd73b521d3c75c5a1d7c77056b2c6339b81468d14d4e33c55f525418a5855", upload-time = "2026-10-28T13:17:07Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:0d2b2d9674fa0b9b3f50e83231aa6545a0b19e437a52f0af939a224faaa45515", upload-time = "2026-10-28T13:17:13Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:628f54cb55a2363a5f14471a80c1b6efb63724449d2611ad2772fb5d4c42d19d", upload-time = "2026-10-28T13:17:20Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0-cp315-cp315-macosx_14_0_arm64.whl", hash = "sha256:06a686eb717cd3d1662363082820be45497318887c596d691af0af0c7649c8f0", upload-time = "2026-10-28T13:17:25Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0-cp315-cp315t-macosx_14_0_arm64.whl", hash = "sha256:02ac0b22211c1984e5dc002d2e57fdbc13d32116537ea6ae1a0c9d07cafce0c9", upload-time = "2026-10-28T13:17:32Z" },
 ]
 
 [[package]]
@@ -2958,57 +2999,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/22/6a/6425a3e8e3c9b251c1a1994295eaa2fbbb7211255e2b55f26d3eebae31ae/torch-2.15.0-cp315-cp315t-manylinux_2_28_aarch64.whl", hash = "sha256:ed708117f2f0162dbbd958dbd2654c16c99ad4c8ac14ccc4617dc76f029b8a8d", size = 482878055, upload-time = "2026-10-28T15:20:49.213Z" },
     { url = "https://files.pythonhosted.org/packages/7f/a8/dec4f9c0e4c1c9403294a62d5647fc5e46d23348bbd25f8ff143e57364cd/torch-2.15.0-cp315-cp315t-manylinux_2_28_x86_64.whl", hash = "sha256:9024cbf347dce95759bcde1411ef59b7cdb9ef0a846f4f24f356a17f8cf16f7d", size = 538397035, upload-time = "2026-10-28T15:21:05.11Z" },
     { url = "https://files.pythonhosted.org/packages/7b/64/1ad0107cec15706e4d972fcbfaa6b3da26734959109861a60902c922b50c/torch-2.15.0-cp315-cp315t-win_amd64.whl", hash = "sha256:c521a00891e92aba2f34717671c268acd0bde26444623efcceaeaf51c87b3b36", size = 127024483, upload-time = "2026-10-28T15:20:23.183Z" },
-]
-
-[[package]]
-name = "torch"
-version = "2.15.0+cpu"
-source = { registry = "https://download.pytorch.org/whl/cpu" }
-resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-]
-dependencies = [
-    { name = "filelock", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "fsspec", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "jinja2", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "networkx", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "setuptools", version = "84.2.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "sympy", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-    { name = "typing-extensions", marker = "(sys_platform != 'darwin' and extra == 'extra-13-nemar-process-cpu') or (extra == 'extra-13-nemar-process-cpu' and extra == 'extra-13-nemar-process-cuda')" },
-]
-wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-linux_s390x.whl", hash = "sha256:29c74659a82483d9a9c5d7f9e1112973dfa2dce5b3956dba5d1b97381b94cfae", upload-time = "2026-10-28T13:18:25Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:75941d429aaf4450bcd364345d7677e2d54aad45b38fbfcb1c0552450a6e9c40", upload-time = "2026-10-28T13:18:32Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:0955c7e3446326293f48af18fad67872fa31dee5a36a87690eb9e5be8b465be3", upload-time = "2026-10-28T13:18:39Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:5af9fb357790db09e62484b12032304f046c22c4b1895ca88c4cf5987ea369ca", upload-time = "2026-10-28T13:18:45Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-win_arm64.whl", hash = "sha256:fe17318e964a6eb4b1380fd6dcd5405264af3e54b10bce7abcce5fa701a3f049", upload-time = "2026-10-28T13:18:48Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp313-cp313-linux_s390x.whl", hash = "sha256:88f5fe2c5d25a809a315a4a3f494e367539a307356f37752d89cd0b9d84f175a", upload-time = "2026-10-28T13:18:52Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:ab35875b15ac536a645e165b296300fed71df7b4f2ddbae40c725ab08f0a5e78", upload-time = "2026-10-28T13:18:58Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:0f6f69701b2d38ddc412364dfb92e2e13e74960d33fa3573b4930ced626e81c7", upload-time = "2026-10-28T13:19:05Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp313-cp313-win_amd64.whl", hash = "sha256:086f79c78c941b428410dc15f898ce2420a4580ae6983ea314692d71ce76c619", upload-time = "2026-10-28T13:19:11Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp313-cp313-win_arm64.whl", hash = "sha256:e01d89c7cbc6c07a5d8a03ecff767083a2d997ee030622e96e406f92a06cee11", upload-time = "2026-10-28T13:19:15Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314-linux_s390x.whl", hash = "sha256:ef810702df4dd70fe1b8ebee9e7394c6491f779841571a71433829e44927eaa5", upload-time = "2026-10-28T13:19:19Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:01bdc7d291e3f6b5c03cf72d8a1718a5012d9fad5f380e67b563b0a76592055a", upload-time = "2026-10-28T13:19:25Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:f089c94912c955269a20e5fee6b6a371209b610849c9ece26e908a748d87a723", upload-time = "2026-10-28T13:19:32Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314-win_amd64.whl", hash = "sha256:8c145170f1ad54edd1ef1da3c872a4a8ada202e24894893df4ed2fc75a8322af", upload-time = "2026-10-28T13:19:38Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314t-linux_s390x.whl", hash = "sha256:7f8e2d696d12f965a5967bda4bc903decf6aa714b0b5ffb50e189733112a4dfd", upload-time = "2026-10-28T13:19:42Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:68e4595afffb1af18480b6ecb7217688c02a0f2a7b482c7a95b4896a3b38d49a", upload-time = "2026-10-28T13:19:48Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:17d66ae6f8a49d4dfca368b50b7dc15f7129175e80b4ae2832dfa0cce86d3159", upload-time = "2026-10-28T13:19:55Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314t-win_amd64.whl", hash = "sha256:c556fb12f69e907386e98136d3be6fbcf4f3962ad018cf74fc6fe43d1c81a240", upload-time = "2026-10-28T13:20:02Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:2cec97b29524b3352bb794321976da7cef2ecee171866499c5630c865396c0a2", upload-time = "2026-10-28T13:20:08Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:3552930ba3d358d3ff0b6fee19cb296e199767443c0c86be2a715471036d9233", upload-time = "2026-10-28T13:20:15Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp315-cp315-win_amd64.whl", hash = "sha256:5c21ee962b6f67821dac0bc882f5ee1539a4edeabe736284d2ff1d652e595ed1", upload-time = "2026-10-28T13:20:21Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp315-cp315t-manylinux_2_28_aarch64.whl", hash = "sha256:3fb23f534fdffdd3a178f8ef3327ab5fff833f291e5955be7edcaa7547a3f1fa", upload-time = "2026-10-28T13:20:26Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp315-cp315t-manylinux_2_28_x86_64.whl", hash = "sha256:92551daf5873fc6db15be48fe9644398f13143291c151ab6769f19e7c5ebd10c", upload-time = "2026-10-28T13:20:33Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp315-cp315t-win_amd64.whl", hash = "sha256:694b58039c3b1df7f5a890e97494728de849adb168a4617dd6024ca19eb8598e", upload-time = "2026-10-28T13:20:39Z" },
 ]
 
 [[package]]
