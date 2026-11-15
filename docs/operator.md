@@ -210,9 +210,9 @@ Nothing below names a host, an account or a path: write them as placeholders whe
 1. Run the recipe on the CPU first, as the baseline, with the CUDA flavor so that the two runs differ in nothing but the device:
 
    ```bash
-   <container runtime> run --rm --gpus all --volume <dataset>:/data/<id>:ro --volume <out>:/out \
+   <container runtime> run --rm --gpus all --volume <dataset>:/dataset:ro --volume <out>:/out \
      ghcr.io/nemarorg/nemar-python@<image digest> \
-     nemar-recipe run nemar-ica --dataset-dir /data/<id> --out /out/cpu/product \
+     nemar-recipe run nemar-ica --dataset-dir /dataset --out /out/cpu/product \
      --dataset-id <id> --dataset-version <tag> --ica-device cpu
    ```
 

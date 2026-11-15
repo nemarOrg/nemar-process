@@ -204,9 +204,9 @@ def test_the_recipe_command_names_eegprep_with_the_commit_it_was_taken_from():
 def test_a_requirement_that_is_not_a_git_commit_names_no_commit(tmp_path):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        '[dependency-groups]\nruntime = ["eegprep[mne]==0.5.0", "x @ git+https://example.org/x@'
+        '[dependency-groups]\nruntime = ["eegprep[mne]==0.5.0", "x @ git+https://example.invalid/x@'
         + "ab" * 20
-        + '#subdirectory=y", "z @ git+https://example.org/z@main"]\n',
+        + '#subdirectory=y", "z @ git+https://example.invalid/z@main"]\n',
         encoding="utf-8",
     )
     assert pins.declared_commits(pyproject) == {"x": "ab" * 20}  # a branch or a short hash is none

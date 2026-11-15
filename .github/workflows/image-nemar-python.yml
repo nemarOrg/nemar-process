@@ -166,10 +166,10 @@ jobs:
           mkdir -p "$out"
           chmod 0777 "$out"
           docker run --rm --env NVIDIA_VISIBLE_DEVICES=void \
-            --volume "$PWD/tests/fixtures/eeg/dataset:/data/on007823:ro" \
+            --volume "$PWD/tests/fixtures/eeg/dataset:/dataset:ro" \
             --volume "$out:/out" \
             nemar-python:ci nemar-recipe run nemar-ica \
-              --dataset-dir /data/on007823 --out /out/product \
+              --dataset-dir /dataset --out /out/product \
               --dataset-id on007823 --dataset-version v1.0.0 --ica-max-iter 5
           python3 - "$out/product" <<'PY'
           import json

@@ -625,7 +625,7 @@ def test_a_reason_that_is_not_a_word_is_a_usage_error_and_a_missing_one_is_unspe
     cli, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("NEMAR_DEVICE", "cpu")
-    monkeypatch.setenv("NEMAR_DEVICE_REASON", "gpu busy: /home/someone")
+    monkeypatch.setenv("NEMAR_DEVICE_REASON", "gpu busy, not a word")
     dataset = located_dataset(tmp_path / "ds")
     with pytest.raises(SystemExit) as stopped:
         cli("run", "nemar-ica", "--dataset-dir", dataset, "--out", tmp_path / "o", *run_args())
@@ -880,7 +880,10 @@ COMMIT = "0123456789abcdef0123456789abcdef01234567"
         (None, "1.2.3"),  # an index install has no such file
         (
             json.dumps(
-                {"url": "https://example.org/x", "vcs_info": {"vcs": "git", "commit_id": COMMIT}}
+                {
+                    "url": "https://example.invalid/x",
+                    "vcs_info": {"vcs": "git", "commit_id": COMMIT},
+                }
             ),
             "1.2.3+" + COMMIT,
         ),
