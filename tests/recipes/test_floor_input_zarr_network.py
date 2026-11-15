@@ -48,7 +48,18 @@ CHOSEN_INDEX_SHA256 = "61e73a86b6a541d060786f5433c6eb90aef68e584a6d71856a8010352
 STORES = 4
 CHANNEL_SAMPLES = 16_384_000
 IMAGE = "sha256:" + "0" * 64
-PRODUCT = ("channels.tsv", "badsegments.tsv", "filters.json", "qc.json", "signalJourney.json")
+PRODUCT = (
+    "channels.tsv",
+    "badsegments.tsv",
+    "samplemask.tsv",
+    "filters.json",
+    "qc.json",
+    "signalJourney.json",
+)
+SERVING_SENTENCE = (
+    "QC describes NEMAR's Zarr serving copy (EEG capped at 250 Hz, 16-bit), "
+    "not the archived recordings."
+)
 
 
 def live_index() -> tuple[bytes, dict]:
@@ -184,6 +195,61 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
         assert (metrics["nChannelsInput"], metrics["samplingRateHz"]) == (32, 200.0)
         total += metrics["nChannelsInput"] * round(metrics["durationS"] * metrics["samplingRateHz"])
     assert total == CHANNEL_SAMPLES
+
+    # the sample masks sit on the serving grid, and are the bad segments multiplied out by its rate
+    for path in stores:
+        stem = path.removesuffix("_eeg.edf")
+        mine = json.loads((out / "{}_desc-nemarfloor_signalJourney.json".format(stem)).read_text())
+        grid = mine["extensions"]["nemar"]["mask_grid"]
+        assert grid["profile"] == "serving"
+        assert grid["rate"] == mine["summaryMetrics"]["samplingRateHz"] == 200.0
+        assert grid["n_samples"] == round(mine["summaryMetrics"]["durationS"] * grid["rate"])
+        masks = (out / "{}_desc-nemarfloor_samplemask.tsv".format(stem)).read_text().splitlines()
+        segments = (
+            (out / "{}_desc-nemarfloor_badsegments.tsv".format(stem)).read_text().splitlines()
+        )
+        assert masks[0].split("\t") == ["start_sample", "stop_sample", "label", "nemar_reason"]
+        assert len(masks) == len(segments)
+        for mask, segment in zip(masks[1:], segments[1:], strict=True):
+            start, stop, *_ = mask.split("\t")
+            onset, duration, *_ = segment.split("\t")
+            assert "{:.6f}".format(int(start) / grid["rate"]) == onset
+            assert "{:.6f}".format((int(stop) - int(start)) / grid["rate"]) == duration
+            assert int(stop) <= grid["n_samples"]
+
+    # the QC summary: valid for its schema, serving, the Zarr sentence, and no sampling rate in it
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads((ROOT / "docs" / "schemas" / "qc-summary.v1.json").read_text())
+    summary_file = out / "desc-nemarfloor_qcsummary.json"
+    summary = json.loads(summary_file.read_text())
+    assert list(Draft202012Validator(schema).iter_errors(summary)) == []
+    assert summary_file.stat().st_size <= 65_536
+    assert (summary["input_kind"], summary["profile"]) == ("zarr", "serving")
+    assert summary["describes"] == SERVING_SENTENCE
+    assert (summary["dataset_id"], summary["dataset_version"]) == (DATASET, VERSION)
+    assert summary["counts"] == {
+        "discovered": STORES,
+        "succeeded": STORES,
+        "failed": 0,
+        "skipped": 0,
+    }
+    assert summary["not_processed"] == []
+    assert summary["not_processed_truncated"] == 0
+    assert (
+        summary["record_sha256"]
+        == hashlib.sha256((out / "desc-nemarfloor_signalJourney.json").read_bytes()).hexdigest()
+    )
+
+    def every_key(node):
+        if isinstance(node, dict):
+            return set(node) | {key for item in node.values() for key in every_key(item)}
+        if isinstance(node, list):
+            return {key for item in node for key in every_key(item)}
+        return set()
+
+    assert not [key for key in every_key(summary) if re.search("rate|hz|sampling", key, re.I)]
+    print("summary {} bytes".format(summary_file.stat().st_size))
 
     # the network rule: only the Zarr host and the bucket it redirects reads to
     assert watch.names <= allowed, watch.names
