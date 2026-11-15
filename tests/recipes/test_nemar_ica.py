@@ -179,8 +179,12 @@ def test_the_plan_is_the_floors_steps_then_the_four_of_the_recipe(tiny):
 def test_two_runs_with_the_same_seed_threads_and_device_give_identical_weights_sphere_and_ica_json(
     tiny, tmp_path
 ):
-    directory, _, _, _ = tiny
+    directory, _, product, _ = tiny
     tiny_run(tmp_path)
+    # the seed is passed to the engine and recorded as passed, not left to a default
+    step = next(s for s in product.record["processingSteps"] if s["stepId"] == "ica")
+    assert step["parameters"]["seed"] == 5489
+    assert step["parameters"]["threads"] == 1
     for suffix in (
         "weights.tsv",
         "sphere.tsv",
