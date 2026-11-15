@@ -14,9 +14,10 @@ dependencies = []
 [project.optional-dependencies]
 # The two flavors of the runtime image. Each extra exists so that `[tool.uv.sources]` can send torch
 # to that flavor's index, and the two are declared in conflict (`[tool.uv] conflicts` below): an
-# environment holds one torch. The CPU floor is pamica 0.4.0's own (`torch>=2.12.1`); the CUDA flavor
-# pins that floor exactly, the CUDA 12.9 build (the `cu128` index stops at torch 2.11.0).
-cpu = ["torch>=2.12.1"]
+# environment holds one torch. Both pin torch 2.12.1, pamica 0.4.0's own floor (`torch>=2.12.1`): the
+# CUDA 12.9 build in one (the `cu128` index stops at torch 2.11.0) and the CPU build in the other, so
+# both images and every uv-based test run use one torch version. A test requires the two to match.
+cpu = ["torch==2.12.1"]
 cuda = ["torch==2.12.1"]
 
 [dependency-groups]

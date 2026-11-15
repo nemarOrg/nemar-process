@@ -17,7 +17,7 @@ The ICLabel weights check belongs to a later phase.
 | MNE-Python | `1.13.2` | the same |
 | pamica | `0.4.0` | the same |
 | NumPy, SciPy | as resolved | `uv.lock` |
-| torch, `cpu` flavor | as resolved, from the CPU index only | extra `cpu`, `[tool.uv.sources]`, `uv.lock` |
+| torch, `cpu` flavor | `2.12.1`, from the CPU index only | extra `cpu`, `[tool.uv.sources]`, `uv.lock` |
 | torch, `cuda` flavor | `2.12.1`, built for CUDA 12.9, from the `cu129` index only | extra `cuda`, `[tool.uv.sources]`, `uv.lock` |
 | `amica15`, pAMICA's native AMICA binary | pAMICA release `v0.4.0` (the release pamica 0.4.0 resolves), `amica15-linux-x64`, checked by SHA-256 | both Dockerfiles, `scripts/check_smoke_pins.py` (see "The native AMICA binary") |
 | `libgomp1` (the OpenMP runtime the binary links) | `14.2.0-19`, the version the live trixie archive served when it was pinned | both Dockerfiles |
@@ -185,7 +185,7 @@ In the CUDA file `sif` and `launch_image` are `null` (no SIF exists for it, so n
 
 ## The two flavors
 
-The `cpu` flavor carries torch from the CPU index.
+The `cpu` flavor carries torch `2.12.1` from the CPU index, the same version as the CUDA flavor.
 The `cuda` flavor carries torch `2.12.1` built for CUDA 12.9, from the PyTorch `cu129` index, for the lab workstations' GPUs.
 The `cu128` index stops at torch 2.11.0, below pamica 0.4.0's floor (`torch>=2.12.1`), which is why the CUDA flavor is 12.9 and not 12.8.
 A flavor for V100 nodes, with an older torch, is a later HPC GPU run and is not built here.
@@ -194,7 +194,7 @@ The runner fixes an image by the claim's digest before it chooses the device, an
 So the CUDA flavor must run the CPU engine correctly with no GPU visible, and that path is the default, not an exception.
 Its smoke test therefore runs the way such a job runs, `docker run --env NVIDIA_VISIBLE_DEVICES=void <image> python /opt/smoke.py --no-gpu`, on a hosted runner that has no GPU: `torch.cuda.is_available()` must be false, and a 5-iteration pAMICA fit by the PyTorch engine on the CPU in float64 must run.
 The same smoke test prints the GPU architectures this torch was compiled for on a line `CUDA_ARCH_LIST ...` and in the document, and the CUDA flavor's digest file records them.
-`torch.cuda.get_arch_list()` is what answers on a GPU host, but in torch 2.12 it returns an empty list whenever no GPU is visible (it asks `is_available()` first; the locked 2.15.0 asks `_is_compiled()` instead), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
+`torch.cuda.get_arch_list()` is what answers on a GPU host, but in torch 2.12 it returns an empty list whenever no GPU is visible (it asks `is_available()` first), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
 Whether a workstation's driver runs CUDA 12.9 wheels is not shown by any of this; the operator's preflight on that machine prints the driver and the GPU.
 
 Both flavors print `CPUFIT sha256=<hex>`: the SHA-256 of that CPU fit's 4 by 4 unmixing matrix, written with `format(x, ".17g")` in row-major order, one value per line.
@@ -219,7 +219,7 @@ It runs the 5-iteration CPU float64 pAMICA fit on a 4-channel, 2,000-sample matr
 In an image (where `/opt/nemar/flavor` exists) it also checks that the binary has the digest recorded beside it, that `ldd` lists nothing as not found, and that `pamica.AMICANative(binary="/opt/amica/amica15", threads=1, max_iter=5, seed=5489)` fits the same matrix and returns a 4 by 4 unmixing matrix.
 With `--no-gpu` it fails if torch sees a GPU.
 It then runs `nemar-recipe version` and prints what it said; `scripts/check_smoke_pins.py` requires it to name the pinned eegprep and the registered recipes, and, for an image, requires that it ran as the script on the path and not as the module.
-`scripts/check_smoke_pins.py` compares the document with `pyproject.toml` and `uv.lock`: every pin and every locked version must match, nothing that leads to MATLAB or Octave may be installed, torch must be the flavor's build (a CPU build for `cpu`; the `+cu129` build for `cuda`, which must also list its GPU architectures), Python must be the 3.12 series, and, for an image, the thread and hash environment and the `/opt/venv` prefix must be as the Dockerfile sets them, the flavor must be the one the workflow expects (`--flavor`), and the native binary's digest, `ldd` result and fit must be as above.
+`scripts/check_smoke_pins.py` compares the document with `pyproject.toml` and `uv.lock`: every pin and every locked version must match, nothing that leads to MATLAB or Octave may be installed, torch must be the flavor's build (a version the lock takes from the CPU index for `cpu`, and for an image the `+cpu` build; the `+cu129` build for `cuda`, which must also list its GPU architectures), Python must be the 3.12 series, and, for an image, the thread and hash environment and the `/opt/venv` prefix must be as the Dockerfile sets them, the flavor must be the one the workflow expects (`--flavor`), and the native binary's digest, `ldd` result and fit must be as above.
 With `--no-gpu` it also requires that torch saw no GPU and that the CPU fit is there.
 The fixture is synthetic and a smoke input only (see its README); the scientific fixture is `tests/fixtures/eeg/`, which the recipes' tests and the launch end to end use.
 
@@ -268,6 +268,7 @@ Also the owner's, before the first release:
 Edit `pyproject.toml`, run `uv lock`, and run the tests; never edit `uv.lock` by hand.
 The one exception is the project's own version, which only the release bot changes, and in both files at once (`docs/release.md`); a pull request never touches it.
 `uv lock` writes the project's version in the PEP 440 spelling (`0.1.1.dev3`) where the bot writes `0.1.1-dev3`; put the bot's spelling back before committing, or `bump-validator` sees a changed version line.
+The `cpu` and `cuda` extras pin one torch version, and a test requires them equal, so move both together.
 The tests that guard the declaration are in `tests/images/`:
 
 ```bash
