@@ -269,7 +269,9 @@ def run_zarr(out: Path, stand_in_port: int) -> int:
             return cli.main(
                 [
                     "run",
-                    "nemar-floor-zarr",
+                    "nemar-floor",
+                    "--input",
+                    "zarr",
                     "--out",
                     str(out),
                     "--zarr-base",
@@ -288,37 +290,47 @@ def run_zarr(out: Path, stand_in_port: int) -> int:
         patch.undo()
 
 
+VARIANTS = sorted(
+    (recipe_id, kind) for recipe_id, recipe in REGISTRY.items() for kind in recipe.inputs
+)
+"""Every recipe with every input it reads, as (recipe id, input)."""
+
+
 @pytest.fixture(scope="module")
 def products(served, tmp_path_factory):  # noqa: F811
-    """One run of every registered recipe on the repository's fixtures: recipe id to directory."""
+    """One run of every registered recipe on each input's fixture: (recipe id, input) to directory."""
     served.requested.clear()
     served.policy = z.default_policy
     made = {}
-    for recipe_id, recipe in REGISTRY.items():
-        out = tmp_path_factory.mktemp(recipe.label)
-        code = run_bids(out) if recipe.input == "bids" else run_zarr(out, served.port)
-        assert code == 0, recipe_id
-        made[recipe_id] = out
+    for recipe_id, kind in VARIANTS:
+        recipe = REGISTRY[recipe_id].reading(kind)
+        out = tmp_path_factory.mktemp("{}-{}".format(recipe.label, kind))
+        code = run_bids(out) if kind == "bids" else run_zarr(out, served.port)
+        assert code == 0, (recipe_id, kind)
+        made[(recipe_id, kind)] = out
     return made
 
 
-def documents(out: Path, recipe_id: str) -> tuple[dict, dict]:
+def documents(out: Path, recipe_id: str, kind: str = "bids") -> tuple[dict, dict]:
     """The dataset record and the first recording's record of a product directory."""
-    label = REGISTRY[recipe_id].label
+    label = REGISTRY[recipe_id].reading(kind).label
     dataset = json.loads((out / "desc-{}_signalJourney.json".format(label)).read_text("utf-8"))
     (first, *_) = sorted(out.rglob("*_desc-{}_signalJourney.json".format(label)))
     return dataset, json.loads(first.read_text("utf-8"))
 
 
 def test_the_registry_holds_only_recipes_this_contract_knows_how_to_run():
-    assert {recipe.input for recipe in REGISTRY.values()} <= {"bids", "zarr"}
-    assert len(REGISTRY) >= 2
+    assert {kind for _, kind in VARIANTS} <= {"bids", "zarr"}
+    assert len(VARIANTS) >= 2
+    for recipe_id, kind in VARIANTS:
+        recipe = REGISTRY[recipe_id].reading(kind)
+        assert (recipe.id, recipe.input) == (recipe_id, kind)
 
 
-@pytest.mark.parametrize("recipe_id", sorted(REGISTRY))
-def test_both_records_name_the_build_the_image_the_recipe_and_the_engine(products, recipe_id):
-    recipe = REGISTRY[recipe_id]
-    dataset, recording = documents(products[recipe_id], recipe_id)
+@pytest.mark.parametrize(("recipe_id", "kind"), VARIANTS)
+def test_both_records_name_the_build_the_image_the_recipe_and_the_engine(products, recipe_id, kind):
+    recipe = REGISTRY[recipe_id].reading(kind)
+    dataset, recording = documents(products[(recipe_id, kind)], recipe_id, kind)
     for document in (dataset, recording):
         nemar = document["extensions"]["nemar"]
         # a run from the working tree is a source run: no commit, the project's version
@@ -335,10 +347,10 @@ def test_both_records_name_the_build_the_image_the_recipe_and_the_engine(product
     assert recording["pipelineInfo"]["version"] == recipe.version
 
 
-@pytest.mark.parametrize("recipe_id", sorted(REGISTRY))
-def test_the_pypi_validator_accepts_both_records(products, recipe_id):
+@pytest.mark.parametrize(("recipe_id", "kind"), VARIANTS)
+def test_the_pypi_validator_accepts_both_records(products, recipe_id, kind):
     validator = sj.validator()
-    for document in documents(products[recipe_id], recipe_id):
+    for document in documents(products[(recipe_id, kind)], recipe_id, kind):
         assert records.check(document, validator) == []
         assert validator.validate(document, raise_exceptions=False) == []
 

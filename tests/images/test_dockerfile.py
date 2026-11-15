@@ -220,10 +220,8 @@ def test_the_script_the_dockerfile_writes_runs_the_command(runtime_python, tmp_p
     assert done.returncode == 0, done.stderr[-2000:]
     document = json.loads(done.stdout)
     assert document["eegprep"] == PINNED_EEGPREP_VERSION
-    assert document["recipes"] == {
-        "nemar-floor": PINNED_RECIPE_VERSION,
-        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
-    }
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
+    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"]}
 
 
 def test_the_build_context_is_an_allow_list_that_names_what_the_build_copies():

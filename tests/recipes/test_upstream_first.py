@@ -182,8 +182,7 @@ def test_the_scan_covers_the_validator_wrapper():
 def test_the_scan_covers_the_zarr_recipe_and_its_input_layer():
     names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
     for name in (
-        "nemar_floor_zarr/__init__.py",
-        "nemar_floor_zarr/recipe.py",
+        "nemar_floor/zarr_recipe.py",
         "common/zarr_input.py",
         "common/zarr_hosts.py",
     ):

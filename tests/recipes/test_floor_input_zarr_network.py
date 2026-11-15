@@ -1,6 +1,6 @@
-"""``nemar-floor-zarr`` on a real public dataset, read over the internet from NEMAR's Zarr serving copy.
+"""``nemar-floor --input zarr`` on a real public dataset, read over the internet from NEMAR's Zarr serving copy.
 
-Run it with ``uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_zarr_network.py
+Run it with ``uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_input_zarr_network.py
 -m network -q``; without ``-m network`` it is skipped. The dataset is the demo dataset chosen for the
 portable-compute work: ``nm000274`` (never one of the live datasets). Its serving index was built a
 few metadata-only commits after the version tag, which is what the attestation records; the check
@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import io as stdlib_io
 import json
+import re
 import subprocess
 import sys
 import time
@@ -62,7 +63,9 @@ def live_index() -> tuple[bytes, dict]:
 def arguments(out: Path, *extra: str, source_commit: str = SOURCE_COMMIT) -> list[str]:
     return [
         "run",
-        "nemar-floor-zarr",
+        "nemar-floor",
+        "--input",
+        "zarr",
         "--out",
         str(out),
         "--zarr-base",
@@ -115,17 +118,17 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
 
     # every output present, and each record valid for the schema
     validate = ROOT / "scripts" / "validate_signaljourney.py"
-    record = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
+    record = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())
     stores = record["extensions"]["nemar"]["input"]["stores"]
     assert len(stores) == STORES
-    files = [out / "desc-nemarfloorzarr_signalJourney.json"]
+    files = [out / "desc-nemarfloor_signalJourney.json"]
     for path in stores:
         stem = path.removesuffix("_eeg.edf")
         for suffix in PRODUCT:
-            product = out / "{}_desc-nemarfloorzarr_{}".format(stem, suffix)
+            product = out / "{}_desc-nemarfloor_{}".format(stem, suffix)
             assert product.is_file(), product.name
-        files.append(out / "{}_desc-nemarfloorzarr_signalJourney.json".format(stem))
-    assert (out / "desc-nemarfloorzarr_recordings.tsv").is_file()
+        files.append(out / "{}_desc-nemarfloor_signalJourney.json".format(stem))
+    assert (out / "desc-nemarfloor_recordings.tsv").is_file()
     for file in files:
         done = subprocess.run(
             [sys.executable, str(validate), str(file)], capture_output=True, text=True, check=False
@@ -145,6 +148,27 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     assert nemar["input"]["hosts_contacted"] == sorted(pair)
     assert nemar["reader"].startswith("eegprep-lean@")
     assert nemar["engine"]["package"] == "eegprep"
+
+    # what was read, by content: one digest per store, and the dataset's input digest over them
+    rows = nemar["input"]["stores_content"]
+    assert [row["path"] for row in rows] == sorted(stores)
+    assert len(rows) == STORES
+    assert nemar["input"]["stores_unread"] == []
+    for row in rows:
+        assert re.fullmatch(r"[0-9a-f]{64}", row["content_sha256"]), row
+        assert row["content_sha256"] != live  # the index file is not what was read
+        mine = json.loads(
+            (
+                out
+                / "{}_desc-nemarfloor_signalJourney.json".format(
+                    row["path"].removesuffix("_eeg.edf")
+                )
+            ).read_text()
+        )["extensions"]["nemar"]["input"]
+        assert (mine["group"], mine["content_sha256"]) == (row["group"], row["content_sha256"])
+    text = "".join("{path}\t{group}\t{content_sha256}\n".format(**row) for row in rows)
+    assert nemar["input"]["input_digest"] == "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+    print("input digest {}".format(nemar["input"]["input_digest"]))
     print(
         "stores {} bytes read {} reader {}".format(
             len(stores), nemar["input"]["bytes_read"], nemar["reader"]
@@ -155,9 +179,7 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     total = 0
     for path in stores:
         stem = path.removesuffix("_eeg.edf")
-        mine = json.loads(
-            (out / "{}_desc-nemarfloorzarr_signalJourney.json".format(stem)).read_text()
-        )
+        mine = json.loads((out / "{}_desc-nemarfloor_signalJourney.json".format(stem)).read_text())
         metrics = mine["summaryMetrics"]
         assert (metrics["nChannelsInput"], metrics["samplingRateHz"]) == (32, 200.0)
         total += metrics["nChannelsInput"] * round(metrics["durationS"] * metrics["samplingRateHz"])

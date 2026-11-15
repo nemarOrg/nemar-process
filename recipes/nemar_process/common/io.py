@@ -83,7 +83,7 @@ class Recording:
     extension: str
     entities: dict[str, str]
     companions: tuple[str, ...]
-    # A recording read over the network from a Zarr serving copy (nemar-floor-zarr): there is no file
+    # A recording read over the network from a Zarr serving copy (nemar-floor --input zarr): there is no file
     # under ``root``, ``path`` is the recording's source path in the index, and it is always supported.
     streamed: bool = False
 

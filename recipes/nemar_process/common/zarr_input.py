@@ -20,6 +20,13 @@ needs around it:
   are never used, and the hosts actually contacted are kept for the records. ``zarr_hosts.Fence`` is
   the second line, a socket-level audit hook for the run.
 
+* every store read in full is named by the content that was read: ``window_content_sha256`` is the
+  SHA-256 of the physical values of the window eegprep-lean returned under a header of the
+  serving rate, unit and labels (``nemar.store-content.v1``, the platform's definition), and
+  ``input_digest`` is the digest of a dataset's stores by path, group and content, so a derivative
+  can be keyed on what was read and not on the index file, whose bytes change when any one store
+  of the dataset is converted again.
+
 ``eegprep_lean`` and ``eegprep`` are imported where they are used, so this module (and the tests of
 the attestation) import without them.
 """
@@ -32,6 +39,7 @@ import json
 import math
 import posixpath
 import re
+import struct
 import threading
 import urllib.error
 import urllib.request
@@ -41,6 +49,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urljoin
+
+import numpy as np
 
 from nemar_process.common import io, naming, zarr_hosts
 from nemar_process.common.errors import (
@@ -395,11 +405,22 @@ def _whole(value: Any, low: int, high: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
 
 
+def _encodable(value: str) -> bool:
+    """Whether the text has a UTF-8 form: a lone surrogate (JSON can spell one) has none, and a name
+    that has none would end the run in an encoding error where the text is written or hashed."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _name(value: Any) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value) <= MAX_NAME_LENGTH
         and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        and _encodable(value)
     )
 
 
@@ -442,7 +463,12 @@ def validate_document(document: Any) -> None:
         for group in groups:
             if not isinstance(group, dict):
                 raise IndexInvalid("a group is not an object")
-            if not _name(group.get("name")) or not isinstance(group.get("modality"), str):
+            modality = group.get("modality")
+            if (
+                not _name(group.get("name"))
+                or not isinstance(modality, str)
+                or not _encodable(modality)
+            ):
                 raise IndexInvalid("a group has no usable name or modality")
             rate = group.get("rate")
             if (
@@ -456,6 +482,202 @@ def validate_document(document: Any) -> None:
                 raise IndexInvalid("a group has no usable n_channels")
             if not _whole(group.get("n_samples"), 0, MAX_DECLARED_SAMPLES):
                 raise IndexInvalid("a group has no usable n_samples")
+
+
+# ---- what was read: the content digest of a store and the input digest of a dataset -----------
+
+STORE_CONTENT_FORMAT = "nemar.store-content.v1"
+LINE_BREAKS = ("\r", "\n")
+ROW_BREAKS = (*LINE_BREAKS, "\t")  # a row's pieces are tab-separated lines
+# Matched whole with ``fullmatch``: a ``$`` would accept a trailing line feed.
+CONTENT_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+class Undigestable(ValueError):
+    """A store, or a row of a dataset, that has no digest, never a digest of a guess: a unit or label
+    that cannot be a line of the header (a line feed or a carriage return, a lone surrogate), a list
+    that is not one per channel, a value or a rate that is not finite, no channel or no sample, or a
+    row that is not one of the input digest's."""
+
+
+class StoreContent(NamedTuple):
+    """What a store's digest names: the channel group that was read, and the SHA-256 of its content."""
+
+    group: str
+    sha256: str
+
+
+def _utf8(name: str, text: Any) -> bytes:
+    """The text as the UTF-8 bytes it is hashed as, exactly as given (no normalization, no trimming);
+    ``Undigestable`` when it is not text or has no UTF-8 (a lone surrogate)."""
+    if not isinstance(text, str):
+        raise Undigestable("the {} is not text".format(name))
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise Undigestable("the {} is not text in UTF-8".format(name)) from error
+
+
+def _line(name: str, text: str | None) -> str:
+    """``name`` alone when there is no text, else ``name``, a space and the text; ``Undigestable``
+    when the text could not be a line. Only text that enters the header is looked at."""
+    if text is None:
+        return name
+    _utf8(name, text)
+    if any(character in text for character in LINE_BREAKS):
+        raise Undigestable("the {} cannot be a line of the header".format(name))
+    return "{} {}".format(name, text)
+
+
+def _per_channel(values: Sequence[str | None] | None, channels: int, name: str) -> list[Any]:
+    """One entry per channel as the store states it (text, empty or absent); a list absent as a whole
+    is every channel absent, and one that is not one per channel is refused."""
+    if values is None:
+        return [None] * channels
+    if isinstance(values, (str, bytes)) or len(values) != channels:
+        raise Undigestable("the {} are not one per channel".format(name))
+    for value in values:
+        if value is not None and not isinstance(value, str):
+            raise Undigestable("a channel's {} is not text".format(name))
+    return list(values)
+
+
+def store_content_header(
+    shape: tuple[int, int],
+    rate: float,
+    units: Sequence[str | None] | None,
+    labels: Sequence[str | None] | None,
+) -> bytes:
+    """The header lines of ``nemar.store-content.v1``, each ending in a line feed, as UTF-8.
+
+    ``nemar.store-content.v1``; ``shape C S`` (channels and samples); ``rate H``, the 16 lower-case
+    hexadecimal digits of the rate (the serving rate, never the archived one) as an IEEE-754 binary64,
+    big-endian; ``unit`` and the unit; one ``label`` line per channel; ``data float64-le``.
+
+    ``units`` and ``labels`` are each channel's, as the store states them, and two rules decide the
+    text. The unit is shared or none: ``unit`` carries text only when every channel states the same
+    non-empty unit, and otherwise is ``unit`` alone, so an empty unit is no unit and never ``unit``
+    and a space. Labels are all or none: the ``label`` lines carry labels only when every channel has
+    a non-empty one, and otherwise every line is ``label`` alone. Text the rules drop is never looked
+    at; text that enters the header with a carriage return, a line feed or a lone surrogate has no
+    digest (``Undigestable``).
+    """
+    channels, samples = shape
+    if channels < 1 or samples < 1:
+        raise Undigestable("the group has no channel or no sample")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+        raise Undigestable("the rate is not a finite number")
+    each_unit = _per_channel(units, channels, "units")
+    each_label = _per_channel(labels, channels, "labels")
+    shared = each_unit[0] if each_unit and each_unit[0] and len(set(each_unit)) == 1 else None
+    named = each_label if each_label and all(each_label) else [None] * channels
+    lines = [
+        STORE_CONTENT_FORMAT,
+        "shape {} {}".format(int(channels), int(samples)),
+        "rate " + struct.pack(">d", float(rate)).hex(),
+        _line("unit", shared),
+        *(_line("label", label) for label in named),
+        "data float64-le",
+    ]
+    return "".join(line + "\n" for line in lines).encode("utf-8")
+
+
+def store_content_sha256(
+    data: Any,
+    rate: float,
+    units: Sequence[str | None] | None,
+    labels: Sequence[str | None] | None,
+) -> str:
+    """The content digest of one channel group: SHA-256 of the header, then the values.
+
+    The values are the physical ones, ``data`` as channels by samples, written as little-endian
+    binary64 in C order (all of channel 0, then channel 1): what is hashed is the values and not how
+    an array lays them out in memory. ``Undigestable`` for what has no digest: no channel or no
+    sample, a rate that is not finite, a value that is not finite. A non-finite scale, offset or
+    digital value, or a product that overflows, is a non-finite value here, because ``data`` is
+    what eegprep-lean made of them (``physical = digital * scale + offset``, two separately rounded
+    operations, never fused).
+    """
+    values = np.asarray(data)
+    if values.ndim != 2:
+        raise Undigestable("the data is not channels by samples")
+    shape = (values.shape[0], values.shape[1])
+    hasher = hashlib.sha256(store_content_header(shape, rate, units, labels))
+    for channel in values:  # one at a time: the same bytes as the whole array, with no second copy
+        row = np.ascontiguousarray(channel, dtype="<f8")
+        if not np.isfinite(row).all():
+            raise Undigestable("a value is not finite")
+        hasher.update(row.tobytes(order="C"))
+    return hasher.hexdigest()
+
+
+def window_content_sha256(window: Any) -> str:
+    """The digest of an eegprep-lean ``Window``: its data, rate, unit and labels. The window states
+    the unit its channels share (or None) and the labels all of them have (or None), which are the
+    same two rules, so they are passed on as every channel's. Its ``original_rate`` is the rate the
+    recording was acquired at and is never read."""
+    values = np.asarray(window.data)
+    channels = values.shape[0] if values.ndim == 2 else 0  # any other shape is refused below
+    units = None if window.unit is None else [window.unit] * channels
+    return store_content_sha256(values, window.rate, units, window.labels)
+
+
+def content_rows(read: Mapping[str, Sequence[str]]) -> list[dict[str, str]]:
+    """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256"}`` for
+    each store read in full, sorted by path in code point order. ``read`` maps a path to its group
+    and its digest."""
+    rows = []
+    for path in sorted(read):  # a str sorts by code point, which is the order of its UTF-8 bytes
+        group, digest = read[path]
+        rows.append({"path": path, "group": group, "content_sha256": digest})
+    return rows
+
+
+def _row_text(name: str, text: Any) -> str:
+    """A row's path or group as a piece of a tab-separated line: non-empty text with no tab, no line
+    feed, no carriage return and no lone surrogate."""
+    _utf8(name, text)
+    if not text:
+        raise Undigestable("the {} is empty".format(name))
+    if any(character in text for character in ROW_BREAKS):
+        raise Undigestable("the {} cannot be a piece of a line".format(name))
+    return text
+
+
+def _row_fields(row: Any) -> tuple[Any, Any, Any]:
+    """A row's path, group and content digest; ``Undigestable`` for a row that is not an object or
+    lacks one of them."""
+    if not isinstance(row, Mapping):
+        raise Undigestable("a row is not an object")
+    try:
+        return row["path"], row["group"], row["content_sha256"]
+    except KeyError as error:
+        raise Undigestable("a row has no {}".format(error.args[0])) from error
+
+
+def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
+    """``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
+    store read in full, sorted by path in code point order (the order of the paths' UTF-8 bytes,
+    whatever order ``rows`` come in), each text as it is given.
+
+    ``Undigestable`` (a ``ValueError``) for a row that is not one: not an object, or without a path,
+    a group or a ``content_sha256``; a path repeated; an empty path or group; a tab, a line feed, a
+    carriage return or a lone surrogate in a path or group; or a ``content_sha256`` that is not 64
+    lower-case hexadecimal digits. No rows is the digest of no text, and is not refused here (the key
+    consumer's check for a non-empty ``stores_content`` comes first).
+    """
+    fields = sorted((_row_fields(row) for row in rows), key=lambda found: _utf8("path", found[0]))
+    lines = []
+    seen = set()
+    for raw_path, raw_group, digest in fields:
+        path, group = _row_text("path", raw_path), _row_text("group", raw_group)
+        if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest):
+            raise Undigestable("a content_sha256 is not 64 lower-case hexadecimal digits")
+        if path in seen:
+            raise Undigestable("a path is repeated")
+        seen.add(path)
+        lines.append("{}\t{}\t{}\n".format(path, group, digest))
+    return "sha256:" + hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
 # ---- the source -------------------------------------------------------------------------------
@@ -512,6 +734,8 @@ class ZarrSource:
         self.index: Any = None
         self.store_bytes: dict[str, int] = {}
         self.store_hosts: dict[str, list[str]] = {}
+        # what each store read in full was, by content (a store with none is in ``stores_unread``)
+        self.contents: dict[str, StoreContent] = {}
         self.scope: list[str] = []  # the source paths of the stores the run covers (``select``)
 
     # -- the index
@@ -695,6 +919,16 @@ class ZarrSource:
                 host for host, count in after.items() if count > before_hosts.get(host, 0)
             )
         try:
+            # what was read, named before anything is made of it: a store whose metadata cannot be
+            # digested is not used (its content could not be named), and one the floor then fails is
+            # still a store that was read in full
+            content = StoreContent(window.group_name, window_content_sha256(window))
+        except Undigestable as error:
+            raise RecordingError(CONVERT_FAILED, "load", "undigestable_metadata") from error
+        except MemoryError as error:
+            raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
+        self.contents[path] = content
+        try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
             eeg = eeg_checkset(eeg)
@@ -739,7 +973,11 @@ class ZarrSource:
     def input_fields(
         self, stores: Sequence[str], bytes_read: int, hosts: Sequence[str]
     ) -> dict[str, Any]:
-        """``extensions.nemar.input``: where the data came from and what the caller attested."""
+        """``extensions.nemar.input``: where the data came from and what the caller attested.
+
+        What was read, by content, is added by the record that states it (``recording_extras``,
+        ``dataset_extras``).
+        """
         attestation = self.attestation
         return {
             "kind": "zarr",
@@ -761,22 +999,35 @@ class ZarrSource:
         }
 
     def recording_extras(self, path: str) -> dict[str, Any]:
-        """What a recording's record adds to ``extensions.nemar``: its input and the reader."""
-        return {
-            "input": self.input_fields(
-                [path], self.store_bytes.get(path, 0), self.store_hosts.get(path, [])
-            ),
-            "reader": reader_string(),
-        }
+        """What a recording's record adds to ``extensions.nemar``: its input and the reader.
+
+        The input names the channel group that was read and the content digest of the store (when
+        this source read it: a recording handed in by a test was not read by it).
+        """
+        fields = self.input_fields(
+            [path], self.store_bytes.get(path, 0), self.store_hosts.get(path, [])
+        )
+        if path in self.contents:
+            group, digest = self.contents[path]
+            fields["group"] = group
+            fields["content_sha256"] = digest
+        return {"input": fields, "reader": reader_string()}
 
     def dataset_extras(self) -> dict[str, Any]:
-        """What the dataset record adds: every store in scope and every byte read (the index's too)."""
-        return {
-            "input": self.input_fields(
-                self.scope, self.transport.bytes_read, self.transport.contacted
-            ),
-            "reader": reader_string(),
-        }
+        """What the dataset record adds: every store in scope and every byte read (the index's too),
+        and what was read by content.
+
+        ``stores_content`` has a row for every store in scope whose group was read in full (sorted
+        by path), ``input_digest`` is the input digest of exactly those rows, and ``stores_unread``
+        lists the stores in scope that have no digest (never read, or not digestable), so that a
+        record that names its whole input says so with an empty list.
+        """
+        fields = self.input_fields(self.scope, self.transport.bytes_read, self.transport.contacted)
+        rows = content_rows(self.contents)
+        fields["stores_content"] = rows
+        fields["input_digest"] = input_digest(rows)
+        fields["stores_unread"] = sorted(path for path in self.scope if path not in self.contents)
+        return {"input": fields, "reader": reader_string()}
 
 
 LOAD_FUNCTION = "eegprep_lean.load_recording"

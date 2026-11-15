@@ -1,4 +1,4 @@
-"""``nemar-floor-zarr``: the allowlist is a list of host pairs, one per NEMAR environment.
+"""``nemar-floor --input zarr``: the allowlist is a list of host pairs, one per NEMAR environment.
 
 A run is bound to the one pair its ``--zarr-base`` names: the index's ``data_base`` must be the data
 host of that pair and the one redirect a read may take is to that data host. No host is taken from
@@ -192,7 +192,7 @@ def test_the_command_refuses_a_crossed_index_with_exit_6_and_reads_nothing_else(
     monkeypatch.setattr(zarr_hosts, "fence", contextlib.nullcontext)
     out = tmp_path / "o"
     code, stdout, stderr = cli(
-        "run", "nemar-floor-zarr", "--out", out, *arguments("https://" + zarr_host)
+        "run", "nemar-floor", "--input", "zarr", "--out", out, *arguments("https://" + zarr_host)
     )
     assert code == 6
     assert stdout == ""
@@ -333,7 +333,7 @@ def test_the_command_refuses_each_bad_base_before_any_request(
     monkeypatch.setattr(zarr_input, "fetch_https", documents.fetch)
     for label, base in bad_bases(zarr_host).items():
         code, stdout, stderr = cli(
-            "run", "nemar-floor-zarr", "--out", tmp_path / "o", *arguments(base)
+            "run", "nemar-floor", "--input", "zarr", "--out", tmp_path / "o", *arguments(base)
         )
         assert (code, stdout) == (6, ""), label
         assert "--zarr-base" in stderr, label
@@ -364,7 +364,7 @@ def lookup(fence: zarr_hosts.Fence, host: str) -> None:
 
 
 def test_the_fence_of_a_zarr_recipe_allows_the_hosts_of_both_pairs():
-    fence = command.network_fence(REGISTRY["nemar-floor-zarr"])
+    fence = command.network_fence(REGISTRY["nemar-floor"].reading("zarr"))
     assert fence.hosts == zarr_hosts.ALLOWED_HOSTS
     for host in (z.ZARR_HOST, z.DATA_HOST, z.STAGING_ZARR_HOST, z.STAGING_DATA_HOST):
         lookup(fence, host)
@@ -407,7 +407,7 @@ def run(served_one, monkeypatch, out: Path, origin: str, *extra: str) -> tuple[i
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         code = command.main(
-            ["run", "nemar-floor-zarr", "--out", str(out), *arguments(origin, *extra)]
+            ["run", "nemar-floor", "--input", "zarr", "--out", str(out), *arguments(origin, *extra)]
         )
     return code, {"line": captured.getvalue(), "urls": stand_in.urls}
 
@@ -423,14 +423,14 @@ def test_a_staging_run_reads_its_own_environment_and_records_the_pair(
     hosts = {url.split("/")[2] for url in seen["urls"]}
     assert hosts == {z.STAGING_ZARR_HOST, z.STAGING_DATA_HOST}  # production was never addressed
     assert all(url.startswith("https://") for url in seen["urls"])
-    dataset = json.loads((out / "desc-nemarfloorzarr_signalJourney.json").read_text())
+    dataset = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())
     assert records.check(dataset, sj.validator()) == []
     given = dataset["extensions"]["nemar"]["input"]
     assert given["zarr_pair"] == "staging"
     assert given["zarr_base"] == z.STAGING_ORIGIN
     assert given["hosts_contacted"] == sorted([z.STAGING_ZARR_HOST, z.STAGING_DATA_HOST])
     record = json.loads(
-        (out / "sub-01/eeg/sub-01_task-rest_desc-nemarfloorzarr_signalJourney.json").read_text()
+        (out / "sub-01/eeg/sub-01_task-rest_desc-nemarfloor_signalJourney.json").read_text()
     )
     assert record["extensions"]["nemar"]["input"]["zarr_pair"] == "staging"
 

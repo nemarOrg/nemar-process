@@ -1,4 +1,4 @@
-"""A local stand-in for NEMAR's Zarr hosts, for the ``nemar-floor-zarr`` tests.
+"""A local stand-in for NEMAR's Zarr hosts, for the ``nemar-floor --input zarr`` tests.
 
 Real Zarr stores written by zarr itself, served over real HTTP that honors ``Range`` (the way
 eegprep-lean's own tests serve them), plus an index document in the format of the contract. The
@@ -86,8 +86,51 @@ def _signal(seed: int):
     )
 
 
-def write_group(root, name: str, *, modality: str, unit: str, data, scale: float = 0.5) -> None:
-    """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization."""
+def reference_content_sha256(
+    seed: int | None,
+    unit: str | None,
+    scale: float = 0.5,
+    labels: tuple[str, ...] | None = LABELS,
+) -> str:
+    """The content digest of a stand-in store (``seed`` None is the flat one), written out from the
+    definition (``nemar.store-content.v1``) and apart from the recipe's own function: the header
+    lines, then the physical values as little-endian binary64, channel-major. ``unit`` and
+    ``labels`` are what the header carries (None is ``unit`` alone, and a ``label`` alone per
+    channel), already decided by the two rules (shared or none, all or none)."""
+    import struct
+
+    import numpy as np
+
+    counts = np.zeros((N_CHANNELS, N_SAMPLES), dtype=int) if seed is None else _signal(seed)
+    with np.errstate(over="ignore"):
+        values = counts.astype(np.int16).astype(np.float64) * scale + 0.0
+    lines = [
+        "nemar.store-content.v1",
+        "shape {} {}".format(N_CHANNELS, N_SAMPLES),
+        "rate " + struct.pack(">d", RATE).hex(),
+        "unit" if unit is None else "unit " + unit,
+        *(["label"] * N_CHANNELS if labels is None else ["label " + label for label in labels]),
+        "data float64-le",
+    ]
+    header = "".join(line + "\n" for line in lines)
+    return hashlib.sha256(header.encode() + values.astype("<f8").tobytes(order="C")).hexdigest()
+
+
+def write_group(
+    root,
+    name: str,
+    *,
+    modality: str,
+    unit: str,
+    data,
+    scale: float = 0.5,
+    labels: tuple[str, ...] | None = None,
+    units: tuple[str, ...] | None = None,
+) -> None:
+    """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization.
+
+    The labels and units are the stand-in's own (``LABELS``, ``unit``) unless a test gives each
+    channel's, as a store that states a label or a unit for some channels only would."""
     import numpy as np
 
     channels, _samples = data.shape
@@ -100,8 +143,10 @@ def write_group(root, name: str, *, modality: str, unit: str, data, scale: float
             "n_channels": channels,
             "channels": [
                 {
-                    "label": LABELS[i] if channels == N_CHANNELS else "C{}".format(i + 1),
-                    "unit": unit,
+                    "label": labels[i]
+                    if labels is not None
+                    else (LABELS[i] if channels == N_CHANNELS else "C{}".format(i + 1)),
+                    "unit": units[i] if units is not None else unit,
                     "channel_type": modality,
                     "row_index": i,
                     "original_rate": 500.0,
