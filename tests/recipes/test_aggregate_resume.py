@@ -155,6 +155,23 @@ def comparable(root, *, resumed=None):
     return found
 
 
+def retabled(source, destination, path, status, code):
+    """A copy of a product whose recordings table says another outcome for one recording."""
+    shutil.copytree(source, destination)
+    table = destination / TABLE
+    lines = table.read_text(encoding="utf-8").splitlines()
+    names = lines[0].split("\t")
+    changed = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split("\t")
+        if cells[names.index("path")] == path:
+            cells[names.index("status")] = status
+            cells[names.index("code")] = code
+        changed.append("\t".join(cells))
+    table.write_text("\n".join(changed) + "\n", encoding="utf-8")
+    return destination
+
+
 def edited(source, destination, change):
     """A copy of a product whose dataset record ``change`` has edited (``extensions.nemar``)."""
     shutil.copytree(source, destination)
@@ -345,6 +362,58 @@ def test_a_remainder_that_names_a_finished_recording_is_an_error_under_resume(pr
     assert code == 1
     assert "two inputs name the same recording: {}".format(recording("sub-S03")) in err
     assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("skipped", "unsupported_format"),
+        ("skipped", "no_signal_channels"),
+        ("skipped", "duplicate_recording"),
+        ("failed", "load_failed"),
+        ("failed", "file_not_found"),
+    ],
+)
+def test_only_a_budget_row_is_ever_replaced_whatever_else_a_row_says(
+    products, tmp_path, status, reason
+):
+    """A recording that was skipped for another reason, or that failed, is a finished outcome: a
+    second row for it is two outcomes for one recording and not the rest of a cut run."""
+    other = retabled(products["third"], tmp_path / "other", recording("sub-S03"), status, reason)
+    for name, order in (("one", (other, products["third"])), ("two", (products["third"], other))):
+        out = tmp_path / name
+        code, _, err = merge(out, *order)
+        assert code == 1
+        assert "two inputs name the same recording: {}".format(recording("sub-S03")) in err
+        assert not out.exists()
+
+
+@pytest.fixture(scope="module")
+def unreadable_rest(products):
+    """The remainder's run, on a copy of the dataset in which the third recording cannot be read."""
+    damaged = products["base"] / "damaged"
+    shutil.copytree(products["dataset"], damaged)
+    (damaged / recording("sub-S03")).write_bytes(b"this is not a recording")
+    rest = [recording("sub-S03"), recording("sub-S04")]
+    assert floor_run(damaged, products["base"] / "unreadable", "unreadable", *rest)[0] == 0
+    return products["base"] / "unreadable"
+
+
+def test_a_failed_row_of_the_remainder_replaces_a_budget_row(products, unreadable_rest, tmp_path):
+    """The run of the remainder is the later word on a recording, whatever came of it: a recording
+    that failed is not one the time budget left out."""
+    out = tmp_path / "out"
+    code, stdout, _ = merge(out, products["cut"], unreadable_rest)
+    assert code == 0
+    assert result_of(stdout)["result"] == "ok"
+    nemar = nemar_of(out)
+    assert nemar["counts"] == {"discovered": 4, "succeeded": 3, "failed": 1, "skipped": 0}
+    assert nemar["report"]["pending_count"] == 0
+    assert nemar["report"]["resumed"] == 2
+    assert [(row["status"], row["code"]) for row in rows_of(out)][2:] == [
+        ("failed", "load_failed"),
+        ("succeeded", "n/a"),
+    ]
 
 
 def test_two_budget_rows_for_one_recording_are_an_error_under_resume(products, tmp_path):
