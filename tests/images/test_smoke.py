@@ -30,7 +30,7 @@ CPUFIT = "ab" * 32  # a SHA-256 reading, never a gate
 
 def expected_document(flavor: str = "cpu", no_gpu: bool = False) -> dict:
     """What `smoke.py` prints in an image of this flavor when every package is as pinned or locked."""
-    expected = pins.expected_versions(PYPROJECT, LOCK, flavor)
+    expected = pins.expected_versions(PYPROJECT, LOCK, flavor, image=True)
     cuda = flavor == "cuda"
     return {
         "python": "3.12.16",
@@ -302,6 +302,22 @@ def test_each_flavor_expects_its_own_torch():
         document = expected_document("cpu")
         document["distributions"]["torch"] = locked_elsewhere
         assert any("torch" in p for p in problems_of(document, "cpu")), locked_elsewhere
+
+
+def test_an_image_is_linux_so_a_cpu_image_refuses_the_plain_macos_torch_and_a_cuda_image_the_cpu_one():
+    assert pins.expected_versions(PYPROJECT, LOCK, "cpu", image=True)["torch"] == {"2.12.1+cpu"}
+    assert pins.expected_versions(PYPROJECT, LOCK, "cuda", image=True)["torch"] == {"2.12.1+cu129"}
+    document = expected_document("cpu")
+    assert document["distributions"]["torch"] == "2.12.1+cpu"
+    assert problems_of(document, "cpu") == []
+    # the plain version is the CPU index's macOS wheel, which no image holds
+    document["distributions"]["torch"] = "2.12.1"
+    assert any("torch" in p for p in problems_of(document, "cpu"))
+    # a macOS host's environment is not an image: its torch is still one the lock takes from the CPU index
+    assert not any("torch" in p for p in pins.check(document, PYPROJECT, LOCK))
+    document = expected_document("cuda")
+    document["distributions"]["torch"] = "2.12.1+cpu"
+    assert any("torch" in p for p in problems_of(document, "cuda"))
 
 
 def test_the_cuda_flavor_must_be_the_cuda_12_9_build_with_architectures_listed():

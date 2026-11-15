@@ -11,8 +11,9 @@ declares, so the tests, the pull-request job and the release job all ask the sam
 * nothing that leads to MATLAB or Octave is installed, by name (``NO_MATLAB`` and the substring
   rule in ``forbidden_names``);
 * torch is, in the CPU flavor, a version the lock takes from the CPU index (never the torch the lock
-  takes from PyPI for the resolution that selects no flavor), and in the CUDA flavor the CUDA 12.9
-  build (which also lists its GPU architectures); Python is the 3.12 series;
+  takes from PyPI for the resolution that selects no flavor; in an image, which is Linux, the
+  ``+cpu`` build alone), and in the CUDA flavor the CUDA 12.9 build (which also lists its GPU
+  architectures); Python is the 3.12 series;
 * the recipe command ran and names the pinned eegprep and the recipes the repository registers
   (``recipe_command``), and with ``--image`` it was the script ``nemar-recipe`` on the path;
 * with ``--image``: the thread and hash environment the Dockerfile sets, the environment at
@@ -59,6 +60,9 @@ CUDA_TORCH_LOCAL = "+cu129"
 # torch of the resolution that selects no flavor (from PyPI, never installed), which is not the CPU
 # flavor's however plain its version looks.
 CPU_TORCH_INDEX_NAME = "pytorch-cpu"
+# The CPU index's Linux builds carry this local version (`2.12.1+cpu`); its macOS wheel carries none
+# (`2.12.1`). An image is Linux, so an image document's CPU torch must carry it.
+CPU_TORCH_LOCAL = "+cpu"
 # pAMICA v0.4.0's `amica15-linux-x64`, as the image's Dockerfiles check it; a test keeps the three
 # copies (this one and the two Dockerfiles) equal.
 AMICA15_SHA256 = "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a"
@@ -153,13 +157,15 @@ def cpu_index_torch_versions(pyproject: Path, lock: Path) -> set[str]:
 
 
 def expected_versions(
-    pyproject: Path, lock: Path, flavor: str | None = None
+    pyproject: Path, lock: Path, flavor: str | None = None, image: bool = False
 ) -> dict[str, set[str]]:
     """The versions each checked package may have: the pin when there is one, else the lock's.
 
     torch has one locked version per flavor and platform; a flavor narrows it: the CUDA flavor's is
     the ``+cu129`` build, the CPU flavor's is what the lock takes from the CPU index (the Linux
     ``+cpu`` build and the macOS build), never the torch of the resolution that selects no flavor.
+    An image is always Linux, so for an image the CPU flavor's is the ``+cpu`` build alone: the
+    macOS wheel's plain version is refused there.
     """
     pins = declared_pins(pyproject)
     locked = lock_versions(lock)
@@ -173,6 +179,8 @@ def expected_versions(
         expected["torch"] = {v for v in expected["torch"] if v.endswith(CUDA_TORCH_LOCAL)}
     elif flavor == "cpu":
         expected["torch"] = expected["torch"] & cpu_index_torch_versions(pyproject, lock)
+        if image:
+            expected["torch"] = {v for v in expected["torch"] if v.endswith(CPU_TORCH_LOCAL)}
     return expected
 
 
@@ -296,7 +304,7 @@ def check(
     installed = {normalize(k): v for k, v in smoke.get("distributions", {}).items()}
     # outside an image the flavor is what the host's environment says: no file, so any locked torch
     shape = smoke.get("flavor") if smoke.get("flavor") in FLAVORS else None
-    for name, versions in expected_versions(pyproject, lock, shape).items():
+    for name, versions in expected_versions(pyproject, lock, shape, image).items():
         if name not in installed:
             problems.append("{} is not installed".format(name))
         elif installed[name] not in versions:
