@@ -227,6 +227,8 @@ The fixture is synthetic and a smoke input only (see its README); the scientific
 
 The pull-request job's `cpu` leg also runs the launch end to end in the SIF it just built: `tests/e2e/test_floor_launch.py` runs the real launcher against a stand-in data plane that serves the scientific fixture, runs `nemar-recipe run nemar-floor` in the SIF as a job would, uploads to stand-in outputs routes, and compares the result with a direct run of the same fixture.
 It runs in the unprivileged `test` job only (the signing job holds the OpenID Connect (OIDC) token and runs no test from this repository).
+The same leg runs `tests/e2e/test_ica_launch.py` in the SIF: `nemar-ica` with pAMICA and with the image's `amica15` binary on the fixture at full length (it prints the informational `E1R` line and asserts nothing about it), and the binary twice on a 50-iteration cut, whose two weight files must differ because nothing seeds the binary.
+The `cuda` leg runs one tiny `nemar-ica` run in its image with no GPU visible, and checks that the record says the CPU ran (`device` `cpu`, `device_reason` `no_gpu`, `fallback` true, `image_flavor` `cuda`, torch `2.12.1+cu129`): the image and the path the registry uses.
 
 ## Published images
 
