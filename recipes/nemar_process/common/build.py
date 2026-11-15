@@ -7,6 +7,8 @@ without a network call and without a guess:
   image build from the build arguments ``NEMAR_PROCESS_VERSION``, ``NEMAR_PROCESS_COMMIT`` and
   ``NEMAR_PROCESS_BUILD`` by ``python -m nemar_process.common.build write``, which refuses what
   ``build_info`` would refuse, so an inconsistent image is never built;
+* beside it, ``/opt/nemar/flavor`` holds one word, ``cpu`` or ``cuda``, written by each Dockerfile;
+  the tag a record names is ``<version>-<flavor>`` for a release (``image_provenance``);
 * anywhere else (no file), the run is a ``source`` run: the version in the project's
   ``pyproject.toml`` beside the package, and no commit. Package metadata cannot say it: the project
   is not an installed distribution (``[tool.uv] package = false``).
@@ -25,7 +27,7 @@ import os
 import re
 import sys
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +43,11 @@ KEYS = ("version", "commit", "build")
 RELEASE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 DEV_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-dev[0-9]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
-# The one flavor the Dockerfile builds (its label io.nemar.flavor), and so the suffix of the tag the
-# image workflow publishes: <version>-cpu.
-IMAGE_FLAVOR = "cpu"
+# The flavors an image comes in (the label io.nemar.flavor), and so the suffix of the tag the image
+# workflow publishes: <version>-cpu and <version>-cuda. The image says which one it is in the one-word
+# file each Dockerfile writes as root (module attribute, so that a test points it elsewhere).
+IMAGE_FLAVORS = ("cpu", "cuda")
+FLAVOR_FILE = Path("/opt/nemar/flavor")
 ARGUMENT_PREFIX = "NEMAR_PROCESS_"
 
 
@@ -114,14 +118,66 @@ def build_info(path: Path | None = None) -> dict[str, str | None]:
     return dict(check(document["version"], document["commit"], document["build"]))
 
 
+def read_image_fact(path: Path, valid: Callable[[str], bool], what: str) -> str | None:
+    """The one word in a file an image writes as root, None where there is no file.
+
+    A file that is there must be what its writer writes: a symbolic link is refused and never
+    followed, and so is text that is not ASCII, a file that cannot be read and anything but a single
+    word that ``valid`` accepts once the whitespace around it is stripped. Raises ``BuildRefused``,
+    whose message names the part (``what``) and never a path or a value.
+    """
+    if not os.path.lexists(path):
+        return None
+    if path.is_symlink():
+        raise BuildRefused("the {} file is a symbolic link".format(what))
+    try:
+        word = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as error:
+        raise BuildRefused(
+            "the {} file cannot be read ({})".format(what, type(error).__name__)
+        ) from error
+    if not valid(word):
+        raise BuildRefused("the {} file does not hold what its writer writes".format(what))
+    return word
+
+
+def image_flavor() -> str | None:
+    """The flavor this image says it is (``FLAVOR_FILE``): ``cpu`` or ``cuda``; None with no file.
+
+    The one reader of that file: a file that is there and holds anything but one word of
+    ``IMAGE_FLAVORS`` is refused (``read_image_fact``).
+    """
+    return read_image_fact(FLAVOR_FILE, IMAGE_FLAVORS.__contains__, "flavor")
+
+
+def image_provenance() -> tuple[dict[str, str | None], str | None]:
+    """The build this process runs in and the tag its image was published under: ``(info, tag)``.
+
+    A source run (no build file, so not in an image) has no tag and never reads the flavor file.
+    Whenever a build file exists, release or dev, the flavor file must exist and be valid, or
+    ``BuildRefused``: every Dockerfile writes it, so a build file without it is a broken or foreign
+    image, and defaulting to ``cpu`` would name a CUDA image as a CPU one. A dev build reads it too,
+    so that every pull request's image build exercises the read; its tag is still None.
+    """
+    info = build_info()
+    if info["build"] == "source":
+        return info, None
+    flavor = image_flavor()
+    if flavor is None:
+        raise BuildRefused("the image has a build file and no flavor file")
+    return info, image_tag(info, flavor)
+
+
 def check_recorded(process: Any, tag: Any) -> None:
     """Refuse a ``process`` block and image tag, read from a record, that no run could have written.
 
     The aggregate states the build of the rows it merges, so what it copies is checked by the rules
     the writer and the reader apply: a ``release`` or ``dev`` block passes ``check`` (a release is
-    ``X.Y.Z`` and a dev build ``X.Y.Z-devN``, with a commit) and its tag is exactly ``image_tag``; a
-    ``source`` block has the three keys, no commit and no tag; a record that predates the block
-    (``process`` None) has no tag either. Raises ``BuildRefused``, whose message holds no value.
+    ``X.Y.Z`` and a dev build ``X.Y.Z-devN``, with a commit); the tag of a release is exactly
+    ``image_tag`` of one flavor of ``IMAGE_FLAVORS`` (``<version>-cpu`` or ``<version>-cuda``, the
+    record holds nothing that says which image the digest is) and a dev build has none; a ``source``
+    block has the three keys, no commit and no tag; a record that predates the block (``process``
+    None) has no tag either. Raises ``BuildRefused``, whose message holds no value.
     """
     if process is None:
         if tag is not None:
@@ -129,25 +185,32 @@ def check_recorded(process: Any, tag: Any) -> None:
         return
     if not isinstance(process, dict) or sorted(process) != sorted(KEYS):
         raise BuildRefused("the build has exactly the keys {}".format(", ".join(KEYS)))
+    accepted: tuple[str | None, ...]
     if process["build"] == "source":
         version = process["version"]
         if process["commit"] is not None or not (version is None or isinstance(version, str)):
             raise BuildRefused("a source build has a text version or none, and no commit")
-        expected = None
+        accepted = (None,)
     else:
-        expected = image_tag(check(process["version"], process["commit"], process["build"]))
-    if tag != expected:
+        info = check(process["version"], process["commit"], process["build"])
+        accepted = tuple(image_tag(info, flavor) for flavor in IMAGE_FLAVORS)
+    if tag not in accepted:
         raise BuildRefused("the image tag is not the one this build was published under")
 
 
-def image_tag(info: Mapping[str, Any]) -> str | None:
-    """The tag the image workflow published for this build, or None where no tag was.
+def image_tag(info: Mapping[str, Any], flavor: str | None) -> str | None:
+    """The tag the image workflow published for this build and flavor, or None where no tag was.
 
-    Only a release is published (``<version>-cpu``); a dev build or a source run has no tag.
+    Only a release is published (``<version>-<flavor>``, and a release needs a flavor of
+    ``IMAGE_FLAVORS``, or ``BuildRefused``); a dev build or a source run has no tag, whatever the flavor.
     """
     if info["build"] != "release":
         return None
-    return "{}-{}".format(info["version"], IMAGE_FLAVOR)
+    if flavor not in IMAGE_FLAVORS:
+        raise BuildRefused(
+            "the flavor of a release image is one of {}".format(", ".join(IMAGE_FLAVORS))
+        )
+    return "{}-{}".format(info["version"], flavor)
 
 
 def write_build_file(path: Path, version: Any, commit: Any, build: Any) -> None:

@@ -13,6 +13,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -30,7 +31,7 @@ CPUFIT = "ab" * 32  # a SHA-256 reading, never a gate
 
 def expected_document(flavor: str = "cpu", no_gpu: bool = False) -> dict:
     """What `smoke.py` prints in an image of this flavor when every package is as pinned or locked."""
-    expected = pins.expected_versions(PYPROJECT, LOCK, flavor)
+    expected = pins.expected_versions(PYPROJECT, LOCK, flavor, image=True)
     cuda = flavor == "cuda"
     return {
         "python": "3.12.16",
@@ -288,8 +289,9 @@ def test_each_flavor_expects_its_own_torch():
     cpu = pins.expected_versions(PYPROJECT, LOCK, "cpu")["torch"]
     cuda = pins.expected_versions(PYPROJECT, LOCK, "cuda")["torch"]
     assert cuda == {"2.12.1+cu129"}
-    assert cpu
-    assert not any("+cu" in v for v in cpu)
+    # the CPU index's two builds of the one pinned version (Linux, macOS), never the PyPI torch that
+    # the resolution selecting no flavor locks
+    assert cpu == {"2.12.1", "2.12.1+cpu"}
     assert not cpu & cuda
     document = expected_document("cuda")
     document["distributions"]["torch"] = sorted(cpu)[0]
@@ -297,6 +299,26 @@ def test_each_flavor_expects_its_own_torch():
     document = expected_document("cpu")
     document["distributions"]["torch"] = "2.12.1+cu129"
     assert any("torch" in p for p in problems_of(document, "cpu"))
+    for locked_elsewhere in ("2.15.0", "2.15.0+cpu"):
+        document = expected_document("cpu")
+        document["distributions"]["torch"] = locked_elsewhere
+        assert any("torch" in p for p in problems_of(document, "cpu")), locked_elsewhere
+
+
+def test_an_image_is_linux_so_a_cpu_image_refuses_the_plain_macos_torch_and_a_cuda_image_the_cpu_one():
+    assert pins.expected_versions(PYPROJECT, LOCK, "cpu", image=True)["torch"] == {"2.12.1+cpu"}
+    assert pins.expected_versions(PYPROJECT, LOCK, "cuda", image=True)["torch"] == {"2.12.1+cu129"}
+    document = expected_document("cpu")
+    assert document["distributions"]["torch"] == "2.12.1+cpu"
+    assert problems_of(document, "cpu") == []
+    # the plain version is the CPU index's macOS wheel, which no image holds
+    document["distributions"]["torch"] = "2.12.1"
+    assert any("torch" in p for p in problems_of(document, "cpu"))
+    # a macOS host's environment is not an image: its torch is still one the lock takes from the CPU index
+    assert not any("torch" in p for p in pins.check(document, PYPROJECT, LOCK))
+    document = expected_document("cuda")
+    document["distributions"]["torch"] = "2.12.1+cpu"
+    assert any("torch" in p for p in problems_of(document, "cuda"))
 
 
 def test_the_cuda_flavor_must_be_the_cuda_12_9_build_with_architectures_listed():
@@ -587,6 +609,165 @@ def test_an_image_flavor_file_must_say_cpu_or_cuda(runtime_python, tmp_path):
         )
         assert done.returncode != 0, text
         assert "smoke test failed" in done.stderr
+
+
+# The tag check runs the way `image_flavor` does above: smoke's own flavor file and the recipes' reader
+# (`nemar_process.common.build`, whose file is a module attribute) are pointed at files of the test.
+TAG_CHECK = """
+from pathlib import Path
+from nemar_process.common import build
+smoke.FLAVOR_FILE = sys.argv[2]
+build.FLAVOR_FILE = Path(sys.argv[3])
+print(json.dumps(smoke.check_image_tag(smoke.image_flavor())))
+"""
+
+
+def check_tag(runtime_python, smoke_file, reader_file):
+    return probe(runtime_python, TAG_CHECK, str(smoke_file), str(reader_file))
+
+
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_the_image_tag_check_passes_when_the_reader_and_the_tag_say_the_flavor(
+    runtime_python, tmp_path, flavor
+):
+    flavor_file = tmp_path / "flavor"
+    flavor_file.write_text(flavor + "\n", encoding="ascii")
+    done = check_tag(runtime_python, flavor_file, flavor_file)
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert json.loads(done.stdout) == "0.0.0-" + flavor
+    assert "0.0.0-" + flavor in done.stderr  # the reading is in the log; the document gains no key
+
+
+def test_the_image_tag_check_fails_when_the_recipes_reader_does_not_say_the_flavor_smoke_read(
+    runtime_python, tmp_path
+):
+    cpu, cuda = tmp_path / "cpu", tmp_path / "cuda"
+    cpu.write_text("cpu\n", encoding="ascii")
+    cuda.write_text("cuda\n", encoding="ascii")
+    absent = tmp_path / "absent"
+    broken = tmp_path / "broken"
+    broken.write_text("gpu\n", encoding="ascii")
+    cases = (
+        (cpu, cuda, "the recipes read flavor 'cuda' and this test read 'cpu'"),
+        (cuda, cpu, "the recipes read flavor 'cpu' and this test read 'cuda'"),
+        (cpu, absent, "the recipes read flavor None and this test read 'cpu'"),
+        (cuda, broken, "the recipes' flavor reader refused the image"),
+    )
+    for smoke_file, reader_file, message in cases:
+        done = check_tag(runtime_python, smoke_file, reader_file)
+        assert done.returncode != 0, (smoke_file.name, reader_file.name)
+        assert "smoke test failed: " + message in done.stderr
+        assert "Traceback" not in done.stderr  # a refusal is a stated failure, not a crash
+        assert str(tmp_path) not in done.stderr
+
+
+def test_the_image_tag_check_fails_when_the_tag_is_not_the_flavors(runtime_python, tmp_path):
+    """The mutation a reader of the tag would miss: `image_tag` ignoring the flavor it was given."""
+    source = (RECIPES / "nemar_process" / "common" / "build.py").read_text(encoding="utf-8")
+    asked = 'return "{}-{}".format(info["version"], flavor)'
+    assert source.count(asked) == 1
+    mutated = tmp_path / "mutated" / "nemar_process"
+    mutated.parent.mkdir()
+    shutil.copytree(RECIPES / "nemar_process", mutated)
+    (mutated / "common" / "build.py").write_text(
+        source.replace(asked, 'return "{}-cpu".format(info["version"])'), encoding="utf-8"
+    )
+    flavor_file = tmp_path / "flavor"
+    flavor_file.write_text("cuda\n", encoding="ascii")
+    done = subprocess.run(
+        [
+            str(runtime_python),
+            "-c",
+            PROBE + TAG_CHECK,
+            str(SMOKE),
+            str(flavor_file),
+            str(flavor_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+        env=clean_env(PYTHONPATH=str(mutated.parent), PYTHONHASHSEED="0"),
+    )
+    assert done.returncode != 0
+    assert "0.0.0-cuda" in done.stderr
+    assert "0.0.0-cpu" in done.stderr
+
+
+# `collect` is what `main` runs: the tag check is wired into it, and only a run of `collect` with a
+# flavor file proves that. The native binary is a Linux x86-64 program that cannot run here, so the probe
+# replaces `native_binary` alone (the image's legs of CI run it for real, with the CUDA leg's `collect`
+# too: a CUDA build of torch is not in this environment); everything else in `collect` runs.
+COLLECT = """
+import contextlib
+from pathlib import Path
+from nemar_process.common import build
+smoke.FLAVOR_FILE = sys.argv[2]
+build.FLAVOR_FILE = Path(sys.argv[3])
+smoke.native_binary = lambda: {"ran": False}
+with contextlib.redirect_stdout(sys.stderr):
+    document = smoke.collect(sys.argv[4])
+print(json.dumps({"keys": sorted(document), "flavor": document["flavor"]}))
+"""
+DOCUMENT_KEYS = [
+    "amica15",
+    "cpu_fit",
+    "distributions",
+    "eegprep",
+    "environment",
+    "flavor",
+    "imports",
+    "no_gpu",
+    "prefix",
+    "python",
+    "recipe_command",
+    "signaljourney",
+    "torch",
+]
+
+
+def collect_with(runtime_python, smoke_fixture, smoke_file, reader_file):
+    return probe(runtime_python, COLLECT, str(smoke_file), str(reader_file), str(smoke_fixture))
+
+
+def test_collect_runs_the_tag_check_and_fails_on_a_pair_of_flavor_readings_that_differ(
+    runtime_python, smoke_fixture, tmp_path
+):
+    cpu, cuda, absent = tmp_path / "cpu", tmp_path / "cuda", tmp_path / "absent"
+    cpu.write_text("cpu\n", encoding="ascii")
+    cuda.write_text("cuda\n", encoding="ascii")
+    cases = (
+        (cpu, cuda, "the recipes read flavor 'cuda' and this test read 'cpu'"),
+        (cuda, cpu, "the recipes read flavor 'cpu' and this test read 'cuda'"),
+        (cpu, absent, "the recipes read flavor None and this test read 'cpu'"),
+    )
+    for smoke_file, reader_file, message in cases:
+        done = collect_with(runtime_python, smoke_fixture, smoke_file, reader_file)
+        assert done.returncode != 0, (smoke_file.name, reader_file.name)
+        assert "smoke test failed: " + message in done.stderr
+        assert "Traceback" not in done.stderr
+        assert str(tmp_path) not in done.stderr
+
+
+def test_collect_with_a_matching_pair_succeeds_and_adds_no_key_to_the_document(
+    runtime_python, smoke_fixture, tmp_path
+):
+    flavor_file = tmp_path / "flavor"
+    flavor_file.write_text("cpu\n", encoding="ascii")
+    done = collect_with(runtime_python, smoke_fixture, flavor_file, flavor_file)
+    assert done.returncode == 0, done.stderr[-3000:]
+    assert json.loads(done.stdout) == {"keys": DOCUMENT_KEYS, "flavor": "cpu"}
+    assert "image tag check: a release of the cpu image is tagged 0.0.0-cpu" in done.stderr
+
+
+def test_no_flavor_file_means_no_tag_check(runtime_python, tmp_path):
+    done = probe(
+        runtime_python,
+        "smoke.FLAVOR_FILE = sys.argv[2]\nprint(json.dumps(smoke.check_image_tag(smoke.image_flavor())))",
+        str(tmp_path / "absent"),
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert json.loads(done.stdout) is None  # not in an image: nothing to check
 
 
 def test_the_cuda_flavor_is_refused_by_a_torch_that_is_not_the_cuda_12_9_build(runtime_python):

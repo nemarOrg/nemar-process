@@ -42,6 +42,13 @@ def write(path: Path, **fields) -> Path:
     return path
 
 
+def flavored(directory: Path, word: str = "cpu") -> Path:
+    """The one-word file every image writes beside its build file (PX-06): `cpu` or `cuda`."""
+    path = directory / "flavor"
+    path.write_text(word + "\n", encoding="ascii")
+    return path
+
+
 # ---- build_info -------------------------------------------------------------------------------
 
 
@@ -161,9 +168,86 @@ def test_reading_the_build_makes_no_network_call(tmp_path, monkeypatch):
 
 def test_the_image_tag_is_the_published_one_for_a_release_and_nothing_otherwise():
     release = {"version": "1.2.3", "commit": COMMIT, "build": "release"}
-    assert build.image_tag(release) == "1.2.3-cpu"
-    assert build.image_tag({**release, "version": "1.2.3-dev1", "build": "dev"}) is None
-    assert build.image_tag({"version": "0.1.0", "commit": None, "build": "source"}) is None
+    assert build.image_tag(release, "cpu") == "1.2.3-cpu"
+    assert build.image_tag(release, "cuda") == "1.2.3-cuda"
+    for flavor in ("cpu", "cuda", None, "gpu"):
+        assert build.image_tag({**release, "version": "1.2.3-dev1", "build": "dev"}, flavor) is None
+        assert (
+            build.image_tag({"version": "0.1.0", "commit": None, "build": "source"}, flavor) is None
+        )
+
+
+@pytest.mark.parametrize("flavor", [None, "", "gpu", "CUDA", "cpu\n", "cuda-cpu"])
+def test_a_release_tag_needs_a_flavor_of_the_two_images_and_refuses_any_other(flavor):
+    release = {"version": "1.2.3", "commit": COMMIT, "build": "release"}
+    with pytest.raises(build.BuildRefused) as refused:
+        build.image_tag(release, flavor)
+    assert "gpu" not in str(refused.value)  # the message names the part, never the value
+
+
+def test_the_flavors_are_one_tuple_and_the_old_single_flavor_constant_is_gone():
+    assert build.IMAGE_FLAVORS == ("cpu", "cuda")
+    assert Path("/opt/nemar/flavor") == build.FLAVOR_FILE
+    assert not hasattr(build, "IMAGE_FLAVOR")
+    assert not hasattr(cli, "IMAGE_FLAVORS")  # `version` reads the shared tuple and reader
+    assert not hasattr(cli, "FLAVOR_FILE")  # and the one file attribute is the reader's
+
+
+# ---- the flavor file: one reader ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ["cpu\n", "cuda\n", "cuda", "  cpu  \n", "cpu\r\n"])
+def test_the_flavor_reader_returns_the_one_word_the_file_holds(tmp_path, monkeypatch, text):
+    path = tmp_path / "flavor"
+    path.write_text(text, encoding="ascii", newline="")
+    monkeypatch.setattr(build, "FLAVOR_FILE", path)
+    assert build.image_flavor() == text.strip()
+
+
+def test_no_flavor_file_is_no_flavor_and_not_a_refusal(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "FLAVOR_FILE", tmp_path / "absent")
+    assert build.image_flavor() is None
+
+
+@pytest.mark.parametrize("text", ["", "\n", "gpu\n", "CUDA\n", "Cpu", "cpu cuda\n", "cpu\ncuda\n"])
+def test_a_flavor_file_with_anything_but_one_flavor_word_is_refused_without_naming_it(
+    tmp_path, monkeypatch, text
+):
+    path = tmp_path / "flavor"
+    path.write_text(text, encoding="ascii")
+    monkeypatch.setattr(build, "FLAVOR_FILE", path)
+    with pytest.raises(build.BuildRefused) as refused:
+        build.image_flavor()
+    assert "does not hold what its writer writes" in str(refused.value)
+    assert str(tmp_path) not in str(refused.value)
+
+
+def test_a_flavor_file_that_is_a_symbolic_link_is_refused_and_never_followed(tmp_path, monkeypatch):
+    real = flavored(tmp_path)  # a valid word behind the link: following it would pass
+    path = tmp_path / "link"
+    path.symlink_to(real)
+    monkeypatch.setattr(build, "FLAVOR_FILE", path)
+    with pytest.raises(build.BuildRefused, match="symbolic link"):
+        build.image_flavor()
+    path.unlink()
+    path.symlink_to(tmp_path / "nowhere")  # dangling: refused too, never taken for no file
+    with pytest.raises(build.BuildRefused, match="symbolic link"):
+        build.image_flavor()
+
+
+@pytest.mark.parametrize("content", [b"\xff\xfe", "cpué\n".encode()])
+def test_a_flavor_file_that_is_not_ascii_text_is_refused(tmp_path, monkeypatch, content):
+    path = tmp_path / "flavor"
+    path.write_bytes(content)
+    monkeypatch.setattr(build, "FLAVOR_FILE", path)
+    with pytest.raises(build.BuildRefused, match="cannot be read"):
+        build.image_flavor()
+
+
+def test_a_directory_in_place_of_the_flavor_file_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "FLAVOR_FILE", tmp_path)
+    with pytest.raises(build.BuildRefused, match="cannot be read"):
+        build.image_flavor()
 
 
 # ---- the image's writer -----------------------------------------------------------------------
@@ -355,24 +439,93 @@ def test_the_pypi_validator_accepts_both_records(products, recipe_id, kind):
         assert validator.validate(document, raise_exceptions=False) == []
 
 
-def test_a_recipe_run_in_a_release_image_records_the_release_and_its_tag(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_a_recipe_run_in_a_release_image_records_the_release_and_its_flavors_tag(
+    tmp_path, monkeypatch, flavor
+):
     monkeypatch.setattr(build, "BUILD_FILE", write(tmp_path / "build.json"))
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavored(tmp_path, flavor))
     out = tmp_path / "product"
     assert run_bids(out) == 0
     for document in documents(out, "nemar-floor"):
         nemar = document["extensions"]["nemar"]
         assert nemar["process"] == {"version": "1.2.3", "commit": COMMIT, "build": "release"}
-        assert nemar["image"] == {"digest": DIGEST, "tag": "1.2.3-cpu"}
+        assert nemar["image"] == {"digest": DIGEST, "tag": "1.2.3-" + flavor}
 
 
-def test_a_dev_image_records_a_dev_build_and_no_tag(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_a_dev_image_records_a_dev_build_and_no_tag_whatever_its_flavor(
+    tmp_path, monkeypatch, flavor
+):
     path = write(tmp_path / "build.json", version="1.2.4-dev2", build="dev")
     monkeypatch.setattr(build, "BUILD_FILE", path)
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavored(tmp_path, flavor))
     out = tmp_path / "product"
     assert run_bids(out) == 0
     for document in documents(out, "nemar-floor"):
         nemar = document["extensions"]["nemar"]
         assert nemar["process"] == {"version": "1.2.4-dev2", "commit": COMMIT, "build": "dev"}
+        assert nemar["image"] == {"digest": DIGEST, "tag": None}
+
+
+def broken_flavor(directory: Path, how: str) -> Path | None:
+    """A flavor file that is not what an image writes (None for no file at all)."""
+    path = directory / "flavor"
+    if how == "absent":
+        return None
+    if how == "symbolic link":
+        real = directory / "real-flavor"
+        real.write_text("cuda\n", encoding="ascii")  # a valid word behind the link
+        path.symlink_to(real)
+        return path
+    path.write_text({"empty": "", "gpu": "gpu\n", "upper case": "CUDA\n"}[how], encoding="ascii")
+    return path
+
+
+@pytest.mark.parametrize("how", ["absent", "symbolic link", "empty", "gpu", "upper case"])
+@pytest.mark.parametrize(
+    "fields", [{}, {"version": "1.2.4-dev2", "build": "dev"}], ids=["release", "dev"]
+)
+def test_a_build_file_without_a_valid_flavor_file_ends_the_run_before_anything_is_written(
+    tmp_path, monkeypatch, fields, how
+):
+    monkeypatch.setattr(build, "BUILD_FILE", write(tmp_path / "build.json", **fields))
+    flavor = broken_flavor(tmp_path, how)
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavor or tmp_path / "no-such-flavor")
+    out = tmp_path / "product"
+    assert run_bids(out) == 1
+    assert not out.exists()  # ended before anything was created, not recording by recording
+
+
+@pytest.mark.parametrize("how", ["absent", "symbolic link", "empty", "gpu", "upper case"])
+def test_the_refusal_of_a_flavor_file_names_the_part_and_never_a_path_or_a_value(
+    cli, tmp_path, monkeypatch, how
+):
+    monkeypatch.setattr(build, "BUILD_FILE", write(tmp_path / "build.json"))
+    flavor = broken_flavor(tmp_path, how)
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavor or tmp_path / "no-such-flavor")
+    out = tmp_path / "product"
+    code, _, err = cli("run", "nemar-floor", "--dataset-dir", DATASET, "--out", out, *IDENTITY)
+    assert code == 1
+    assert err.startswith("the build file was refused: ")
+    assert "flavor" in err
+    assert "engine_extra" not in err
+    for leaked in (str(tmp_path), "gpu", "CUDA", "1.2.3"):
+        assert leaked not in err
+    assert not out.exists()
+
+
+def test_a_source_run_never_reads_the_flavor_file(tmp_path, monkeypatch):
+    """No build file: not an image, so a flavor file that is not one changes nothing (tag null)."""
+    monkeypatch.setattr(build, "BUILD_FILE", tmp_path / "absent.json")
+    bad = tmp_path / "flavor"
+    bad.write_text("gpu\n", encoding="ascii")
+    monkeypatch.setattr(build, "FLAVOR_FILE", bad)
+    out = tmp_path / "product"
+    assert run_bids(out) == 0
+    for document in documents(out, "nemar-floor"):
+        nemar = document["extensions"]["nemar"]
+        assert nemar["process"] == {"version": PYPROJECT_VERSION, "commit": None, "build": "source"}
         assert nemar["image"] == {"digest": DIGEST, "tag": None}
 
 
@@ -423,6 +576,7 @@ def test_an_aggregate_run_by_another_build_states_the_build_of_the_rows(
     """Dev rows merged in a release image stay dev rows: the merge runs no step."""
     dev = write(tmp_path / "dev.json", version="1.2.4-dev2", build="dev")
     monkeypatch.setattr(build, "BUILD_FILE", dev)
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavored(tmp_path))
     one = chunk(cli, multi, tmp_path / "one", CHUNK_A)
     two = chunk(cli, multi, tmp_path / "two", CHUNK_B)
     monkeypatch.setattr(build, "BUILD_FILE", write(tmp_path / "release.json"))
@@ -438,6 +592,7 @@ def test_release_rows_merged_from_a_working_tree_keep_their_release_and_tag(
     multi, cli, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(build, "BUILD_FILE", write(tmp_path / "release.json"))
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavored(tmp_path))
     one = chunk(cli, multi, tmp_path / "one", CHUNK_A)
     two = chunk(cli, multi, tmp_path / "two", CHUNK_B)
     monkeypatch.setattr(build, "BUILD_FILE", tmp_path / "absent.json")
@@ -450,6 +605,7 @@ def test_release_rows_merged_from_a_working_tree_keep_their_release_and_tag(
 
 def test_chunks_made_by_different_builds_are_not_merged(multi, cli, tmp_path, monkeypatch):
     monkeypatch.setattr(build, "BUILD_FILE", write(tmp_path / "release.json"))
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavored(tmp_path))
     one = chunk(cli, multi, tmp_path / "one", CHUNK_A)
     monkeypatch.setattr(
         build, "BUILD_FILE", write(tmp_path / "dev.json", version="1.2.4-dev2", build="dev")
@@ -467,13 +623,20 @@ def test_chunks_made_by_different_builds_are_not_merged(multi, cli, tmp_path, mo
 
 @pytest.fixture(scope="module")
 def chunks(multi, tmp_path_factory):
-    """Two chunks made under a dev build and two under a release: (kind, chunk) to directory."""
+    """Two chunks made under a dev build and two under a release, in the CPU image (the flavor is
+    `cpu`), and two more under the same release in the CUDA image (kind `release-cuda`): (kind, chunk)
+    to directory."""
     base = tmp_path_factory.mktemp("honest")
     made = {}
     patch = pytest.MonkeyPatch()
     try:
-        for kind, fields in (("dev", {"version": "1.2.4-dev2", "build": "dev"}), ("release", {})):
+        for kind, fields, flavor in (
+            ("dev", {"version": "1.2.4-dev2", "build": "dev"}, "cpu"),
+            ("release", {}, "cpu"),
+            ("release-cuda", {}, "cuda"),
+        ):
             patch.setattr(build, "BUILD_FILE", write(base / (kind + ".json"), **fields))
+            patch.setattr(build, "FLAVOR_FILE", flavored(base, flavor))
             for key, recording in (("a", CHUNK_A), ("b", CHUNK_B)):
                 out = base / "{}-{}".format(kind, key)
                 arguments = ["run", "nemar-floor", "--dataset-dir", str(multi), "--out", str(out)]
@@ -519,6 +682,30 @@ FORGED = {
     ),
     "a release without its tag": ("release", lambda nemar: nemar["image"].update(tag=None)),
     "a tag on a dev build": ("dev", lambda nemar: nemar["image"].update(tag="1.2.4-dev2-cpu")),
+    "a cuda tag on a dev build": (
+        "dev",
+        lambda nemar: nemar["image"].update(tag="1.2.4-dev2-cuda"),
+    ),
+    "a release tag of a flavor no image has": (
+        "release",
+        lambda nemar: nemar["image"].update(tag="1.2.3-gpu"),
+    ),
+    "a release tag with both flavors": (
+        "release",
+        lambda nemar: nemar["image"].update(tag="1.2.3-cuda-cpu"),
+    ),
+    "a release tag of the other release's cuda image": (
+        "release-cuda",
+        lambda nemar: nemar["image"].update(tag="9.9.9-cuda"),
+    ),
+    "a cuda release without its tag": (
+        "release-cuda",
+        lambda nemar: nemar["image"].update(tag=None),
+    ),
+    "a release tag with the flavor in upper case": (
+        "release-cuda",
+        lambda nemar: nemar["image"].update(tag="1.2.3-CUDA"),
+    ),
     "a source block with an extra field": (
         "dev",
         lambda nemar: nemar.update(process={**SOURCE, "extra": "x"}),
@@ -564,6 +751,35 @@ def test_honest_chunks_of_one_build_still_merge_after_the_check(chunks, cli, tmp
     nemar = json.loads((out / MERGED).read_text("utf-8"))["extensions"]["nemar"]
     assert nemar["process"] == {"version": "1.2.4-dev2", "commit": COMMIT, "build": "dev"}
     assert nemar["image"]["tag"] is None
+
+
+def test_honest_release_chunks_of_the_cuda_image_merge_and_keep_their_cuda_tag(
+    chunks, cli, tmp_path
+):
+    same = [
+        edited(chunks["release-cuda", key], tmp_path / key, lambda nemar: None)
+        for key in ("a", "b")
+    ]
+    for directory in same:
+        record = json.loads((directory / MERGED).read_text("utf-8"))
+        assert record["extensions"]["nemar"]["image"]["tag"] == "1.2.3-cuda"
+    out = tmp_path / "merged"
+    code, _, err = merge(cli, out, *same)
+    assert code == 0, err
+    nemar = json.loads((out / MERGED).read_text("utf-8"))["extensions"]["nemar"]
+    assert nemar["process"] == {"version": "1.2.3", "commit": COMMIT, "build": "release"}
+    assert nemar["image"]["tag"] == "1.2.3-cuda"
+
+
+@pytest.mark.parametrize("order", [("release", "release-cuda"), ("release-cuda", "release")])
+def test_a_cpu_chunk_and_a_cuda_chunk_of_one_release_are_not_merged(chunks, cli, tmp_path, order):
+    """Each is honest alone (both pass the tag check), and they disagree about the image."""
+    first, second = (chunks[kind, key] for kind, key in zip(order, ("a", "b"), strict=True))
+    out = tmp_path / "merged"
+    code, _, err = merge(cli, out, first, second)
+    assert code == 6, err
+    assert "the inputs disagree about the image tag" in err
+    assert not out.exists()
 
 
 def test_a_contradicting_build_file_is_named_and_is_not_called_an_engine_extra(

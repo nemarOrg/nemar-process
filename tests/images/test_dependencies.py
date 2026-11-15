@@ -146,6 +146,22 @@ def test_torch_has_a_cpu_extra_and_an_explicit_cpu_index():
     assert index["explicit"] is True
     sources = uv["sources"]["torch"]
     assert {"index": "pytorch-cpu", "extra": "cpu"} in sources
+    # the floor is pamica 0.4.0's, pinned exactly like the CUDA extra (the owner's decision)
+    assert document["project"]["optional-dependencies"]["cpu"] == ["torch==2.12.1"]
+
+
+def test_the_cpu_and_cuda_extras_name_the_same_torch_requirement():
+    """One torch version in both images and in every uv-based test run: move both extras together."""
+    extras = load_pyproject()["project"]["optional-dependencies"]
+    assert len(extras["cpu"]) == 1
+    assert len(extras["cuda"]) == 1
+    cpu, cuda = Requirement(extras["cpu"][0]), Requirement(extras["cuda"][0])
+    assert canonicalize_name(cpu.name) == canonicalize_name(cuda.name)
+    assert canonicalize_name(cpu.name) == "torch"
+    assert str(cpu) == str(cuda), "the cpu and cuda extras must pin the same torch requirement"
+    # a public version, which each index's wheels match with their own local label (or none)
+    assert [s.operator for s in cpu.specifier] == ["=="]
+    assert "+" not in str(cpu.specifier)
 
 
 def test_torch_has_a_cuda_extra_and_an_explicit_cu129_index_and_the_two_extras_conflict():
@@ -169,14 +185,40 @@ def test_every_locked_torch_comes_from_an_index_the_declaration_names():
     for torch in torches:
         if torch["source"] == cuda:
             assert torch["version"] == "2.12.1+cu129"
+        elif torch["source"] == cpu:
+            # the CPU index: the Linux build and the macOS build of the one pinned version
+            assert torch["version"] in ("2.12.1", "2.12.1+cpu")
         else:
-            # the CPU index, or PyPI for the resolution that selects no flavor: nothing builds an
-            # image that way (test_every_runtime_sync_names_a_flavor)
-            assert torch["source"] in (cpu, {"registry": "https://pypi.org/simple"})
+            # PyPI, for the resolution that selects no flavor: nothing builds an image that way
+            # (test_every_runtime_sync_names_a_flavor)
+            assert torch["source"] == {"registry": "https://pypi.org/simple"}
+    from_cpu = {t["version"] for t in torches if t["source"] == cpu}
+    assert from_cpu == {"2.12.1", "2.12.1+cpu"}
 
 
-def exported(extra: str) -> dict[str, str]:
-    """{package: pinned version} of what ``uv sync --group runtime --extra <extra>`` installs on Linux."""
+LINUX = {
+    "sys_platform": "linux",
+    "platform_system": "Linux",
+    "platform_machine": "x86_64",
+    "os_name": "posix",
+    "implementation_name": "cpython",
+    "python_version": "3.12",
+    "python_full_version": "3.12.16",
+}
+MACOS_ARM64 = {
+    "sys_platform": "darwin",
+    "platform_system": "Darwin",
+    "platform_machine": "arm64",
+    "os_name": "posix",
+    "implementation_name": "cpython",
+    "python_version": "3.12",
+    "python_full_version": "3.12.16",
+}
+
+
+def exported(extra: str, environment: dict[str, str] = LINUX) -> dict[str, str]:
+    """{package: pinned version} of what ``uv sync --group runtime --extra <extra>`` installs in the
+    marker environment given (Linux x86-64 unless another is passed)."""
     done = subprocess.run(
         [
             uv_binary(),
@@ -198,26 +240,24 @@ def exported(extra: str) -> dict[str, str]:
         env=clean_env(),
     )
     assert done.returncode == 0, done.stderr[-2000:]
-    linux = {
-        "sys_platform": "linux",
-        "platform_system": "Linux",
-        "platform_machine": "x86_64",
-        "os_name": "posix",
-        "implementation_name": "cpython",
-        "python_version": "3.12",
-        "python_full_version": "3.12.16",
-    }
     found = {}
     for line in done.stdout.splitlines():
         match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)(?:\s*;\s*(.*))?$", line)
-        if match and (not match.group(3) or Marker(match.group(3)).evaluate(linux)):
+        if match and (not match.group(3) or Marker(match.group(3)).evaluate(environment)):
             found[match.group(1)] = match.group(2)
     return found
 
 
-def test_the_cpu_extra_installs_the_cpu_torch_and_nothing_cuda():
+def test_the_cpu_extra_installs_torch_2_12_1_for_the_cpu_and_nothing_cuda():
     installed = exported("cpu")
-    assert installed["torch"] == "2.15.0+cpu"
+    assert installed["torch"] == "2.12.1+cpu"
+    assert not {n for n in installed if n.startswith(("nvidia-", "cuda-")) or n == "triton"}
+
+
+def test_the_cpu_extra_installs_the_plain_2_12_1_on_macos():
+    # the CPU index's macOS wheel carries no local label, so the pin is the public version
+    installed = exported("cpu", MACOS_ARM64)
+    assert installed["torch"] == "2.12.1"
     assert not {n for n in installed if n.startswith(("nvidia-", "cuda-")) or n == "triton"}
 
 
@@ -457,8 +497,9 @@ def test_every_source_built_package_has_its_build_backend_pinned():
         assert backend in constraints, "{} is built with {} and nothing pins it".format(
             package, backend
         )
-        # the pin is a version the lock already resolved (the CUDA flavor's torch asks for an older
-        # setuptools, so the lock holds two), so no build fetches a version the lock never saw
+        # the pin is a version the lock already resolved (torch 2.12.1, in both flavors, asks for the
+        # older setuptools and the newer one is held by the resolution that selects no flavor, so
+        # the lock holds two), so no build fetches a version the lock never saw
         assert constraints[backend] in locked_versions[backend], (backend, constraints[backend])
 
 

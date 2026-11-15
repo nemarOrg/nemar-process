@@ -17,7 +17,7 @@ The ICLabel weights check belongs to a later phase.
 | MNE-Python | `1.13.2` | the same |
 | pamica | `0.4.0` | the same |
 | NumPy, SciPy | as resolved | `uv.lock` |
-| torch, `cpu` flavor | as resolved, from the CPU index only | extra `cpu`, `[tool.uv.sources]`, `uv.lock` |
+| torch, `cpu` flavor | `2.12.1`, from the CPU index only | extra `cpu`, `[tool.uv.sources]`, `uv.lock` |
 | torch, `cuda` flavor | `2.12.1`, built for CUDA 12.9, from the `cu129` index only | extra `cuda`, `[tool.uv.sources]`, `uv.lock` |
 | `amica15`, pAMICA's native AMICA binary | pAMICA release `v0.4.0` (the release pamica 0.4.0 resolves), `amica15-linux-x64`, checked by SHA-256 | both Dockerfiles, `scripts/check_smoke_pins.py` (see "The native AMICA binary") |
 | `libgomp1` (the OpenMP runtime the binary links) | `14.2.0-19`, the version the live trixie archive served when it was pinned | both Dockerfiles |
@@ -42,6 +42,7 @@ The image therefore has no licence label, because one value would be wrong for m
 The image sets `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `PYTHONHASHSEED=0`, runs as a non-root user, and carries labels for the version (`org.opencontainers.image.version`), the source commit (`org.opencontainers.image.revision`), the build (`io.nemar.build`: `release` or `dev`), the lock's SHA-256 (`io.nemar.lock-sha256`) and the flavor (`io.nemar.flavor`: `cpu` or `cuda`).
 The first three facts are in `/opt/nemar/build.json`, `{"version", "commit", "build"}`, which every record reads (see "The build a record names" below).
 The flavor is in `/opt/nemar/flavor`, one word, and the binary's digest in `/opt/amica/amica15.sha256`; both are written as root, and `nemar-recipe version` prints them as `flavor` and `amica15_sha256` (both `null` outside an image, and a file that is there and holds anything else is refused).
+The record writer reads the flavor file too (`nemar_process.common.build.image_provenance`) and names `<version>-<flavor>` as the tag of a release; a build file without a valid flavor file ends a run before anything is written ([recipes.md](recipes.md)).
 Its bases are digests: `python:3.12-slim` (used by two stages, with the same digest) and the `uv` image, each named with its version in the Dockerfile's comments.
 The image also holds the recipes package `nemar_process` (the signalJourney validator over the schema its release packages, the common layer and `nemar_floor`) and the command `nemar-recipe` in `/opt/venv/bin` (see [recipes.md](recipes.md)).
 The command is a three-line script (the interpreter, an import and the call of `main`) that `python -m nemar_process` stands behind; a launch specification names it as an argument vector, for example `["nemar-recipe", "run", "nemar-floor", "--dataset-dir", "/data/<id>", ...]`.
@@ -165,7 +166,7 @@ The defaults are an empty version, an empty commit and `dev`, so a plain `docker
 The writer, and the reader (`nemar_process.common.build.build_info`), refuse a `release` whose version has a `-devN` suffix, a `dev` whose version has none, a commit that is not 40 lowercase hexadecimal digits, and any `build` other than `release` or `dev`.
 Outside an image there is no file and the run is a `source` run: the `pyproject.toml` version beside the package and no commit.
 
-Every signalJourney record then carries `extensions.nemar.process` (`version`, `commit`, `build`) and `extensions.nemar.image` (`digest`, and `tag`, `<version>-cpu` for a release and null otherwise), read from inside the image with no network call ([recipes.md](recipes.md)).
+Every signalJourney record then carries `extensions.nemar.process` (`version`, `commit`, `build`) and `extensions.nemar.image` (`digest`, and `tag`, `<version>-<flavor>` for a release, `<version>-cpu` or `<version>-cuda` as the image's `/opt/nemar/flavor` says, and null otherwise), read from inside the image with no network call ([recipes.md](recipes.md)).
 
 ### When a run fails after the image was pushed
 
@@ -185,7 +186,7 @@ In the CUDA file `sif` and `launch_image` are `null` (no SIF exists for it, so n
 
 ## The two flavors
 
-The `cpu` flavor carries torch from the CPU index.
+The `cpu` flavor carries torch `2.12.1` from the CPU index, the same version as the CUDA flavor.
 The `cuda` flavor carries torch `2.12.1` built for CUDA 12.9, from the PyTorch `cu129` index, for the lab workstations' GPUs.
 The `cu128` index stops at torch 2.11.0, below pamica 0.4.0's floor (`torch>=2.12.1`), which is why the CUDA flavor is 12.9 and not 12.8.
 A flavor for V100 nodes, with an older torch, is a later HPC GPU run and is not built here.
@@ -194,7 +195,7 @@ The runner fixes an image by the claim's digest before it chooses the device, an
 So the CUDA flavor must run the CPU engine correctly with no GPU visible, and that path is the default, not an exception.
 Its smoke test therefore runs the way such a job runs, `docker run --env NVIDIA_VISIBLE_DEVICES=void <image> python /opt/smoke.py --no-gpu`, on a hosted runner that has no GPU: `torch.cuda.is_available()` must be false, and a 5-iteration pAMICA fit by the PyTorch engine on the CPU in float64 must run.
 The same smoke test prints the GPU architectures this torch was compiled for on a line `CUDA_ARCH_LIST ...` and in the document, and the CUDA flavor's digest file records them.
-`torch.cuda.get_arch_list()` is what answers on a GPU host, but in torch 2.12 it returns an empty list whenever no GPU is visible (it asks `is_available()` first; the locked 2.15.0 asks `_is_compiled()` instead), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
+`torch.cuda.get_arch_list()` is what answers on a GPU host, but in torch 2.12 it returns an empty list whenever no GPU is visible (it asks `is_available()` first), so with none the smoke test reads the same compile-time string through `torch._C._cuda_getArchFlags()`, a private call that needs no device, and the document says which call answered (`arch_source`).
 Whether a workstation's driver runs CUDA 12.9 wheels is not shown by any of this; the operator's preflight on that machine prints the driver and the GPU.
 
 Both flavors print `CPUFIT sha256=<hex>`: the SHA-256 of that CPU fit's 4 by 4 unmixing matrix, written with `format(x, ".17g")` in row-major order, one value per line.
@@ -217,9 +218,10 @@ It is a Linux x86-64 binary, so it runs only in these images and in CI, never on
 It imports every pinned package, lists every installed distribution with its version, runs one real eegprep step on `tests/fixtures/smoke/smoke.set` (`pop_loadset`, `pop_eegfiltnew`, `clean_flatlines`), and validates a hand-written signalJourney record with `nemar_process.sj.validator()`, which must also reject the same record without `pipelineInfo`.
 It runs the 5-iteration CPU float64 pAMICA fit on a 4-channel, 2,000-sample matrix drawn with `numpy.random.default_rng(5489)`.
 In an image (where `/opt/nemar/flavor` exists) it also checks that the binary has the digest recorded beside it, that `ldd` lists nothing as not found, and that `pamica.AMICANative(binary="/opt/amica/amica15", threads=1, max_iter=5, seed=5489)` fits the same matrix and returns a 4 by 4 unmixing matrix.
+In an image it also checks the record's tag: the recipes' own reader (`nemar_process.common.build.image_flavor`) must return the flavor the smoke test read, and the tag a record would name for a release `0.0.0` must be `0.0.0-<flavor>` (no key is added to the document), so each flavor proves the tag in its real image on every pull request.
 With `--no-gpu` it fails if torch sees a GPU.
 It then runs `nemar-recipe version` and prints what it said; `scripts/check_smoke_pins.py` requires it to name the pinned eegprep and the registered recipes, and, for an image, requires that it ran as the script on the path and not as the module.
-`scripts/check_smoke_pins.py` compares the document with `pyproject.toml` and `uv.lock`: every pin and every locked version must match, nothing that leads to MATLAB or Octave may be installed, torch must be the flavor's build (a CPU build for `cpu`; the `+cu129` build for `cuda`, which must also list its GPU architectures), Python must be the 3.12 series, and, for an image, the thread and hash environment and the `/opt/venv` prefix must be as the Dockerfile sets them, the flavor must be the one the workflow expects (`--flavor`), and the native binary's digest, `ldd` result and fit must be as above.
+`scripts/check_smoke_pins.py` compares the document with `pyproject.toml` and `uv.lock`: every pin and every locked version must match, nothing that leads to MATLAB or Octave may be installed, torch must be the flavor's build (a version the lock takes from the CPU index for `cpu`, and for an image the `+cpu` build; the `+cu129` build for `cuda`, which must also list its GPU architectures), Python must be the 3.12 series, and, for an image, the thread and hash environment and the `/opt/venv` prefix must be as the Dockerfile sets them, the flavor must be the one the workflow expects (`--flavor`), and the native binary's digest, `ldd` result and fit must be as above.
 With `--no-gpu` it also requires that torch saw no GPU and that the CPU fit is there.
 The fixture is synthetic and a smoke input only (see its README); the scientific fixture is `tests/fixtures/eeg/`, which the recipes' tests and the launch end to end use.
 
@@ -239,13 +241,12 @@ The first images are published from `main` (a manual dispatch, or a version tag 
 
 - **The CUDA flavor and the native binary have run only where CI runs them.** No Docker is available where this was written, so the first build of both flavors, the `ldd` lines, the architecture list, the CUDA flavor's CPU fit with no GPU visible and both `CPUFIT` readings are those of the pull request's `test` job; this page records none of them.
 - **A workstation's driver and GPU are not read here.** Whether a workstation's NVIDIA driver runs CUDA 12.9 wheels, and what the GPU path then does, is for the operator's preflight on that machine; the CUDA flavor is proven here on the CPU only.
-- **A record written inside the CUDA image names the `<version>-cpu` tag.** `extensions.nemar.image.tag` comes from `nemar_process.common.build`, which does not yet read the flavor; the digest is the identity, and the tag is only a name.
 - **The hosted runner's disk.** The CUDA build frees disk space first and keeps no cache; if a run still runs out of disk, a larger runner is the owner's to provide.
 - **The git tag the version step needs does not exist yet.** At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0, so the `publish` job refuses every version until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
 - **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.
-- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-cpu` tag and the SIF tag rely on two things that nothing has confirmed: that GHCR answers a manifest `HEAD` for an absent tag, including one in a package that does not exist yet, with exactly 404, and that its token endpoint accepts the actor and the workflow's token as basic authentication for the `pull` scope. Any other answer stops the run before anything is pushed, so the failure mode is a first release that stops at the check, not one that overwrites; if that happens the check needs a change, and it is not to be bypassed.
+- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-<flavor>` tags (`<version>-cpu` and `<version>-cuda`, one per leg) and the SIF tag rely on two things that nothing has confirmed: that GHCR answers a manifest `HEAD` for an absent tag, including one in a package that does not exist yet, with exactly 404, and that its token endpoint accepts the actor and the workflow's token as basic authentication for the `pull` scope. Any other answer stops the run before anything is pushed, so the failure mode is a first release that stops at the check, not one that overwrites; if that happens the check needs a change, and it is not to be bypassed.
 - **`apptainer push` and the SIF package.** The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure; "When a run fails after the image was pushed" says what to do then.
 
 ### The owner's controls (not in place)
@@ -268,6 +269,7 @@ Also the owner's, before the first release:
 Edit `pyproject.toml`, run `uv lock`, and run the tests; never edit `uv.lock` by hand.
 The one exception is the project's own version, which only the release bot changes, and in both files at once (`docs/release.md`); a pull request never touches it.
 `uv lock` writes the project's version in the PEP 440 spelling (`0.1.1.dev3`) where the bot writes `0.1.1-dev3`; put the bot's spelling back before committing, or `bump-validator` sees a changed version line.
+The `cpu` and `cuda` extras pin one torch version, and a test requires them equal, so move both together.
 The tests that guard the declaration are in `tests/images/`:
 
 ```bash
