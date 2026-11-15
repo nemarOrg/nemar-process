@@ -67,9 +67,22 @@ def crafted(tmp_path):
 
 
 def eegprep_reads(path, value=42.0):
-    """The premise of a test: eegprep alone loads the file the crafted set leads it to."""
-    loaded = np.asarray(pop_loadset(str(path))["data"])
-    assert np.unique(loaded).tolist() == [value]
+    """The premise of a test: eegprep alone is led by the crafted set to the file outside the dataset.
+
+    eegprep 0.5.0 loaded that file whatever the name. The commit of `develop` the images pin refuses a
+    data file named outside the set's directory, naming the reference, and still loads a name it can
+    resolve beside the set. Either way the premise holds (it follows the crafted name); the check
+    refuses the set before eegprep is called, and stays as the second line (a link out of the dataset
+    is still followed: test_headers.py).
+    """
+    try:
+        loaded = np.asarray(pop_loadset(str(path))["data"])
+    except ValueError as error:
+        refused = str(error)
+    else:
+        refused = ""
+        assert np.unique(loaded).tolist() == [value]
+    assert not refused or "reference" in refused
 
 
 def refused_and_never_loaded(root, path, monkeypatch, expected=UNREADABLE):
