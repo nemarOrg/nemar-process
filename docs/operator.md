@@ -201,6 +201,31 @@ The accounting export carries a job's id, partition, state, elapsed time, alloca
 The NEMAR route it posts to is built in the gateway epic and does not exist yet.
 If the site does not allow a `FORK` application to run these commands on a login node, the observer cannot run as designed; that is question 6 of the design page, and an escalation, not something to work around.
 
+## Validating `nemar-ica` on a GPU by hand
+
+No GPU host has run the recipe in this repository's tests, so the first GPU run is a manual step.
+It needs a machine whose container runtime can give a container an NVIDIA GPU, the CUDA flavor of the image by digest ([images.md](images.md)), and a public dataset directory (never a live dataset, never one that is not public).
+Nothing below names a host, an account or a path: write them as placeholders wherever the readings are reported.
+
+1. Run the recipe on the CPU first, as the baseline, with the CUDA flavor so that the two runs differ in nothing but the device:
+
+   ```bash
+   <container runtime> run --rm --gpus all --volume <dataset>:/data/<id>:ro --volume <out>:/out \
+     ghcr.io/nemarorg/nemar-python@<image digest> \
+     nemar-recipe run nemar-ica --dataset-dir /data/<id> --out /out/cpu/product \
+     --dataset-id <id> --dataset-version <tag> --ica-device cpu
+   ```
+
+2. Run it again on the GPU (`--ica-device cuda`, into `/out/gpu/product`).
+   With `--ica-device auto` the recipe takes the GPU when torch sees one and nothing in `NEMAR_DEVICE` says otherwise; `--ica-device cuda` refuses with exit 8 (`engine_unavailable: no_gpu`) when the container sees none, and that refusal is the first thing to check if the run does not start.
+3. Read each recording's `_ica.json` (the same block is `extensions.nemar.ica` of its record): the GPU run must say `device` `cuda`, the GPU's name, `torch_cuda` `12.9`, `bit_reproducible` null and `fallback` false; the CPU run `device` `cpu`, `bit_reproducible` true and `fallback` false.
+   Both records must carry the same engine stamp (`extensions.nemar.engine`): the device is never in it.
+4. Compare the two decompositions through `_unmixing.tsv`: the Hungarian-matched absolute correlations of the rows (`scipy.optimize.linear_sum_assignment` on the absolute correlation matrix) and the Amari distance of `unmixing_gpu @ pinv(unmixing_cpu)`, as `tests/recipe_support.py` computes them (`e1_statistics`).
+   Report the minimum and the median; a GPU float64 fit and a CPU one are not bit-identical, and the record says so by stating no bit reproducibility for the GPU.
+5. Repeat the GPU run once more and compare the two GPU weight files byte for byte: equal files are a reading to report (pAMICA's statement for CUDA float64 is unmeasured), and unequal files are one too.
+6. Run once with a runner's decision: `--env NEMAR_DEVICE=cpu --env NEMAR_DEVICE_REASON=gpu_busy` with the default device must run on the CPU and say `gpu_busy` and `fallback` true; `NEMAR_DEVICE=cuda --env NEMAR_DEVICE_REASON=gpu_idle` must run on the GPU and say `gpu_idle`.
+7. Report: the image digest, the GPU model and driver version, torch's version, the wall time and the peak GPU memory of each run, the readings of steps 3 to 5, and anything unexpected, with every host, account and path replaced by a placeholder.
+
 ## Housekeeping
 
 Tapis does not remove a job's execution, input or output directory, so they accumulate under `EXEC_ROOT_DIR`, and the observer adds one every 15 minutes.

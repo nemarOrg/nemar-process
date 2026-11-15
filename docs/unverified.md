@@ -200,6 +200,16 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   The recipes recognize torch's out-of-memory error by the name and module of its class, so torch is never imported for it.
   The test uses a class made to carry that name and, where torch is installed, torch's own class built by hand; a real GPU running out of memory was not produced, and a torch release that renames the class would make it a plain `step_failed`.
 
+## The decomposition recipe (`nemar-ica`)
+
+[recipes.md](recipes.md) says what the recipe does.
+No GPU host has run it: the GPU path (`--ica-device cuda`, or `auto` with a GPU the runner granted) is exercised only by its decision rule on the CPU, and what a CUDA record says (`bit_reproducible` null, the GPU's name) is as eegprep and pAMICA state it, unmeasured until the pAMICA workstream's CUDA determinism measurement.
+The native AMICA binary runs only in the image, so its cases (the record's shape, two short runs that are not byte identical, the informational E1R line) run in the image workflow and not on a developer's machine; this document does not say that job passed.
+The per-iteration log-likelihood the binary writes is read as eegprep loads it (`LL`), and its length is taken as the number of iterations; no stop reason is read from the binary, so `stop_reason` and `did_converge` of its records are null.
+Wall time and peak memory of a 2000-iteration fit on a real recording are not measured here (a 50-iteration fit of the 19-channel, 282-second fixture takes about 11 seconds on one thread of a laptop).
+ICLabel cannot run on a recording whose channels have no locations, which includes every store of the Zarr serving copy; such a recording fails at `iclabel` (see [upstream.md](upstream.md)).
+No minimum number of samples is enforced before a fit.
+
 ## The Tapis definitions and the observer
 
 [operator.md](operator.md) says what the definitions are and how they are registered.

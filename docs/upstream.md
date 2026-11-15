@@ -63,6 +63,19 @@ Where a recipe works around a gap, the code names the issue beside the workaroun
 `pop_saveset` writes an empty `etc` as an empty matrix and `pop_loadset` reads it back as an array, so the failure follows a plain save and load; setting `EEG["etc"] = {}` after loading avoids it.
 The workaround stays until that is fixed upstream: `scripts/make_smoke_fixture.py` gives the fixture's `etc` a key, with a comment pointing here, and a recipe that loads sets it did not write should expect the same.
 
+### The commit the images pin (`nemar-ica`, 2026-11-15)
+
+No eegprep release holds pAMICA's `pop_runica(icatype='pamica')` (sccn/eegprep#617), the ASR state (#621) or eegprep-lean (#616): PyPI's newest is 0.5.0 (2026-11-04), and `develop` still says `0.5.0`.
+The images therefore take eegprep from the merge commit of #617 on `develop`, `edf694c8344b9c4c68672eac3acf9a819f1462a8`, and every record, the engine stamp and `nemar-recipe version` name it (`0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8`).
+A release that contains it moves the pin to that release, which drops the suffix and gives a new engine string.
+Three behaviors of 0.5.0 that this repository's tests pinned have changed at that commit, and the tests were changed to say so:
+
+- `pop_loadbv` and `pop_loadset` refuse a data or marker file named outside the file's directory (an absolute path or a `..`), with a `ValueError` that names the reference; 0.5.0 followed it. A symbolic link that leaves the dataset is still followed, so the recipes' own check stays.
+- `pop_loadset` returns an empty `etc` as a dictionary (sccn/eegprep#533 is fixed for that case); the loader's repair of a non-dict `etc` stays, and its load step now records `etcNormalized` false for such a set where it recorded true.
+- A set with no sampling rate raises a `ValueError` at load; it used to load and fail the first check after it with a `TypeError`.
+
+One gap found by `nemar-ica`, to be filed upstream (it is not worked around): `pop_iclabel` raises a `ValueError` from `topoplot` ("no channel has a finite theta and radius") on a dataset whose channels have no locations, so ICLabel cannot classify a recording without electrode locations (the Zarr serving copy has none).
+
 ### Gaps found by the `nemar-floor` recipe (phase 3, 2026-11-04 and 2026-11-05)
 
 Every reproduction was run against eegprep 0.5.0; the first and the eighth were also read on the `develop` branch of the same day.
