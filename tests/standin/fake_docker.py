@@ -200,8 +200,11 @@ def _bad_run_option(name: str, option: str, value: str, ncpu: int) -> str | None
             return "Minimum memory limit allowed is 6MB"
     if option == "--pids-limit" and re.fullmatch(r"-?[0-9]+", value) is None:
         return "invalid pids limit"
-    if option == "--gpus" and re.fullmatch(r"[1-9][0-9]*|all", value) is None:
-        return "invalid gpus"
+    if (
+        option == "--gpus"
+        and re.fullmatch(r"[1-9][0-9]*|all|device=(GPU-[0-9a-fA-F-]{36}|[0-9]+)", value) is None
+    ):
+        return "invalid gpus"  # a count, all, or one device: an index or a `GPU-` identifier
     return None
 
 

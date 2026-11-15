@@ -277,11 +277,16 @@ def test_a_gpu_job_gets_gpus_and_no_cuda_visible_devices(rig, engine):
     argv = engine.run_argv()
     assert value_after(argv, "--gpus") == "2"
     assert not any("CUDA_VISIBLE_DEVICES" in part for part in argv)
+    # no runner decided the device: the count is the specification's, nothing is hidden, nothing added
+    assert "NVIDIA_VISIBLE_DEVICES=void" not in argv
+    assert not any(part.startswith("NEMAR_DEVICE") for part in argv)
+    assert argv[argv.index("NEMAR_OUT=/work/outputs") + 1] == REFERENCE
 
 
 def test_a_job_with_no_gpus_has_no_gpus_flag(rig, engine):
     assert launch(rig, engine).exit == 0
     assert "--gpus" not in engine.run_argv()
+    assert engine.run_argv().count("NVIDIA_VISIBLE_DEVICES=void") == 1
 
 
 def test_an_env_value_is_passed_as_it_is_not_as_a_csv_record(rig, engine):

@@ -54,7 +54,7 @@ from .codes import (
     exit_number,
 )
 from .provenance import Documents, Log
-from .settings import Settings, read_settings
+from .settings import Device, Settings, check_device, read_settings
 
 _SLURM_ID = re.compile(r"^[0-9A-Za-z_+.-]{1,64}$")
 
@@ -77,6 +77,8 @@ class Run:
         self.timings: dict[str, float] = {}
         self.runtime_version = "unknown"
         self.slurm_job_id: str | None = None
+        # What a runner decided for a GPU job, set only when the container is about to start
+        self.device: Device | None = None
         self.files: list[dict[str, Any]] = []
         # True when no output may be uploaded: the full upload is skipped, the launcher files go
         # alone (an unreadable output, an over-limit result, a refused output directory).
@@ -110,6 +112,7 @@ class Run:
                 timings=self.timings,
                 slurm_job_id=self.slurm_job_id,
                 entry_exit_code=self.entry_exit_code,
+                device=None if self.device is None else self.device.record(),
             ),
         )
         self.docs.put(MANIFEST_FILE, provenance.build_manifest(self.job_id, self.files))
@@ -146,6 +149,8 @@ def _do_work(
     """
     log = state.log
     assert state.layout is not None
+    # a GPU the specification did not allow is refused before anything is created, fetched or run
+    check_device(settings.device, job.gpus)
     base = settings.scratch_base
     if _inside(base, state.out_dir):
         raise Failure(
@@ -221,6 +226,7 @@ def _do_work(
                 binds,
                 run.cuda_visible_devices(job, env),
                 limits=settings.limits,
+                device=settings.device,
             )
         else:
             runtime.check_mount_sources(binds)
@@ -239,7 +245,11 @@ def _do_work(
                 settings.limits,
                 settings.runner_label,
                 cpu_shares=engine_found.cpu_shares,
+                device=settings.device,
             )
+        if settings.device is not None:
+            state.device = settings.device  # recorded only for a container that is about to start
+            log.info("device: {} ({})".format(settings.device.device, settings.device.reason))
         oom_check = (
             None
             if container is None
