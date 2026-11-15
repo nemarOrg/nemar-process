@@ -626,10 +626,16 @@ def test_the_image_tag_check_fails_when_the_recipes_reader_does_not_say_the_flav
     absent = tmp_path / "absent"
     broken = tmp_path / "broken"
     broken.write_text("gpu\n", encoding="ascii")
-    for smoke_file, reader_file in ((cpu, cuda), (cuda, cpu), (cpu, absent), (cuda, broken)):
+    cases = (
+        (cpu, cuda, "the recipes read flavor 'cuda' and this test read 'cpu'"),
+        (cuda, cpu, "the recipes read flavor 'cpu' and this test read 'cuda'"),
+        (cpu, absent, "the recipes read flavor None and this test read 'cpu'"),
+        (cuda, broken, "the recipes' flavor reader refused the image"),
+    )
+    for smoke_file, reader_file, message in cases:
         done = check_tag(runtime_python, smoke_file, reader_file)
         assert done.returncode != 0, (smoke_file.name, reader_file.name)
-        assert "smoke test failed" in done.stderr
+        assert "smoke test failed: " + message in done.stderr
         assert "Traceback" not in done.stderr  # a refusal is a stated failure, not a crash
         assert str(tmp_path) not in done.stderr
 
@@ -665,6 +671,72 @@ def test_the_image_tag_check_fails_when_the_tag_is_not_the_flavors(runtime_pytho
     assert done.returncode != 0
     assert "0.0.0-cuda" in done.stderr
     assert "0.0.0-cpu" in done.stderr
+
+
+# `collect` is what `main` runs: the tag check is wired into it, and only a run of `collect` with a
+# flavor file proves that. The native binary is a Linux x86-64 program that cannot run here, so the probe
+# replaces `native_binary` alone (the image's legs of CI run it for real, with the CUDA leg's `collect`
+# too: a CUDA build of torch is not in this environment); everything else in `collect` runs.
+COLLECT = """
+import contextlib
+from pathlib import Path
+from nemar_process.common import build
+smoke.FLAVOR_FILE = sys.argv[2]
+build.FLAVOR_FILE = Path(sys.argv[3])
+smoke.native_binary = lambda: {"ran": False}
+with contextlib.redirect_stdout(sys.stderr):
+    document = smoke.collect(sys.argv[4])
+print(json.dumps({"keys": sorted(document), "flavor": document["flavor"]}))
+"""
+DOCUMENT_KEYS = [
+    "amica15",
+    "cpu_fit",
+    "distributions",
+    "eegprep",
+    "environment",
+    "flavor",
+    "imports",
+    "no_gpu",
+    "prefix",
+    "python",
+    "recipe_command",
+    "signaljourney",
+    "torch",
+]
+
+
+def collect_with(runtime_python, smoke_fixture, smoke_file, reader_file):
+    return probe(runtime_python, COLLECT, str(smoke_file), str(reader_file), str(smoke_fixture))
+
+
+def test_collect_runs_the_tag_check_and_fails_on_a_pair_of_flavor_readings_that_differ(
+    runtime_python, smoke_fixture, tmp_path
+):
+    cpu, cuda, absent = tmp_path / "cpu", tmp_path / "cuda", tmp_path / "absent"
+    cpu.write_text("cpu\n", encoding="ascii")
+    cuda.write_text("cuda\n", encoding="ascii")
+    cases = (
+        (cpu, cuda, "the recipes read flavor 'cuda' and this test read 'cpu'"),
+        (cuda, cpu, "the recipes read flavor 'cpu' and this test read 'cuda'"),
+        (cpu, absent, "the recipes read flavor None and this test read 'cpu'"),
+    )
+    for smoke_file, reader_file, message in cases:
+        done = collect_with(runtime_python, smoke_fixture, smoke_file, reader_file)
+        assert done.returncode != 0, (smoke_file.name, reader_file.name)
+        assert "smoke test failed: " + message in done.stderr
+        assert "Traceback" not in done.stderr
+        assert str(tmp_path) not in done.stderr
+
+
+def test_collect_with_a_matching_pair_succeeds_and_adds_no_key_to_the_document(
+    runtime_python, smoke_fixture, tmp_path
+):
+    flavor_file = tmp_path / "flavor"
+    flavor_file.write_text("cpu\n", encoding="ascii")
+    done = collect_with(runtime_python, smoke_fixture, flavor_file, flavor_file)
+    assert done.returncode == 0, done.stderr[-3000:]
+    assert json.loads(done.stdout) == {"keys": DOCUMENT_KEYS, "flavor": "cpu"}
+    assert "image tag check: a release of the cpu image is tagged 0.0.0-cpu" in done.stderr
 
 
 def test_no_flavor_file_means_no_tag_check(runtime_python, tmp_path):

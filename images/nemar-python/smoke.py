@@ -21,7 +21,10 @@ standard error), and exits non-zero, with a reason on standard error, when somet
   has the SHA-256 the image recorded beside it, ``ldd`` lists no library as ``not found``, and
   ``pamica.AMICANative`` fits a 4-channel, 2,000-sample matrix with it and returns a 4 by 4 unmixing
   matrix. A CUDA image also reports ``torch.cuda.get_arch_list()`` and must hold the CUDA 12.9 build
-  of torch. ``--no-gpu`` is how a job the runner kept off the GPU runs, and then no GPU may be visible.
+  of torch. ``--no-gpu`` is how a job the runner kept off the GPU runs, and then no GPU may be visible;
+* in an image: the recipes' own flavor reader (``nemar_process.common.build.image_flavor``) returns the
+  flavor read here, and the tag a record names for a release of version 0.0.0 is ``0.0.0-<flavor>``
+  (``check_image_tag``; it adds no key to the document).
 
 It runs the same way in the lock's environment (where there is no flavor file, so no binary), in the
 container image and in the SIF under Apptainer (``--containall --cleanenv --no-home``).
@@ -253,6 +256,7 @@ def check_image_tag(flavor: str | None) -> str | None:
     release = {"version": "0.0.0", "commit": "0" * 40, "build": "release"}
     try:
         read = build.image_flavor()
+        # also caught by the tag comparison below, kept for a message that names both readings
         if read != flavor:
             fail("the recipes read flavor {!r} and this test read {!r}".format(read, flavor))
         tag = build.image_tag(release, read)
