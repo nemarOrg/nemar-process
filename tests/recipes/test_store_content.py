@@ -499,8 +499,8 @@ def test_the_input_digest_of_no_rows_is_the_digest_of_no_text():
         [row("sub-01/eeg/a_eeg.edf", "eeg", "sha256:" + "a" * 64)],
         [row("sub-01/eeg/a_eeg.edf", "eeg", "g" * 64)],
         [row("sub-01/eeg/a_eeg.edf", "eeg", "")],
-        [row("sub-01/eeg/a_eeg.edf", "eeg", 1234)],
-        [row(5, "eeg", "a" * 64)],
+        [{"path": "sub-01/eeg/a_eeg.edf", "group": "eeg", "content_sha256": 1234}],
+        [{"path": 5, "group": "eeg", "content_sha256": "a" * 64}],
     ],
     ids=[
         "a path repeated with another digest",
