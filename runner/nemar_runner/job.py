@@ -398,6 +398,13 @@ class JobRunner:
             uri = image.get("uri", job.image_uri)
             if not isinstance(uri, str) or verify.bare(uri) != verify.bare(job.image_uri):
                 return "image_mismatch"
+        resources = document.get("resources")
+        if isinstance(resources, dict):
+            # the Worker fills both from one number; a launch value that allows another count than the
+            # claim says would skip the GPU check or turn a job that should run on the CPU away
+            gpus = resources.get("gpus")
+            if type(gpus) is not int or gpus != job.gpus:
+                return "gpus_mismatch"
         return None
 
     def _stop_reason(self) -> str | None:
@@ -408,6 +415,16 @@ class JobRunner:
         if self.stop.is_set():
             return "runner_stopping"
         return None
+
+    def _stopped_outcome(self) -> Outcome | None:
+        """The outcome of a job that is being stopped (a lost lease is not completed, the rest are refused as
+        `terminated`), or None to go on."""
+        reason = self._stop_reason()
+        if reason is None:
+            return None
+        if reason == "lease_lost":
+            return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
+        return refusal("terminated")
 
     def _end_time(self) -> int:
         return int(self.job.claimed_at) + self.job.minutes * 60
@@ -477,6 +494,10 @@ class JobRunner:
             abandoned = self._await_room(term_at)
             if abandoned is not None:
                 return abandoned
+        # a job that is already being stopped takes no sample (a window is up to its whole time)
+        stopped = self._stopped_outcome()
+        if stopped is not None:
+            return stopped
         device = self._choose_device(term_at)
         enforce = sif is not None and self.limits.proven(sif, dirs.home)
         env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label, device)
@@ -488,11 +509,9 @@ class JobRunner:
             BOOT,
             config.launcher_dir,
         ]
-        reason = self._stop_reason()
-        if reason is not None:  # stopped while the image was being made: do not start
-            if reason == "lease_lost":
-                return Outcome(0, None, None, usage.ZERO, False, lease_lost=True)
-            return refusal("terminated")
+        stopped = self._stopped_outcome()
+        if stopped is not None:  # stopped while the image was being made: do not start
+            return stopped
         death = pdeathsig_hook()
         if death is None:
             self.log.warn("pdeathsig_unavailable", job=job.id)
@@ -571,7 +590,11 @@ class JobRunner:
         except Exception as error:  # noqa: BLE001 - a bug in the check is a doubt, and a doubt is the CPU
             self.log.error("device_check_error", job=job.id, error=type(error).__name__)
             decision = gpu.cpu(gpu.FAILED, "internal_error")
-        fields: dict[str, Any] = {"device": decision.device, "reason": decision.reason}
+        fields: dict[str, Any] = {
+            "gpus": job.gpus,  # what the claim allowed: the ceiling the decision stays under
+            "device": decision.device,
+            "reason": decision.reason,
+        }
         if decision.cuda:
             fields.update(gpu=decision.gpu_index, cap_mb=decision.memory_mb)
         if decision.why is not None:

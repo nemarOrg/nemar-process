@@ -33,6 +33,7 @@ from runner_support import (
     lease_id,
     make_launcher,
     retune,
+    spec_text,
     wait_for,
     write_private,
 )
@@ -68,6 +69,9 @@ mode = script.get("mode", {{}}).get(kind, "ok")
 touch = script.get("touch")
 if touch and kind == "gpu" and number == touch["call"]:
     os.mkdir(touch["path"]) if touch.get("directory") else open(touch["path"], "w").close()
+if mode == "slow":
+    time.sleep(0.5)
+    mode = "ok"
 if mode == "sleep":
     with open(os.path.join(HERE, "pid"), "w") as handle:
         handle.write(str(os.getpid()))
@@ -437,6 +441,17 @@ def test_a_reservation_in_any_listed_directory_counts_and_a_missing_directory_do
     assert decide(pool).reason == "gpu_reserved"
 
 
+def test_a_reservation_of_all_gpus_made_during_the_window_is_seen(tmp_path, smi):
+    """`gpu-all` is looked for before the program is asked (above), and in every sample after it: one that
+    appears after the third reading ends the window at the fourth."""
+    reservations = tmp_path / "reservations"
+    reservations.mkdir()
+    smi.set(idle(), touch={"call": 3, "path": str(reservations / "gpu-all")})
+    decision = decide(build_pool(tmp_path, smi, reservations=[reservations]))
+    assert (decision.device, decision.reason) == ("cpu", "gpu_reserved")
+    assert len(smi.calls("gpu")) == 4
+
+
 def test_a_reservation_made_during_the_window_is_seen(tmp_path, smi):
     reservations = tmp_path / "reservations"
     reservations.mkdir()
@@ -579,13 +594,61 @@ def test_a_program_others_can_write_is_not_trusted(tmp_path):
     assert named.calls() == []
 
 
-def test_a_window_that_cannot_finish_before_the_deadline_is_the_cpu(tmp_path, smi):
-    pool = build_pool(tmp_path, smi, settings(sample_seconds=0.3))
+DEFAULT_WINDOW = Gpu(
+    enabled=True
+)  # six samples, five seconds apart, and calls of up to ten seconds
+
+
+@pytest.mark.parametrize(
+    ("rules", "seconds"),
+    [
+        (settings(sample_seconds=60.0), 5.0),  # a valid setting: five minutes of gaps
+        (settings(sample_seconds=3.0), 1.0),  # the gap was slept, and a decision came 3 s after 1 s
+        (DEFAULT_WINDOW, 30.0),  # 25 s of gaps and 20 s of calls at their slowest do not fit in 30
+    ],
+)
+def test_a_window_that_cannot_fit_before_the_deadline_is_the_cpu_at_once_and_asks_nothing(
+    tmp_path, smi, rules, seconds
+):
+    """The decision never comes after its deadline (the time the lease leaves): a launcher that started
+    after the lease ran out would lose the lease and spend a claim. A window that cannot fit is the CPU
+    now, not after a wait, and it asks `nvidia-smi` nothing."""
+    pool = build_pool(tmp_path, smi, rules, gpu_call_seconds=10.0)
     began = time.monotonic()
-    decision = decide(pool, seconds=0.5)  # the third reading would start after it
-    assert (decision.reason, decision.why) == ("gpu_check_failed", "deadline")
-    assert time.monotonic() - began < 3
+    decision = decide(pool, seconds=seconds)  # a real wait: the gaps would be slept
+    finished = time.monotonic()
+    assert (decision.device, decision.reason, decision.why) == (
+        "cpu",
+        "gpu_check_failed",
+        "deadline",
+    )
+    assert finished < began + seconds
+    assert finished - began < 1.0  # at once, not after a gap
+    assert smi.calls() == []
     assert pool.holder(0) is None
+
+
+def test_a_gap_is_not_slept_when_the_next_sample_could_end_after_the_deadline(tmp_path, smi):
+    """The window fits when it starts (2.5 s of gaps and 4 s of calls at their slowest in 7 s), but each
+    call here takes half a second, so after a sample or two the next one, at its slowest, would end past
+    it: the window stops there, before the deadline, and not after the last sample."""
+    smi.set(idle(), mode={"gpu": "slow", "apps": "slow"})
+    pool = build_pool(tmp_path, smi, settings(sample_seconds=0.5), gpu_call_seconds=2.0)
+    began = time.monotonic()
+    decision = decide(pool, seconds=7.0)
+    finished = time.monotonic()
+    assert (decision.reason, decision.why) == ("gpu_check_failed", "deadline")
+    assert finished < began + 7.0
+    assert 1 <= len(smi.calls("gpu")) < 6  # it started, and stopped between samples
+    assert pool.holder(0) is None
+
+
+def test_a_window_that_fits_with_its_calls_at_their_slowest_is_taken_whole(tmp_path, smi):
+    pool = build_pool(tmp_path, smi, settings(sample_seconds=0.02), gpu_call_seconds=5.0)
+    # the calls here are quick, but the guard allows for two of 5 s after every sample: with the time
+    # that leaves (even on a slow machine) all six samples are taken
+    assert decide(pool, seconds=30.0).cuda
+    assert len(smi.calls("gpu")) == 6
 
 
 def test_a_deadline_already_past_asks_nothing(tmp_path, smi):
@@ -602,7 +665,7 @@ def test_a_stop_during_the_window_is_the_cpu_at_once(tmp_path, smi):
         asked.append(seconds)
         return True
 
-    decision = decide(pool, wait=stopping)
+    decision = decide(pool, wait=stopping, seconds=3600.0)
     assert (decision.reason, decision.why) == ("gpu_check_failed", "interrupted")
     assert asked == [30.0]
     assert len(smi.calls("gpu")) == 1
@@ -682,6 +745,19 @@ def test_two_jobs_of_one_runner_never_share_a_gpu_and_a_release_frees_it(tmp_pat
     pool.release("lease-a")  # twice: safe
     assert pool.holder(0) is None
     assert decide(pool, key="lease-c").cuda
+
+
+def test_when_every_gpu_seen_is_held_the_answer_is_given_at_once_without_a_window(tmp_path, smi):
+    pool = build_pool(tmp_path, smi, settings(sample_seconds=0.5))
+    assert decide(pool, key="lease-a").cuda  # the first window sees the one GPU, and takes it
+    taken = len(smi.calls())
+    began = time.monotonic()
+    second = decide(pool, key="lease-b")
+    assert (second.device, second.reason) == ("cpu", "gpu_in_use")
+    assert time.monotonic() - began < 0.4  # not the 2.5 s of gaps a window would take
+    assert len(smi.calls()) == taken  # and nvidia-smi was not asked
+    pool.release("lease-a")
+    assert decide(pool, key="lease-c").cuda  # once it is free the check is made again
 
 
 def test_a_second_job_takes_the_second_gpu_when_the_first_is_held(tmp_path, smi):
@@ -795,6 +871,7 @@ def test_a_job_that_asked_for_a_gpu_is_given_the_idle_one_and_told_the_cap(jobs)
     [chosen] = jobs.events("device_chosen")
     assert (chosen["job"], chosen["device"], chosen["reason"]) == (job_id(1), "cuda", "gpu_idle")
     assert (chosen["gpu"], chosen["cap_mb"]) == (0, TOTAL // 2)
+    assert chosen["gpus"] == 1  # what the claim allowed, the ceiling the decision stays under
     assert UUID0 not in json.dumps(
         jobs.rig.log_lines()
     )  # the log names the index, never the GPU's id
@@ -845,6 +922,9 @@ def test_a_job_that_asked_for_several_gpus_is_given_one_at_most(jobs):
     seen = device_keys(jobs.launched(1))
     assert seen["NEMAR_GPU_ID"] == UUID0  # one GPU, never the second: the ceiling is not a quota
     assert seen["NEMAR_GPU_INDEX"] == "0"
+    assert (
+        jobs.events("device_chosen")[0]["gpus"] == 2
+    )  # the log keeps the ceiling beside the choice
 
 
 def test_two_jobs_of_one_runner_get_the_gpu_and_the_cpu_and_a_later_job_gets_the_gpu_again(
@@ -921,7 +1001,7 @@ def test_a_runner_told_to_stop_during_the_check_refuses_the_job_at_once(tmp_path
     made = JobRig(tmp_path, smi, gpu_settings=settings(sample_seconds=30.0))
     try:
         made.claim(claim_job(1, gpus=1))
-        agent = made.agent(lease_abandon_seconds=120.0)
+        agent = made.agent(lease_abandon_seconds=3600.0)
         timer = threading.Timer(0.5, agent.stop.set)
         timer.start()
         began = time.monotonic()
@@ -956,6 +1036,96 @@ def test_a_fault_in_the_check_is_the_cpu_and_never_a_failed_job(tmp_path, smi):
         assert made.rig.routes.bodies("complete")[0]["launcher_failure_code"] is None
     finally:
         made.close()
+
+
+MEMINFO_SHORT = "MemTotal: 67108864 kB\nMemAvailable: 2560000 kB\n"  # 2500 MB, a claim needs 2048
+
+
+def test_a_job_whose_wait_for_room_ended_in_a_stop_takes_no_sample_and_chooses_nothing(
+    tmp_path, smi
+):
+    """The start check waits while the host is busy and returns on a stop; the job is then refused. The GPU
+    check, which takes a window of samples, is not made for a job that is already being stopped."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text("MemTotal: 67108864 kB\nMemAvailable: 16777216 kB\n")  # room, now
+    (proc / "loadavg").write_text("0.00 0.00 0.00 1/1 1\n")
+    room = Availability(
+        enabled=True, reserve_memory_mb=1024, claim_memory_mb=2048, reservation_dirs=()
+    )
+    made = JobRig(tmp_path, smi, availability=room)
+    try:
+
+        def busy_at_claim(_body):
+            """The Worker's answer: the room is gone by the time the job starts."""
+            (proc / "meminfo").write_text(MEMINFO_SHORT)
+            return {"jobs": [claim_job(1, gpus=1)], "min_runner_version": "0.1.0"}
+
+        made.rig.routes.claims.append(busy_at_claim)
+        agent = made.agent(lease_abandon_seconds=3600.0, proc_root=str(proc))
+        timer = threading.Timer(0.5, agent.stop.set)
+        timer.start()
+        began = time.monotonic()
+        try:
+            agent.run_once()
+        finally:
+            timer.cancel()
+            agent.release()
+        assert time.monotonic() - began < 10
+        assert made.events("start_waiting")  # it did wait for room, and the stop ended the wait
+        assert smi.calls() == []  # no sample
+        assert made.events("device_chosen") == []  # and no decision logged
+        assert made.launched(1) == {}
+        [body] = made.rig.routes.bodies("complete")
+        assert (body["launcher_failure_code"], body["launcher_detail"]) == (
+            "runtime_error",
+            "terminated",
+        )
+        assert agent.gpus.holder(0) is None
+    finally:
+        made.close()
+
+
+def spec_allowing(gpus, n=1, claimed_gpus=1):
+    """A claim for ``claimed_gpus`` whose launch value says ``resources`` is ``gpus`` (a value to put there)."""
+    return claim_job(n, gpus=claimed_gpus, spec=spec_text(job_id(n), resources={"gpus": gpus}))
+
+
+@pytest.mark.parametrize(
+    ("allowed", "claimed_gpus"),
+    [(0, 1), (2, 1), (1, 0), (True, 1), ("1", 1), (None, 1)],
+    ids=["spec 0, claim 1", "spec 2, claim 1", "spec 1, claim 0", "a boolean", "a string", "null"],
+)
+def test_a_launch_value_whose_gpu_count_is_not_the_claims_is_refused_before_anything_runs(
+    jobs, allowed, claimed_gpus
+):
+    jobs.claim(spec_allowing(allowed, claimed_gpus=claimed_gpus))
+    assert run_once(jobs, jobs.agent()) == 0
+    [body] = jobs.rig.routes.bodies("complete")
+    assert (body["launcher_failure_code"], body["launcher_detail"]) == (
+        "runtime_error",
+        "invalid_spec",
+    )
+    assert jobs.events("launch_value_refused")[0]["reason"] == "gpus_mismatch"
+    assert jobs.launched(1) == {}  # the launcher never started
+    assert jobs.smi.calls() == []  # no GPU was looked at for it
+    assert jobs.events("device_chosen") == []
+
+
+def test_a_resources_object_with_no_gpu_count_is_refused_too(jobs):
+    jobs.claim(
+        claim_job(1, gpus=1, spec=spec_text(job_id(1), resources={})),
+    )
+    assert run_once(jobs, jobs.agent()) == 0
+    assert jobs.events("launch_value_refused")[0]["reason"] == "gpus_mismatch"
+
+
+@pytest.mark.parametrize("gpus", [0, 1, 2])
+def test_a_launch_value_whose_gpu_count_is_the_claims_runs(jobs, gpus):
+    jobs.claim(spec_allowing(gpus, claimed_gpus=gpus))
+    assert run_once(jobs, jobs.agent()) == 0
+    assert jobs.events("launch_value_refused") == []
+    assert jobs.launched(1) != {}
 
 
 def test_the_launchers_environment_has_the_device_keys_only_for_a_decision(tmp_path):
@@ -1114,6 +1284,7 @@ def test_doctor_names_the_gpus_seen_and_the_reservations_present(cli, smi):
 def test_doctor_says_why_the_gpu_check_is_not_usable_and_it_never_changes_the_exit_status(cli, smi):
     cli.install("apptainer", "#!/bin/sh\necho apptainer version 1.3.0-standin\n")
     results = {}
+    (cli.tmp / "reservations").mkdir()  # the default directory, beside the configuration file
     for name, gpu_object, mode in (
         ("off", {}, None),
         ("on", GPU_ON, None),
@@ -1127,6 +1298,31 @@ def test_doctor_says_why_the_gpu_check_is_not_usable_and_it_never_changes_the_ex
     assert results["on"][1] == "yes (tool found, GPUs seen: 1, reservations: none)"
     assert results["broken"][1] == "no (gpu_check_failed (exit_status))"
     assert len({status for status, _ in results.values()}) == 1  # informational
+
+
+@pytest.mark.parametrize(
+    ("directories", "said"),
+    [
+        (["{tmp}/nowhere"], "1 of 1 reservation directories do not exist"),
+        (["{tmp}/reservations", "{tmp}/nowhere"], "1 of 2 reservation directories do not exist"),
+        (["{tmp}/nowhere", "{tmp}/also-nowhere"], "2 of 2 reservation directories do not exist"),
+        (None, "1 of 1 reservation directories do not exist"),  # the default is never created
+        ([], "no reservation directory is configured"),
+    ],
+    ids=["one mistyped", "one of two", "both", "the default, not made", "none configured"],
+)
+def test_doctor_says_when_a_reservation_directory_is_not_there(cli, smi, directories, said):
+    """A reservation can only be made in a directory that exists: a mistyped one would silently turn
+    reservations off. The line says how many, never which path."""
+    if directories and "{tmp}/reservations" in directories:
+        (cli.tmp / "reservations").mkdir()
+    extra = {}
+    if directories is not None:
+        extra = {"reservation_dirs": [d.format(tmp=cli.tmp) for d in directories]}
+    write_config(cli, gpu=GPU_ON, availability=extra)
+    _, lines = doctor_lines(cli, smi)
+    assert lines["gpu"] == "no (tool found, GPUs seen: 1, but {})".format(said)
+    assert str(cli.tmp) not in lines["gpu"]
 
 
 def test_doctor_names_the_runtime_that_has_no_gpu_yet(cli, smi):

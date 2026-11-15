@@ -111,6 +111,7 @@ Nothing of the runner's own environment reaches the launcher.
 A claim's `launch_spec_env` is checked by the schema for its alphabet and length only, so the runner decodes it with the seven rules of the launcher's decoder (`runner/nemar_runner/wire.py`, replayed against the launcher's table of wire cases) before it does anything for the job.
 A value that fails ends the job without launching: exit 13, `runtime_error`, detail `invalid_spec`, the answer the launcher would give.
 So does a specification whose `job_id` is not the claimed job's, or whose image is not the claim's: the file, the digest, or the reference (a Docker or Podman launcher pulls the specification's `image.uri`, and the runner verifies the claim's, so they must be the same, with or without `docker://`).
+So does a specification whose `resources.gpus` is not the claim's `gpus` (the Worker fills both from one number): the count is the ceiling of the GPU decision, and a launch value that allowed another would skip the GPU check or turn a job that should run on the CPU away (log word `gpus_mismatch`).
 The decoded text holds the job token and is never logged.
 
 ### The image
@@ -368,7 +369,7 @@ Nothing about the accounting changes: the Worker counted the job's `resources.gp
 **When.**
 The decision is made for each claimed job whose `gpus` is above zero, just before it starts: after its image is proven and made, and after the start check of [Just before a claimed job starts](#just-before-a-claimed-job-starts) found room.
 A job whose `gpus` is zero gets no decision, no variable, and no call of `nvidia-smi`.
-Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index and `cap_mb`, and, when the reason is `gpu_check_failed`, a fixed word `why`.
+Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `gpus` the claim allowed, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index and `cap_mb`, and, when the reason is `gpu_check_failed`, a fixed word `why`.
 A GPU is never named in the log by its identifier.
 
 **The reason.**
@@ -379,7 +380,7 @@ The CPU is chosen with the first of these that applies:
 | `gpu_disabled` | `gpu.enabled` is false, which is the default: a host turns the GPU on |
 | `gpu_unsupported_runtime` | the runtime is Podman: the launcher passes no GPU there yet |
 | `gpu_reserved` | an entry named `gpu<i>` or `gpu-all` is in a reservation directory (below), for the GPU with index `i` |
-| `gpu_check_failed` | `nvidia-smi` is missing, is not trusted, does not answer within 10 seconds a call, exits non-zero, or prints anything that cannot be read (no GPU, a field that is `[N/A]`, a process on a GPU the other call did not name, a GPU that appeared or went between samples); or the check could not finish before the time the lease leaves before the launcher starts (`lease_abandon_seconds` after the claim) or before the job's own deadline, or the runner is stopping |
+| `gpu_check_failed` | `nvidia-smi` is missing, is not trusted, does not answer within 10 seconds a call, exits non-zero, or prints anything that cannot be read (no GPU, a field that is `[N/A]`, a process on a GPU the other call did not name, a GPU that appeared or went between samples); or the whole window cannot end before the time the lease leaves before the launcher starts (`lease_abandon_seconds` after the claim) or before the job's own deadline (below), or the runner is stopping |
 | `gpu_busy` | in some sample a compute process lists the GPU, or `memory.used` is above `max_used_mb` (memory held by a process that is quiet counts), or `utilization.gpu` is above `max_utilization_pct` |
 | `gpu_memory_short` | in some sample `memory.total` less `memory.used` is under the cap plus `headroom_mb`, where the cap is `floor(memory_fraction * memory.total)`; a cap under one megabyte is short too |
 | `gpu_in_use` | the GPU passed and another job of this runner holds it |
@@ -390,6 +391,12 @@ A GPU that is reserved or busy in a sample cannot become idle later in the windo
 With several GPUs the lowest index that passed and is free is given; when none is, the reason is the first of the table that any GPU has.
 A job is given one GPU, whatever its `gpus` allows.
 
+**The window ends before its deadline.**
+The check is given the time the lease leaves before the launcher starts (`lease_abandon_seconds`, 540 seconds, after the claim) or the job's own deadline, whichever comes first, and it never returns after it: a launcher that started after the lease had run out would lose the lease and spend a claim, which is not the CPU.
+The window is not started unless the gaps, `(samples - 1) * sample_seconds`, and the last sample at its slowest, two calls of 10 seconds each, all fit before the deadline, and a gap is not slept unless the next sample, at its slowest, still ends before it (the calls before it may have been slow).
+A window that cannot fit, because `sample_seconds` and `samples` are large or the claim was slow to start, is the CPU at once with reason `gpu_check_failed` and `why` `deadline`, not after a wait.
+With the defaults the window is 25 seconds of gaps and at most 20 of calls.
+
 **How it is asked.**
 Two calls per sample, `nvidia-smi --query-gpu=index,uuid,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits` and `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits`, each with a 10-second timeout (the program and its whole process group are killed), at most a megabyte of output, no input, and `PATH` and `LANG` only in the environment.
 The program is the first `nvidia-smi` in the launch PATH's directories (`/usr/local/bin:/usr/bin:/bin`), vetted as `python3` is ([Configuration](#configuration)): every directory up to it, and the program, the user's or root's and not writable by group or others.
@@ -398,7 +405,7 @@ What is kept and logged is counts and fixed words: no process id, no user name a
 
 **Two jobs of one runner never share a GPU.**
 One lock per GPU, held from the decision until the job ends (after its container is removed, so its memory is free), and released when the job ends however it ends.
-A GPU another job of this runner holds is `gpu_in_use` for the next, with no waiting.
+A GPU another job of this runner holds is `gpu_in_use` for the next, with no waiting; when every GPU the runner has seen is held, the answer is given at once, without a window.
 The lock is the runner's: a second runner on the same host is a second user of the GPU, which the check treats like any other (its job's memory and process show in the samples).
 
 **Reserving the GPU.**
@@ -437,7 +444,7 @@ gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 processes=1,1,1,0,0,0 use
 ```
 
 It exits 0 when a GPU is idle and 1 when none is; when the check cannot be made the one line is `gpu: unavailable reason=gpu_check_failed why=<word>`.
-`doctor` adds an informational `gpu` line: `no (disabled)`, `no (gpu_unsupported_runtime)`, `no (gpu_check_failed (<word>))`, or `yes (tool found, GPUs seen: <n>, reservations: <names>)`; it never changes the exit status.
+`doctor` adds an informational `gpu` line: `no (disabled)`, `no (gpu_unsupported_runtime)`, `no (gpu_check_failed (<word>))`, `no (tool found, GPUs seen: <n>, but <k> of <m> reservation directories do not exist)` (a reservation can only be made in a directory that is there, and a mistyped one would silently turn reservations off; the default one beside the configuration file is never created by the runner), or `yes (tool found, GPUs seen: <n>, reservations: <names>)`; it never changes the exit status.
 
 **What the recipe is told.**
 `NEMAR_DEVICE` (`cpu` or `cuda`), `NEMAR_DEVICE_REASON`, and for `cuda` `NEMAR_GPU_MEMORY_MB` (the cap), inside the container ([the launcher](launcher.md#the-device)).
@@ -445,7 +452,7 @@ A recipe keeps to the cap, and a Compute Unified Device Architecture (CUDA) out-
 
 **What is not guaranteed.**
 `nvidia-smi` lists compute processes of other accounts only where the host lets it (a container or `hidepid` can hide them), and `memory.used` and `utilization.gpu` are the backstop that still sees their use; the check is a reading of a moment, so a person who starts work a second after the window is not seen until the next one, and nothing stops the job then.
-Under Apptainer the one GPU is named by `CUDA_VISIBLE_DEVICES`, a request the CUDA runtime honors and a job's own code could undo, where under Docker only that device is handed to the container.
+Under Apptainer the one GPU is named by `CUDA_VISIBLE_DEVICES`, a request the CUDA runtime honors and a job's own code could undo, where under Docker only that device is handed to the container: Apptainer's `--nv` binds every GPU's device file, so on a host with several GPUs a job's code can reach a GPU it was not granted (the check protects against honest use, not against a job that undoes the request; `--nvccli` is the follow-up to look at before an Apptainer runner serves untrusted code on such a host).
 Podman gets the CPU until a later step.
 The real check against a GPU is an operator step on a workstation that has one, after the demo.
 

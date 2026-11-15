@@ -15,8 +15,9 @@ The decision is one of these, the first that applies in this order (``REASONS``)
   searched counts), for the GPU with index ``i``. Anyone who needs a GPU reserves it with such an entry,
   and the check never asks them. The reservation directories are `availability.reservation_dirs`;
 * ``gpu_check_failed``: `nvidia-smi` is missing, not trusted, does not answer in time (10 seconds a call),
-  exits non-zero, prints something that cannot be read, or the check could not finish before the lease
-  or the job's own deadline, or the job is being stopped. Every doubt is the CPU;
+  exits non-zero, prints something that cannot be read, or the whole window cannot be finished before the
+  deadline it is given (the lease, and the job's own, see below), or the job is being stopped. Every doubt
+  is the CPU;
 * ``gpu_busy``: in some sample a compute process lists the GPU, or `memory.used` is above `max_used_mb`
   (memory held by a quiet process counts), or `utilization.gpu` is above `max_utilization_pct`;
 * ``gpu_memory_short``: in some sample `memory.total - memory.used` is under the cap plus `headroom_mb`,
@@ -26,9 +27,14 @@ The decision is one of these, the first that applies in this order (``REASONS``)
   sampled again for its own sake: it is simply not given twice.
 
 Idle is only ``samples`` readings, ``sample_seconds`` apart, EVERY one of which passes every rule, and the
-reservation is looked for in every one of them. One failing sample is the CPU. The first GPU (lowest
+reservation is looked for in every one of them. THE WINDOW ENDS BEFORE ITS DEADLINE, never after: it is not
+started unless the gaps and the last sample at its slowest (two calls, each killed after `gpu_call_seconds`)
+all fit before it, and no gap is slept unless the next sample would still fit, so a runner that is given the
+time the lease leaves never starts the launcher after the lease has run out. A window that cannot fit is
+the CPU at once, not after a wait. One failing sample is the CPU. The first GPU (lowest
 index) that passed and is free is granted, as ``gpu_idle``, with its identifier, its index and the cap.
-When there is no such GPU the reason is the first of ``REASONS`` that any GPU has.
+When there is no such GPU the reason is the first of ``REASONS`` that any GPU has. When every GPU the runner
+has seen is held by one of its jobs, there is nothing to look for: ``gpu_in_use`` at once, no window.
 
 The readings come from two calls of `nvidia-smi` (the exact queries are ``GPU_QUERY`` and ``APPS_QUERY``),
 run with `PATH` and `LANG` only, in a process group of their own that is killed on a timeout, with a bounded
@@ -364,6 +370,7 @@ class Pool:
         self.tuning = tuning
         self._lock = threading.Lock()
         self._held: dict[int, str] = {}  # GPU index -> the job's lease id
+        self._known: set[int] = set()  # the GPUs the last window saw
 
     # ---- the check ------------------------------------------------------------------------------------
 
@@ -378,7 +385,8 @@ class Pool:
     ) -> list[Report]:
         """Take the samples and say what each GPU did in them. ``CheckFailed`` when the program cannot be
         asked or relied on, when ``wait`` (which sleeps the seconds it is given and answers True if the
-        job is being stopped) says to stop, or when a sample would start after ``deadline`` (monotonic).
+        job is being stopped) says to stop, or when the window cannot end before ``deadline`` (monotonic:
+        see the module's account of it). It never returns after ``deadline``.
 
         With ``settle`` the window ends as soon as every GPU is reserved or busy (a later sample cannot
         change that, and a job never waits for a busy GPU); without it every sample is taken, which is what
@@ -386,12 +394,21 @@ class Pool:
         settings, tuning = self.config.gpu, self.tuning
         directories = self._reservation_dirs()
         tool = find_tool(tuning)
+        # the slowest a sample can be: its two calls, each killed after `gpu_call_seconds`
+        slowest = 2 * tuning.gpu_call_seconds
+        if time.monotonic() + (settings.samples - 1) * settings.sample_seconds + slowest > deadline:
+            raise CheckFailed(
+                "deadline"
+            )  # the whole window cannot fit: the CPU now, not after a wait
         tracks: dict[int, _Track] = {}
         for number in range(settings.samples):
-            if number > 0 and wait(settings.sample_seconds):
-                raise CheckFailed("interrupted")
-            if time.monotonic() > deadline:
-                raise CheckFailed("deadline")
+            if number > 0:
+                # a gap is slept only if the next sample, at its slowest, still ends before the deadline
+                # (the calls before it may have been slow)
+                if time.monotonic() + settings.sample_seconds + slowest > deadline:
+                    raise CheckFailed("deadline")
+                if wait(settings.sample_seconds):
+                    raise CheckFailed("interrupted")
             gpus, apps = take_sample(tool, tuning)
             if tracks and {r.index: r.uuid for r in gpus} != {i: t.uuid for i, t in tracks.items()}:
                 raise CheckFailed("gpus_changed")  # a GPU came or went: nothing can be relied on
@@ -412,6 +429,8 @@ class Pool:
                     track.reason = _worse(track.reason, RESERVED)
             if settle and all(track.settled for track in tracks.values()):
                 break
+        with self._lock:
+            self._known = set(tracks)
         return [tracks[index].report() for index in sorted(tracks)]
 
     # ---- the decision ---------------------------------------------------------------------------------
@@ -426,6 +445,11 @@ class Pool:
             return cpu(UNSUPPORTED)
         if availability.entry_present(self._reservation_dirs(), RESERVE_ALL):
             return cpu(RESERVED)  # asked before the program is: nothing is to be given anyway
+        with self._lock:
+            if self._known and self._known <= set(self._held):
+                return cpu(
+                    IN_USE
+                )  # every GPU seen is held by a job of this runner: nothing to look for
         try:
             reports = self.window(wait, deadline)
         except CheckFailed as failed:
@@ -498,6 +522,18 @@ def survey(config: Config, tuning: Tuning) -> tuple[bool, str]:
     except CheckFailed as failed:
         return False, "{} ({})".format(FAILED, failed.why)
     directories = config.availability.reservation_dirs
+    missing = [d for d in directories if not os.path.isdir(d)]
+    if not directories or missing:
+        # a reservation can only be made in a directory that is there: a mistyped one would silently turn
+        # reservations off. Counts only: a configured path is not printed.
+        return False, "tool found, GPUs seen: {}, but {}".format(
+            len(found),
+            "no reservation directory is configured"
+            if not directories
+            else "{} of {} reservation directories do not exist".format(
+                len(missing), len(directories)
+            ),
+        )
     names = [
         name
         for name in [RESERVE_ALL, *("gpu{}".format(r.index) for r in found)]
