@@ -12,10 +12,12 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-# The CPU flavor of the runtime image (the only flavor in this phase). The extra exists so that
-# `[tool.uv.sources]` can send torch to the CPU index; a CUDA flavor adds its own extra later.
-# The floor is pamica 0.4.0's own.
+# The two flavors of the runtime image. Each extra exists so that `[tool.uv.sources]` can send torch
+# to that flavor's index, and the two are declared in conflict (`[tool.uv] conflicts` below): an
+# environment holds one torch. The CPU floor is pamica 0.4.0's own (`torch>=2.12.1`); the CUDA flavor
+# pins that floor exactly, the CUDA 12.9 build (the `cu128` index stops at torch 2.11.0).
 cpu = ["torch>=2.12.1"]
+cuda = ["torch==2.12.1"]
 
 [dependency-groups]
 dev = [
@@ -67,6 +69,9 @@ runtime = [
 [tool.uv]
 package = false
 
+# An image is one flavor: the two torch builds never share an environment, so uv resolves them apart.
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
 # A package with no wheel for a target is built on the machine, in an isolated environment whose
 # build requirements uv resolves afresh (uv.lock does not record them), so a new release of the
 # build backend would change what is installed while `uv lock --check` stays green. These pins are
@@ -74,13 +79,22 @@ package = false
 # requirements are still fetched from PyPI by name and version (docs/images.md).
 build-constraint-dependencies = ["setuptools==84.2.1"]
 
-# torch comes from the CPU index only, never from PyPI (whose Linux wheels carry the CUDA runtime).
+# torch comes from one of two explicit indexes, never from PyPI (whose Linux wheels carry the CUDA
+# runtime): the CPU index for the `cpu` extra, the CUDA 12.9 index for the `cuda` extra.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", extra = "cpu" }]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.pytest.ini_options]
