@@ -362,6 +362,24 @@ def test_a_recording_that_three_inputs_name_is_an_error_in_any_order(products, t
     assert not out.exists()
 
 
+def test_two_rows_of_one_input_for_one_recording_are_not_a_resume(products, tmp_path):
+    """Replacement is for two inputs: a table that names a recording twice is a damaged table."""
+    damaged = tmp_path / "damaged"
+    shutil.copytree(products["cut"], damaged)
+    real_row = next(
+        line
+        for line in (products["rest"] / TABLE).read_text(encoding="utf-8").splitlines()[1:]
+        if line.startswith(recording("sub-S03") + "\t")
+    )
+    with (damaged / TABLE).open("a", encoding="utf-8") as handle:
+        handle.write(real_row + "\n")
+    out = tmp_path / "out"
+    code, _, err = merge(out, damaged)
+    assert code == 1
+    assert "two inputs name the same recording: {}".format(recording("sub-S03")) in err
+    assert not out.exists()
+
+
 def test_a_duplicated_file_is_still_an_error_under_resume(products, tmp_path):
     crowded = tmp_path / "crowded"
     shutil.copytree(products["rest"], crowded)
