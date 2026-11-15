@@ -405,11 +405,22 @@ def _whole(value: Any, low: int, high: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
 
 
+def _encodable(value: str) -> bool:
+    """Whether the text has a UTF-8 form: a lone surrogate (JSON can spell one) has none, and a name
+    that has none would end the run in an encoding error where the text is written or hashed."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _name(value: Any) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value) <= MAX_NAME_LENGTH
         and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        and _encodable(value)
     )
 
 
@@ -452,7 +463,12 @@ def validate_document(document: Any) -> None:
         for group in groups:
             if not isinstance(group, dict):
                 raise IndexInvalid("a group is not an object")
-            if not _name(group.get("name")) or not isinstance(group.get("modality"), str):
+            modality = group.get("modality")
+            if (
+                not _name(group.get("name"))
+                or not isinstance(modality, str)
+                or not _encodable(modality)
+            ):
                 raise IndexInvalid("a group has no usable name or modality")
             rate = group.get("rate")
             if (

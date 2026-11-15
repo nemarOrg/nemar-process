@@ -447,6 +447,14 @@ MALFORMED = {
     "no path": lambda d: first_store(d).pop("path"),
     "an empty zarr": lambda d: first_store(d).update(zarr=""),
     "a path with a control character": lambda d: first_store(d).update(path="a\x00_eeg.edf"),
+    # JSON can spell a lone surrogate, which has no UTF-8: a refusal of the document, never an
+    # encoding error where the text is written or hashed (docs/recipes.md)
+    "a path with a lone surrogate": lambda d: first_store(d).update(
+        path="sub-01/eeg/a\ud800_eeg.edf"
+    ),
+    "a zarr with a lone surrogate": lambda d: first_store(d).update(zarr="sub-01/a\udfff_eeg.zarr"),
+    "a group name with a lone surrogate": lambda d: first_group(d).update(name="eeg_250hz\ud800"),
+    "a modality with a lone surrogate": lambda d: first_group(d).update(modality="EEG\ud800"),
     "a path under the work directory": lambda d: first_store(d).update(
         path=".partial/x/sub-01_task-rest_eeg.edf"
     ),
