@@ -493,3 +493,16 @@ def test_the_files_of_other_datatypes_are_counted_once_in_a_resumed_product(mixe
     assert merge(out, mixed["cut"], mixed["rest"])[0] == 0
     assert nemar_of(out)["ignored_datatypes"] == {"ieeg": 4}
     assert comparable(out, resumed=2) == comparable(mixed["whole"])
+
+
+def test_an_input_with_no_recordings_still_adds_its_other_datatypes(mixed, tmp_path):
+    """Only a remainder, whose every row replaced a budget row, is left out of the sum: a run that
+    found no EEG recording at all (exit 3) has no rows and counted files that nothing else did."""
+    bare = tmp_path / "bare"
+    target = bare / "sub-09" / "ieeg" / "sub-09_task-smoke_ieeg.edf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"")
+    assert floor_run(bare, tmp_path / "none", "none")[0] == 3
+    out = tmp_path / "out"
+    assert merge(out, mixed["cut"], mixed["rest"], tmp_path / "none")[0] == 0
+    assert nemar_of(out)["ignored_datatypes"] == {"ieeg": 5}
