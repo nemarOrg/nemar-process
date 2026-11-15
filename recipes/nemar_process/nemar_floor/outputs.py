@@ -124,6 +124,25 @@ def mask_rows(sample_mask: np.ndarray) -> list[list[Any]]:
     ]
 
 
+def grid_profile(profile: str | None, nemar_extra: Mapping[str, Any] | None) -> str:
+    """The profile of the samples the floor read, for ``mask_grid``.
+
+    A recipe with a remote input says what the samples were in ``nemar_extra["input"]["profile"]``
+    (the Zarr input says ``serving``): that is the profile, so an embedder on that input is never
+    labeled ``archive`` by a default. A ``profile`` argument that disagrees with it is refused. With
+    neither, the floor read the archived recording itself.
+    """
+    declared = None
+    given = (nemar_extra or {}).get("input")
+    if isinstance(given, Mapping):
+        declared = given.get("profile")
+    if profile is not None and declared is not None and profile != declared:
+        raise ValueError(
+            "the profile {!r} is not the input's profile {!r}".format(profile, declared)
+        )
+    return next(found for found in (profile, declared, "archive") if found is not None)
+
+
 def mask_grid(result: FloorResult, profile: str) -> dict[str, Any]:
     """The grid of the samples the floor read: what a sample index in ``_samplemask.tsv`` counts."""
     if profile not in PROFILES:
@@ -218,23 +237,26 @@ def write_product(
     extra_products: Sequence[Product] = (),
     summary_extra: Mapping[str, Any] | None = None,
     nemar_extra: Mapping[str, Any] | None = None,
-    profile: str = "archive",
+    profile: str | None = None,
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
-    The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the four
-    files are then named with its label, stamped with its name and version and described by its
+    The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the
+    floor's files (four, five when the window step ran) are then named with its label, stamped with its name and version and described by its
     record, and ``result.plan`` is expected to be that recipe's plan. ``extra_products`` are its
     own files, written after the floor's and listed after them (each belongs to a step of the plan),
     and ``summary_extra`` its own summary metrics, which may not replace one of the floor's.
     ``nemar_extra`` are keys it adds to ``extensions.nemar`` (a recipe with a remote input says where
-    the data came from; ``mask_grid`` is the floor's own and may not be among them). ``profile`` says
-    what the samples were: ``archive`` (the recording itself, the default) or ``serving`` (NEMAR's
-    Zarr serving copy), and goes into ``mask_grid``. The identity is looked up when called, not when
+    the data came from; ``mask_grid`` is the floor's own and may not be among them). The profile of
+    ``mask_grid`` says what the samples were: ``archive`` (the recording itself) or ``serving``
+    (NEMAR's Zarr serving copy). It is ``nemar_extra["input"]["profile"]`` when the recipe states
+    one, else ``profile`` (``archive`` when neither is given); a ``profile`` that disagrees with the
+    stated one is refused (``grid_profile``). The identity is looked up when called, not when
     defined, so a caller that replaces ``INFO`` is honored.
     """
     if "mask_grid" in (nemar_extra or {}):
         raise ValueError("mask_grid is a key the floor writes")
+    grid = mask_grid(result, grid_profile(profile, nemar_extra))  # refused before any file is made
     info = INFO if info is None else info
     label = info.label
 
@@ -325,7 +347,7 @@ def write_product(
         ],
         summary_metrics=metrics,
         context=context,
-        nemar_extra={**(nemar_extra or {}), "mask_grid": mask_grid(result, profile)},
+        nemar_extra={**(nemar_extra or {}), "mask_grid": grid},
     )
     problems = records.problems_of(record, context.validator)
     if problems:

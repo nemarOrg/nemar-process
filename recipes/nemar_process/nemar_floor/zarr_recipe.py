@@ -112,7 +112,6 @@ def run_recording(
         loaded.inputs,
         info=INFO,
         nemar_extra=source.recording_extras(recording.path),
-        profile="serving",
     )
 
 

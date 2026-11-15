@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 PREFIX = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
 COLUMNS = ["start_sample", "stop_sample", "label", "nemar_reason"]
@@ -154,3 +155,62 @@ def test_a_caller_cannot_replace_the_grid_through_the_extras(floor_product):
             [],
             nemar_extra={"mask_grid": {}},
         )
+
+
+SERVING_INPUT = {"input": {"kind": "zarr", "profile": "serving"}}
+
+
+def write(result, directory, **keywords):
+    """The floor's ``write_product`` as a recipe that embeds it calls it, on the fixture recording."""
+    from nemar_process.common import io
+    from nemar_process.nemar_floor import outputs
+    from recipe_support import DATASET, make_context
+
+    (recording,) = io.discover(DATASET)
+    return outputs.write_product(recording, make_context(), directory, result, [], **keywords)
+
+
+def test_an_embedder_on_the_zarr_input_is_labeled_serving_by_the_inputs_own_profile(
+    fixture_result, tmp_path
+):
+    """The Zarr extras already say ``serving``: a recipe that embeds the floor on that input and passes
+    no profile must not be labeled ``archive`` by a default."""
+    product = write(fixture_result, tmp_path, nemar_extra=SERVING_INPUT)
+    assert grid_of(product.record)["profile"] == "serving"
+    assert product.record["extensions"]["nemar"]["input"]["profile"] == "serving"
+
+
+def test_a_profile_that_agrees_with_the_inputs_is_accepted_and_with_no_input_it_is_the_callers(
+    fixture_result, tmp_path
+):
+    agreed = write(
+        fixture_result, tmp_path / "agreed", nemar_extra=SERVING_INPUT, profile="serving"
+    )
+    assert grid_of(agreed.record)["profile"] == "serving"
+    given = write(fixture_result, tmp_path / "given", profile="serving")
+    assert grid_of(given.record)["profile"] == "serving"
+    default = write(fixture_result, tmp_path / "default")
+    assert grid_of(default.record)["profile"] == "archive"
+
+
+def test_a_profile_that_disagrees_with_the_inputs_is_refused_before_any_file_is_made(
+    fixture_result, tmp_path
+):
+    out = tmp_path / "refused"
+    with pytest.raises(ValueError, match="not the input's profile"):
+        write(fixture_result, out, nemar_extra=SERVING_INPUT, profile="archive")
+    with pytest.raises(ValueError, match="not the input's profile"):
+        write(
+            fixture_result,
+            out,
+            nemar_extra={"input": {"kind": "bids", "profile": "archive"}},
+            profile="serving",
+        )
+    assert not out.exists()  # nothing was written
+
+
+def test_a_profile_that_is_neither_archive_nor_serving_is_refused(fixture_result, tmp_path):
+    with pytest.raises(ValueError, match="a profile is one of"):
+        write(fixture_result, tmp_path / "unknown", profile="live")
+    with pytest.raises(ValueError, match="a profile is one of"):
+        write(fixture_result, tmp_path / "unknown", nemar_extra={"input": {"profile": "live"}})
