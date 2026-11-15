@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from . import availability, containers, contract, images, pids, scratch, usage, verify, wire
+from . import availability, containers, contract, gpu, images, pids, scratch, usage, verify, wire
 from .api import Api, ApiError
 from .config import ENGINES, Config, Tuning
 from .logs import Log
@@ -85,8 +85,10 @@ def launch_environment(
     tuning: Tuning,
     enforce: bool,
     runner_label: str | None = None,
+    device: gpu.Decision | None = None,
 ) -> dict[str, str]:
-    """The launcher's whole environment: these keys and no others (docs/runner.md)."""
+    """The launcher's whole environment: these keys and no others (docs/runner.md). ``device`` is the
+    decision for a job that asked for a GPU; a job that did not has none and no variable."""
     end_time = int(job.claimed_at) + job.minutes * 60
     env = {
         "NEMAR_LAUNCH_SPEC": job.launch_spec_env,
@@ -107,6 +109,8 @@ def launch_environment(
     memory = effective_memory_mb(job, config)
     if memory is not None:
         env["NEMAR_MEMORY_MB"] = str(memory)
+    if device is not None:
+        env.update(device.environment())
     return env
 
 
@@ -270,8 +274,12 @@ class JobRunner:
         python: str | None = None,
         gate: availability.Gate | None = None,
         verifier: verify.Verifier | None = None,
+        gpus: gpu.Pool | None = None,
     ) -> None:
         self.verifier = verifier or verify.Verifier(config, tuning, log)
+        # the GPUs of the runner (one lock per GPU, across its jobs); a job run without the runner's own
+        # has a pool to itself
+        self.gpus = gpus or gpu.Pool(config, tuning)
         self.runner_label = runner_label
         self.python = python  # pinned at the runner's start; looked up again only when not given
         self.gate = gate  # the host's room for this job, asked before it starts; None asks nothing
@@ -304,6 +312,7 @@ class JobRunner:
         finally:
             if self.gate is not None:
                 self.gate.release(job.lease_id)  # its memory is no longer promised to anyone
+            self.gpus.release(job.lease_id)  # and its GPU, if it held one, is free
             if self._heartbeat is not None:
                 self._heartbeat.finish()
 
@@ -468,8 +477,9 @@ class JobRunner:
             abandoned = self._await_room(term_at)
             if abandoned is not None:
                 return abandoned
+        device = self._choose_device(term_at)
         enforce = sif is not None and self.limits.proven(sif, dirs.home)
-        env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label)
+        env = launch_environment(job, dirs, config, tuning, enforce, self.runner_label, device)
         argv = [
             self.python or images.resolve_python(tuning) or sys.executable,
             "-I",
@@ -529,6 +539,45 @@ class JobRunner:
             max_rss_mb=measured.max_rss_mb,
         )
         return Outcome(number, code, detail, measured, partial, lease_lost=why == "lease_lost")
+
+    def _pause(self, seconds: float, term_at: float) -> bool:
+        """Sleep ``seconds`` in slices that notice a stop; True when the job is being stopped or its own
+        deadline has come (the GPU check then ends, and the caller turns a stop into a refusal)."""
+        end = time.monotonic() + seconds
+        while True:
+            if self._interrupt(term_at) is not None:
+                return True
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            self.stop.wait(min(left, self.tuning.tick_seconds))
+
+    def _choose_device(self, term_at: float) -> gpu.Decision | None:
+        """For a job that asked for a GPU, the device it runs on (`gpu.py`): None for a job that did not.
+
+        Never waits for a GPU, never declines the job and never fails it: whatever goes wrong the answer is
+        the CPU. The check is bounded by the end of the time the lease leaves before the launcher starts
+        (`lease_abandon_seconds` after the claim) and by the job's own deadline, and it ends at once when
+        the job is stopped. The decision is logged as `device_chosen`; a GPU it grants is held until the
+        job ends (`run`)."""
+        job = self.job
+        if job.gpus <= 0:
+            return None
+        deadline = min(self._began + self.tuning.lease_abandon_seconds, term_at)
+        try:
+            decision = self.gpus.decide(
+                job.lease_id, lambda seconds: self._pause(seconds, term_at), deadline
+            )
+        except Exception as error:  # noqa: BLE001 - a bug in the check is a doubt, and a doubt is the CPU
+            self.log.error("device_check_error", job=job.id, error=type(error).__name__)
+            decision = gpu.cpu(gpu.FAILED, "internal_error")
+        fields: dict[str, Any] = {"device": decision.device, "reason": decision.reason}
+        if decision.cuda:
+            fields.update(gpu=decision.gpu_index, cap_mb=decision.memory_mb)
+        if decision.why is not None:
+            fields["why"] = decision.why
+        self.log.info("device_chosen", job=job.id, **fields)
+        return decision
 
     def _await_room(self, term_at: float) -> Outcome | None:
         """Wait, inside the lease, until the host has room for this job: None to go on (room, or a

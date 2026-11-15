@@ -275,17 +275,24 @@ def read_all(
     )
 
 
-def paused(directories: tuple[str, ...]) -> bool:
-    """Whether a file (or link, or directory) named `pause` is in any of the directories."""
+def entry_present(directories: tuple[str, ...], name: str) -> bool:
+    """Whether an entry called ``name`` (a file, a link, a directory, a pipe: whatever it is) is in any of
+    the directories. Only the name is looked at, with `os.lstat`: nothing is opened, read or followed. A
+    directory that cannot be searched counts as present, because an entry that cannot be seen is respected."""
     for directory in directories:
         try:
-            os.lstat(os.path.join(directory, PAUSE_NAME))
+            os.lstat(os.path.join(directory, name))
         except (FileNotFoundError, NotADirectoryError):
             continue
         except OSError:
-            return True  # cannot tell: a pause that cannot be seen is respected
+            return True  # cannot tell: an entry that cannot be seen is respected
         return True
     return False
+
+
+def paused(directories: tuple[str, ...]) -> bool:
+    """Whether a file (or link, or directory) named `pause` is in any of the directories."""
+    return entry_present(directories, PAUSE_NAME)
 
 
 class Gate:

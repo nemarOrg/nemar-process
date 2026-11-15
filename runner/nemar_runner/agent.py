@@ -20,6 +20,7 @@ from . import (
     availability,
     containers,
     contract,
+    gpu,
     images,
     pids,
     priority,
@@ -60,6 +61,7 @@ class Agent:
         self.limits = images.Limits(config, self.tuning, log)
         self.verifier = verify.Verifier(config, self.tuning, log)
         self.gate = availability.Gate(config, self.tuning)
+        self.gpus = gpu.Pool(config, self.tuning)  # one lock per GPU, across this runner's jobs
         self._skipping: str | None = None  # why the last claim was declined, until one is sent
         self._threads: dict[str, threading.Thread] = {}  # by lease id
         self._latest: dict[str, threading.Thread] = {}  # the newest run of each job id
@@ -227,6 +229,7 @@ class Agent:
             self.python,
             gate=self.gate,
             verifier=self.verifier,
+            gpus=self.gpus,
         )
         self.gate.claimed(job.lease_id, effective_memory_mb(job, self.config))
 
