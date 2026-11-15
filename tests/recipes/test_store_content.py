@@ -418,6 +418,9 @@ def row(path: str, group: str, digest: str) -> dict[str, str]:
 
 def test_the_input_digest_of_the_one_row_is_the_platforms_vector():
     assert z.input_digest([row(*INPUT_ROW)]) == INPUT_DIGEST
+    # and written out from the definition alone: the line `path TAB group TAB content_sha256 LF`
+    path, group, digest = INPUT_ROW
+    assert "sha256:" + sha("{}\t{}\t{}\n".format(path, group, digest)) == INPUT_DIGEST
 
 
 def test_the_input_digest_is_over_the_rows_in_path_order_whatever_order_they_come_in():
@@ -472,6 +475,39 @@ def test_the_input_digest_hashes_each_text_as_given_and_refuses_what_is_no_text_
         for text in ("a\nb", "a\rb", "a\ud800b"):
             with pytest.raises(z.Undigestable):
                 z.input_digest([{**base, field: text}])
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"group": "eeg", "content_sha256": "a" * 64}],
+        [{"path": "sub-01/eeg/a_eeg.edf", "content_sha256": "a" * 64}],
+        [{"path": "sub-01/eeg/a_eeg.edf", "group": "eeg"}],
+        [{}],
+        ["sub-01/eeg/a_eeg.edf"],
+        [None],
+        [5],
+        [("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64)],
+        [["sub-01/eeg/a_eeg.edf", "eeg", "a" * 64]],
+        [row(*INPUT_ROW), None],
+    ],
+    ids=[
+        "no path",
+        "no group",
+        "no content digest",
+        "an empty object",
+        "a row that is text",
+        "a row that is none",
+        "a row that is a number",
+        "a row that is a tuple",
+        "a row that is a list",
+        "a good row and a bad one",
+    ],
+)
+def test_a_row_that_is_not_an_object_with_the_three_fields_is_refused_as_such(rows):
+    """Not a KeyError or a TypeError of the function's own: the platform refuses the shape."""
+    with pytest.raises(z.Undigestable):
+        z.input_digest(rows)
 
 
 def test_the_input_digest_of_no_rows_is_the_digest_of_no_text():

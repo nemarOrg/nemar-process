@@ -628,22 +628,33 @@ def _row_text(name: str, text: Any) -> str:
     return text
 
 
+def _row_fields(row: Any) -> tuple[Any, Any, Any]:
+    """A row's path, group and content digest; ``Undigestable`` for a row that is not an object or
+    lacks one of them."""
+    if not isinstance(row, Mapping):
+        raise Undigestable("a row is not an object")
+    try:
+        return row["path"], row["group"], row["content_sha256"]
+    except KeyError as error:
+        raise Undigestable("a row has no {}".format(error.args[0])) from error
+
+
 def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
     """``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
     store read in full, sorted by path in code point order (the order of the paths' UTF-8 bytes,
     whatever order ``rows`` come in), each text as it is given.
 
-    ``Undigestable`` (a ``ValueError``) for a row that is not one: a path repeated, an empty path or
-    group, a tab, a line feed, a carriage return or a lone surrogate in a path or group, or a
-    ``content_sha256`` that is not 64 lower-case hexadecimal digits. No rows is the digest of no text,
-    and is not refused here (the key consumer's check for a non-empty ``stores_content`` comes first).
+    ``Undigestable`` (a ``ValueError``) for a row that is not one: not an object, or without a path,
+    a group or a ``content_sha256``; a path repeated; an empty path or group; a tab, a line feed, a
+    carriage return or a lone surrogate in a path or group; or a ``content_sha256`` that is not 64
+    lower-case hexadecimal digits. No rows is the digest of no text, and is not refused here (the key
+    consumer's check for a non-empty ``stores_content`` comes first).
     """
-    ordered = sorted(rows, key=lambda row: _utf8("path", row["path"]))
+    fields = sorted((_row_fields(row) for row in rows), key=lambda found: _utf8("path", found[0]))
     lines = []
     seen = set()
-    for row in ordered:
-        path, group = _row_text("path", row["path"]), _row_text("group", row["group"])
-        digest = row["content_sha256"]
+    for raw_path, raw_group, digest in fields:
+        path, group = _row_text("path", raw_path), _row_text("group", raw_group)
         if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest):
             raise Undigestable("a content_sha256 is not 64 lower-case hexadecimal digits")
         if path in seen:
