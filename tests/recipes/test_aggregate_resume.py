@@ -187,7 +187,7 @@ def products(tmp_path_factory):
     """Real floor runs over four copies of the fixture: all of it at once (``whole``), cut by a
     budget after two (``cut``), the two paths the cut table names (``rest``), and each of those
     paths alone (``third`` and ``fourth``). ``spent`` is a run of the same two paths whose budget
-    ended before the first one."""
+    ended before the first one, and ``recut`` one that it cut after the first."""
     base = tmp_path_factory.mktemp("resume")
     dataset = four_copies(base / "on007823")
     clock = Clock()
@@ -217,6 +217,12 @@ def products(tmp_path_factory):
             extra=["--time-budget-s", "25"],
         )
         assert code == 9
+        # the remainder's own run, cut again after one recording (10 + 15 = 25 is over 24)
+        code, _, _ = floor_run(
+            dataset, base / "recut", "recut", *rest, recipe="toy", extra=["--time-budget-s", "24"]
+        )
+        assert code == 9
+        assert budget_paths(base / "recut") == rest[1:]
     for name, paths in (
         ("whole", []),
         ("rest", rest),
@@ -224,7 +230,9 @@ def products(tmp_path_factory):
         ("fourth", rest[1:]),
     ):
         assert floor_run(dataset, base / name, name, *paths)[0] == 0
-    return {name: base / name for name in ("whole", "cut", "rest", "third", "fourth", "spent")} | {
+    return {
+        name: base / name for name in ("whole", "cut", "rest", "third", "fourth", "spent", "recut")
+    } | {
         "base": base,
         "dataset": dataset,
     }
@@ -330,6 +338,26 @@ def test_a_remainder_of_only_one_budget_row_leaves_the_other_pending_and_exits_n
     assert nemar["report"]["pending_count"] == 1  # recomputed from the rows left, not carried over
     assert nemar["report"]["resumed"] == 1
     assert budget_paths(out) == [recording("sub-S04")]
+
+
+def test_a_remainder_that_was_itself_cut_is_completed_in_two_merges(products, tmp_path):
+    """Its budget row and the cut product's name one recording, so the two cannot be merged; the
+    run of what it left out is merged with it first, and that product with the cut one."""
+    refused = tmp_path / "refused"
+    code, _, err = merge(refused, products["cut"], products["recut"])
+    assert code == 1
+    assert "two inputs name the same recording: {}".format(recording("sub-S04")) in err
+    assert not refused.exists()
+    first, done = tmp_path / "first", tmp_path / "done"
+    assert merge(first, products["recut"], products["fourth"])[0] == 0
+    assert nemar_of(first)["report"]["pending_count"] == 0
+    assert nemar_of(first)["report"]["resumed"] == 1
+    code, stdout, _ = merge(done, products["cut"], first)
+    assert code == 0
+    assert result_of(stdout)["result"] == "ok"
+    assert nemar_of(done)["report"]["pending_count"] == 0
+    assert nemar_of(done)["report"]["resumed"] == 2
+    assert comparable(done, resumed=2) == comparable(products["whole"])
 
 
 def test_a_merged_product_can_be_completed_by_a_second_remainder(products, tmp_path):
