@@ -381,6 +381,8 @@ def test_the_test_job_checks_the_build_record_after_the_build_and_the_label_step
         '--version "$VERSION"',
         '--commit "$GITHUB_SHA"',
         "nemar-python:ci",
+        "--network none --entrypoint cat",
+        "the build file could not be read from the built image",
     ):
         assert needle in run, needle
     assert "ghcr.io" not in run  # the pull request's own image, which nothing pushed
@@ -413,7 +415,8 @@ def test_the_sign_job_checks_the_pushed_digests_build_record_before_anything_is_
         "--build release",
         '--version "$VERSION"',
         '--commit "$GITHUB_SHA"',
-        "the pushed image has no build file",
+        "--network none --entrypoint cat",
+        "the build file could not be read from the pushed image",
     ):
         assert needle in run, needle
     # both reads name the digest the smoke tests pulled, never a tag and never the pull request's image

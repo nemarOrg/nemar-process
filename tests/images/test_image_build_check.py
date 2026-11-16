@@ -19,11 +19,10 @@ from pathlib import Path
 
 import check_image_build
 import pytest
-import yaml
 from nemar_process.common import build as process_build
-from repo_paths import IMAGE_WORKFLOW, ROOT
+from repo_paths import ROOT
 from test_dockerfile import final_rows
-from test_publish_guards import find_step, output_of, run_body
+from test_publish_guards import DIGEST, declared_env, find_step, output_of, run_body
 
 SCRIPT = ROOT / "scripts" / "check_image_build.py"
 PREFIX = "::error::build record disagrees with the version step:"
@@ -745,12 +744,12 @@ def test_the_dockerfiles_write_the_build_file_with_the_writer_the_tests_run():
 
 TEST_STEP = ("test", "Check the build record and labels against the dev build")
 SIGN_STEP = ("sign", "Check the pushed digest's build record against the version step")
-DIGEST = "sha256:" + "9f2c" * 16
 PUSHED = "ghcr.io/nemarorg/nemar-python@" + DIGEST
 LOCAL = "nemar-python:ci"
-NO_BUILD_FILE = {
-    "test": "the built image has no build file",
-    "sign": "the pushed image has no build file",
+BUILD_FILE_PATH = "/opt/nemar/build.json"
+CANNOT_READ = {
+    "test": "the build file could not be read from the built image",
+    "sign": "the build file could not be read from the pushed image",
 }
 
 STANDIN_DOCKER = r"""
@@ -762,11 +761,19 @@ args = sys.argv[1:]
 with open(os.environ["STANDIN_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(args) + "\n")
 image = os.environ["STANDIN_IMAGE"]
+entrypoint = args.index("--entrypoint") + 1 if "--entrypoint" in args else None
 if args[:2] == ["image", "inspect"] and args[-1] == image and "{{json .Config.Labels}}" in args:
     with open(os.environ["STANDIN_LABELS"], "rb") as labels:
         sys.stdout.buffer.write(labels.read())
-elif args[:1] == ["run"] and image in args and args[-1] == "/opt/nemar/build.json":
-    # `cat` of the file the image has, or the failure of `cat` of one it does not have
+elif (
+    args[:1] == ["run"]
+    and entrypoint is not None
+    and args[entrypoint:entrypoint + 1] == ["cat"]
+    and args[-2:] == [image, "/opt/nemar/build.json"]
+):
+    # `cat` of the file the image has, or the failure of `cat` of one it does not have: the
+    # entry point is replaced by `cat` (the image's own would run otherwise), the image reference
+    # comes right before the path, and anything else is not what the step is meant to ask
     if not os.path.exists(os.environ["STANDIN_BUILD_FILE"]):
         sys.exit(1)
     with open(os.environ["STANDIN_BUILD_FILE"], "rb") as build_file:
@@ -778,23 +785,26 @@ else:
 
 
 def step_env(job: dict, step: dict, flavor: str, version: str) -> dict[str, str]:
-    """The workflow's, the job's and the step's `env:`, each expression replaced by a test value."""
-    expressions = {
+    """`declared_env` of the publish guards' tests, given the two version expressions it lacks."""
+    versions = {
         "${{ steps.devbuild.outputs.version }}": version,
         "${{ needs.publish.outputs.version }}": version,
-        "${{ needs.publish.outputs[format('digest_{0}', matrix.flavor)] }}": DIGEST,
-        "${{ matrix.flavor }}": flavor,
     }
-    document = yaml.safe_load(IMAGE_WORKFLOW.read_text(encoding="utf-8"))
-    merged: dict[str, str] = {}
-    for source in (document.get("env", {}), job.get("env", {}), step.get("env", {})):
-        for key, value in source.items():
+
+    def filled(env: dict) -> dict[str, str]:
+        found = {}
+        for key, value in env.items():
             text = str(value)
-            for expression, replacement in expressions.items():
+            for expression, replacement in versions.items():
                 text = text.replace(expression, replacement)
-            assert "${{" not in text, "no test value for the expression in {}: {}".format(key, text)
-            merged[key] = text
-    return merged
+            found[key] = text
+        return found
+
+    return declared_env(
+        {**job, "env": filled(job.get("env", {}))},
+        {**step, "env": filled(step.get("env", {}))},
+        flavor,
+    )
 
 
 def run_step(
@@ -839,6 +849,33 @@ def run_step(
     return done, calls
 
 
+NOT_ENVIRONMENT_OR_MOUNT = {
+    "--env",
+    "-e",
+    "--env-file",
+    "--volume",
+    "-v",
+    "--mount",
+    "--privileged",
+}
+
+
+def assert_two_reads_in_isolation(calls: list[list[str]], image: str) -> None:
+    """Both reads name `image` and nothing else; the file is read by `cat` in an isolated container."""
+    (inspect,) = [call for call in calls if call[:2] == ["image", "inspect"]]
+    (run,) = [call for call in calls if call[:1] == ["run"]]
+    assert len(calls) == 2
+    assert inspect[-1] == image
+    assert run[-2:] == [image, BUILD_FILE_PATH]
+    # no network, the entry point replaced by `cat`, no environment passed and no mount
+    assert run[run.index("--network") + 1] == "none"
+    assert run[run.index("--entrypoint") + 1] == "cat"
+    assert not NOT_ENVIRONMENT_OR_MOUNT & set(run)
+    # and no other image: not a tag, not the other job's image
+    others = {PUSHED, LOCAL} - {image}
+    assert not [arg for call in calls for arg in call if arg in others]
+
+
 @pytest.mark.parametrize("flavor", FLAVORS)
 @pytest.mark.parametrize("version", ["1.2.3", "10.20.30"])
 def test_the_sign_step_passes_on_an_agreeing_record_and_reads_exactly_the_pushed_digest(
@@ -853,17 +890,7 @@ def test_the_sign_step_passes_on_an_agreeing_record_and_reads_exactly_the_pushed
         )
         in done.stdout
     )
-    # two reads, both of the digest and of nothing else: not a tag, not the pull request's image
-    (inspect,) = [call for call in calls if call[:2] == ["image", "inspect"]]
-    (run,) = [call for call in calls if call[:1] == ["run"]]
-    assert len(calls) == 2
-    assert inspect[-1] == PUSHED
-    assert PUSHED in run
-    assert not [arg for call in calls for arg in call if arg.startswith(LOCAL.split(":")[0] + ":")]
-    # the file is read in a container with no network, no environment passed and no mount
-    assert run[run.index("--network") + 1] == "none"
-    assert run[-1] == "/opt/nemar/build.json"
-    assert not {"--env", "-e", "--env-file", "--volume", "-v", "--mount", "--privileged"} & set(run)
+    assert_two_reads_in_isolation(calls, PUSHED)
 
 
 @pytest.mark.parametrize("flavor", FLAVORS)
@@ -880,9 +907,7 @@ def test_the_test_step_passes_on_a_dev_record_and_reads_the_image_it_built(
         )
         in done.stdout
     )
-    assert len(calls) == 2
-    assert all(LOCAL in call for call in calls)
-    assert [call[-1] for call in calls if call[0] == "run"] == ["/opt/nemar/build.json"]
+    assert_two_reads_in_isolation(calls, LOCAL)
 
 
 def disagreeing_record(directory: Path, kind: str, expected: str):
@@ -973,14 +998,14 @@ def test_the_test_step_fails_on_a_dev_record_of_another_version(tmp_path):
 
 
 @pytest.mark.parametrize("which", [TEST_STEP, SIGN_STEP])
-def test_a_step_fails_when_the_image_has_no_build_file(tmp_path, which):
+def test_a_step_fails_when_the_build_file_cannot_be_read_from_the_image(tmp_path, which):
     build = "dev" if which == TEST_STEP else "release"
     labels, _ = real_record(tmp_path, "cpu", build)
     done, calls = run_step(
         tmp_path, which, "cpu", labels, tmp_path / "no-such-file", VERSIONS[build]
     )
     assert done.returncode != 0
-    assert "::error::" + NO_BUILD_FILE[which[0]] in output_of(done)
+    assert "::error::" + CANNOT_READ[which[0]] in output_of(done)
     assert "agrees" not in done.stdout
     assert any(call[:1] == ["run"] for call in calls)
 

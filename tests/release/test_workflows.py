@@ -421,14 +421,16 @@ def test_the_build_record_check_adds_no_job_no_trigger_and_no_permission_to_the_
     workflow = load(IMAGE_WORKFLOW.name)
     assert list(workflow["jobs"]) == ["test", "publish", "sign", "release"]
     assert set(triggers(workflow)) == {"pull_request", "push", "workflow_dispatch"}
-    for step in (*image_steps("test"), *image_steps("sign")):
-        if step.get("name") in (
-            "Check the build record and labels against the dev build",
-            "Check the pushed digest's build record against the version step",
-        ):
-            assert set(step) <= {"name", "env", "run"}, step.get("name")
-            assert "secrets." not in str(step)
-            assert "permissions" not in step
+    for job, name in (
+        ("test", "Check the build record and labels against the dev build"),
+        ("sign", "Check the pushed digest's build record against the version step"),
+    ):
+        found = [s for s in image_steps(job) if s.get("name") == name]
+        assert len(found) == 1, (job, name)  # the loop below must not pass for want of the step
+        (step,) = found
+        assert set(step) <= {"name", "env", "run"}, name
+        assert "secrets." not in str(step)
+        assert "permissions" not in step
 
 
 # the runner release workflow (S4) ----------------------------------------------------------------------

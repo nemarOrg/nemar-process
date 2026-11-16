@@ -184,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! docker run --rm --network none --entrypoint cat nemar-python:ci /opt/nemar/build.json > image-build.json; then
-            echo "::error::the built image has no build file"
+            echo "::error::the build file could not be read from the built image"
             exit 1
           fi
           docker image inspect --format '{{json .Config.Labels}}' nemar-python:ci > image-labels.json
@@ -440,15 +440,15 @@ jobs:
       # run's commit and `release`. A disagreement ends the leg here, before any signature, and a
       # digest's record cannot change, so a re-run cannot pass: the way on is a new version. The
       # reference is the digest, so the daemon holds exactly the content that was smoke tested and is
-      # signed below, and the file is read by `cat` in a container with no network, no environment and
-      # no mount. The step has no `if`, no `env` and no credential of its own (docs/images.md, "The
-      # build a record names"). It proves nothing about an image built on purpose to lie: the record
-      # is the image's own statement.
+      # signed below, and the file is read by `cat` in a container with no network, no host environment
+      # passed in and no mount. The step has no `if`, no `env` and no credential of its own
+      # (docs/images.md, "The build a record names"). It proves nothing about an image built on purpose
+      # to lie: the record is the image's own statement.
       - name: Check the pushed digest's build record against the version step
         run: |
           set -euo pipefail
           if ! docker run --rm --network none --entrypoint cat "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" /opt/nemar/build.json > image-build.json; then
-            echo "::error::the pushed image has no build file"
+            echo "::error::the build file could not be read from the pushed image"
             exit 1
           fi
           docker image inspect --format '{{json .Config.Labels}}' "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" > image-labels.json
