@@ -21,6 +21,7 @@ import zarr_support as z
 from nemar_process import cli as command
 from nemar_process import sj
 from nemar_process.common import records, zarr_hosts, zarr_input
+from recipe_support import PINNED_ICA_RECIPE_VERSION
 from zarr_support import no_fence, routing, served  # noqa: F401  fixtures
 
 ARGS = [
@@ -87,7 +88,7 @@ def test_the_dataset_record_still_says_what_was_read_and_what_was_asked_for(ran)
     _, _, out = ran
     record = json.loads((out / "desc-nemarica_signalJourney.json").read_text(encoding="utf-8"))
     nemar = record["extensions"]["nemar"]
-    assert nemar["recipe"] == {"id": "nemar-ica", "version": "1.0.0"}
+    assert nemar["recipe"] == {"id": "nemar-ica", "version": PINNED_ICA_RECIPE_VERSION}
     assert nemar["input"]["kind"] == "zarr"
     assert nemar["input"]["profile"] == "serving"
     assert nemar["input"]["stores"] == [z.EEG_ONE]

@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 RECIPE_ID = "nemar-ica"
-RECIPE_VERSION = "1.0.0"
+RECIPE_VERSION = "1.0.0-b1"
 
 STEP_ORDER = ("asr", "reref", "ica", "iclabel")
 

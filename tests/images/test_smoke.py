@@ -25,6 +25,7 @@ from recipe_support import (
     PINNED_EEGPREP_COMMIT,
     PINNED_EEGPREP_TEXT,
     PINNED_EEGPREP_VERSION,
+    PINNED_ICA_RECIPE_VERSION,
     PINNED_RECIPE_VERSION,
 )
 from repo_paths import LOCK, PYPROJECT, RECIPES, ROOT, SMOKE
@@ -261,7 +262,7 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
     assert document["recipe_command"]["version"]["eegprep"] == PINNED_EEGPREP_TEXT
     assert document["recipe_command"]["version"]["recipes"] == {
         "nemar-floor": PINNED_RECIPE_VERSION,
-        "nemar-ica": "1.0.0",
+        "nemar-ica": PINNED_ICA_RECIPE_VERSION,
     }
     assert document["recipe_command"]["version"]["inputs"] == {
         "nemar-floor": ["bids", "zarr"],

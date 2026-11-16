@@ -499,7 +499,7 @@ The tests: `tests/recipes/test_floor_input_zarr_args.py` (arguments, the input o
 uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_input_zarr_network.py -m network -q
 ```
 
-## `nemar-ica` 1.0.0: the decomposition
+## `nemar-ica` 1.0.0-b1: the decomposition
 
 `nemar-recipe run nemar-ica` decomposes every recording of a dataset into independent components, on the floor's cleaned data, and writes the decomposition, ASR's state and ICLabel's classification as files with a signalJourney record that names every setting, version, digest and fact that decides what the numbers are.
 It is one recipe with two inputs, as the floor is (`--input bids`, the default, or `--input zarr`; the Zarr input block of every record is written by the same common code as the floor's), and the product label is `nemarica`.
