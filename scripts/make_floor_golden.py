@@ -10,7 +10,8 @@ a difference on another host is a finding to record (docs/recipes.md, O6), not a
 the comparison.
 
 Any change under ``recipes/nemar_process/common/`` that alters a byte of these files is a
-``nemar-floor`` version bump; a change that does not bumps only ``COMMON_VERSION``'s patch.
+``nemar-floor`` version bump; a change that does not bumps only ``COMMON_VERSION``: its next
+iteration before the first release, its patch from then on.
 A move of the version (before the first release, the next iteration ``-b<N+1>``; then the first
 release itself) regenerates these files into the directory of the new version (``git mv`` the
 directory to ``nemar-floor-<RECIPE_VERSION>``, change ``GOLDEN`` and this text, and run the script).
