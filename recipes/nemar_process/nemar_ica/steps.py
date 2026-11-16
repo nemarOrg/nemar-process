@@ -80,6 +80,9 @@ AMICA15_SHA256 = "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b
 
 # Why a recording ends here, in the table's `detail` (the dataset record's `reason`).
 ASR_MAXMEM_DETAIL = "asr_maxmem"
+# A recording whose channels have no location cannot be classified (ICLabel maps each component on
+# the scalp), and it ends here, at the step `iclabel`, before ASR and the fit.
+ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 
 

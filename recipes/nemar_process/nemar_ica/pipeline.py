@@ -132,6 +132,24 @@ def decomposition_call(settings: Settings, resolution: device.Resolution, rank: 
     return {**engine, "reorder": steps.REORDER, **call}
 
 
+def check_locations(eeg: dict[str, Any]) -> None:
+    """End the recording, before ASR and the fit, when ICLabel could not map its components.
+
+    ICLabel draws each component's scalp map with eegprep's ``topoplot``, which raises when no channel
+    has a finite theta and radius (a recording with no electrode locations: every store of the Zarr
+    serving copy). The fit of such a recording (up to 2000 iterations) would run and be discarded, so
+    ``topoplot`` is called here on the working copy's channels exactly as ICLabel calls it, with one
+    value per channel: the rule is eegprep's own and cannot drift from it. The error is recognized by
+    its class, never by its message. ICLabel is not skipped: the recording fails, writing nothing.
+    """
+    from eegprep import topoplot
+
+    try:
+        topoplot(np.ones(int(eeg["nbchan"])), eeg["chanlocs"], noplot="on", gridscale=32)
+    except ValueError as error:
+        raise RecordingError(STEP_FAILED, "iclabel", steps.ICLABEL_NO_LOCATIONS) from error
+
+
 def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """``clean_asr`` with its state kept; the repaired copy and the state as canonical JSON text.
 
@@ -246,6 +264,10 @@ def process(loaded: Loaded, settings: Settings, resolution: device.Resolution) -
         if rank < steps.MIN_RANK:
             # one component (or none) is not a decomposition: nothing is wrong with the recording
             raise RecordingSkipped(ICA_INELIGIBLE, "ica", RANK_TOO_LOW)
+
+    # ICLabel needs a scalp map: a recording that cannot have one fails now, not after the fit
+    with guarded("iclabel"):
+        check_locations(eeg)
 
     # ASR, keeping the state that reproduces it
     with guarded("asr"):
