@@ -149,7 +149,7 @@ def zarr_run_recording(
 
 
 def run_facts(context: RunContext) -> dict[str, Any]:
-    """What the dataset record says of the run: the settings and the recordings per device.
+    """What the dataset record says of the run: its settings and, per device, its products.
 
     A merge of product directories (``aggregate``) has no options and ran no recording: it states
     neither, and each row of the table still says the device its recording ran on.

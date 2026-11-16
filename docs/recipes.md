@@ -561,7 +561,7 @@ A dispatch that passes one must first make it change the derivative key.
 ### The device
 
 The CPU is the default path and a GPU a bonus: the lab workstations are shared and their GPU is often busy.
-`auto` resolves once, at the start:
+`auto` resolves for each recording, from the option, the runner's two variables and torch's view of the GPU, none of which a run changes, so every recording of a run takes the same device (the preflight resolves it once more, before anything is written, only to refuse an explicit `cuda` with no GPU):
 
 - to the runner's decision when `NEMAR_DEVICE` is set (`cpu` or `cuda`; any other value is exit 2), with `NEMAR_DEVICE_REASON` as the reason (a word of lowercase letters, digits and `_`, such as `gpu_idle`, `gpu_busy`, `gpu_reserved`, `gpu_memory_short`; any other text is exit 2; none is `unspecified`);
 - otherwise to `cuda` when torch sees a GPU (reason `gpu_present`), else to `cpu` (reason `no_gpu`);
@@ -617,7 +617,7 @@ The recordings table has the columns `path`, `datatype`, `status`, `code`, `step
 - the good-channel set and its count, ICLabel's version and the SHA-256 of its network file, and the input profile (`archive` for a dataset directory, `serving` for the Zarr serving copy);
 - the device facts: `device_requested`, `device` (the one that ran), `device_reason`, `fallback` (true exactly when `device_requested` is `auto` and the CPU ran), `gpu_name` (CUDA only), `torch_version`, `torch_cuda`, `threads` and `image_flavor` (from `/opt/nemar/flavor`, null outside an image).
 
-The dataset record adds `devices` (recordings per device) and `ica_run` (engine, device asked for, threads and iterations), because its steps hold only constants.
+The dataset record adds `devices` (the recordings that wrote a product, per device) and `ica_run` (engine, device asked for, threads and iterations), because its steps hold only constants.
 A merge of product directories (`aggregate`) ran no recording and states neither; each row of its table still says its recording's device.
 
 ### Failures and skips

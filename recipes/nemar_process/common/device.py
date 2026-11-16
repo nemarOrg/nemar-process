@@ -134,7 +134,12 @@ def resolve(
     *,
     gpu_visible: Callable[[], bool] = cuda_available,
 ) -> Resolution:
-    """The device that runs, once, at the start of a run.
+    """The device a recording runs on, from the option, the environment and torch's view of the GPU.
+
+    It is resolved for each recording (``outputs.produce``), and once more by the preflight, before
+    anything is written, only to refuse an explicit ``cuda`` with no GPU. None of its inputs changes
+    during a run, so every recording of a run resolves to the same device; the dataset record's
+    ``devices`` counts the recordings that wrote a product on each device.
 
     * ``cpu`` runs on the CPU, reason ``requested``.
     * ``cuda`` runs on the GPU, reason ``requested``; with no GPU visible the run is refused before
