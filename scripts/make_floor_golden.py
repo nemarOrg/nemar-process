@@ -1,6 +1,6 @@
 """Write or check the pinned decisions of ``nemar-floor`` on the EEG fixture.
 
-The golden files in ``tests/recipes/golden/nemar-floor-1.0.1/`` are what the floor DECIDED for the
+The golden files in ``tests/recipes/golden/nemar-floor-1.0.0-b1/`` are what the floor DECIDED for the
 fixture recording: the channel table, the bad segments, and a small JSON of the plan hash, the
 rules, the skipped steps and the applied filters. They hold no float beyond the table's rounding and
 no measurement that depends on how a sum is accumulated, so they are the part of the output that
@@ -11,11 +11,14 @@ the comparison.
 
 Any change under ``recipes/nemar_process/common/`` that alters a byte of these files is a
 ``nemar-floor`` version bump; a change that does not bumps only ``COMMON_VERSION``'s patch.
-A bump regenerates these files into the directory of the new version (``git mv`` the directory to
-``nemar-floor-<RECIPE_VERSION>``, change ``GOLDEN`` and this text, and run the script). A bump that
-changes no decision changes only ``recipe.version`` and ``plan_hash`` in ``decisions.json`` (the plan
-hash covers the recipe's name and version), and ``channels.tsv`` and ``badsegments.tsv`` stay
-byte-identical; ``tests/recipes/test_golden_decisions.py`` shows it for the move to 1.0.1.
+A move of the version (before the first release, the next iteration ``-b<N+1>``; then the first
+release itself) regenerates these files into the directory of the new version (``git mv`` the
+directory to ``nemar-floor-<RECIPE_VERSION>``, change ``GOLDEN`` and this text, and run the script).
+A move that changes no decision changes only ``recipe.version`` and ``plan_hash`` in
+``decisions.json`` (the plan hash covers the recipe's name and version), and ``channels.tsv`` and
+``badsegments.tsv`` stay byte-identical. At ``1.0.0`` the plan hash is again the fixture's hash
+before the scheme, ``sha256:ffa6a154580dd7099bb4f2a6a5bf7a9b3f1f2ffc6a99e9a2603124702ebe35fd``,
+unless a decision changed (``tests/recipes/test_golden_decisions.py``; docs/recipes.md).
 
 Run it in the runtime environment (``--group runtime``):
 
@@ -32,7 +35,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GOLDEN = ROOT / "tests" / "recipes" / "golden" / "nemar-floor-1.0.1"
+GOLDEN = ROOT / "tests" / "recipes" / "golden" / "nemar-floor-1.0.0-b1"
 DATASET = ROOT / "tests" / "fixtures" / "eeg" / "dataset"
 RECORDING = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
 PRODUCT = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"

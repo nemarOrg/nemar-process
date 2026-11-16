@@ -35,7 +35,7 @@
     },
     "recipe_version": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-b[1-9][0-9]*)?$"
     },
     "input_kind": {
       "enum": ["bids", "zarr"]

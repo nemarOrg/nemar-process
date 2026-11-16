@@ -35,8 +35,8 @@ DATASET_ID = "on007823"
 DATASET_VERSION = "v1.0.0"
 # The versions the tests pin. A bump of the recipe, of the common layer or of eegprep is an edit of
 # these lines (and of the places that declare them), not a search through the tests.
-PINNED_RECIPE_VERSION = "1.0.1"
-PINNED_COMMON_VERSION = "1.0.0"
+PINNED_RECIPE_VERSION = "1.0.0-b1"
+PINNED_COMMON_VERSION = "1.0.0-b1"
 PINNED_EEGPREP_VERSION = "0.5.0"
 
 
