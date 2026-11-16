@@ -201,7 +201,10 @@ The accounting export carries a job's id, partition, state, elapsed time, alloca
 The NEMAR route it posts to is built in the gateway epic and does not exist yet.
 If the site does not allow a `FORK` application to run these commands on a login node, the observer cannot run as designed; that is question 6 of the design page, and an escalation, not something to work around.
 
-## Validating `nemar-ica` on a GPU by hand
+## Validating `nemar-ica` on a graphics processing unit by hand
+
+Abbreviations used here: central processing unit (CPU), graphics processing unit (GPU), Compute Unified Device Architecture (CUDA), adaptive mixture independent component analysis (AMICA).
+pAMICA is the Python implementation of AMICA and ICLabel is EEGLAB's classifier of independent components (names, not abbreviations).
 
 No GPU host has run the recipe in this repository's tests, so the first GPU run is a manual step.
 It needs a machine whose container runtime can give a container an NVIDIA GPU, the CUDA flavor of the image by digest ([images.md](images.md)), and a public dataset directory (never a live dataset, never one that is not public).
