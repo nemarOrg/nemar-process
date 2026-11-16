@@ -174,8 +174,10 @@ In `test` (each flavor, every pull request) the build is the dev build the job n
 In `sign` (each flavor, before the first signature) the image is the pushed digest, read by that digest, and the build is the version step's version, the run's commit and `release`.
 The step in `sign` has no condition, no environment and no credential of its own, and it reads the file with `cat` in a container with no network and no mount.
 A leg that disagrees fails there, before anything is signed, so `release` attaches nothing; the other flavor's leg is independent.
+The step fails with one of three messages: `::error::build record disagrees with the version step:` (one line per place), `::error::the build file could not be read from the pushed image` (or `the built image` in `test`; the read failed, which is no file but also a pull or daemon error), and `::error::build record check:` (an expected value is malformed, exit status 2).
 The expected version and commit must themselves have the shape of that build, or the script stops with exit status 2 before it reads anything, so an empty `VERSION` is never matched by an empty record.
-It catches an image whose record is not the build the run named: a cached layer of a dev build, a Dockerfile that stopped passing an argument through, a digest output that names another run's or another flavor's image.
+It catches an image whose record is not the build the run named: a cached layer of a dev build, a Dockerfile that stopped passing an argument through, a digest output that names another run's image.
+It does not tell the flavors apart: the build file has no flavor and both flavors state the same version, commit and build, so another flavor's image is caught by the flavor check of the smoke step (`scripts/check_smoke_pins.py --flavor`, earlier in the same leg), not by this one.
 It does not catch an image built on purpose to lie: the build file is the image's own statement, and what binds a digest to this workflow is the guards and the signing identity (see "Verifying a signature").
 No other label is read there; the flavor and the lock are checked where they always were.
 
@@ -190,6 +192,7 @@ Never use an unsigned tag: take only a digest that `cosign verify` accepted.
 - The CPU `sign` leg alone can be re-run until the SIF tag `sha256-<hex>` exists, because it refuses to move an existing SIF tag. If the failure came after the SIF was pushed (for example while signing it), a re-run stops there, and the way on is to publish a new version: a new tag and a new image. The CUDA leg has no SIF step, so it can always be re-run.
 - If a pushed digest failed its smoke test, that image is bad, and the way on is also a new version.
 - If `sign` refused the pushed digest's build record (the step "Check the pushed digest's build record against the version step"), the pushed image is not the version, the commit or the build the run named. A re-run fails the same way, because a digest's record cannot change; the tags stay published and unsigned, and the way on is a new version once the cause is fixed.
+  The other flavor's leg is independent and may already have signed its own digest for that version; the new version replaces both flavors.
 - If only `release` failed, re-run it; it fails rather than replace an existing asset.
 
 There is one digest file per flavor, `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json`, and each holds the image digest and reference, the SHA-256 of `uv.lock`, the Python, eegprep, pamica and torch versions, the native binary's SHA-256 (`amica15`) and the SHA-256 reading of the CPU fit (`cpu_fit_sha256`, see "The smoke test"), the source commit, the run's address, and `launch_image`, the `image` object of a launch specification for this release.

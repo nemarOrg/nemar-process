@@ -1045,3 +1045,11 @@ def test_the_docs_name_the_check_and_say_what_it_catches_and_what_it_does_not():
     # the failure the check ends a leg with, and what to do then
     assert "Check the pushed digest's build record against the version step" in docs
     assert "a digest's record cannot change" in docs
+    # what it does not catch: another flavor's image states the same version, commit and build
+    assert "names another run's image." in docs
+    assert "another flavor's image" not in docs.split("It catches an image")[1].split("\n")[0]
+    assert "another flavor's image is caught by the flavor check of the smoke step" in docs
+    assert "the new version replaces both flavors" in docs
+    # the messages the step can fail with
+    assert "the build file could not be read from the pushed image" in docs
+    assert "no build file" not in docs
