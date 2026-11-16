@@ -19,9 +19,11 @@ from pathlib import Path
 
 import check_image_build
 import pytest
+import yaml
 from nemar_process.common import build as process_build
-from repo_paths import ROOT
+from repo_paths import IMAGE_WORKFLOW, ROOT
 from test_dockerfile import final_rows
+from test_publish_guards import find_step, output_of, run_body
 
 SCRIPT = ROOT / "scripts" / "check_image_build.py"
 PREFIX = "::error::build record disagrees with the version step:"
@@ -89,9 +91,11 @@ def write_labels(directory: Path, labels) -> Path:
     return target
 
 
-def real_record(directory: Path, flavor: str, build: str, commit: str = COMMIT):
+def real_record(
+    directory: Path, flavor: str, build: str, commit: str = COMMIT, version: str | None = None
+):
     """(labels file, build file) of a real image of the flavor, built as `build`."""
-    version = VERSIONS[build]
+    version = VERSIONS[build] if version is None else version
     return (
         write_labels(directory, labels_of(flavor, version, commit, build)),
         write_build_file(directory, version, commit, build),
@@ -429,7 +433,7 @@ MALFORMED_VERSIONS = {
     "a dev version with a trailing newline": ("dev", "1.2.3-dev1\n"),
     "a version with a v": ("release", "v1.2.3"),
     "two numbers": ("release", "1.2"),
-    "a fourth number": ("release", "1.2.3.4"),
+    "a fourth part": ("release", "1.2.3.final"),
     "a pre-release that is not a dev one": ("release", "1.2.3-rc1"),
     "a version with a space": ("release", "1.2.3 "),
 }
@@ -597,3 +601,276 @@ def test_the_dockerfiles_write_the_build_file_with_the_writer_the_tests_run():
             if keyword == "RUN" and "nemar_process.common.build write /opt/nemar/build.json" in rest
         ]
         assert len(writers) == 1, flavor
+
+
+# ---- the two steps of the workflow, run -------------------------------------------------------------
+#
+# The `run` of each new step is taken from the parsed workflow and executed with `bash -e`, as the
+# publish guards are (tests/images/test_publish_guards.py): the workflow's, the job's and the step's
+# `env:` with each expression replaced by a test value. The one outside system is `docker`: a
+# stand-in executable first on PATH that serves the real files, records its arguments, and exits
+# non-zero for anything but the two reads the steps are meant to make of the one image reference it
+# was told. It holds no NEMAR logic: the script, the record and the labels are the real ones.
+
+TEST_STEP = ("test", "Check the build record and labels against the dev build")
+SIGN_STEP = ("sign", "Check the pushed digest's build record against the version step")
+DIGEST = "sha256:" + "9f2c" * 16
+PUSHED = "ghcr.io/nemarorg/nemar-python@" + DIGEST
+LOCAL = "nemar-python:ci"
+NO_BUILD_FILE = {
+    "test": "the built image has no build file",
+    "sign": "the pushed image has no build file",
+}
+
+STANDIN_DOCKER = r"""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["STANDIN_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\n")
+image = os.environ["STANDIN_IMAGE"]
+if args[:2] == ["image", "inspect"] and args[-1] == image and "{{json .Config.Labels}}" in args:
+    with open(os.environ["STANDIN_LABELS"], "rb") as labels:
+        sys.stdout.buffer.write(labels.read())
+elif args[:1] == ["run"] and image in args and args[-1] == "/opt/nemar/build.json":
+    # `cat` of the file the image has, or the failure of `cat` of one it does not have
+    if not os.path.exists(os.environ["STANDIN_BUILD_FILE"]):
+        sys.exit(1)
+    with open(os.environ["STANDIN_BUILD_FILE"], "rb") as build_file:
+        sys.stdout.buffer.write(build_file.read())
+else:
+    sys.stderr.write("stand-in docker: not asked for this: {!r}\n".format(args))
+    sys.exit(97)
+"""
+
+
+def step_env(job: dict, step: dict, flavor: str, version: str) -> dict[str, str]:
+    """The workflow's, the job's and the step's `env:`, each expression replaced by a test value."""
+    expressions = {
+        "${{ steps.devbuild.outputs.version }}": version,
+        "${{ needs.publish.outputs.version }}": version,
+        "${{ needs.publish.outputs[format('digest_{0}', matrix.flavor)] }}": DIGEST,
+        "${{ matrix.flavor }}": flavor,
+    }
+    document = yaml.safe_load(IMAGE_WORKFLOW.read_text(encoding="utf-8"))
+    merged: dict[str, str] = {}
+    for source in (document.get("env", {}), job.get("env", {}), step.get("env", {})):
+        for key, value in source.items():
+            text = str(value)
+            for expression, replacement in expressions.items():
+                text = text.replace(expression, replacement)
+            assert "${{" not in text, "no test value for the expression in {}: {}".format(key, text)
+            merged[key] = text
+    return merged
+
+
+def run_step(
+    tmp_path: Path,
+    which: tuple[str, str],
+    flavor: str,
+    labels: Path,
+    build_file: Path,
+    version: str,
+    commit: str = COMMIT,
+    **env: str,
+):
+    """Run one step; return the finished process and the arguments `docker` was called with."""
+    job, step = find_step(*which)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "python3").symlink_to(sys.executable)
+    (bin_dir / "docker-standin.py").write_text(STANDIN_DOCKER, encoding="utf-8")
+    docker = bin_dir / "docker"
+    docker.write_text('#!/bin/sh\nexec python3 "$(dirname "$0")/docker-standin.py" "$@"\n')
+    docker.chmod(0o755)
+    work = tmp_path / "work"  # a checkout, as far as the step is concerned: it has the scripts
+    work.mkdir()
+    (work / "scripts").symlink_to(ROOT / "scripts")
+    log = tmp_path / "docker.log"
+    merged = {
+        **step_env(job, step, flavor, version),
+        "PATH": "{}{}{}".format(bin_dir, os.pathsep, os.environ["PATH"]),
+        "GITHUB_SHA": commit,
+        "STANDIN_IMAGE": LOCAL if which == TEST_STEP else PUSHED,
+        "STANDIN_LABELS": str(labels),
+        "STANDIN_BUILD_FILE": str(build_file),
+        "STANDIN_LOG": str(log),
+        **env,
+    }
+    done = run_body(step, merged, work, tmp_path)
+    calls = (
+        [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        if log.exists()
+        else []
+    )
+    return done, calls
+
+
+@pytest.mark.parametrize("flavor", FLAVORS)
+@pytest.mark.parametrize("version", ["1.2.3", "10.20.30"])
+def test_the_sign_step_passes_on_an_agreeing_record_and_reads_exactly_the_pushed_digest(
+    tmp_path, flavor, version
+):
+    labels, build_file = real_record(tmp_path, flavor, "release", version=version)
+    done, calls = run_step(tmp_path, SIGN_STEP, flavor, labels, build_file, version)
+    assert done.returncode == 0, output_of(done)
+    assert (
+        "build record agrees with the version step: build=release version={} commit={}".format(
+            version, COMMIT
+        )
+        in done.stdout
+    )
+    # two reads, both of the digest and of nothing else: not a tag, not the pull request's image
+    (inspect,) = [call for call in calls if call[:2] == ["image", "inspect"]]
+    (run,) = [call for call in calls if call[:1] == ["run"]]
+    assert len(calls) == 2
+    assert inspect[-1] == PUSHED
+    assert PUSHED in run
+    assert not [arg for call in calls for arg in call if arg.startswith(LOCAL.split(":")[0] + ":")]
+    # the file is read in a container with no network, no environment passed and no mount
+    assert run[run.index("--network") + 1] == "none"
+    assert run[-1] == "/opt/nemar/build.json"
+    assert not {"--env", "-e", "--env-file", "--volume", "-v", "--mount", "--privileged"} & set(run)
+
+
+@pytest.mark.parametrize("flavor", FLAVORS)
+@pytest.mark.parametrize("version", ["1.2.3-dev1", "0.2.0-dev17"])
+def test_the_test_step_passes_on_a_dev_record_and_reads_the_image_it_built(
+    tmp_path, flavor, version
+):
+    labels, build_file = real_record(tmp_path, flavor, "dev", version=version)
+    done, calls = run_step(tmp_path, TEST_STEP, flavor, labels, build_file, version)
+    assert done.returncode == 0, output_of(done)
+    assert (
+        "build record agrees with the version step: build=dev version={} commit={}".format(
+            version, COMMIT
+        )
+        in done.stdout
+    )
+    assert len(calls) == 2
+    assert all(LOCAL in call for call in calls)
+    assert [call[-1] for call in calls if call[0] == "run"] == ["/opt/nemar/build.json"]
+
+
+def disagreeing_record(directory: Path, kind: str, expected: str):
+    """A record for the build `expected` with one thing wrong: (labels, file, places that say so)."""
+    version = VERSIONS[expected]
+    other = "dev" if expected == "release" else "release"
+    if kind == "the version in the file":
+        wrong = "9.9.9" if expected == "release" else "9.9.9-dev9"
+        return (
+            write_labels(directory, labels_of("cpu", version, COMMIT, expected)),
+            write_build_file(directory, wrong, COMMIT, expected),
+            ["build file version"],
+        )
+    if kind == "the commit of the record":  # a good record, of a commit this run did not build
+        labels, build_file = real_record(directory, "cuda", expected, OTHER_COMMIT)
+        return labels, build_file, ["build file commit", "label org.opencontainers.image.revision"]
+    if kind == "the other kind of build":  # a good record, of a dev build where a release is named
+        labels, build_file = real_record(directory, "cpu", other)
+        return (
+            labels,
+            build_file,
+            [
+                "build file build",
+                "build file version",
+                "label io.nemar.build",
+                "label org.opencontainers.image.version",
+            ],
+        )
+    assert kind == "a label"
+    wrong_labels = labels_of("cpu", version, COMMIT, expected)
+    wrong_labels[LABEL_OF["build"]] = other
+    return (
+        write_labels(directory, wrong_labels),
+        write_build_file(directory, version, COMMIT, expected),
+        ["label io.nemar.build"],
+    )
+
+
+KINDS = [
+    "the version in the file",
+    "the commit of the record",
+    "the other kind of build",
+    "a label",
+]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_sign_step_fails_on_a_record_that_disagrees_and_names_the_place(tmp_path, kind):
+    labels, build_file, places = disagreeing_record(tmp_path, kind, "release")
+    done, calls = run_step(tmp_path, SIGN_STEP, "cpu", labels, build_file, VERSIONS["release"])
+    assert done.returncode == 1, output_of(done)
+    assert len(calls) == 2  # it read the record, and the script found it wanting
+    assert sorted(
+        line[len(PREFIX) + 1 :].split(":", 1)[0]
+        for line in done.stderr.splitlines()
+        if line.startswith(PREFIX)
+    ) == sorted(places)
+    assert "agrees" not in done.stdout
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_test_step_fails_on_a_record_that_disagrees_and_names_the_place(tmp_path, kind):
+    labels, build_file, places = disagreeing_record(tmp_path, kind, "dev")
+    done, calls = run_step(tmp_path, TEST_STEP, "cpu", labels, build_file, VERSIONS["dev"])
+    assert done.returncode == 1, output_of(done)
+    assert len(calls) == 2
+    assert sorted(
+        line[len(PREFIX) + 1 :].split(":", 1)[0]
+        for line in done.stderr.splitlines()
+        if line.startswith(PREFIX)
+    ) == sorted(places)
+
+
+def test_the_sign_step_fails_on_a_commit_other_than_the_one_the_run_built(tmp_path):
+    labels, build_file = real_record(tmp_path, "cpu", "release")
+    done, _ = run_step(
+        tmp_path, SIGN_STEP, "cpu", labels, build_file, VERSIONS["release"], commit=OTHER_COMMIT
+    )
+    assert done.returncode == 1, output_of(done)
+    assert "build file commit: found {}, expected {}".format(COMMIT, OTHER_COMMIT) in done.stderr
+
+
+def test_the_test_step_fails_on_a_dev_record_of_another_version(tmp_path):
+    labels, build_file = real_record(tmp_path, "cpu", "dev", version="1.2.3-dev0")
+    done, _ = run_step(tmp_path, TEST_STEP, "cpu", labels, build_file, "1.2.3-dev1")
+    assert done.returncode == 1, output_of(done)
+    assert "build file version: found 1.2.3-dev0, expected 1.2.3-dev1" in done.stderr
+
+
+@pytest.mark.parametrize("which", [TEST_STEP, SIGN_STEP])
+def test_a_step_fails_when_the_image_has_no_build_file(tmp_path, which):
+    build = "dev" if which == TEST_STEP else "release"
+    labels, _ = real_record(tmp_path, "cpu", build)
+    done, calls = run_step(
+        tmp_path, which, "cpu", labels, tmp_path / "no-such-file", VERSIONS[build]
+    )
+    assert done.returncode != 0
+    assert "::error::" + NO_BUILD_FILE[which[0]] in output_of(done)
+    assert "agrees" not in done.stdout
+    assert any(call[:1] == ["run"] for call in calls)
+
+
+@pytest.mark.parametrize("which", [TEST_STEP, SIGN_STEP])
+def test_a_step_fails_when_the_version_it_is_given_is_empty(tmp_path, which):
+    # a publish leg that set no output leaves VERSION empty, and an empty record would agree with it
+    build = "dev" if which == TEST_STEP else "release"
+    labels = {LABEL_OF["version"]: "", LABEL_OF["commit"]: COMMIT, LABEL_OF["build"]: build}
+    build_file = tmp_path / "image-build.json"
+    build_file.write_text(
+        json.dumps({"build": build, "commit": COMMIT, "version": ""}), encoding="utf-8"
+    )
+    done, _ = run_step(
+        tmp_path,
+        which,
+        "cpu",
+        write_labels(tmp_path, labels),
+        build_file,
+        VERSIONS[build],
+        VERSION="",
+    )
+    assert done.returncode == 2, output_of(done)
+    assert "the expected version of a {} build".format(build) in done.stderr

@@ -350,6 +350,78 @@ def test_the_pull_request_paths_include_what_the_launch_test_runs_on():
         assert needed in paths, needed
 
 
+def test_a_change_to_the_build_record_check_runs_the_image_workflow_on_its_pull_request():
+    assert "scripts/check_image_build.py" in triggers(workflow())["pull_request"]["paths"]
+
+
+TEST_RECORD_STEP = "Check the build record and labels against the dev build"
+SIGN_RECORD_STEP = "Check the pushed digest's build record against the version step"
+LABEL_STEP = "Check the labels against the lock and the commit"
+
+
+def test_the_test_job_checks_the_build_record_after_the_build_and_the_label_step():
+    job = workflow()["jobs"]["test"]
+    names = [s.get("name", "") for s in job["steps"]]
+    assert names.count(TEST_RECORD_STEP) == 1
+    index = names.index(TEST_RECORD_STEP)
+    step = job["steps"][index]
+    # after the image is built and the existing label step, directly: nothing between them
+    build = next(
+        i for i, s in enumerate(job["steps"]) if "docker/build-push-action" in s.get("uses", "")
+    )
+    assert build < names.index(LABEL_STEP) < index
+    assert index == names.index(LABEL_STEP) + 1
+    # no `if`: both flavors run it; nothing switches it off or lets a failure pass
+    assert set(step) == {"name", "env", "run"}
+    assert step["env"] == {"VERSION": "${{ steps.devbuild.outputs.version }}"}
+    run = step["run"]
+    for needle in (
+        "scripts/check_image_build.py",
+        "--build dev",
+        '--version "$VERSION"',
+        '--commit "$GITHUB_SHA"',
+        "nemar-python:ci",
+    ):
+        assert needle in run, needle
+    assert "ghcr.io" not in run  # the pull request's own image, which nothing pushed
+
+
+def test_the_sign_job_checks_the_pushed_digests_build_record_before_anything_is_signed():
+    job = workflow()["jobs"]["sign"]
+    names = [s.get("name", "") for s in job["steps"]]
+    assert names.count(SIGN_RECORD_STEP) == 1
+    index = names.index(SIGN_RECORD_STEP)
+    step = job["steps"][index]
+    # nothing switches it off or lets a failure pass, and it takes nothing of its own: the job's
+    # VERSION and IMAGE_DIGEST, the run's GITHUB_SHA, the login and the checkout the job already has
+    assert set(step) == {"name", "run"}
+    assert "secrets." not in str(step)
+    # before the first call of cosign (the two signatures and the two verifications), and directly
+    # before the step that signs the image, after the pushed digest passed both its smoke tests
+    signing = [i for i, s in enumerate(job["steps"]) if "cosign" in s.get("run", "")]
+    assert len(signing) == 2
+    assert index < min(signing)
+    assert names[index + 1] == "Sign the image digest and verify the signature"
+    smokes = [
+        i for i, n in enumerate(names) if n.startswith("Smoke test the pushed image by digest")
+    ]
+    assert len(smokes) == 2
+    assert max(smokes) < index
+    run = step["run"]
+    for needle in (
+        "scripts/check_image_build.py",
+        "--build release",
+        '--version "$VERSION"',
+        '--commit "$GITHUB_SHA"',
+        "the pushed image has no build file",
+    ):
+        assert needle in run, needle
+    # both reads name the digest the smoke tests pulled, never a tag and never the pull request's image
+    assert run.count('"ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"') == 2
+    assert "nemar-python:" not in run
+    assert "cosign" not in run
+
+
 def test_only_the_unprivileged_test_job_runs_repository_test_code_against_the_sif():
     """The signing job holds the OIDC token and package write access: it runs no test from here."""
     jobs = workflow()["jobs"]
