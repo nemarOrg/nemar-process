@@ -23,10 +23,10 @@
     "Pg2"
   ],
   "not_assessed_channels": [],
-  "plan_hash": "sha256:6e9ee2dd23f65560c6e0aa18822f205d5341d9bb3fd65027de513514818e603c",
+  "plan_hash": "sha256:e3e3f899de1bcd2802ee4be9c6d1b4ebd4b78cc441229eaa42809ac0d7174df2",
   "recipe": {
     "id": "nemar-floor",
-    "version": "1.0.1"
+    "version": "1.0.0-b1"
   },
   "rules": [
     "signal-channels-typed",
