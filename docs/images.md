@@ -232,7 +232,8 @@ The `cuda` leg runs one tiny `nemar-ica` run in its image with no GPU visible, a
 
 ## Published images
 
-None yet.
+No release image yet.
+The image `0.1.0-cpu` in the registry is a demonstration build, published from `main` before the version step existed: it is not a release, its records name `nemar-floor` `1.0.0` and carry no `process` block, and no recipe or common version counts it (the version rule of `docs/recipes.md`).
 The first images are published from `main` (a manual dispatch, or a version tag on a commit of `main`) once the epic branch has merged, which the maintainers decide; both flavors publish and sign in that one run, and their digests are recorded here when they exist.
 
 | Version | Flavor | Image digest | SIF artifact digest | Run |
