@@ -9,7 +9,7 @@ Linux program, and neither the development environment nor a laptop can run it):
   the Amari distance. The line is printed with the reference values beside it and nothing asserts
   anything about the numbers: the binary starts from the clock, so the comparison moves from run to
   run, and no document or record turns it into a claim;
-* two runs of the binary on the same cut (50 iterations) give weight files that are NOT byte
+* two runs of the binary on the same recording (50 iterations each) give weight files that are NOT byte
   identical, as the unseeded binary implies and the record's ``bit_reproducible: false`` says; if
   they were identical the record would be wrong;
 * the pAMICA record of an image says the device facts of a CPU image with no GPU, and the binary's
@@ -173,6 +173,23 @@ def test_the_pamica_record_of_a_cpu_image_with_no_gpu_says_so(runs):
     assert facts["max_iter"] == 2000
     assert facts["threads"] == 1
     assert facts["pamica"]["pipeline"] == "pamica.AMICA(backend='torch').fit"
+
+
+@pytest.mark.apptainer
+def test_the_binarys_full_length_record_is_internally_consistent(runs):
+    """What eegprep read of the binary's output, on the full run (the path was written without a binary
+    to run it on, so this is the first reading of it): every value is consistent with the others."""
+    base, _ = runs
+    facts = ica_of(base, "amica")
+    assert facts["engine"] == "amica15"
+    assert facts["max_iter"] == 2000
+    assert 0 < facts["iterations"] <= facts["max_iter"]
+    assert facts["best_ll"] < 0  # a log-likelihood per sample of whitened data
+    assert facts["final_ll"] <= facts["best_ll"]
+    assert 0 <= facts["best_iter"] < facts["iterations"]
+    assert facts["stop_reason"] is None
+    assert facts["did_converge"] is None
+    assert facts["rank"] == facts["pcakeep"] == facts["n_good_channels"] - 1
 
 
 @pytest.mark.apptainer

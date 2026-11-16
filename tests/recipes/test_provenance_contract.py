@@ -381,8 +381,9 @@ def run_zarr(out: Path, stand_in_port: int) -> int:
 
 # A recipe and input whose run writes no recording record on the serving copy: ICLabel needs a scalp
 # map, the serving copy has no electrode locations, and eegprep raises on a channel with none, so every
-# store of nemar-ica --input zarr ends `step_failed` at `iclabel` (tests/recipes/test_nemar_ica.py pins
-# it, and the dataset record it still writes). It joins the contract when that is decided.
+# store of nemar-ica --input zarr ends `step_failed` at `iclabel` with the detail `iclabel_no_locations`,
+# before ASR and the fit (tests/recipes/test_nemar_ica_zarr.py pins it, and the dataset record it still
+# writes). It joins the contract when it is decided what a recording without locations comes to.
 NO_RECORDING_RECORDS = {("nemar-ica", "zarr")}
 
 VARIANTS = sorted(

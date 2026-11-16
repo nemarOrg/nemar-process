@@ -482,23 +482,74 @@ def test_a_recording_with_too_few_channels_for_a_decomposition_is_skipped_not_fa
     )
 
 
-def test_a_recording_without_electrode_locations_fails_at_iclabel_because_eegprep_cannot_map_it(
-    tmp_path,
-):
-    """ICLabel needs a scalp map, and eegprep's ``topoplot`` raises on channels with no location: a
-    finding for the owner (the Zarr serving copy carries none), pinned here so that a change is
-    deliberate. Nothing is written for the recording."""
+def unlocated_fixture():
+    """The cut recording with its channel labels and no location at all (a serving copy's channels)."""
     loaded = cut_fixture()
     loaded.eeg["chanlocs"] = [{"labels": c["labels"]} for c in loaded.eeg["chanlocs"]]
+    return loaded
+
+
+def test_a_recording_without_electrode_locations_fails_at_iclabel_with_a_word_and_writes_nothing(
+    tmp_path,
+):
+    """ICLabel needs a scalp map, and eegprep's ``topoplot`` raises on channels with no location (the
+    Zarr serving copy carries none). The recording ends ``step_failed`` at ``iclabel`` with the detail
+    ``iclabel_no_locations`` and nothing is written; ICLabel is neither skipped nor removed."""
     (recording,) = io.discover(DATASET)
     with pytest.raises(RecordingError) as raised, determinism.pinned_threads():
-        outputs.produce(recording, run_context(**TINY), tmp_path, loaded, profile="archive")
+        outputs.produce(
+            recording, run_context(**TINY), tmp_path, unlocated_fixture(), profile="archive"
+        )
     assert (raised.value.code, raised.value.step, raised.value.detail) == (
         "step_failed",
         "iclabel",
-        "ValueError",
+        "iclabel_no_locations",
     )
     assert not list(tmp_path.rglob("*"))
+
+
+def test_the_missing_locations_are_found_before_asr_which_is_before_the_fit(tmp_path, monkeypatch):
+    """The order is the test: with a memory budget that would fail ASR (``asr_maxmem``), a recording
+    without locations still ends at ``iclabel``, so the check came first."""
+    monkeypatch.setattr(steps, "ASR_MAXMEM_MB", None)
+    (recording,) = io.discover(DATASET)
+    with pytest.raises(RecordingError) as raised, determinism.pinned_threads():
+        outputs.produce(
+            recording, run_context(**TINY), tmp_path, unlocated_fixture(), profile="archive"
+        )
+    assert raised.value.detail == "iclabel_no_locations"
+    with pytest.raises(RecordingError) as located, determinism.pinned_threads():
+        outputs.produce(recording, run_context(**TINY), tmp_path, cut_fixture(), profile="archive")
+    assert located.value.detail == "asr_maxmem"  # the same budget fails a recording that has them
+
+
+@pytest.fixture
+def spy_binary(tmp_path, monkeypatch):
+    """A program in the place of the image's binary that only leaves a mark when it is started, with
+    the digest file that makes the preflight accept it: a real process, so what it saw is a fact."""
+    mark = tmp_path / "engine-was-started"
+    binary, digest = tmp_path / "amica15", tmp_path / "amica15.sha256"
+    binary.write_text('#!/bin/sh\ntouch "{}"\nexit 1\n'.format(mark), encoding="ascii")
+    binary.chmod(0o755)
+    digest.write_text(hashlib.sha256(binary.read_bytes()).hexdigest() + "\n", encoding="ascii")
+    monkeypatch.setattr(engines, "AMICA15_BINARY", binary)
+    monkeypatch.setattr(engines, "AMICA15_SHA256_FILE", digest)
+    return mark
+
+
+def test_no_engine_process_is_started_for_a_recording_without_locations(spy_binary, tmp_path):
+    options = {"ica_engine": "amica15", "ica_device": "cpu", "ica_max_iter": 5}
+    (recording,) = io.discover(DATASET)
+    out = tmp_path / "out"
+    with pytest.raises(RecordingError) as raised, determinism.pinned_threads():
+        outputs.produce(recording, run_context(**options), out, unlocated_fixture(), profile="a")
+    assert raised.value.detail == "iclabel_no_locations"
+    assert not spy_binary.exists()  # the fit was never started
+    # the control: a recording that has locations does reach the engine (which fails, as it is a spy)
+    with pytest.raises(RecordingError) as reached, determinism.pinned_threads():
+        outputs.produce(recording, run_context(**options), out, cut_fixture(), profile="archive")
+    assert reached.value.step == "ica"
+    assert spy_binary.exists()
 
 
 # ---- a small located dataset for the runs of the command ---------------------------------------
@@ -612,17 +663,25 @@ def test_an_explicit_cpu_is_requested_not_a_fallback(cli, tmp_path, monkeypatch)
     )
 
 
-def test_a_device_the_runner_names_that_is_not_one_is_a_usage_error(cli, tmp_path, monkeypatch):
+def test_a_device_the_runner_names_that_is_not_one_is_a_usage_error_that_says_what_to_do(
+    cli, tmp_path, monkeypatch, capsys
+):
     monkeypatch.setenv("NEMAR_DEVICE", "gpu")
     dataset = located_dataset(tmp_path / "ds")
     with pytest.raises(SystemExit) as stopped:
         cli("run", "nemar-ica", "--dataset-dir", dataset, "--out", tmp_path / "o", *run_args())
     assert stopped.value.code == 2
     assert not (tmp_path / "o").exists()
+    message = capsys.readouterr().err
+    assert message.startswith("nemar-recipe run: error: ")
+    assert "NEMAR_DEVICE must be cpu or cuda" in message
+    assert "unset it for a manual run" in message
+    assert message.endswith("\n")
+    assert message.count("\n") == 1
 
 
 def test_a_reason_that_is_not_a_word_is_a_usage_error_and_a_missing_one_is_unspecified(
-    cli, tmp_path, monkeypatch
+    cli, tmp_path, monkeypatch, capsys
 ):
     monkeypatch.setenv("NEMAR_DEVICE", "cpu")
     monkeypatch.setenv("NEMAR_DEVICE_REASON", "gpu busy, not a word")
@@ -630,6 +689,9 @@ def test_a_reason_that_is_not_a_word_is_a_usage_error_and_a_missing_one_is_unspe
     with pytest.raises(SystemExit) as stopped:
         cli("run", "nemar-ica", "--dataset-dir", dataset, "--out", tmp_path / "o", *run_args())
     assert stopped.value.code == 2
+    message = capsys.readouterr().err
+    assert "NEMAR_DEVICE_REASON must be one word of lowercase letters, digits and _" in message
+    assert "gpu busy" not in message  # the text that was refused is not echoed
     monkeypatch.delenv("NEMAR_DEVICE_REASON")
     assert device.resolve("auto", {"NEMAR_DEVICE": "cpu"}).reason == "unspecified"
 
@@ -766,14 +828,31 @@ def test_the_binary_must_be_executable(fake_binary):
         engines.preflight({"ica_engine": "amica15", "ica_device": "cpu"})
 
 
-@pytest.mark.parametrize("device_word", ["auto", "cuda"])
-def test_the_binary_engine_takes_only_the_cpu(cli, tmp_path, device_word):
+@pytest.mark.parametrize(
+    ("device_arguments", "said"),
+    [
+        ([], "the default, auto, is not cpu"),
+        (["--ica-device", "auto"], "the default, auto, is not cpu"),
+        (["--ica-device", "cuda"], "--ica-device cuda was given"),
+    ],
+    ids=["no device given", "auto", "cuda"],
+)
+def test_the_binary_engine_takes_only_the_cpu_and_the_message_says_how_to_ask_for_it(
+    cli, tmp_path, capsys, device_arguments, said
+):
     dataset = located_dataset(tmp_path / "ds")
-    args = run_args("--ica-engine", "amica15", "--ica-device", device_word)
+    args = run_args("--ica-engine", "amica15", *device_arguments)
     with pytest.raises(SystemExit) as stopped:
         cli("run", "nemar-ica", "--dataset-dir", dataset, "--out", tmp_path / "o", *args)
     assert stopped.value.code == 2
     assert not (tmp_path / "o").exists()
+    message = capsys.readouterr().err
+    assert (
+        message
+        == "nemar-recipe run: error: amica15 takes only cpu: pass --ica-device cpu ({})\n".format(
+            said
+        )
+    )
 
 
 @pytest.mark.parametrize("flag", ["--ica-threads", "--ica-max-iter"])
@@ -797,6 +876,124 @@ def test_the_engine_stamp_names_the_engine_and_never_the_device():
     other = RECIPE.option_values({"ica_engine": "amica15", "ica_device": "cpu"})
     assert RECIPE.engine_extra(other) == {"ica_engine": "amica15"}
     assert RECIPE.threads_for(RECIPE.option_values({"ica_threads": 3})) == 3
+
+
+# ---- the threads, and the exact call each engine gets ---------------------------------------------
+
+
+def test_two_threads_reach_the_engine_the_stamp_and_the_record(cli, tmp_path, no_runner):
+    dataset = located_dataset(tmp_path / "ds")
+    out = tmp_path / "o"
+    assert (
+        cli(
+            "run",
+            "nemar-ica",
+            "--dataset-dir",
+            dataset,
+            "--out",
+            out,
+            *run_args("--ica-threads", "2"),
+        )[0]
+        == 0
+    )
+    nemar = record_of(out)
+    ica = nemar["ica"]
+    assert ica["threads"] == 2  # the device facts
+    assert ica["pamica"]["threads"] == 2  # what the engine says it ran with
+    assert nemar["engine"]["threads"] == 2
+    assert nemar["engine"]["environment"]["OMP_NUM_THREADS"] == "2"
+    assert ica["bit_reproducible"] is None  # more than one thread: not stated
+    (step,) = [
+        s
+        for s in json.loads(next(out.rglob("sub-*_signalJourney.json")).read_text("utf-8"))[
+            "processingSteps"
+        ]
+        if s["stepId"] == "ica"
+    ]
+    assert step["parameters"]["threads"] == 2  # what the call passed
+    assert dataset_record_of(out)["ica_run"]["threads"] == 2
+
+
+PAMICA_KEYS = {
+    "icatype": "pamica",
+    "reorder": "on",
+    "n_models": 1,
+    "n_mix": 3,
+    "max_iter": 50,
+    "block_size": 131072,
+    "seed": 5489,
+    "device": "cpu",
+    "threads": 3,
+    "pcakeep": 6,
+}
+AMICA15_KEYS = {
+    "icatype": "runamica15",
+    "reorder": "on",
+    "num_models": 1,
+    "num_mix_comps": 3,
+    "max_iter": 50,
+    "pcakeep": 6,
+    "max_threads": 3,
+    "amica_binary": "/opt/amica/amica15",
+}
+
+
+def test_each_engine_gets_exactly_its_keywords_and_the_binary_no_seed(monkeypatch):
+    for engine, expected in (("pamica", PAMICA_KEYS), ("amica15", AMICA15_KEYS)):
+        settings = Settings.from_options(
+            {"ica_engine": engine, "ica_max_iter": 50, "ica_threads": 3}
+        )
+        call = pipeline.decomposition_call(
+            settings, device.Resolution("cpu", "cpu", "requested"), 6
+        )
+        assert call == expected, engine
+    assert "seed" not in AMICA15_KEYS
+    assert "fix_init" not in AMICA15_KEYS
+    assert "fix_init" not in PAMICA_KEYS  # pAMICA 0.4.0's torch backend does not take it
+    # the device pAMICA runs on is the one resolved
+    settings = Settings.from_options({"ica_threads": 3})
+    call = pipeline.decomposition_call(settings, device.Resolution("auto", "cuda", "gpu_idle"), 6)
+    assert call["device"] == "cuda"
+
+
+@pytest.fixture
+def copying_binary(tmp_path, monkeypatch):
+    """A program in the place of the binary that keeps the parameter file it was started with."""
+    kept = tmp_path / "parameters-seen"
+    binary, digest = tmp_path / "amica15", tmp_path / "amica15.sha256"
+    binary.write_text('#!/bin/sh\ncp "$1" "{}"\nexit 1\n'.format(kept), encoding="ascii")
+    binary.chmod(0o755)
+    digest.write_text(hashlib.sha256(binary.read_bytes()).hexdigest() + "\n", encoding="ascii")
+    monkeypatch.setattr(engines, "AMICA15_BINARY", binary)
+    monkeypatch.setattr(engines, "AMICA15_SHA256_FILE", digest)
+    return kept
+
+
+def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_file(
+    copying_binary, tmp_path
+):
+    options = {"ica_engine": "amica15", "ica_device": "cpu", "ica_max_iter": 7, "ica_threads": 2}
+    (recording,) = io.discover(DATASET)
+    with pytest.raises(RecordingError) as raised, determinism.pinned_threads(2):
+        outputs.produce(
+            recording, run_context(**options), tmp_path / "o", cut_fixture(), profile="a"
+        )
+    assert raised.value.step == "ica"  # the stand-in program fails, after it was started
+    seen = dict(line.split(None, 1) for line in copying_binary.read_text("ascii").splitlines())
+    assert seen["max_threads"].strip() == "2"
+    assert seen["max_iter"].strip() == "7"
+    assert seen["num_models"].strip() == "1"
+    assert seen["pcakeep"].strip() == "6"
+    assert "seed" not in seen  # nothing seeds the binary: it starts from the clock
+    assert seen["fix_init"].strip() == "0"  # eegprep's own default, not a setting of the recipe
+
+
+def test_pamica_is_found_by_the_search_for_the_module_and_torch(tmp_path, monkeypatch):
+    assert engines.pamica_importable() is True  # the runtime environment has both
+    assert engines.pamica_importable("a_package_nobody_installed") is False
+    (tmp_path / "nemar_px05_probe_module.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert engines.pamica_importable("nemar_px05_probe_module") is True  # a module that is there
 
 
 # ---- the dataset record --------------------------------------------------------------------
@@ -953,6 +1150,45 @@ def test_eegprep_is_taken_from_one_full_commit_with_the_pamica_extra():
     )
     (locked,) = [p for p in lock_packages() if p["name"] == "eegprep"]
     assert locked["source"]["git"].endswith("#" + PINNED_EEGPREP_COMMIT)
+
+
+# ---- the engine string, and what is read of the binary's output --------------------------------
+
+# The derivative contract's `engine` (ADR 0123): one to 64 of these characters, `<package>@<version>`.
+ENGINE_CHARACTERS = re.compile(r"[0-9A-Za-z._+@-]{1,64}")
+
+
+def test_the_engine_string_fits_the_derivative_contract_with_ten_characters_to_spare(tiny):
+    _, _, product, context = tiny
+    for engine in (context.engine, product.record["extensions"]["nemar"]["engine"]):
+        text = "{}@{}".format(engine["package"], engine["version"])
+        assert text == "eegprep@" + PINNED_EEGPREP_TEXT
+        assert len(text) == 54
+        assert ENGINE_CHARACTERS.fullmatch(text)
+    # a version of three four-digit fields with a full commit still fits; two more characters do not
+    longest = "eegprep@{}+{}".format("1000.2000.3000", "f" * 40)
+    assert len(longest) == 63
+    assert ENGINE_CHARACTERS.fullmatch(longest)
+    assert not ENGINE_CHARACTERS.fullmatch(longest + "xx")
+
+
+def test_what_is_read_of_the_binarys_log_likelihood_is_summarized_as_it_is():
+    history = [-3.0, -2.5, -2.7, -2.6]
+    account = pipeline.amica15_account({"etc": {"amica": {"LL": np.array(history)}}})
+    assert account["iterations"] == 4
+    assert account["final_ll"] == history[-1]  # the last value of the file
+    assert account["best_ll"] == max(history)
+    assert account["best_iter"] == 1
+    assert account["stop_reason"] is None
+    assert account["did_converge"] is None
+    assert account["binary_sha256"] is None or len(account["binary_sha256"]) == 64
+    empty = pipeline.amica15_account({"etc": {"amica": {"LL": []}}})
+    assert (empty["iterations"], empty["final_ll"], empty["best_ll"], empty["best_iter"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
 
 
 # ---- small helpers -----------------------------------------------------------------------------

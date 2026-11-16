@@ -2,9 +2,10 @@
 
 What is pinned here is a finding, not a feature: the serving copy carries no electrode locations, and
 ICLabel needs a scalp map, so eegprep's ``topoplot`` raises on every channel and every store of the
-serving copy ends ``step_failed`` at ``iclabel`` after its decomposition was fitted. The Zarr input
-itself works: the index is checked, the store is read in full and named by its content, and the
-dataset record states what was read and what was asked for. The first of these tests is the one to
+serving copy ends ``step_failed`` at ``iclabel`` with the detail ``iclabel_no_locations``, found
+right after the floor and before ASR and the fit, with nothing written. The Zarr input itself works:
+the index is checked, the store is read in full and named by its content, and the dataset record
+states what was read and what was asked for. The first of these tests is the one to
 change when it is decided what a recording without locations should come to.
 """
 
@@ -66,7 +67,7 @@ def rows_of(out: Path) -> list[dict[str, str]]:
     return [dict(zip(names, line.split("\t"), strict=True)) for line in lines[1:]]
 
 
-def test_a_store_without_electrode_locations_fails_at_iclabel_and_leaves_no_files(ran):
+def test_a_store_without_electrode_locations_fails_before_the_fit_and_leaves_no_files(ran):
     code, line, out = ran
     assert code == 4  # nothing succeeded
     assert line["recipe"] == "nemar-ica"
@@ -77,7 +78,7 @@ def test_a_store_without_electrode_locations_fails_at_iclabel_and_leaves_no_file
         "failed",
         "step_failed",
         "iclabel",
-        "ValueError",
+        "iclabel_no_locations",
     )
     assert not [p for p in out.rglob("*") if p.is_file() and p.name.startswith("sub-")]
 
