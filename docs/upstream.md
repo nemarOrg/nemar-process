@@ -75,7 +75,7 @@ Three behaviors of 0.5.0 that this repository's tests pinned have changed at tha
 - `pop_loadset` returns an empty `etc` as a dictionary (sccn/eegprep#533 is fixed for that case); the loader's repair of a non-dict `etc` stays, and its load step now records `etcNormalized` false for such a set where it recorded true.
 - A set with no sampling rate raises a `ValueError` at load; it used to load and fail the first check after it with a `TypeError`.
 
-One gap found by `nemar-ica`, to be filed upstream (it is not worked around): `pop_iclabel` raises a `ValueError` from `topoplot` ("no channel has a finite theta and radius") on a dataset whose channels have no locations, so ICLabel cannot classify a recording without electrode locations (the Zarr serving copy has none).
+One gap found by `nemar-ica`, filed upstream as sccn/eegprep issue 625 (it is not worked around): the Zarr reader in eegprep-lean (`to_eeg`) builds label-only channel locations, and does not read the electrode positions, system and units that a store carries in its root attributes (pull request 626 is the fix), so ICLabel cannot classify a recording read from a store. That `pop_iclabel` raises a `ValueError` from `topoplot` ("no channel has a finite theta and radius") on channels with no locations is correct behavior; the gap is the reader.
 
 ### Gaps found by the `nemar-floor` recipe (phase 3, 2026-11-04 and 2026-11-05)
 

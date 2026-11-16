@@ -207,7 +207,7 @@ No GPU host has run it: the GPU path (`--ica-device cuda`, or `auto` with a GPU 
 The native AMICA binary runs only in the image, so its cases (the record's shape, two short runs that are not byte identical, the informational E1R line, the comparison of the two engines) run in the image workflow and not on a developer's machine; this document does not say that job passed.
 The per-iteration log-likelihood the binary writes is read as eegprep loads it (`LL`), and its length is taken as the number of iterations; no stop reason is read from the binary, so `stop_reason` and `did_converge` of its records are null.
 Wall time and peak memory of a 2000-iteration fit on a real recording are not measured here (a 50-iteration fit of the 19-channel, 282-second fixture takes about 11 seconds on one thread of a laptop).
-ICLabel cannot run on a recording whose channels have no locations, which includes every store of the Zarr serving copy; such a recording fails at `iclabel` with the detail `iclabel_no_locations`, found before ASR and the fit (see [upstream.md](upstream.md)).
+ICLabel cannot run on a recording whose channels have no locations, which includes every store read through eegprep-lean's Zarr reader today: the store carries the electrode positions, system and units in its root attributes, and the reader does not read them yet (sccn/eegprep issue 625); such a recording fails at `iclabel` with the detail `iclabel_no_locations`, found before ASR and the fit (see [upstream.md](upstream.md)).
 No minimum number of samples is enforced before a fit.
 
 ## The Tapis definitions and the observer

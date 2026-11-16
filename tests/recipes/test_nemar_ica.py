@@ -483,7 +483,7 @@ def test_a_recording_with_too_few_channels_for_a_decomposition_is_skipped_not_fa
 
 
 def unlocated_fixture():
-    """The cut recording with its channel labels and no location at all (a serving copy's channels)."""
+    """The cut recording with its channel labels and no location at all (the Zarr reader's channels)."""
     loaded = cut_fixture()
     loaded.eeg["chanlocs"] = [{"labels": c["labels"]} for c in loaded.eeg["chanlocs"]]
     return loaded
@@ -493,8 +493,9 @@ def test_a_recording_without_electrode_locations_fails_at_iclabel_with_a_word_an
     tmp_path,
 ):
     """ICLabel needs a scalp map, and eegprep's ``topoplot`` raises on channels with no location (the
-    Zarr serving copy carries none). The recording ends ``step_failed`` at ``iclabel`` with the detail
-    ``iclabel_no_locations`` and nothing is written; ICLabel is neither skipped nor removed."""
+    Zarr reader in eegprep-lean builds label-only locations and does not read the store's electrode
+    attributes yet, sccn/eegprep issue 625). The recording ends ``step_failed`` at ``iclabel`` with the
+    detail ``iclabel_no_locations`` and nothing is written; ICLabel is neither skipped nor removed."""
     (recording,) = io.discover(DATASET)
     with pytest.raises(RecordingError) as raised, determinism.pinned_threads():
         outputs.produce(

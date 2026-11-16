@@ -435,7 +435,7 @@ A published image that predates the change (`0.1.0-cpu`) still has the old name 
   The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` and `_samplemask.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv`, `desc-nemarfloor_signalJourney.json` and `desc-nemarfloor_qcsummary.json` for the dataset.
   A store's `mask_grid` names the serving rate and the profile `serving`, so a mask index counts the serving copy's level-0 samples.
   Nothing is written outside `--out`, and there is no cache directory.
-  The serving copy carries no electrode coordinates and no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
+  The Zarr reader in eegprep-lean (`to_eeg`) builds label-only channel locations: the store carries the electrode positions, system and units in its root attributes, and the reader does not read them yet (sccn/eegprep issue 625; its fix is pull request 626); the serving copy carries no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
   The unit is passed to eegprep-lean's `to_eeg` as the serving copy states it (`uV`, and the micro sign and the Greek mu that real indexes use, which eegprep-lean accepts from sccn/eegprep#616's commit 14ba46e8); a unit that is not a voltage makes the store `convert_failed`.
 - **Which stores.** Every store whose group is EEG, in index order, or exactly the stores `--recording` names (by source path or by store path; a name that is not an EEG store of the index is exit 2, before anything is created).
   Stores with no EEG group are counted in `ignored_datatypes` by modality.
@@ -645,7 +645,7 @@ The same job runs the binary twice for 50 iterations each on the same recording 
 ### Locations, and what the Zarr input cannot do yet
 
 ICLabel needs a scalp map of each component, and eegprep's `topoplot` raises when no channel has a finite theta and radius.
-The serving copy of a Zarr input carries no electrode locations, so every store of `nemar-ica --input zarr`, and every recording of a dataset directory whose channels have none, ends `step_failed` at `iclabel` with the detail `iclabel_no_locations`.
+The store of a Zarr input carries the electrode positions, system and units in its root attributes, and the Zarr reader in eegprep-lean does not read them yet (sccn/eegprep issue 625; its fix is pull request 626), so it builds label-only channel locations; every store of `nemar-ica --input zarr` today, and every recording of a dataset directory whose channels have no locations, ends `step_failed` at `iclabel` with the detail `iclabel_no_locations`.
 The recipe finds that right after the floor, before ASR and the fit, by calling `topoplot` on the working copy's channels as ICLabel calls it (one value per channel, so the rule is eegprep's own and cannot drift from it; the error is recognized by its class), and writes nothing for the recording: a fit of up to 2000 iterations is not run to be discarded.
 ICLabel is neither skipped nor removed; the owner decided that a recording it cannot classify fails.
 

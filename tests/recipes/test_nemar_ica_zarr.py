@@ -1,9 +1,12 @@
 """``nemar-ica --input zarr`` against the local stand-in for NEMAR's Zarr hosts.
 
-What is pinned here is a finding, not a feature: the serving copy carries no electrode locations, and
-ICLabel needs a scalp map, so eegprep's ``topoplot`` raises on every channel and every store of the
-serving copy ends ``step_failed`` at ``iclabel`` with the detail ``iclabel_no_locations``, found
-right after the floor and before ASR and the fit, with nothing written. The Zarr input itself works:
+What is pinned here is a finding, not a feature: a store carries the electrode positions, system and
+units in its root attributes, and the Zarr reader in eegprep-lean (``to_eeg``) does not read them yet
+(sccn/eegprep issue 625), so it builds label-only channel locations, and ICLabel needs a scalp map.
+eegprep's ``topoplot`` raises on every channel, and every store ends ``step_failed`` at ``iclabel``
+with the detail ``iclabel_no_locations``, found right after the floor and before ASR and the fit,
+with nothing written. The stand-in's stores carry no positions, and the reader would not read them if
+they did. The Zarr input itself works:
 the index is checked, the store is read in full and named by its content, and the dataset record
 states what was read and what was asked for. The first of these tests is the one to
 change when it is decided what a recording without locations should come to.

@@ -136,11 +136,14 @@ def check_locations(eeg: dict[str, Any]) -> None:
     """End the recording, before ASR and the fit, when ICLabel could not map its components.
 
     ICLabel draws each component's scalp map with eegprep's ``topoplot``, which raises when no channel
-    has a finite theta and radius (a recording with no electrode locations: every store of the Zarr
-    serving copy). The fit of such a recording (up to 2000 iterations) would run and be discarded, so
-    ``topoplot`` is called here on the working copy's channels exactly as ICLabel calls it, with one
-    value per channel: the rule is eegprep's own and cannot drift from it. The error is recognized by
-    its class, never by its message. ICLabel is not skipped: the recording fails, writing nothing.
+    has a finite theta and radius, correctly, for a recording with no electrode locations. Every store
+    of the Zarr input is one today: the store carries the electrode positions, system and units in its
+    root attributes, and the Zarr reader in eegprep-lean (``to_eeg``) builds label-only channel
+    locations and does not read them yet (sccn/eegprep issue 625). The fit of such a recording (up to
+    2000 iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
+    channels exactly as ICLabel calls it, with one value per channel: the rule is eegprep's own and
+    cannot drift from it. The error is recognized by its class, never by its message. ICLabel is not
+    skipped: the recording fails, writing nothing.
     """
     from eegprep import topoplot
 
