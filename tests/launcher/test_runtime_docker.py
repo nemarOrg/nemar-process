@@ -162,6 +162,8 @@ def test_the_engine_arguments_are_exactly_these(rig, engine):
         *(["--log-driver=none"] if engine.name == "docker" else []),
         "--cpus",
         "4",
+        "--cpu-shares",
+        "2",
         "--memory",
         "2048m",
         "--memory-swap",
@@ -275,11 +277,16 @@ def test_a_gpu_job_gets_gpus_and_no_cuda_visible_devices(rig, engine):
     argv = engine.run_argv()
     assert value_after(argv, "--gpus") == "2"
     assert not any("CUDA_VISIBLE_DEVICES" in part for part in argv)
+    # no runner decided the device: the count is the specification's, nothing is hidden, nothing added
+    assert "NVIDIA_VISIBLE_DEVICES=void" not in argv
+    assert not any(part.startswith("NEMAR_DEVICE") for part in argv)
+    assert argv[argv.index("NEMAR_OUT=/work/outputs") + 1] == REFERENCE
 
 
 def test_a_job_with_no_gpus_has_no_gpus_flag(rig, engine):
     assert launch(rig, engine).exit == 0
     assert "--gpus" not in engine.run_argv()
+    assert engine.run_argv().count("NVIDIA_VISIBLE_DEVICES=void") == 1
 
 
 def test_an_env_value_is_passed_as_it_is_not_as_a_csv_record(rig, engine):
@@ -795,6 +802,70 @@ def test_build_argv_refuses_a_run_without_a_memory_size():
             RUNNER,
         )
     assert caught.value.detail == "invalid_spec"
+
+
+def build(cpu_shares=None):
+    extra = {} if cpu_shares is None else {"cpu_shares": cpu_shares}
+    return runtime.build_argv(
+        "docker",
+        "/bin/docker",
+        parsed_spec(),
+        REFERENCE,
+        "n",
+        [],
+        settings.Limits(2, 512),
+        RUNNER,
+        **extra,
+    )
+
+
+def test_build_argv_adds_the_lowest_cpu_weight_after_cpus_only_when_told_the_engine_can():
+    with_shares = build(cpu_shares=True)
+    assert with_shares[with_shares.index("--cpus") :][:4] == ["--cpus", "2", "--cpu-shares", "2"]
+    for without in (build(), build(cpu_shares=False)):  # the default is no weight
+        assert "--cpu-shares" not in without
+        assert without[without.index("--cpus") :][:3] == ["--cpus", "2", "--memory"]
+    pair = with_shares.index("--cpu-shares")
+    assert with_shares[:pair] + with_shares[pair + 2 :] == build()  # nothing else moved
+    assert "--blkio-weight" not in with_shares  # Docker refuses a kernel without it
+
+
+def test_the_lowest_cpu_weight_is_applied_when_the_engine_can_apply_it(rig, engine):
+    result = launch(rig, engine)
+    assert result.exit == 0, result.log
+    assert value_after(engine.run_argv(), "--cpu-shares") == "2"
+    assert "engine: can apply CPU shares" in result.log
+
+
+@pytest.mark.parametrize("how", ["false", "absent"])
+def test_an_engine_that_cannot_apply_cpu_shares_gets_no_flag_and_the_log_says_so(rig, docker, how):
+    info = fake_docker.default_info("docker")
+    info["CPUShares"] = False
+    if how == "absent":
+        del info["CPUShares"]
+    Path(str(docker.record) + ".info").write_text(json.dumps(info))
+    result = launch(rig, docker)
+    assert result.exit == 0, result.log
+    assert "--cpu-shares" not in docker.run_argv()
+    assert "engine: cannot apply CPU shares, the job keeps the default CPU weight" in result.log
+    assert "engine: can apply CPU shares" not in result.log
+
+
+def test_assess_reads_cpu_shares_from_each_engines_own_document():
+    docker_info = fake_docker.default_info("docker")
+    assert runtime.assess("docker", docker_info).cpu_shares is True
+    assert runtime.assess("docker", {**docker_info, "CPUShares": False}).cpu_shares is False
+    assert runtime.assess("docker", {**docker_info, "CPUShares": "yes"}).cpu_shares is False
+    podman_info = fake_docker.default_info("podman")
+    assert runtime.assess("podman", podman_info).cpu_shares is True
+    host = podman_info["host"]
+    for broken in (
+        {**host, "cgroupControllers": ["memory", "pids"]},
+        {**host, "cgroupVersion": "v1"},
+        {k: v for k, v in host.items() if k != "cgroupControllers"},
+    ):
+        assert runtime.assess("podman", {"host": broken}).cpu_shares is False
+    assert runtime.assess("docker", {}).cpu_shares is False
 
 
 def test_selected_names_the_runtime():

@@ -104,13 +104,14 @@ def engine_info(limit: int = 1, extra: Mapping[str, Any] | None = None) -> dict[
     ``extra`` are the recipe's fields (``Recipe.engine_extra``): plain JSON values under names the
     stamp does not already use. ``torch`` and ``pamica`` are recorded when they are installed.
 
-    The build file is read here too, and not recorded here (a record's ``process`` block states it):
-    the stamp is made before anything is created, so a build that contradicts itself ends the run
-    before it writes a byte (``BuildRefused``).
+    The build file, and the flavor file beside it, are read here too, and not recorded here (a
+    record's ``process`` block and image tag state them): the stamp is made before anything is
+    created, so a build that contradicts itself, or a build file without a valid flavor file, ends
+    the run before it writes a byte (``BuildRefused``).
     """
     import numpy
 
-    build.build_info()
+    build.image_provenance()
 
     stamp: dict[str, Any] = {
         "package": "eegprep",

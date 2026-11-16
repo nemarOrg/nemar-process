@@ -145,8 +145,17 @@ def test_the_image_is_pushed_without_attestation_manifests_so_its_digest_is_the_
     assert build["with"]["sbom"] is False
     assert build["with"]["platforms"] == "linux/amd64"
     assert "ghcr.io/nemarorg/nemar-python:" in build["with"]["tags"]
-    assert "-cpu" in build["with"]["tags"]
-    assert publish["outputs"]["digest"] == "${{ steps.build.outputs.digest }}"
+    # the tag carries the flavor of the matrix leg: <version>-cpu and <version>-cuda
+    assert build["with"]["tags"].endswith("-${{ matrix.flavor }}")
+    # each leg writes the output of its own flavor (and leaves the other empty): a bare `digest`
+    # output would be whichever leg finished last
+    assert "digest" not in publish["outputs"]
+    assert publish["outputs"]["digest_cpu"] == (
+        "${{ matrix.flavor == 'cpu' && steps.build.outputs.digest || '' }}"
+    )
+    assert publish["outputs"]["digest_cuda"] == (
+        "${{ matrix.flavor == 'cuda' && steps.build.outputs.digest || '' }}"
+    )
 
 
 def test_signing_follows_the_issues_order_and_verifies_in_the_same_run():
@@ -264,7 +273,10 @@ def test_publish_checks_the_version_tag_before_it_pushes():
     steps = publish_steps()
     check = step_index(steps, "scripts/check_tag_absent.py nemarorg/nemar-python ")
     assert check < step_index(steps, "docker/build-push-action")
-    assert '"${VERSION}-cpu"' in steps[check]["run"]
+    # the step runs in each flavor's leg and asks about that leg's tag
+    assert '"${VERSION}-${FLAVOR}"' in steps[check]["run"]
+    assert steps[check]["env"]["FLAVOR"] == "${{ matrix.flavor }}"
+    assert "if" not in steps[check]
 
 
 def test_the_sif_tag_is_checked_before_it_is_pushed():
@@ -344,3 +356,217 @@ def test_only_the_unprivileged_test_job_runs_repository_test_code_against_the_si
     for name, job in jobs.items():
         runs_tests = "pytest" in step_commands(job)
         assert runs_tests == (name == "test"), name
+
+
+# ---- the two flavors: a matrix over cpu and cuda ------------------------------------------------------
+
+FLAVORS = ["cpu", "cuda"]
+CUDA_SMOKE = "--env NVIDIA_VISIBLE_DEVICES=void"
+
+
+def matrix_flavors(job: dict) -> list[str]:
+    matrix = job["strategy"]["matrix"]
+    if "include" in matrix:
+        return [leg["flavor"] for leg in matrix["include"]]
+    return list(matrix["flavor"])
+
+
+def named(job: dict, prefix: str) -> list[dict]:
+    return [s for s in job["steps"] if s.get("name", "").startswith(prefix)]
+
+
+@pytest.mark.parametrize("job", ["test", "publish", "sign"])
+def test_the_test_publish_and_sign_jobs_run_once_per_flavor(job):
+    document = workflow()["jobs"][job]
+    assert matrix_flavors(document) == FLAVORS
+    # a flavor that fails must not cancel the other: its own leg is the one to re-run
+    assert document["strategy"]["fail-fast"] is False
+
+
+def test_the_release_job_and_the_guards_are_not_split_by_flavor():
+    jobs = workflow()["jobs"]
+    assert "strategy" not in jobs["release"]
+    # a guard step has no `if`: it runs in every leg, so no leg can publish past it
+    publish = jobs["publish"]["steps"]
+    for name in (
+        "Refuse a commit that is not on main",
+        "Read the version from the tag or the dispatch input",
+    ):
+        (step,) = [s for s in publish if s.get("name") == name]
+        assert "if" not in step, name
+        assert "matrix" not in str(step), name
+
+
+def test_each_flavor_builds_its_own_dockerfile_in_the_test_and_publish_jobs():
+    for job in ("test", "publish"):
+        legs = {
+            leg["flavor"]: leg for leg in workflow()["jobs"][job]["strategy"]["matrix"]["include"]
+        }
+        assert legs["cpu"]["dockerfile"] == "images/nemar-python/Dockerfile"
+        assert legs["cuda"]["dockerfile"] == "images/nemar-python/Dockerfile.cuda"
+        (build,) = [
+            s
+            for s in workflow()["jobs"][job]["steps"]
+            if "docker/build-push-action" in s.get("uses", "")
+        ]
+        assert build["with"]["file"] == "${{ matrix.dockerfile }}"
+
+
+def test_both_flavors_are_built_by_the_pull_request_job_and_neither_is_pushed_there():
+    test_job = workflow()["jobs"]["test"]
+    assert matrix_flavors(test_job) == FLAVORS
+    (build,) = [s for s in test_job["steps"] if "docker/build-push-action" in s.get("uses", "")]
+    assert build["with"]["push"] is False
+    assert build["with"]["load"] is True
+    assert "pull_request" in triggers(workflow())
+
+
+def test_the_cuda_flavor_has_no_actions_cache_and_the_cpu_flavor_keeps_its_own():
+    for job in ("test", "publish"):
+        legs = {
+            leg["flavor"]: leg for leg in workflow()["jobs"][job]["strategy"]["matrix"]["include"]
+        }
+        assert legs["cpu"]["cache_from"] == "type=gha,scope=nemar-python-cpu"
+        assert legs["cuda"]["cache_from"] == ""
+    legs = {
+        leg["flavor"]: leg for leg in workflow()["jobs"]["test"]["strategy"]["matrix"]["include"]
+    }
+    assert legs["cpu"]["cache_to"] == "type=gha,scope=nemar-python-cpu,mode=max"
+    assert legs["cuda"]["cache_to"] == ""
+
+
+@pytest.mark.parametrize("job", ["test", "publish", "sign"])
+def test_only_the_cuda_leg_frees_disk_space(job):
+    steps = named(workflow()["jobs"][job], "Free disk space")
+    assert len(steps) == 1
+    assert steps[0]["if"] == "matrix.flavor == 'cuda'"
+    assert "sudo rm -rf" in steps[0]["run"]
+
+
+def test_the_cuda_smoke_runs_with_no_gpu_visible_and_demands_the_cpu_fit():
+    """The CUDA image runs a job the runner kept off the GPU: no GPU is visible and the CPU engine runs."""
+    for job, name in (
+        ("test", "Smoke test the container image (cuda"),
+        ("sign", "Smoke test the pushed image by digest (container form, cuda"),
+    ):
+        (step,) = named(workflow()["jobs"][job], name)
+        assert step["if"] == "matrix.flavor == 'cuda'"
+        run = step["run"]
+        docker = next(line for line in run.splitlines() if "docker run" in line)
+        assert CUDA_SMOKE in docker  # no GPU is visible to the container
+        assert "python /opt/smoke.py --no-gpu" in docker  # the smoke fails if torch sees a GPU
+        check = next(line for line in run.splitlines() if "check_smoke_pins.py" in line)
+        # the document is checked for flavor cuda, a torch that saw no GPU and a CPU float64 fit
+        assert "--image --flavor cuda --no-gpu" in check
+        assert "smoke-container.json" in check
+
+
+def test_the_cpu_smoke_does_not_hide_the_gpu_and_checks_flavor_cpu():
+    for job, name in (
+        ("test", "Smoke test the container image (cpu)"),
+        ("sign", "Smoke test the pushed image by digest (container form, cpu)"),
+    ):
+        (step,) = named(workflow()["jobs"][job], name)
+        assert step["if"] == "matrix.flavor == 'cpu'"
+        assert "NVIDIA_VISIBLE_DEVICES" not in step["run"]
+        assert "--image --flavor cpu" in step["run"]
+
+
+def test_every_check_of_a_smoke_document_in_an_image_names_the_flavor_it_expects():
+    text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
+    checks = [line for line in text.splitlines() if "python3 scripts/check_smoke_pins.py" in line]
+    assert len(checks) == 6  # test: cpu container, cuda container, SIF; sign: the same three
+    for line in checks:
+        assert re.search(r"--image --flavor (cpu|cuda)\b", line), line
+
+
+def test_the_sif_and_the_launch_test_are_cpu_only():
+    for job in ("test", "sign"):
+        for step in workflow()["jobs"][job]["steps"]:
+            blob = step.get("run", "") + step.get("name", "")
+            if re.search(r"apptainer|SIF|tests/e2e|setup-uv", blob + step.get("uses", "")):
+                assert step.get("if") == "matrix.flavor == 'cpu'", (job, step.get("name"))
+
+
+def test_the_image_digest_of_a_sign_leg_is_the_one_its_own_publish_leg_pushed():
+    sign = workflow()["jobs"]["sign"]
+    assert sign["env"]["FLAVOR"] == "${{ matrix.flavor }}"
+    assert sign["env"]["IMAGE_DIGEST"] == (
+        "${{ needs.publish.outputs[format('digest_{0}', matrix.flavor)] }}"
+    )
+    # an empty or malformed digest stops the leg before anything is smoke-tested or signed
+    first = sign["steps"][1]
+    assert first["name"] == "Refuse an empty or malformed image digest"
+    assert "exit 1" in first["run"]
+    assert "^sha256:[0-9a-f]{64}$" in first["run"]
+
+
+def test_both_images_are_signed_by_digest_with_the_one_identity():
+    sign = workflow()["jobs"]["sign"]
+    (step,) = named(sign, "Sign the image digest and verify the signature")
+    assert "if" not in step  # both legs sign
+    assert 'cosign sign --yes "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"' in step["run"]
+    assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in step["run"]
+
+
+def test_each_flavor_writes_its_own_digest_record_and_uploads_it_under_its_own_name():
+    sign = workflow()["jobs"]["sign"]
+    (cpu,) = named(sign, "Write the digest record (cpu)")
+    (cuda,) = named(sign, "Write the digest record (cuda)")
+    assert cpu["if"] == "matrix.flavor == 'cpu'"
+    assert cuda["if"] == "matrix.flavor == 'cuda'"
+    assert "nemar-python-${VERSION}-cpu-digests.json" in cpu["run"]
+    assert "--flavor cpu" in cpu["run"]
+    assert "--sif-digest" in cpu["run"]
+    assert "nemar-python-${VERSION}-cuda-digests.json" in cuda["run"]
+    assert "--flavor cuda" in cuda["run"]
+    # the CUDA flavor publishes no SIF, and its record comes from the container-form smoke document
+    assert "sif" not in cuda["run"].replace("--smoke", "")
+    assert "--smoke smoke-container.json" in cuda["run"]
+    (upload,) = [s for s in sign["steps"] if "actions/upload-artifact" in s.get("uses", "")]
+    assert upload["with"]["name"] == "nemar-python-digests-${{ matrix.flavor }}"
+    assert (
+        upload["with"]["path"]
+        == "nemar-python-${{ env.VERSION }}-${{ matrix.flavor }}-digests.json"
+    )
+
+
+def test_the_release_attaches_both_records_and_replaces_neither():
+    release = workflow()["jobs"]["release"]
+    (download,) = [s for s in release["steps"] if "actions/download-artifact" in s.get("uses", "")]
+    assert download["with"] == {"pattern": "nemar-python-digests-*", "merge-multiple": True}
+    commands = step_commands(release)
+    # a file at a time: an existing identical asset is skipped, a differing one fails, none replaced
+    assert 'for file in "$cpu" "$cuda"; do' in commands
+    assert 'gh release upload "$TAG" "$file"' in commands
+    assert '[ "$remote" != "$mine" ]' in commands
+    assert "nemar-python-${VERSION}-cpu-digests.json" in commands
+    assert "nemar-python-${VERSION}-cuda-digests.json" in commands
+    assert "--clobber" not in commands
+
+
+def test_the_cuda_flavor_pushes_no_sif():
+    sign = workflow()["jobs"]["sign"]
+    for step in sign["steps"]:
+        if "oras" in step.get("run", "") or "apptainer push" in step.get("run", ""):
+            assert step.get("if") == "matrix.flavor == 'cpu'", step.get("name")
+
+
+def test_the_dispatch_input_names_both_tags():
+    description = triggers(workflow())["workflow_dispatch"]["inputs"]["version"]["description"]
+    assert "<version>-cpu" in description
+    assert "<version>-cuda" in description
+
+
+def test_the_docs_say_the_cuda_flavor_has_no_sif_and_runs_under_docker_not_apptainer():
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    # no host builds a SIF: the runner runs only the signed artifact's layer and refuses anything else
+    assert "a GPU host builds" not in docs
+    assert "apptainer build <hex>.sif" not in docs
+    assert "The CUDA flavor publishes none, and none may be built by hand" in docs
+    assert "runs under Docker or Podman" in docs
+    assert "refuses it under Apptainer (`image_unverified`)" in docs
+    # nothing in the workflow tells a host to build one either
+    text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
+    assert "a GPU host builds" not in text
+    assert "refuses one built by hand" in re.sub(r"\s*\n#\s*", " ", text)

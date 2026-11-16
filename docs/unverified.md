@@ -92,7 +92,7 @@ These are the facts that nothing has confirmed yet.
 - **A SIF's content hash is not verified by the launcher** (see above); the release's digest file records the file's SHA-256, but it is an unsigned release asset, so it guards only against a corrupted copy.
 - **The existence checks rely on GHCR answering with exactly 404.** `scripts/check_tag_absent.py` lets a publication go on only when a manifest `HEAD` for the tag answers 404, and stops on every other answer. Unconfirmed: that GHCR answers 404 for an absent tag, including in a package that does not exist yet, and that its token endpoint accepts the actor and the workflow's token as basic authentication. If the first release stops at this check, the check needs a change; it is not bypassed.
 - **Signature verification** needs cosign 3 or newer; older versions may not read signatures made by cosign 3. What a passing check proves, and what it does not, is in [images.md](images.md).
-- **Build requirements are pinned by version, not by hash.** `docopt` and the signalJourney validator are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
+- **Build requirements are pinned by version, not by hash.** `docopt` and `eegprep-lean` are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
 - **Thread counts.** The image pins one thread per math library; a recipe that wants more must set them, and what is right on a node is unmeasured.
 
 ### Owner items for the image
@@ -184,8 +184,7 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   The command exits 9 (`time_budget_exhausted`) after it wrote its dataset record, and 8 (`engine_unavailable`) before it wrote anything.
   The launcher records both as `runtime_error` with the detail `entry_failed` and, from its code and its tests (an entry that writes files and then exits 3), still hashes and uploads what the entry wrote and completes the upload; nothing was run with exit 9 or 8 in particular, and no real storage or Worker took the upload.
   Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost, and whether the job is charged for the time used and how.
-  Resuming a budget-cut run is not supported in 1.0.0: `aggregate` refuses two inputs that name the same recording, so a later run of the skipped recordings cannot replace their `time_budget` rows (the Worker runs one whole dataset per job, so nothing needs it yet).
-  Resume or replace is a follow-up: nemarOrg/nemar-process#16.
+  A budget-cut run is completed by a second run of the recordings it skipped, merged with `aggregate --resume` ([recipes.md](recipes.md)); the Worker runs one whole dataset per job, so nothing dispatches the second run yet, and nothing has done it outside the tests.
   Epic A's recipe registry should treat the Worker's handling of failed jobs' outputs as open before it dispatches a recipe that can exit 9.
 - **Exit 8 is charged.**
   The launcher records every non-zero entry exit except 137 as `runtime_error` with the detail `entry_failed`, which is the submitter's and charged, so an `engine_unavailable` exit (no GPU, a binary that is not there), which is the platform's fault, is charged too.

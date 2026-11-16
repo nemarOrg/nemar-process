@@ -2,9 +2,12 @@
 
 Per recording, beside the recording (``naming.py``): ``_channels.tsv`` (the BIDS ``status`` and
 ``status_description`` columns), ``_badsegments.tsv`` (absent when the window step was skipped: an
-empty file would claim "no bad segments"), ``_filters.json``, ``_qc.json`` and the signalJourney
-record, which holds the size and SHA-256 of the other four. Everything is TSV and JSON: nothing
-that carries samples is written, so the raw samples are never altered in outputs.
+empty file would claim "no bad segments"), ``_samplemask.tsv`` (the same bad windows as sample
+indices of the samples the floor read, absent in the same case), ``_filters.json``, ``_qc.json``
+and the signalJourney record, which holds the size and SHA-256 of the others. The record also names
+the grid of the samples that were read (``extensions.nemar.mask_grid``: how many, at what rate, and
+whether they are the archived recording's or NEMAR's serving copy). Everything is TSV and JSON:
+nothing that carries samples is written, so the raw samples are never altered in outputs.
 
 ``run_recording`` is the per-recording function the command calls: load, process, write into a
 private directory, and return the product; it moves nothing into place and appends no row.
@@ -29,6 +32,10 @@ from nemar_process.nemar_floor.pipeline import FloorResult, process
 CHANNEL_COLUMNS = ("name", "type", "status", "status_description", "nemar_reason")
 SEGMENT_COLUMNS = ("onset", "duration", "label", "nemar_reason")
 SEGMENT_DECIMALS = {"onset": 6, "duration": 6}
+MASK_COLUMNS = ("start_sample", "stop_sample", "label", "nemar_reason")
+# What the samples the floor read are: the archived recording's own (the floor read the files), or
+# NEMAR's serving copy of it (``--input zarr``), whose rate is the serving rate.
+PROFILES = ("archive", "serving")
 
 FLAT_TEXT = "flat line longer than {:g} s".format(steps.FLATLINE_CALL["max_flatline_duration"])
 BAD_TEXT = {
@@ -57,14 +64,13 @@ INFO = RecipeInfo(
         "QC (eegprep)."
     ),
     recording_description=(
-        "nemar-floor 1.0.0: annotation of one EEG recording "
+        "nemar-floor {}: annotation of one EEG recording "
         "(bad channels, bad windows, filters, QC); no samples are written."
-    ),
+    ).format(steps.RECIPE_VERSION),
     dataset_pipeline_description="NEMAR quality floor, dataset level.",
     dataset_description=(
-        "nemar-floor 1.0.0: dataset-level quality record "
-        "(aggregates and per-recording summary table)."
-    ),
+        "nemar-floor {}: dataset-level quality record (aggregates and per-recording summary table)."
+    ).format(steps.RECIPE_VERSION),
 )
 
 
@@ -105,6 +111,47 @@ def segment_rows(sample_mask: np.ndarray, srate_hz: float) -> list[list[Any]]:
         [start / srate_hz, length / srate_hz, "bad_window", "clean_windows"]
         for start, length in qc.runs(sample_mask)
     ]
+
+
+def mask_rows(sample_mask: np.ndarray) -> list[list[Any]]:
+    """One row per maximal run of False in the sample mask, in order, as sample indices of what the
+    floor read: ``start_sample`` is the first bad sample (0-based) and ``stop_sample`` is exclusive,
+    so a row says ``[start_sample, stop_sample)`` and the rows are ``segment_rows`` before the
+    division by the rate."""
+    return [
+        [start, start + length, "bad_window", "clean_windows"]
+        for start, length in qc.runs(sample_mask)
+    ]
+
+
+def grid_profile(profile: str | None, nemar_extra: Mapping[str, Any] | None) -> str:
+    """The profile of the samples the floor read, for ``mask_grid``.
+
+    A recipe with a remote input says what the samples were in ``nemar_extra["input"]["profile"]``
+    (the Zarr input says ``serving``): that is the profile, so an embedder on that input is never
+    labeled ``archive`` by a default. A ``profile`` argument that disagrees with it is refused. With
+    neither, the floor read the archived recording itself.
+    """
+    declared = None
+    given = (nemar_extra or {}).get("input")
+    if isinstance(given, Mapping):
+        declared = given.get("profile")
+    if profile is not None and declared is not None and profile != declared:
+        raise ValueError(
+            "the profile {!r} is not the input's profile {!r}".format(profile, declared)
+        )
+    return next(found for found in (profile, declared, "archive") if found is not None)
+
+
+def mask_grid(result: FloorResult, profile: str) -> dict[str, Any]:
+    """The grid of the samples the floor read: what a sample index in ``_samplemask.tsv`` counts."""
+    if profile not in PROFILES:
+        raise ValueError("a profile is one of {}".format(", ".join(PROFILES)))
+    return {
+        "n_samples": int(result.work["pnts"]),
+        "rate": float(result.srate_hz),
+        "profile": profile,
+    }
 
 
 def _strongest_line(result: FloorResult) -> tuple[int | None, float | None, float | None]:
@@ -190,18 +237,26 @@ def write_product(
     extra_products: Sequence[Product] = (),
     summary_extra: Mapping[str, Any] | None = None,
     nemar_extra: Mapping[str, Any] | None = None,
+    profile: str | None = None,
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
-    The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the four
-    files are then named with its label, stamped with its name and version and described by its
+    The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the
+    floor's files (four, five when the window step ran) are then named with its label, stamped with its name and version and described by its
     record, and ``result.plan`` is expected to be that recipe's plan. ``extra_products`` are its
     own files, written after the floor's and listed after them (each belongs to a step of the plan),
     and ``summary_extra`` its own summary metrics, which may not replace one of the floor's.
     ``nemar_extra`` are keys it adds to ``extensions.nemar`` (a recipe with a remote input says where
-    the data came from). The identity is looked up when called, not when defined, so a caller that replaces ``INFO`` is
-    honored.
+    the data came from; ``mask_grid`` is the floor's own and may not be among them). The profile of
+    ``mask_grid`` says what the samples were: ``archive`` (the recording itself) or ``serving``
+    (NEMAR's Zarr serving copy). It is ``nemar_extra["input"]["profile"]`` when the recipe states
+    one, else ``profile`` (``archive`` when neither is given); a ``profile`` that disagrees with the
+    stated one is refused (``grid_profile``). The identity is looked up when called, not when
+    defined, so a caller that replaces ``INFO`` is honored.
     """
+    if "mask_grid" in (nemar_extra or {}):
+        raise ValueError("mask_grid is a key the floor writes")
+    grid = mask_grid(result, grid_profile(profile, nemar_extra))  # refused before any file is made
     info = INFO if info is None else info
     label = info.label
 
@@ -236,6 +291,15 @@ def write_product(
                     segment_rows(mask, result.srate_hz),
                     SEGMENT_DECIMALS,
                 ),
+            )
+        )
+        jobs.append(
+            Product(
+                "samplemask",
+                "tsv",
+                "bad_windows",
+                "Bad windows as sample indices of the samples read, stop exclusive",
+                lambda path: files.write_tsv(path, MASK_COLUMNS, mask_rows(mask)),
             )
         )
     jobs += [
@@ -283,7 +347,7 @@ def write_product(
         ],
         summary_metrics=metrics,
         context=context,
-        nemar_extra=nemar_extra,
+        nemar_extra={**(nemar_extra or {}), "mask_grid": grid},
     )
     problems = records.problems_of(record, context.validator)
     if problems:

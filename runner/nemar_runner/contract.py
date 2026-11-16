@@ -202,6 +202,7 @@ class ClaimedJob:
         launch_spec_env: str,
         image_sif: str,
         image_digest: str,
+        image_uri: str,
         cores: int,
         memory_mb: int | None,
         gpus: int,
@@ -213,6 +214,7 @@ class ClaimedJob:
         self.launch_spec_env = launch_spec_env
         self.image_sif = image_sif
         self.image_digest = image_digest
+        self.image_uri = image_uri
         self.cores = cores
         self.memory_mb = memory_mb
         self.gpus = gpus
@@ -230,7 +232,7 @@ class ClaimedJob:
 def _read_job(raw: Any, where: str, claimed_at: float) -> ClaimedJob:
     job = _object(raw, where)
     image = _object(_key(job, "image", where), where + ".image")
-    _text(_key(image, "uri", where + ".image"), IMAGE_REF_RE, where + ".image.uri", 512)
+    uri = _text(_key(image, "uri", where + ".image"), IMAGE_REF_RE, where + ".image.uri", 512)
     digest = _text(
         _key(image, "digest", where + ".image"), IMAGE_DIGEST_RE, where + ".image.digest"
     )
@@ -259,6 +261,7 @@ def _read_job(raw: Any, where: str, claimed_at: float) -> ClaimedJob:
         ),
         image_sif=sif,
         image_digest=digest,
+        image_uri=uri,
         cores=cores,
         memory_mb=memory,
         gpus=gpus,

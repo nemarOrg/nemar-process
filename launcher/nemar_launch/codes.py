@@ -71,6 +71,31 @@ RUNNER_LABEL_PATTERN = r"rnr_[0-9a-f]{24}"
 # The registries an image may be pulled from under an engine: comma-separated, each as it appears
 # before the first `/` of the reference. Unset is `ghcr.io` only; set and empty allows none.
 ENV_ALLOWED_REGISTRIES = "NEMAR_ALLOWED_REGISTRIES"
+# The device a runner decided for a job that asked for a GPU (docs/launcher.md, "The device"). Unset
+# (the Tapis and SLURM paths, and any job with no GPU) the launcher's command line is exactly what it
+# always was. `NEMAR_DEVICE` is `cpu` or `cuda` and names the reason in `NEMAR_DEVICE_REASON`; for `cuda`
+# the runner also names the one GPU (`NEMAR_GPU_ID`, as `nvidia-smi` prints it, and `NEMAR_GPU_INDEX`) and
+# the most of its memory the job may take (`NEMAR_GPU_MEMORY_MB`). The reason words are the runner's
+# (`runner/nemar_runner/gpu.py`), held equal by `tests/runner/test_gpu.py`.
+ENV_DEVICE = "NEMAR_DEVICE"
+ENV_DEVICE_REASON = "NEMAR_DEVICE_REASON"
+ENV_GPU_ID = "NEMAR_GPU_ID"
+ENV_GPU_INDEX = "NEMAR_GPU_INDEX"
+ENV_GPU_MEMORY_MB = "NEMAR_GPU_MEMORY_MB"
+DEVICE_CPU = "cpu"
+DEVICE_CUDA = "cuda"
+DEVICE_REASON_CUDA = "gpu_idle"  # the only reason a `cuda` decision has
+DEVICE_REASONS_CPU = (
+    "gpu_disabled",
+    "gpu_unsupported_runtime",
+    "gpu_reserved",
+    "gpu_check_failed",
+    "gpu_busy",
+    "gpu_memory_short",
+    "gpu_in_use",
+)
+# A GPU as `nvidia-smi` prints its identifier: `GPU-` and a UUID (36 characters).
+GPU_ID_PATTERN = r"GPU-[0-9a-fA-F-]{36}"
 # Where the Singularity image files named by `image.sif` live on the node. Set by the Tapis
 # application definition; when unset, `image.sif` is relative to the launcher's working directory.
 ENV_SIF_ROOT = "NEMAR_SIF_ROOT"
@@ -133,6 +158,7 @@ LAUNCHER_DETAILS: dict[str, tuple[str, ...]] = {
         "scratch_unavailable",
         "no_container_runtime",
         "image_missing",
+        "image_unverified",
         "runtime_unusable",
         "internal_error",
         "output_dir_not_empty",
@@ -167,6 +193,7 @@ PLATFORM_LAUNCHER_DETAILS = (
     "scratch_unavailable",
     "no_container_runtime",
     "image_missing",
+    "image_unverified",
     "runtime_unusable",
     "internal_error",
     "output_dir_not_empty",

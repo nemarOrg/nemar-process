@@ -6,15 +6,32 @@ the CI job builds the image and runs the smoke test in it, which is the test tha
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
 import subprocess
+import sys
+import threading
+import tomllib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
+import check_smoke_pins
+import pytest
 import yaml
 from image_support import clean_env
+from nemar_process.common import build as process_build
 from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION
-from repo_paths import CI_WORKFLOW, DOCKERFILE, IMAGE_WORKFLOW, PYPROJECT, RECIPES, ROOT
+from repo_paths import (
+    CI_WORKFLOW,
+    CUDA_DOCKERFILE,
+    DOCKERFILE,
+    IMAGE_WORKFLOW,
+    PYPROJECT,
+    RECIPES,
+    ROOT,
+)
 
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 
@@ -204,10 +221,8 @@ def test_the_script_the_dockerfile_writes_runs_the_command(runtime_python, tmp_p
     assert done.returncode == 0, done.stderr[-2000:]
     document = json.loads(done.stdout)
     assert document["eegprep"] == PINNED_EEGPREP_VERSION
-    assert document["recipes"] == {
-        "nemar-floor": PINNED_RECIPE_VERSION,
-        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
-    }
+    assert document["recipes"] == {"nemar-floor": PINNED_RECIPE_VERSION}
+    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"]}
 
 
 def test_the_build_context_is_an_allow_list_that_names_what_the_build_copies():
@@ -294,3 +309,270 @@ def test_the_licence_label_is_not_claimed_for_the_image_contents():
     labels = " ".join(rest for keyword, rest in instructions() if keyword == "LABEL")
     assert "image.licenses" not in labels
     assert "org.opencontainers.image.source" in labels
+
+
+# ---- the native AMICA binary and the two flavors ----------------------------------------------------
+
+BOTH = {"cpu": DOCKERFILE, "cuda": CUDA_DOCKERFILE}
+AMICA_URL = re.compile(
+    r"https://github\.com/sccn/pAMICA/releases/download/v(\d+\.\d+\.\d+)/amica15-linux-x64"
+)
+AMICA_CHECK = re.compile(
+    r'echo "([0-9a-f]{64})  /tmp/amica15\.download" \| sha256sum --check --strict -'
+)
+
+
+def rows(flavor: str) -> list[tuple[str, str]]:
+    return instructions(BOTH[flavor].read_text(encoding="utf-8"))
+
+
+def amica_step(flavor: str) -> str:
+    (step,) = [r for k, r in rows(flavor) if k == "RUN" and "amica15-linux-x64" in r]
+    return step
+
+
+def final_rows(flavor: str) -> list[tuple[str, str]]:
+    found = rows(flavor)
+    last = max(i for i, (k, _) in enumerate(found) if k == "FROM")
+    return found[last:]
+
+
+def pamica_pin() -> str:
+    group = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["dependency-groups"]["runtime"]
+    (pin,) = [g for g in group if isinstance(g, str) and g.startswith("pamica==")]
+    return pin.split("==", 1)[1]
+
+
+FLAVOR_WRITER = re.compile(r"printf '%s\\n' (\S+) > /opt/nemar/flavor")
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_word_a_dockerfile_writes_is_a_flavor_the_records_tag_can_name(flavor):
+    """A record's tag is `<version>-<word>` for the word in `/opt/nemar/flavor` (PX-06b), so the
+    word each Dockerfile writes must be one the aggregate accepts, and the label must say the same."""
+    (step,) = [r for k, r in final_rows(flavor) if k == "RUN" and "/opt/nemar/flavor" in r]
+    written = FLAVOR_WRITER.fullmatch(step)
+    assert written, step
+    word = written.group(1)
+    assert word in process_build.IMAGE_FLAVORS
+    assert word == flavor
+    labels = " ".join(rest for k, rest in final_rows(flavor) if k == "LABEL")
+    assert 'io.nemar.flavor="{}"'.format(word) in labels
+
+
+def test_every_flavor_the_records_can_name_has_a_dockerfile_and_the_reverse():
+    assert sorted(process_build.IMAGE_FLAVORS) == sorted(BOTH)
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_binary_is_the_release_pamica_resolves_and_the_digest_is_the_pinned_one(flavor):
+    step = amica_step(flavor)
+    (url,) = AMICA_URL.findall(step)
+    assert url == pamica_pin()  # the binary of the pAMICA release of the pamica the image pins
+    (digest,) = AMICA_CHECK.findall(step)
+    # one pinned value: the two Dockerfiles and the script that checks the smoke document
+    assert digest == check_smoke_pins.AMICA15_SHA256
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_binary_is_verified_before_it_is_installed_and_never_downloaded_to_its_final_path(
+    flavor,
+):
+    step = amica_step(flavor)
+    download = step.index("urlretrieve")
+    check = step.index("sha256sum --check --strict -")
+    install = step.index("install -m 0755")
+    assert download < check < install
+    # the checks are joined with && so a refusal stops the step, and a pipe into a shell is absent
+    assert step.count("&&") >= 4
+    assert not re.search(r"\|\s*(ba)?sh\b", step)
+    assert "/tmp/amica15.download /opt/amica/amica15" in step
+    assert step.index("/opt/amica/amica15") > check  # the final path is first named after the check
+
+
+class Release(BaseHTTPRequestHandler):
+    """Serves one body for any path: a stand-in for the release host, outside this repository."""
+
+    body = b""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+@pytest.fixture
+def release_host():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Release)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+def run_amica_step(step: str, release_host, tmp_path: Path, body: bytes):
+    """Run the Dockerfile's own download-and-check step against the stand-in, in a scratch tree.
+
+    Only the places are changed: the release URL becomes the stand-in's, and the two directories the
+    step writes become directories of the test; the interpreter is this one. The binary is bytes that
+    are never executed.
+    """
+    Release.body = body
+    port = release_host.server_address[1]
+    assert len(AMICA_URL.findall(step)) == 1
+    command = AMICA_URL.sub("http://127.0.0.1:{}/amica15".format(port), step)
+    assert command != step
+    command = command.replace("/tmp/amica15.download", str(tmp_path / "amica15.download"))
+    command = command.replace("/opt/amica", str(tmp_path / "opt" / "amica"))
+    assert command.startswith("python -c ")
+    command = sys.executable + command[len("python") :]
+    return subprocess.run(
+        ["sh", "-c", command], capture_output=True, text=True, check=False, timeout=60
+    )
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_build_step_refuses_bytes_whose_digest_is_not_the_pinned_one(
+    flavor, release_host, tmp_path
+):
+    done = run_amica_step(amica_step(flavor), release_host, tmp_path, b"not the binary")
+    assert done.returncode != 0
+    assert "FAILED" in done.stdout + done.stderr  # sha256sum says the check failed
+    assert not (tmp_path / "opt" / "amica" / "amica15").exists()  # nothing was installed
+    assert not (tmp_path / "opt" / "amica" / "amica15.sha256").exists()
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_build_step_installs_bytes_that_match_its_digest_and_records_it(
+    flavor, release_host, tmp_path
+):
+    # edit the hex to the stand-in bytes' digest, the one line the refusal above reads, and the same
+    # step installs them: the check is what decided, not the download or the directories
+    body = b"stand-in bytes, never run"
+    digest = hashlib.sha256(body).hexdigest()
+    step = amica_step(flavor).replace(check_smoke_pins.AMICA15_SHA256, digest)
+    done = run_amica_step(step, release_host, tmp_path, body)
+    assert done.returncode == 0, done.stdout + done.stderr
+    installed = tmp_path / "opt" / "amica" / "amica15"
+    assert installed.read_bytes() == body
+    assert installed.stat().st_mode & 0o777 == 0o755
+    assert (tmp_path / "opt" / "amica" / "amica15.sha256").read_text() == digest + "\n"
+    assert not (tmp_path / "amica15.download").exists()
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_a_step_without_the_check_would_install_the_wrong_bytes(flavor, release_host, tmp_path):
+    """The mutation: drop the check from the step and the wrong bytes are installed. The test above
+    that refuses them therefore fails on the one line it guards."""
+    step = amica_step(flavor)
+    mutated = AMICA_CHECK.sub("true", step)
+    assert mutated != step
+    done = run_amica_step(mutated, release_host, tmp_path, b"not the binary")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (tmp_path / "opt" / "amica" / "amica15").read_bytes() == b"not the binary"
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_final_stage_holds_the_verified_binary_and_its_digest_owned_by_root(flavor):
+    copies = [r for k, r in final_rows(flavor) if k == "COPY" and "--from=builder" in r]
+    assert "--from=builder --chmod=0755 /opt/amica/amica15 /opt/amica/amica15" in copies
+    assert (
+        "--from=builder --chmod=0644 /opt/amica/amica15.sha256 /opt/amica/amica15.sha256" in copies
+    )
+    assert not [r for r in copies if "--chown" in r]  # root, as COPY writes it
+    # before the job's user exists in effect: the binary is never writable by it
+    kinds = [k for k, _ in final_rows(flavor)]
+    assert kinds.index("USER") > max(i for i, k in enumerate(kinds) if k == "COPY")
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_libgomp1_is_installed_at_a_pinned_version_and_the_lists_are_removed(flavor):
+    (step,) = [r for k, r in final_rows(flavor) if k == "RUN" and "libgomp1" in r]
+    assert re.search(
+        r"apt-get install --yes --no-install-recommends libgomp1=\d+\.\d+\.\d+-\d+( |$)", step
+    )
+    assert step.endswith("rm -rf /var/lib/apt/lists/*")
+    # nothing else is installed with it: the smoke test's ldd names anything else that is missing
+    assert step.count("apt-get install") == 1
+    assert "libgomp1=14.2.0-19" in step
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_flavor_file_says_what_the_label_and_the_extra_say(flavor):
+    found = rows(flavor)
+    label = " ".join(r for k, r in found if k == "LABEL")
+    assert 'io.nemar.flavor="{}"'.format(flavor) in label
+    (writer,) = [r for k, r in final_rows(flavor) if k == "RUN" and "/opt/nemar/flavor" in r]
+    assert writer == "printf '%s\\n' {} > /opt/nemar/flavor".format(flavor)
+    # written as root, after the build file whose directory it shares and before the job's user
+    kinds = final_rows(flavor)
+    build_file = next(i for i, (k, r) in enumerate(kinds) if k == "RUN" and "build.json" in r)
+    flavor_file = next(i for i, (k, r) in enumerate(kinds) if "/opt/nemar/flavor" in r)
+    assert build_file < flavor_file < next(i for i, (k, _) in enumerate(kinds) if k == "USER")
+    syncs = [r for k, r in found if k == "RUN" and "uv sync" in r]
+    assert syncs == ["uv sync --frozen --no-dev --group runtime --extra " + flavor]
+
+
+def normalized(flavor: str) -> list[tuple[str, str]]:
+    """The instructions with the words that name the flavor replaced, to compare the two files."""
+    out = []
+    for keyword, rest in rows(flavor):
+        rest = rest.replace("--extra " + flavor, "--extra FLAVOR")
+        rest = rest.replace('io.nemar.flavor="{}"'.format(flavor), 'io.nemar.flavor="FLAVOR"')
+        rest = rest.replace("printf '%s\\n' {} >".format(flavor), "printf '%s\\n' FLAVOR >")
+        rest = rest.replace("CPU flavor:", "FLAVOR flavor:").replace(
+            "CUDA 12.9 flavor:", "FLAVOR flavor:"
+        )
+        out.append((keyword, rest))
+    return out
+
+
+def test_the_two_dockerfiles_differ_only_in_the_words_that_name_the_flavor():
+    # one file's invariants (every base a digest, the pinned environment, the non-root user, the build
+    # arguments, the labels) hold for the other when this does
+    assert normalized("cpu") == normalized("cuda")
+    cpu, cuda = (BOTH[f].read_text(encoding="utf-8") for f in BOTH)
+    assert cpu != cuda
+
+
+def test_the_flavor_comparison_fires_on_a_difference_that_is_not_the_flavor():
+    original = CUDA_DOCKERFILE.read_text(encoding="utf-8")
+    mutated = original.replace("libgomp1=14.2.0-19", "libgomp1=14.2.0-18")
+    assert mutated != original
+    changed = instructions(mutated)
+    assert changed != [(k, r) for k, r in rows("cuda")]
+    plain = [(k, r.replace("--extra cuda", "--extra FLAVOR")) for k, r in changed]
+    assert plain != normalized("cpu")
+
+
+def test_the_cuda_flavor_installs_the_cuda_extra_and_the_cpu_flavor_the_cpu_one():
+    cuda_runs = " ".join(r for k, r in rows("cuda") if k == "RUN")
+    assert "uv sync --frozen --no-dev --group runtime --extra cuda" in cuda_runs
+    assert "--extra cpu" not in cuda_runs
+    cpu_runs = " ".join(r for k, r in rows("cpu") if k == "RUN")
+    assert "--extra cuda" not in cpu_runs
+
+
+def test_the_dockerfile_comment_names_the_other_file_and_the_cuda_header_says_how_to_run_it():
+    assert "Dockerfile.cuda" in DOCKERFILE.read_text(encoding="utf-8")
+    header = CUDA_DOCKERFILE.read_text(encoding="utf-8").split("\nFROM ", 1)[0]
+    assert "NVIDIA_VISIBLE_DEVICES=void" in header
+    assert "--no-gpu" in header
+
+
+@pytest.mark.parametrize("flavor", BOTH)
+def test_the_libgomp1_pin_is_described_as_the_live_archives_version_not_a_snapshots(flavor):
+    # the base's apt sources point at the live archive (a snapshot date in its debian.sources is only
+    # a comment), so the pin fails closed when the archive moves on; the files must not say otherwise
+    text = re.sub(r"\s*\n#\s*", " ", BOTH[flavor].read_text(encoding="utf-8"))
+    assert "dated apt snapshot" not in text
+    assert "the base's apt sources point at the live archive" in text
+    assert "the pin is bumped together with the base digest" in text
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert "dated apt snapshot" not in docs
+    assert "the version the live trixie archive served when it was pinned" in docs
+    assert "fails closed" in docs

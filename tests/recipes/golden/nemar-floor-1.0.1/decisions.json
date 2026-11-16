@@ -1,0 +1,47 @@
+{
+  "bad_channels_branch": "ransac",
+  "bad_channels_removed": [
+    "O1",
+    "T6"
+  ],
+  "drift_kernel_length": 1005,
+  "executed_steps": [
+    "load",
+    "signal_channels",
+    "flatline",
+    "drift",
+    "line_noise_measure",
+    "bad_channels",
+    "bad_windows",
+    "qc"
+  ],
+  "flatline_removed": [],
+  "line_noise_removed_hz": [],
+  "n_bad_segments": 40,
+  "noise_only_channels": [
+    "Pg1",
+    "Pg2"
+  ],
+  "not_assessed_channels": [],
+  "plan_hash": "sha256:6e9ee2dd23f65560c6e0aa18822f205d5341d9bb3fd65027de513514818e603c",
+  "recipe": {
+    "id": "nemar-floor",
+    "version": "1.0.1"
+  },
+  "rules": [
+    "signal-channels-typed",
+    "locations-usable"
+  ],
+  "skipped_steps": [
+    {
+      "function": "eegprep.pop_eegfiltnew",
+      "reason": "below_threshold",
+      "step_id": "line_noise_50"
+    },
+    {
+      "function": "eegprep.pop_eegfiltnew",
+      "reason": "below_threshold",
+      "step_id": "line_noise_60"
+    }
+  ]
+}

@@ -1,11 +1,15 @@
-"""The ``nemar-floor`` recipe as the command and the record builders see it."""
+"""The ``nemar-floor`` recipe on a dataset directory, as the command and the record builders see it.
+
+``BIDS_RECIPE`` reads a dataset directory; the same recipe on NEMAR's Zarr serving copy is
+``zarr_recipe.ZARR_RECIPE``, and ``nemar_floor.RECIPE`` is the two together (``--input`` chooses).
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from nemar_process.common import qc
-from nemar_process.common.recipe import Column, DatasetStep, Distribution, Recipe
+from nemar_process.common.recipe import INPUT_OPTION, Column, DatasetStep, Distribution, Recipe
 from nemar_process.nemar_floor import outputs, steps
 
 PERCENT_EDGES = tuple(range(0, 101, 10))
@@ -47,7 +51,7 @@ def steps_with_load(load_function: str, load_parameters: dict[str, Any]) -> list
     """The recipe's steps with their recipe-level parameters: a constant, never read from a recording.
 
     Only the load step differs between the floor on a dataset directory and the floor on a Zarr
-    serving copy (``nemar-floor-zarr``), which passes its own. The bad-channel step is the RANSAC
+    serving copy (``--input zarr``), which passes its own. The bad-channel step is the RANSAC
     branch (the other is ``clean_channels_nolocs``); each recording's record says which ran.
     """
     table = [
@@ -78,10 +82,11 @@ def dataset_steps() -> list[DatasetStep]:
     return steps_with_load(io.BIDS_FUNCTION, io.bids_parameters())
 
 
-RECIPE = Recipe(
+BIDS_RECIPE = Recipe(
     info=outputs.INFO,
     columns=COLUMNS,
     distributions=DISTRIBUTIONS,
     dataset_steps=dataset_steps,
     run_recording=outputs.run_recording,
+    options=(INPUT_OPTION,),
 )

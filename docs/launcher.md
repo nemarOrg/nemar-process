@@ -76,6 +76,32 @@ Under Docker or Podman both limits are required and this variable is not read ([
 
 None of these variables reaches the container (`run.HOST_PASSTHROUGH` is a short allowlist).
 
+### The device
+
+A runner decides, for a job whose `resources.gpus` is above zero, whether the job gets a GPU ([the runner](runner.md#a-gpu-only-when-it-is-idle)), and tells the launcher with variables:
+
+| Variable | Value |
+|---|---|
+| `NEMAR_DEVICE` | `cpu` or `cuda` |
+| `NEMAR_DEVICE_REASON` | for `cuda` exactly `gpu_idle`; for `cpu` one of `gpu_disabled`, `gpu_unsupported_runtime`, `gpu_reserved`, `gpu_check_failed`, `gpu_busy`, `gpu_memory_short`, `gpu_in_use` |
+| `NEMAR_GPU_ID` | `cuda` only: the one GPU, as `nvidia-smi` prints its identifier (`GPU-` and 36 characters of hexadecimal digits and hyphens) |
+| `NEMAR_GPU_INDEX` | `cuda` only: the GPU's index, 0 to 999 with no leading zero |
+| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the most of the GPU's memory the job may take, a whole number from 1 to 999999999 |
+
+With none of them set (a Tapis or SLURM launch, and any job with no GPU) the command line is exactly what it always was.
+Any malformed value, an inconsistent set (`cuda` with a reason that is not `gpu_idle`, `cpu` with `gpu_idle`, a GPU identifier, index or cap without `cuda`, `cuda` without all three, or any of them without `NEMAR_DEVICE`) ends the launch at the start as `runtime_error` with detail `invalid_spec`, as a malformed lease does: one fixed line on standard error, the four launcher files written, and nothing fetched, run or uploaded.
+A `cuda` decision for a specification whose `resources.gpus` is 0 is `invalid_spec` too: the runner may use fewer GPUs than the specification allows and never more.
+It is checked once before anything is fetched or run (the launcher's own files are then uploaded as for any failure) and again by each command-line builder, so no path can hand over a GPU the specification did not allow.
+The container then gets exactly that GPU, or none:
+
+- Docker: `cuda` passes `--gpus device=<GPU id>` in place of `--gpus <n>`, so one GPU is handed over whatever count the specification allowed; `cpu` passes no `--gpus` and sets `NVIDIA_VISIBLE_DEVICES=void`, once, whatever the count was.
+- Apptainer: `cuda` passes `--nv` and `CUDA_VISIBLE_DEVICES=<GPU id>` (the scheduler's own value is not read); `cpu` passes neither.
+  Apptainer's `--nv` binds the host's NVIDIA device files, and `CUDA_VISIBLE_DEVICES` is what picks the one GPU: a request the CUDA runtime honors, not a wall.
+- Podman is refused for now ([Docker and Podman](#docker-and-podman)); a runner never sends it a `cuda` decision.
+- The container's environment gets `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` and, for `cuda`, `NEMAR_GPU_MEMORY_MB`, after `NEMAR_OUT`: launcher-owned, because the specification's `env` allowlist is closed and cannot name them.
+  The GPU's identifier and index are not passed in: the recipe is told the device and the cap.
+- `provenance.json` gets a `device` object only when a decision was made and the container was about to start: `{"device", "reason", "gpu_index", "memory_mb"}`, the index and the cap null for `cpu`, and never the GPU's identifier or a host name.
+
 ## Docker and Podman
 
 With `NEMAR_CONTAINER_RUNTIME=docker` the launcher runs the same image digest through Docker instead of Apptainer, for a host that has a rootful Docker daemon and no Apptainer.
@@ -103,6 +129,8 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Podman reports cgroup v2 with the `cpu`, `memory` and `pids` controllers available to it; a rootless Podman on cgroup v1 ignores the limits.
   Otherwise `runtime_unusable`.
   A Docker daemon without swap accounting is allowed, with a warning in the log: the memory limit holds, the swap limit does not.
+- Whether the engine can apply CPU shares is read from the same document (Docker's `CPUShares`; Podman: cgroup v2 with the `cpu` controller), and is never a refusal.
+  The log says `engine: can apply CPU shares, the job gets the lowest CPU weight` or `engine: cannot apply CPU shares, the job keeps the default CPU weight`, and `--cpu-shares 2` follows only in the first case ([What differs](#what-differs-from-the-apptainer-path)).
 - `NEMAR_CPUS` is at most the engine's CPU count; above it the engine refuses to start, which would be charged to the user.
   Detail `invalid_spec`.
 - `NEMAR_RUNNER_LABEL` is a runner registration id, exactly `rnr_` and 24 lowercase hexadecimal digits: it becomes the container label `nemar.runner`.
@@ -134,6 +162,11 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
   A missing or unusable `NEMAR_CPUS`, a missing or unusable `NEMAR_MEMORY_MB`, or a memory below Docker's minimum of 6 MB ends the launch at the start with exit 13 and detail `invalid_spec`.
   The launch specification carries neither value.
   `--cpus` is `NEMAR_CPUS`, `--memory` and `--memory-swap` are `NEMAR_MEMORY_MB` followed by `m` (no swap beyond the memory), and `--pids-limit` is a fixed 4096, far above what an EEG recipe's thread pools need and far below a fork bomb.
+- On a host that other people use the job should take as little as it can, and the runner's own niceness and idle input and output (I/O) class do not reach a container that the Docker daemon starts, because that container is not the runner's descendant.
+  So the launcher gives the container the lowest CPU weight, `--cpu-shares 2` (right after `--cpus`), when the preflight found that the engine can apply it; the weight only matters while the processors are contended, and `--cpus` stays the hard cap.
+  A weight competes only with the sibling control groups under the same parent: with Docker's systemd cgroup driver the container's scope sits under `system.slice` (siblings: the daemon's other containers and the system's services) and with its cgroupfs driver under `docker` (siblings: the other containers), so either way the lowest weight lowers its share against those siblings only, and not against a person's processes, which sit under `user.slice`, a branch of its own: how a contended CPU splits between that branch and the container's is decided higher up, by the weights of the groups that are siblings there.
+  There is no `--blkio-weight`: Docker refuses to start a container on a kernel without it.
+  Apptainer and rootless Podman containers are descendants of the runner and inherit its niceness and I/O class instead ([the runner](runner.md#sharing-a-workstation)).
 - When the container's client exits, the launcher kills whatever is left in its process group before it reaps the client (`waitid` with `WNOWAIT` on Linux), so the group id cannot have been reused when the kill is sent.
 - The container is named `nemar-launch-<random>`, carries the labels `nemar.job=<job id>` and `nemar.runner=<NEMAR_RUNNER_LABEL>`, and has no `--rm`.
   The launcher logs the name, in one line, `container: named <name>`; the labels are the two above and are not logged separately.
@@ -149,10 +182,11 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
 - `CUDA_VISIBLE_DEVICES` is not passed: the engine numbers the GPUs it hands over from zero, so the scheduler's value would name the wrong ones.
   A job with no GPUs gets `NVIDIA_VISIBLE_DEVICES=void`, so a GPU runtime configured as the default on the host hands over none.
   `--gpus <n>` for a job with GPUs takes the host's GPUs 0 to n-1 whatever the runner claimed; Podman's meaning of `--gpus` is unverified.
+  When a runner decided the device, none of that is read: `cuda` passes `--gpus device=<GPU id>` for the one GPU named, and `cpu` passes no `--gpus` and sets `NVIDIA_VISIBLE_DEVICES=void` ([the device](#the-device)).
 - There is no PID namespace preflight, because the launcher never passes a host namespace flag; the log says so.
 - The engine process gets the same short environment allowlist as Apptainer (`run.HOST_PASSTHROUGH`).
   `DOCKER_HOST` and `CONTAINER_HOST` are not passed on, so the engine's default socket is the one used.
-- The container's environment is exactly the job's allowlisted variables and `NEMAR_OUT` (and `NVIDIA_VISIBLE_DEVICES=void`), plus what the engine and the image add: the image's own `ENV`, `HOSTNAME` and `HOME`.
+- The container's environment is exactly the job's allowlisted variables and `NEMAR_OUT` (and `NVIDIA_VISIBLE_DEVICES=void`, and the device variables when a runner decided the device), plus what the engine and the image add: the image's own `ENV`, `HOSTNAME` and `HOME`.
 
 The command line, `<name>` being the container's name:
 
@@ -163,13 +197,14 @@ run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --
              --env-host=false --read-only-tmpfs=false --image-volume=ignore]
     --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
     [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
-    --cpus <NEMAR_CPUS> --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
+    --cpus <NEMAR_CPUS> [--cpu-shares 2] --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
     --pids-limit 4096 --oom-score-adj=1000
     --mount type=bind,src=<out>/work,dst=/work  --mount type=bind,src=<scratch>/tmp,dst=/tmp
     [--mount type=bind,src=<scratch>/code,dst=/code,readonly]
     [--mount type=bind,src=<dataset dir>,dst=/data/<id>,readonly ...]
-    [--gpus <n>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
+    [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
     --env NEMAR_OUT=/work/outputs
+    [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
     <image.uri without docker://>  <entry or command> <args>
 ```
 
@@ -185,13 +220,13 @@ Every Apptainer isolation flag has a counterpart, and the engine adds restrictio
 | `--no-mount bind-paths` | no counterpart flag: Docker has no site-wide mount list. Podman's `containers.conf` can list default `volumes`, `devices` and a `mounts.conf` of secrets, which a run cannot turn off | a residual: a Podman host must not set them (unverified on a real Podman) |
 | `--pwd /work` | `--workdir /work` | |
 | `--bind <src>:<dst>[:ro]` | `--mount type=bind,src=<src>,dst=<dst>[,readonly]` | exactly the four binds; `--mount` fails on a missing source instead of creating it, and a source holding `"`, a comma, a colon or a line break is refused as `bind_source_unsafe`; an image `VOLUME` is refused before the run, and Podman is also given `--image-volume=ignore` |
-| `--nv` | `--gpus <n>`, only when `resources.gpus` is above zero; otherwise `NVIDIA_VISIBLE_DEVICES=void` | |
+| `--nv` | `--gpus <n>`, only when `resources.gpus` is above zero; otherwise `NVIDIA_VISIBLE_DEVICES=void`; with a runner's decision, `--gpus device=<GPU id>` for `cuda` and `NVIDIA_VISIBLE_DEVICES=void` for `cpu` ([the device](#the-device)) | |
 | the invoking user's identity | `--user <uid>:<gid>` of the launcher, refused when it is 0; `--userns=keep-id` under Podman, so rootless Podman keeps that identity and can write the bind directories | |
 | the image file is read-only | `--read-only` root file system; `/tmp` is the writable scratch bind, so no `--tmpfs /tmp` (the engines refuse a duplicate mount point); Podman also gets `--read-only-tmpfs=false` | |
 | the invoking user's host network | `--network=bridge`, stricter | see the residual below |
 | no privilege gain for an unprivileged user | `--cap-drop ALL` and `--security-opt no-new-privileges` | stricter |
 | the image's own entry point is ignored by `exec` | Docker: `--entrypoint ""`; both: `--no-healthcheck` | Podman's documentation does not say that an empty value resets the entry point, so it is not passed there (unverified) |
-| `--cpus`, `--memory` | `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, applied by the daemon and checked by the preflight | |
+| `--cpus`, `--memory` | `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, applied by the daemon and checked by the preflight; and `--cpu-shares 2` when the engine can apply it | the weight is the lowest, which counts against the container's sibling groups (under `system.slice` with the systemd cgroup driver, under `docker` with the cgroupfs driver) and not against a person's processes under `user.slice` ([What differs](#what-differs-from-the-apptainer-path)) |
 | the PID namespace preflight (`run.require_pid_namespace`, which refuses a runtime configured without one) | the Podman flags above, which override whatever the site's `containers.conf` says about the PID, IPC, UTS and cgroup namespaces and the host environment | the Apptainer check reads the configuration and probes; the flags make the configuration moot |
 
 Residuals, stated plainly:
@@ -204,7 +239,8 @@ Residuals, stated plainly:
 
 ### Tests
 
-`tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a duplicate mount point).
+`tests/launcher/test_device.py` pins the command lines of every device decision under Docker and Apptainer, the settings that are refused, and the refusal of a GPU the specification did not allow; the Docker end-to-end test runs a `cpu` decision for a GPU job in a real container on a daemon with no GPU, in CI.
+`tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a `--cpu-shares` below 2, a duplicate mount point).
 `tests/launcher/test_runtime_podman_refused.py` shows Podman failing closed with a stand-in `podman` on `PATH` recording no call, and `tests/launcher/test_group_kill.py` the group kill with a real child and grandchild.
 `tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`.
 It skips where there is no usable daemon and fails in the CI job that sets `NEMAR_REQUIRE_DOCKER=1`.
@@ -278,7 +314,7 @@ No job with a real token is to be submitted before then either ([unverified.md](
 | `api_base` | NEMAR's API; the launcher calls it with `job_token`; HTTPS, or HTTP on loopback only |
 | `image` | `{uri, digest, sif}`; `sif` is `<64 hex digits of the digest>.sif`, relative to `NEMAR_SIF_ROOT` |
 | `env` | the allowlisted environment for the container |
-| `resources` | `{gpus}`; `--nv` only when above zero |
+| `resources` | `{gpus}`; `--nv` only when above zero, and, when a runner decided the device, only for `cuda` ([the device](#the-device)); a `cuda` decision for `gpus` 0 is refused |
 | `limits` | `{max_files, max_total_bytes}` bound the dataset selection only (checked before any file is fetched); they do not bound the outputs |
 | `job_token` | the per-job token, sent in the `X-Compute-Job-Token` header, never in a URL |
 
@@ -340,6 +376,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
      --bind <out>/work:/work  --bind <scratch>/tmp:/tmp
      [--bind <scratch>/code:/code:ro]  [--bind <dataset>:/data/<id>:ro ...]
      [--nv]  --env <name>=<value> ... [--env CUDA_VISIBLE_DEVICES=<ids>]  --env NEMAR_OUT=/work/outputs
+     [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
      <image> <entry or command> <args>
 ```
 
@@ -347,6 +384,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
 - **A PID namespace, proven or refused.** `--containall` gives the container a PID namespace of its own; a runtime whose configuration forbids it (`allow pid ns = no`) carries on without one, and user code could then read the launcher's environment, the job token, out of `/proc`. The launcher fails closed: before any user code runs it must verify the namespace, or it refuses with `runtime_error`, detail `pid_namespace_unavailable`. It reads the setting from the runtime's configuration. When `<runtime> buildcfg` names the runtime's own `SYSCONFDIR`, that directory is authoritative: only `<SYSCONFDIR>/<runtime>/<runtime>.conf` is read, and if it is missing the result is "cannot be verified" (another installation's file in `/etc` says nothing about this runtime). Only when `buildcfg` is unavailable, or prints no `SYSCONFDIR`, are the guesses used: beside the install prefix, `/usr/local/etc` and `/etc`. A `no`, a file that exists but cannot be read, and a value that is neither `yes` nor `no` are refusals, and a configuration that does not mention the setting is the runtime's default, `yes`. For `runtime: python` it also runs a preflight in the job's own image with the same isolation flags and checks that the container's PID namespace is not the launcher's; that proof stands even where no configuration is found. A user image (`runtime: image`) has no Python to rely on, so only a configuration that is found, readable and says `yes` verifies it; with none, the job is refused. The log names which check ran (the configuration file, or the preflight probe and what the configuration said).
 - **Bind sources are checked.** Immediately before the container runs, every bind source is examined with `lstat` and must be a real directory, not a symlink; a path holding `,` or `:` is refused (the runtime splits a bind argument on them). `runtime_error`, detail `bind_source_unsafe`.
 - The container's environment is the job's allowlisted variables and `NEMAR_OUT`, nothing from the host, plus `CUDA_VISIBLE_DEVICES` for a GPU job when the scheduler's value is plain (letters, digits and `,:_.-`, at most 128 characters).
+  When a runner decided the device ([the device](#the-device)), `--nv` and `CUDA_VISIBLE_DEVICES` are the decision's alone: the named GPU for `cuda`, neither for `cpu`, whatever the scheduler said.
   The runtime reads each `--env` argument as a CSV record, so a value with a comma or a double quote is passed quoted as CSV (`"NAME=a,b"`, the quote doubled); the tests run that against a real runtime.
 - The runtime process itself gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR` and `XDG_RUNTIME_DIR`, because `APPTAINERENV_*` and `SINGULARITY_BIND` style variables in the launcher's environment would otherwise be honoured.
 - `launcher/` is a sibling of `work/` and is not mounted, so the container can neither read nor forge the result, the provenance or the manifest.
@@ -439,7 +477,7 @@ Every directory is first made owner-readable, writable and searchable (`u+rwx`),
 - **Limits are enforced before any file is hashed.** More than 100,000 outputs is `too_many_outputs`, and so are outputs whose entries alone would make the outputs request larger than the Worker's 1 MiB cap (counted as the files are met, so none is hashed for a request that cannot be sent); a file over 5,000,000,000 bytes is `results_too_large`; there is no limit on the total, because `limits` bound the dataset selection only and the Worker's route refuses an excess (charged as the same word). Each ends as `result_upload_failed` with that word as the detail (the submitter's, not the platform's), the manifest is empty and no output is uploaded.
 - **An output that cannot be read** (a mode-000 file, or a directory that cannot be listed even after the `chmod`) is never skipped silently: the job ends `runtime_error` with detail `outputs_unreadable`, the manifest is empty and no output is uploaded. A mode-000 directory is made searchable and read normally.
 
-`provenance.json` holds the launch specification digest, the bundle digest, the image URI and digest, a free-text runtime version (the container runtime's own version line and the host Python), the staging records (`id`, `version`, `mode`, `files`, `bytes`), phase timings (`code_fetch`, `staging`, `run`, `finalize`), the Slurm job id and the entry's exit code.
+`provenance.json` holds the launch specification digest, the bundle digest, the image URI and digest, a free-text runtime version (the container runtime's own version line and the host Python), the staging records (`id`, `version`, `mode`, `files`, `bytes`), phase timings (`code_fetch`, `staging`, `run`, `finalize`), the Slurm job id and the entry's exit code. When a runner decided the device it also holds a `device` object ([the device](#the-device)).
 `result.json` holds the failure code, a fixed-word detail, the exit number and the entry's exit code.
 All three are validated against the schema's `$defs` in the tests.
 
@@ -492,10 +530,11 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 |---|---|
 | `code_fetch_failed` | `unsafe_archive`, `archive_too_large`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `digest_mismatch`, `size_mismatch`, `content_missing`, `disk_error` |
 | `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error` |
-| `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
+| `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `image_unverified`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
 | `result_upload_failed` | `results_too_large`, `results_quota_exceeded`, `too_many_outputs`, `outputs_unreadable`, `bad_response`, `fetch_failed`, `incomplete_plan`, `upload_failed`, `outputs_refused`, `complete_refused`, `internal_error` |
 | `entry_not_found`, `out_of_memory`, `time_limit` | none |
 
+`image_unverified` is the runner's word and never the launcher's: a runner ends a job with it, without launching, when the image's signature does not verify ([runner.md](runner.md#the-image)); the table lists it because NEMAR declares it for the launcher's code `runtime_error`.
 A transport fault (a status, a timeout, a dropped connection, a refused redirect) is `fetch_failed`, and a Worker route's own refusal is `outputs_refused` or `complete_refused`; the exact word (`http_503`, `timeout`, the route's `code`) is kept in the log line only.
 The three results refusals `results_too_large`, `results_quota_exceeded` and `too_many_outputs` are recorded as the route named them.
 
@@ -518,6 +557,7 @@ A signal death of the entry is reported as 128 plus the signal, as a shell does,
 | `SLURM_JOB_END_TIME`, `NEMAR_JOB_END_TIME`, `SLURM_JOB_ID` | Slurm, a runner, Slurm | the time limit rule (the first valid of the two), and the job id in provenance |
 | `NEMAR_OUTPUT_DIR` | a runner | the output directory when Tapis's is unset |
 | `NEMAR_LEASE_ID`, `NEMAR_ENFORCE_LIMITS`, `NEMAR_CPUS`, `NEMAR_MEMORY_MB` | a runner, optional | the lease and the runtime limits ([Outside Tapis and SLURM](#outside-tapis-and-slurm)) |
+| `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON`, `NEMAR_GPU_ID`, `NEMAR_GPU_INDEX`, `NEMAR_GPU_MEMORY_MB` | a runner, only for a job that asked for a GPU | what the runner decided for the device ([the device](#the-device)) |
 | `CUDA_VISIBLE_DEVICES` | Slurm | passed into the container for a GPU job when plain |
 
 Tapis archives `tapisjob.env` by default and the specification carries the job token, so the launcher never prints the specification, the token or a presigned address.

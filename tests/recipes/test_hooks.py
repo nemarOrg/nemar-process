@@ -16,7 +16,7 @@ import pytest
 from nemar_process import cli as command
 from nemar_process.common import determinism
 from nemar_process.common.errors import EngineUnavailable
-from nemar_process.common.recipe import TIME_BUDGET_S, Option
+from nemar_process.common.recipe import INPUT_OPTION, TIME_BUDGET_S, Option
 from nemar_process.nemar_floor import RECIPE, outputs
 from nemar_process.recipes import REGISTRY
 from recipe_support import SMOKE_SET
@@ -106,7 +106,7 @@ def nemar_of(out):
 
 
 def test_the_floor_asks_for_nothing_extra():
-    assert RECIPE.options == ()
+    assert RECIPE.options == (INPUT_OPTION,)  # which input it reads: the one option it has
     assert RECIPE.seeds == ()
     assert isinstance(hash(RECIPE), int)  # a frozen recipe stays hashable: no mutable default
     assert RECIPE.threads_for({}) == 1
