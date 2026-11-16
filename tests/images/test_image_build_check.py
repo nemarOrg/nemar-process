@@ -422,6 +422,137 @@ def test_an_extra_key_that_is_not_a_plain_name_is_described_never_printed(tmp_pa
     assert problems_of(done) == ["build file: unexpected key (a text of 12 characters)"]
 
 
+def test_a_text_of_one_character_is_described_in_the_singular(tmp_path):
+    _, build_file = real_record(tmp_path, "cpu", "release")
+    labels = labels_of("cpu", "1.2.3", COMMIT, "release")
+    labels[LABEL_OF["version"]] = " "
+    done = run_check(tmp_path, write_labels(tmp_path, labels), build_file)
+    assert problems_of(done) == [
+        "label org.opencontainers.image.version: found (a text of 1 character), expected 1.2.3"
+    ]
+
+
+@pytest.mark.parametrize(("length", "printed"), [(80, True), (81, False)])
+def test_a_plain_token_is_printed_up_to_eighty_characters_and_described_beyond(
+    tmp_path, length, printed
+):
+    _, build_file = real_record(tmp_path, "cpu", "release")
+    labels = labels_of("cpu", "1.2.3", COMMIT, "release")
+    value = "1" * length
+    labels[LABEL_OF["version"]] = value
+    done = run_check(tmp_path, write_labels(tmp_path, labels), build_file)
+    (problem,) = problems_of(done)
+    shown = value if printed else "(a text of {} characters)".format(length)
+    assert problem == "label org.opencontainers.image.version: found {}, expected 1.2.3".format(
+        shown
+    )
+
+
+def test_a_label_of_three_megabytes_is_described_by_its_length_and_the_output_stays_small(
+    tmp_path,
+):
+    _, build_file = real_record(tmp_path, "cpu", "release")
+    labels = labels_of("cpu", "1.2.3", COMMIT, "release")
+    labels[LABEL_OF["version"]] = "x" * 3_000_000
+    done = run_check(tmp_path, write_labels(tmp_path, labels), build_file)
+    assert done.returncode == 1
+    assert problems_of(done) == [
+        "label org.opencontainers.image.version: found (a text of 3000000 characters), "
+        "expected 1.2.3"
+    ]
+    assert len(done.stderr) < 500
+
+
+def test_fifty_thousand_extra_keys_are_reported_as_twenty_names_and_a_count(tmp_path):
+    labels, build_file = real_record(tmp_path, "cpu", "release")
+    fields = json.loads(build_file.read_text(encoding="utf-8"))
+    extra = {"k{:05d}".format(number): number for number in range(50_000)}
+    build_file.write_text(json.dumps({**fields, **extra}), encoding="utf-8")
+    done = run_check(tmp_path, labels, build_file)
+    assert done.returncode == 1
+    problems = problems_of(done)
+    assert problems[:20] == ["build file: unexpected key k{:05d}".format(n) for n in range(20)]
+    assert problems[20:] == ["build file: and 49980 more unexpected keys"]
+    assert len(done.stderr) < 2000
+
+
+def test_twenty_extra_keys_are_all_named_and_no_count_follows(tmp_path):
+    labels, build_file = real_record(tmp_path, "cpu", "release")
+    fields = json.loads(build_file.read_text(encoding="utf-8"))
+    extra = {"k{:02d}".format(number): number for number in range(20)}
+    build_file.write_text(json.dumps({**fields, **extra}), encoding="utf-8")
+    done = run_check(tmp_path, labels, build_file)
+    problems = problems_of(done)
+    assert problems == ["build file: unexpected key k{:02d}".format(n) for n in range(20)]
+
+
+# ---- exact match: no trimming, no case folding ---------------------------------------------------
+
+EXACT_CASES = {
+    "a label with a trailing space": (
+        "label",
+        "version",
+        "1.2.3 ",
+        "label org.opencontainers.image.version: found (a text of 6 characters), expected 1.2.3",
+    ),
+    "a label with a leading space": (
+        "label",
+        "version",
+        " 1.2.3",
+        "label org.opencontainers.image.version: found (a text of 6 characters), expected 1.2.3",
+    ),
+    "a label with a trailing newline": (
+        "label",
+        "version",
+        "1.2.3\n",
+        "label org.opencontainers.image.version: found (a text of 6 characters), expected 1.2.3",
+    ),
+    "a label that says the build in another case": (
+        "label",
+        "build",
+        "Release",
+        "label io.nemar.build: found Release, expected release",
+    ),
+    "a build file version with a trailing newline": (
+        "file",
+        "version",
+        "1.2.3\n",
+        "build file version: found (a text of 6 characters), expected 1.2.3",
+    ),
+    "a build file that says the build in another case": (
+        "file",
+        "build",
+        "Release",
+        "build file build: found Release, expected release",
+    ),
+    "a build file commit in uppercase": (
+        "file",
+        "commit",
+        COMMIT.upper(),
+        "build file commit: found {}, expected {}".format(COMMIT.upper(), COMMIT),
+    ),
+}
+
+
+@pytest.mark.parametrize("which", EXACT_CASES)
+def test_a_value_that_is_equal_only_after_trimming_or_case_folding_is_a_disagreement(
+    tmp_path, which
+):
+    where, field, value, problem = EXACT_CASES[which]
+    labels_file, build_file = real_record(tmp_path, "cpu", "release")
+    if where == "label":
+        labels = labels_of("cpu", "1.2.3", COMMIT, "release")
+        labels[LABEL_OF[field]] = value
+        labels_file = write_labels(tmp_path, labels)
+    else:
+        fields = json.loads(build_file.read_text(encoding="utf-8"))
+        fields[field] = value
+        build_file.write_text(json.dumps(fields), encoding="utf-8")
+    done = run_check(tmp_path, labels_file, build_file)
+    assert done.returncode == 1
+    assert problems_of(done) == [problem]
+
+
 # ---- the expected values -------------------------------------------------------------------------
 
 MALFORMED_VERSIONS = {

@@ -13,9 +13,12 @@ The image workflow asks this script the same question in two jobs:
   of the run and ``release``?
 
 A disagreement means the image is not the build the workflow thinks it made: a cached layer of a dev
-build, a Dockerfile that stopped passing an argument through, a digest that names another run's or
-another leg's image. The record is the image's own statement, so this does not stop an image built on
-purpose to lie; the guards of the workflow and the signing identity bind a digest to the workflow.
+build, a Dockerfile that stopped passing an argument through, a digest that names another run's image.
+Another flavor's image is not caught here: the build file has no flavor and both flavors state the
+same version, commit and build; the flavor check of the smoke step (`check_smoke_pins.py --flavor`,
+earlier in the same leg) catches that. The record is the image's own statement, so this does not stop
+an image built on purpose to lie; the guards of the workflow and the signing identity bind a digest
+to the workflow.
 
 Both inputs are the text of a file: the labels are what
 ``docker image inspect --format '{{json .Config.Labels}}'`` prints, the build file is the file read
@@ -26,12 +29,15 @@ out of the image. Standard library only, so it runs on a hosted runner before an
 
 Exit 0 and one line on standard output when everything agrees. Exit 1 and one line per problem on
 standard error, each starting ``::error::build record disagrees with the version step:`` and naming
-the place, when something disagrees or an input cannot be read. Exit 2 when an expected value is not
-a version of that build or not a commit: nothing is read then.
+the place, when something disagrees or an input cannot be read. Exit 2, with a line starting
+``::error::build record check:``, when an expected value is not a version of that build or not a
+commit: nothing is read then. Exit 2 is also what ``argparse`` returns for a usage error (a missing
+or unknown argument), with its own message and without that prefix.
 
 Versions and commits are public. A value an image supplies is printed only when it is a plain token
-(letters, digits and ``._+-``); anything else is described by its length, so an image cannot put a
-line or a workflow command into the log.
+of at most 80 characters (letters, digits and ``._+-``); anything else is described by its length, so
+an image cannot put a line, a workflow command or megabytes into the log. At most 20 unexpected keys
+of the build file are named, then a count.
 """
 
 from __future__ import annotations
@@ -64,7 +70,10 @@ LABELS = {
 
 PREFIX = "::error::build record disagrees with the version step:"
 MISUSE = "::error::build record check:"
-PLAIN = re.compile(r"[A-Za-z0-9._+-]+")
+# A value an image supplies is printed only as a short plain token, and at most this many unexpected
+# keys are named: what an image can make this script write is bounded.
+PLAIN = re.compile(r"[A-Za-z0-9._+-]{1,80}")
+MAX_KEY_LINES = 20
 MISSING = object()
 
 
@@ -81,7 +90,7 @@ def shown(value: object) -> str:
             return "(empty)"
         if PLAIN.fullmatch(value):
             return value
-        return "(a text of {} characters)".format(len(value))
+        return "(a text of {} character{})".format(len(value), "" if len(value) == 1 else "s")
     return "(a value of type {})".format(type(value).__name__)
 
 
@@ -151,9 +160,13 @@ def build_file_problems(path: Path, expected: dict[str, str]) -> list[str]:
     fields = read_object(path, "build file", problems)
     if fields is None:
         return problems
-    for key in sorted(fields):
-        if key not in FIELDS:
-            problems.append("build file: unexpected key {}".format(shown(key)))
+    extra = sorted(key for key in fields if key not in FIELDS)
+    for key in extra[:MAX_KEY_LINES]:
+        problems.append("build file: unexpected key {}".format(shown(key)))
+    if len(extra) > MAX_KEY_LINES:
+        problems.append(
+            "build file: and {} more unexpected keys".format(len(extra) - MAX_KEY_LINES)
+        )
     for key in FIELDS:
         if key not in fields:
             problems.append("build file: missing key {}".format(key))
