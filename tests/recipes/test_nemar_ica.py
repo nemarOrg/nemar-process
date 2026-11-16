@@ -30,6 +30,7 @@ from recipe_support import (
     DATASET,
     PINNED_EEGPREP_COMMIT,
     PINNED_EEGPREP_TEXT,
+    PINNED_ICA_RECIPE_VERSION,
     ROOT,
     correlated_channels,
     e1_statistics,
@@ -113,7 +114,11 @@ def read_matrix(path: Path) -> tuple[list[str], np.ndarray]:
 
 
 def test_the_recipe_is_one_recipe_with_two_inputs_and_the_options_the_card_names():
-    assert (RECIPE.id, RECIPE.version, RECIPE.label) == ("nemar-ica", "1.0.0", "nemarica")
+    assert (RECIPE.id, RECIPE.version, RECIPE.label) == (
+        "nemar-ica",
+        PINNED_ICA_RECIPE_VERSION,
+        "nemarica",
+    )
     assert RECIPE.inputs == ("bids", "zarr")
     flags = {option.flag: option.default for option in RECIPE.options}
     assert flags == {
@@ -1056,7 +1061,7 @@ def test_every_version_text_of_eegprep_names_the_commit_under_the_pin(cli, tiny)
     code, out, _ = cli("version")
     assert code == 0
     assert json.loads(out)["eegprep"] == PINNED_EEGPREP_TEXT
-    assert json.loads(out)["recipes"]["nemar-ica"] == "1.0.0"
+    assert json.loads(out)["recipes"]["nemar-ica"] == PINNED_ICA_RECIPE_VERSION
 
 
 def make_distribution(root: Path, name: str, direct_url: str | None) -> None:

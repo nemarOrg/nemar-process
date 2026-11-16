@@ -118,11 +118,17 @@ def test_another_recipe_gets_the_floors_files_under_its_own_label_and_name(
     assert not [name for name in product.files if "nemarfloor" in name]
     record = product.record
     assert record["pipelineInfo"]["name"] == "nemar-ica"
-    assert record["extensions"]["nemar"]["recipe"] == {"id": "nemar-ica", "version": "1.0.0"}
+    assert record["extensions"]["nemar"]["recipe"] == {
+        "id": "nemar-ica",
+        "version": PINNED_ICA_RECIPE_VERSION,
+    }
     # the state files are stamped with the recipe that wrote them
     for suffix in ("filters.json", "qc.json"):
         document = json.loads((tmp_path / (base + suffix)).read_text(encoding="utf-8"))
-        assert (document["recipe"], document["recipeVersion"]) == ("nemar-ica", "1.0.0")
+        assert (document["recipe"], document["recipeVersion"]) == (
+            "nemar-ica",
+            PINNED_ICA_RECIPE_VERSION,
+        )
     assert records.check(record, make_context().validator) == []
 
 
