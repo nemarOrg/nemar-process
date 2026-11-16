@@ -22,7 +22,7 @@ nemar-recipe run <recipe> --input zarr --zarr-base https://HOST --dataset-id ID
                           --dataset-version TAG --source-commit SHA [--out DIR]
                           [--recording STORE ...] [--image-digest sha256:HEX] [--run-id ID]
                           [the attestation options]
-nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
+nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [--resume] [identity options]
 nemar-recipe version
 ```
 
@@ -55,11 +55,11 @@ nemar-recipe version
   An identity argument may confirm what the inputs say, and may neither contradict it nor give what they lack, because the command line is a claim about the inputs' provenance and not a source for it.
   The inputs must also agree about the recipe, the engine stamp and the seeds, and they must have been made by the version of the recipe that is running, because the merged record's steps are that recipe's.
   The merged record states the recipe, the engine and the seeds of its inputs, not those of the process that merges them, which ran none of the steps and may run on another machine.
-  Two inputs that name the same recording, or hold the same file, are an error (exit 1, with the path), found before anything is copied.
+  Two inputs that name the same recording, or hold the same file, are an error (exit 1, with the path), found before anything is copied; `--resume` is the one exception, for a recording the time budget left out (below).
   It then copies every per-recording file byte for byte (the sample masks among them) into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, rebuilds the QC summary from the merged table and record (an input's own summary is never copied), and moves everything into place at the end.
   The merged summary equals the summary of one run over the same recordings, apart from `record_sha256`.
   A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.
-  It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above).
+  It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above); with `--resume` the remainder of a cut run is the one input that is left out of the sum (below).
 - A recipe can declare options of its own (`Recipe.options`), such as `--time-budget-s N` or the choice of a decomposition engine.
   The command accepts a flag only for a recipe that declares it (exit 2 for any other), fills in the default of one that is not given, and hands the values to the recipe's hooks and to `run_recording` (`RunContext.options`).
   The floor declares `--input`, and its Zarr input four more (below); a flag of the Zarr input is refused with `--input bids` (exit 2), as it would be for a recipe that never declared it.
@@ -70,6 +70,23 @@ nemar-recipe version
   A recording that ends at once for another reason (an unsupported format, a path that is not a file, a duplicate) keeps that reason.
   The dataset record is written, with the unstarted recordings in its counts as skipped, and the run exits 9: the dataset is not complete, and nothing stamps it so.
   `aggregate` of product directories that include such rows exits 9 for the same reason.
+- `aggregate --resume` completes a product that a time budget cut short.
+  The remainder is the list of paths whose row in the cut product's recordings table says `skipped` and `time_budget`; a second `run` over just those paths (`--recording`), merged with the first by `aggregate <recipe> --in FIRST --in SECOND --out DIR --resume`, gives a dataset record with no `time_budget` row, `pending_count` 0 and exit 0 under the usual rule.
+  Without `--resume` nothing about `aggregate` changes.
+  With it, when exactly two inputs name the same recording and exactly one of the two rows is `skipped` with the code `time_budget`, the other row and its files are taken and the budget row is dropped.
+  Every other duplicate is still exit 1 with the path, found before anything is copied: two real rows, two budget rows, a duplicated file, and a recording that three inputs name (so that the outcome never depends on the order the inputs were given in).
+  A remainder that covers only some of the budget rows is merged too, and the rest stay: `pending_count` counts the `time_budget` rows left and the exit is 9 while one is left.
+  The merged product is an input like another, so a run of the rest completes it with a second `--resume`.
+  A remainder that was itself cut short (R1) cannot be merged with the first product, because both hold a budget row for the same recording (two budget rows are an error).
+  Merge it in two steps instead: run the recordings R1 left out (R2), merge R1 with R2 by `--resume`, which leaves no budget row, and then merge the first product with that merge by `--resume`.
+  The result equals one run of all the recordings, with `resumed` counting what the last merge replaced (`tests/recipes/test_aggregate_resume.py` runs exactly this sequence).
+  Every refusal `aggregate` makes about the inputs' agreement (the dataset identity, the recipe and its version, the engine stamp, the seeds, the build and the image tag) applies to every input first, so a remainder made by another build or engine cannot complete a product (exit 6, nothing written).
+  A remainder's own `ignored_datatypes` are not added when every row of its table replaced a budget row, because the product it completes already counted them: a run counts the other datatypes of the subjects it owns, and the recordings of a remainder are recordings of that run, so it owns no subject the first run did not.
+  An input that has recordings of its own as well as rows that replace budget rows (a run of the cut recording and of a new one) is refused (exit 6, nothing written, named by its position): its count holds the other datatypes of both, and which of them the first product already counted cannot be told from the record (summed, the test's example would count 5 where one run counts 4).
+  Keep a remainder to the cut recordings only, and merge a run of other recordings as a separate step.
+  An input none of whose rows replace a budget row, and one with no rows at all, is summed as it always was.
+  The merged dataset record states `extensions.nemar.report.resumed`, the number of budget rows this merge replaced (0 when `--resume` replaced none), and a merge without `--resume` states none.
+  Apart from that field, the clock and the run id, a completed product is what one run of all the recordings writes, file for file, and the order of the `--in` options changes nothing.
 - A recipe's `preflight` checks, once, that its engine can run here: it raises `EngineUnavailable` with one fixed word.
   The command calls it before it creates anything, so a run whose engine is missing (no GPU, a binary that is not there) exits 8 with `engine_unavailable: <word>` on standard error, writes nothing, not even `--out`, and never runs another engine in its place.
   A preflight that fails any other way is an internal error (exit 1), still before anything is written.
@@ -347,7 +364,7 @@ A recording without a percentage is left out of the percent-good-channels histog
 
 `desc-nemarfloor_signalJourney.json` is a valid signalJourney record whose `processingSteps` are a constant list of the recipe's steps with the recipe-level parameters (never read from a recording), and whose `qualityMetrics` count the recordings that succeeded and the recordings that skipped each step for each reason.
 `summaryMetrics` has the counts and, for percent good channels, percent good samples and the line-noise excess before and after, `n`, `min`, `median`, `max` and a histogram with fixed edges (percentages every 10; dB at -10, -5, 0, 5, 10, 15, 20, 30, 40) where a value belongs to the bin `[edge_i, edge_i+1)`, the last bin is closed and values outside are counted as underflow and overflow.
-`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.1/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
+`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.1/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always, and for a merged product the `time_budget` rows left in it), `resumed` (only in the record of an `aggregate --resume`: how many budget rows that merge replaced), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
 The record is at most 256 KB (262,144 bytes): rows are added in path order while the serialized record stays at or under 200,000 bytes, and the rest are counted in `rows_truncated` and live only in the table file; the report's `records` is capped at 200 entries with `records_truncated`.
 Both caps are deterministic.
 At about 420 bytes a row as indented JSON, roughly 300 rows fit; a larger dataset reads the remaining rows from the table file, and the counts, the distributions and the plan variants cover every recording.
