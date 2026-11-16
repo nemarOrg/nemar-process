@@ -108,7 +108,10 @@ def _runner_device(environ: Mapping[str, str]) -> str | None:
     if value is None or value == "":
         return None
     if value not in RUNNING:
-        raise DeviceUsageError("{} is cpu or cuda".format(ENV_DEVICE))
+        raise DeviceUsageError(
+            "{} must be cpu or cuda (the runner sets it: unset it for a manual run, "
+            "or pass --ica-device)".format(ENV_DEVICE)
+        )
     return value
 
 
@@ -118,7 +121,10 @@ def _runner_reason(environ: Mapping[str, str]) -> str:
     if value is None or value == "":
         return UNSPECIFIED
     if not REASON.fullmatch(value):
-        raise DeviceUsageError("{} is a word of lowercase letters, digits and _".format(ENV_REASON))
+        raise DeviceUsageError(
+            "{} must be one word of lowercase letters, digits and _ (at most 40): "
+            "correct it or unset it".format(ENV_REASON)
+        )
     return value
 
 
@@ -143,7 +149,11 @@ def resolve(
     ``gpu_visible`` is torch's view of the GPU; a test passes the answer it needs.
     """
     if requested not in DEVICES:
-        raise DeviceUsageError("the device is one of {}".format(", ".join(DEVICES)))
+        raise DeviceUsageError(
+            "the device must be one of {}: pass --ica-device with one of them".format(
+                ", ".join(DEVICES)
+            )
+        )
     values = os.environ if environ is None else environ
     if requested == "cpu":
         return Resolution(requested, "cpu", REQUESTED)

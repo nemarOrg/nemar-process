@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NoReturn
@@ -35,7 +36,9 @@ HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 def usage_error(message: str) -> NoReturn:
-    """End the command with a usage error (exit 2), as an argument it refused would."""
+    """End the command with a usage error: the message on standard error, as ``parser.error`` writes
+    it, then exit 2. (``sys.stderr.write`` and not ``print``: the linter's unsafe fix deletes a print.)"""
+    sys.stderr.write("nemar-recipe run: error: {}\n".format(message))
     raise SystemExit(2)
 
 
@@ -58,16 +61,26 @@ def amica15_digest() -> str | None:
     return actual if actual == recorded else None
 
 
-def pamica_importable() -> bool:
-    """Whether pAMICA and torch can be imported, found without importing pAMICA (a recipe never does)."""
-    return importlib.util.find_spec("pamica") is not None and device.torch_importable()
+def pamica_importable(package: str = "pamica") -> bool:
+    """Whether pAMICA and torch can be imported, found without importing pAMICA (a recipe never does).
+
+    ``package`` is the name asked for (``pamica``); a test names a module of its own to exercise both
+    answers of the search.
+    """
+    return importlib.util.find_spec(package) is not None and device.torch_importable()
 
 
 def preflight(options: Mapping[str, Any]) -> None:
     """Raise ``EngineUnavailable`` when the engine cannot run here; end with exit 2 on a bad setting."""
     settings = Settings.from_options(options)
     if settings.native and settings.device != "cpu":
-        usage_error("--ica-engine amica15 takes only --ica-device cpu")
+        usage_error(
+            "amica15 takes only cpu: pass --ica-device cpu ({})".format(
+                "the default, auto, is not cpu"
+                if settings.device == "auto"
+                else "--ica-device {} was given".format(settings.device)
+            )
+        )
     unavailable: EngineUnavailable | None = None
     try:
         device.resolve("cpu" if settings.native else settings.device)
