@@ -184,8 +184,7 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   The command exits 9 (`time_budget_exhausted`) after it wrote its dataset record, and 8 (`engine_unavailable`) before it wrote anything.
   The launcher records both as `runtime_error` with the detail `entry_failed` and, from its code and its tests (an entry that writes files and then exits 3), still hashes and uploads what the entry wrote and completes the upload; nothing was run with exit 9 or 8 in particular, and no real storage or Worker took the upload.
   Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost, and whether the job is charged for the time used and how.
-  Resuming a budget-cut run is not supported in 1.0.0: `aggregate` refuses two inputs that name the same recording, so a later run of the skipped recordings cannot replace their `time_budget` rows (the Worker runs one whole dataset per job, so nothing needs it yet).
-  Resume or replace is a follow-up: nemarOrg/nemar-process#16.
+  A budget-cut run is completed by a second run of the recordings it skipped, merged with `aggregate --resume` ([recipes.md](recipes.md)); the Worker runs one whole dataset per job, so nothing dispatches the second run yet, and nothing has done it outside the tests.
   Epic A's recipe registry should treat the Worker's handling of failed jobs' outputs as open before it dispatches a recipe that can exit 9.
 - **Exit 8 is charged.**
   The launcher records every non-zero entry exit except 137 as `runtime_error` with the detail `entry_failed`, which is the submitter's and charged, so an `engine_unavailable` exit (no GPU, a binary that is not there), which is the platform's fault, is charged too.
