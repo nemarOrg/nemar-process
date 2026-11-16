@@ -874,3 +874,18 @@ def test_a_step_fails_when_the_version_it_is_given_is_empty(tmp_path, which):
     )
     assert done.returncode == 2, output_of(done)
     assert "the expected version of a {} build".format(build) in done.stderr
+
+
+# ---- the docs ------------------------------------------------------------------------------------
+
+
+def test_the_docs_name_the_check_and_say_what_it_catches_and_what_it_does_not():
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert docs.count("scripts/check_image_build.py") >= 1
+    assert "refuses to sign unless the pushed digest's build file and labels equal" in docs
+    assert "It catches an image whose record is not the build the run named" in docs
+    assert "It does not catch an image built on purpose to lie" in docs
+    assert "The sign-time build record check has not run against a pushed image" in docs
+    # the failure the check ends a leg with, and what to do then
+    assert "Check the pushed digest's build record against the version step" in docs
+    assert "a digest's record cannot change" in docs
