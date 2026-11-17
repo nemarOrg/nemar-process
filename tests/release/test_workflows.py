@@ -41,19 +41,25 @@ TAG_OWNERS = {
 RELEASE_STEP = "Create the GitHub release if it does not exist"
 LINT = "lint.yml"
 DRIFT = "nemar-cli-drift.yml"
-# The checks the rulesets `release-dev` and `release-main` require (read on 2026-11-17). A name that
-# stops reporting leaves every pull request waiting for it, so each is reported by exactly one job.
+# The checks the rulesets `release-dev` and `release-main` require once the owner has added `static` and
+# removed the three RETIRED_CHECKS (the rulesets read 2026-11-17, before that edit, listed the three and not
+# `static`). A name that stops reporting leaves every pull request waiting for it, so each is reported by
+# exactly one job.
 REQUIRED_ON_DEV = (
     "lint",
-    "actionlint",
+    "static",
     "launcher (python 3.9)",
     "launcher (python 3.12)",
-    "images",
     "recipes",
-    "deploy (tapis definitions and observer)",
     "bump-validator",
 )
 REQUIRED_ON_MAIN = (*REQUIRED_ON_DEV, "release-gate")
+# The jobs `lint` and `static` absorbed: no job of any workflow may report one of these names again.
+RETIRED_CHECKS = ("actionlint", "images", "deploy (tapis definitions and observer)")
+# The step-level condition the two checks use to run a later group after an earlier one failed.
+ALWAYS = "${{ !cancelled() }}"
+# The first step of the deploy group of `static`: the steps before it are the images group.
+DEPLOY_GROUP_START = "Read the nemar-cli pin of the Tapis client"
 BRANCHES_THAT_START_ONLY_LINT = ("feature/x", "feature/issue-7-epic-y", "fix/z", "probe/q")
 GUARD = f"github.event.head_commit.author.email != '{BOT_EMAIL}'"
 
@@ -133,6 +139,25 @@ def contains_key(node, key: str) -> bool:
     if isinstance(node, list):
         return any(contains_key(v, key) for v in node)
     return False
+
+
+def count_key(node, key: str) -> int:
+    """How many times `key` is a mapping key anywhere in `node`."""
+    if isinstance(node, dict):
+        return sum((k == key) + count_key(v, key) for k, v in node.items())
+    if isinstance(node, list):
+        return sum(count_key(v, key) for v in node)
+    return 0
+
+
+def run_lines(job: dict) -> list[str]:
+    """The command lines of every `run` of a job: stripped, with the blank and comment lines dropped."""
+    lines = []
+    for step in job["steps"]:
+        for line in step.get("run", "").splitlines():
+            if line.strip() and not line.strip().startswith("#"):
+                lines.append(line.strip())
+    return lines
 
 
 # triggers and tag namespaces -------------------------------------------------------------------
@@ -893,7 +918,7 @@ def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_conta
 
 
 def test_ci_lints_every_workflow_with_the_pinned_actionlint():
-    job = load(LINT)["jobs"]["actionlint"]
+    job = load(LINT)["jobs"]["lint"]
     commands = "\n".join(s.get("run", "") for s in job["steps"])
     assert "actionlint -color=false .github/workflows/*.yml" in commands
     assert "sha256sum -c" in commands
@@ -916,23 +941,25 @@ def test_a_push_to_a_feature_branch_starts_lint_and_nothing_heavy():
         assert not any(matches(glob, branch) for glob in drift), branch
 
 
-def test_lint_starts_on_every_push_and_every_pull_request_and_runs_both_jobs_unconditionally():
+def test_lint_starts_on_every_push_and_every_pull_request_and_is_one_job_with_no_job_level_if():
     # A push to any branch gives a feature branch its checks; a bare `pull_request` (any base, no path
     # filter) gives a pull request from a fork its checks without a maintainer pushing anything. A same
-    # repository pull request thus shows each name from two real runs. There is no `if` anywhere: a job
+    # repository pull request thus shows the name from two real runs. There is no job-level `if`: a job
     # skipped by its `if` reports "skipped", which satisfies a required check, so a skipped run of a
-    # name beside a failed run of it would leave GitHub to resolve the name from two runs.
+    # name beside a failed run of it would leave GitHub to resolve the name from two runs. The only `if`
+    # in the file is the step-level one the next test pins.
     document = load(LINT)
     assert triggers(document) == {"push": {"branches": ["**"]}, "pull_request": None}
     assert document["permissions"] == {"contents": "read"}
     assert not contains_key(document, "continue-on-error")
-    assert not contains_key(document, "if")
-    assert set(document["jobs"]) == {"lint", "actionlint"}
+    assert count_key(document, "if") == 2  # the two actionlint steps, and nothing else
+    assert list(document["jobs"]) == ["lint"]
     for name, job in document["jobs"].items():
         assert "name" not in job, name  # the check is named by the job key the rulesets list
         assert "if" not in job, name
         assert "continue-on-error" not in job, name
         assert "permissions" not in job, name
+        assert "timeout-minutes" not in job, name
     commands = "\n".join(s.get("run", "") for s in document["jobs"]["lint"]["steps"]) + "\n"
     for command in (
         "uv run ruff check .\n",
@@ -955,6 +982,33 @@ def test_lint_pins_the_tools_ci_pins():
         assert value == ci[key], key
 
 
+def test_lint_runs_actionlint_last_and_even_after_a_failed_ruff_or_ty_step():
+    # The former `actionlint` job is the last two steps of `lint`: the install and the run, each with
+    # exactly the condition that runs a step after an earlier one failed. A condition only decides that a
+    # step runs; any failed step fails the job, so none of this can make `lint` pass. The steps before
+    # them (ruff, ruff format, ty, ty on the floor) have no `if`: a failure there stops nothing that
+    # matters, and the two steps after it run anyway.
+    lint_steps = load(LINT)["jobs"]["lint"]["steps"]
+    *before, install, run = lint_steps
+    assert install["name"] == "Install actionlint"
+    assert install["if"] == ALWAYS
+    assert "sha256sum -c -" in install["run"]
+    assert "${ACTIONLINT_VERSION}" in install["run"]
+    assert run["if"] == ALWAYS
+    assert run["run"] == "actionlint -color=false .github/workflows/*.yml"
+    for step in (install, run):
+        assert "continue-on-error" not in step
+    assert [s for s in before if "if" in s] == []
+    commands = [s.get("run") for s in before if "run" in s]
+    assert commands == [
+        "uv sync --frozen",
+        "uv run ruff check .",
+        "uv run ruff format --check .",
+        "uv run ty check",
+        "uv run ty check --python-version 3.9 launcher observer",
+    ]
+
+
 def test_a_superseded_pull_request_or_feature_push_run_is_canceled_and_a_main_or_dev_push_never():
     concurrency = load(LINT)["concurrency"]
     group, cancel = concurrency["group"], concurrency["cancel-in-progress"]
@@ -974,6 +1028,16 @@ def test_a_superseded_pull_request_or_feature_push_run_is_canceled_and_a_main_or
     assert render(cancel, pull) == "true"
     # the push run and the pull request run of one branch are different groups, so neither cancels the other
     assert render(group, feature) != render(group, pull)
+
+
+def test_no_job_reports_a_retired_check_name():
+    # `actionlint` is a step of `lint`, `images` and `deploy (tapis definitions and observer)` are groups
+    # of `static`: a job that reported one again would be a second entry the rulesets no longer list.
+    # Read by job id and by display name, in every workflow, lint.yml and ci.yml included.
+    for name in EVERY:
+        for key, job in load(name)["jobs"].items():
+            assert key not in RETIRED_CHECKS, (name, key)
+            assert not set(RETIRED_CHECKS) & set(display_names(key, job)), (name, key)
 
 
 def test_no_workflow_but_lint_has_a_job_named_lint_or_actionlint():
@@ -1000,10 +1064,11 @@ def test_every_required_check_is_reported_by_exactly_one_job():
     counts = Counter(name for workflow in EVERY for name in job_names(load(workflow)))
     for name in REQUIRED_ON_MAIN:
         assert counts[name] == 1, (name, counts[name])
-    assert set(job_names(load(LINT))) == {"lint", "actionlint"}
+    assert set(job_names(load(LINT))) == {"lint"}
     ci_names = set(job_names(load("ci.yml")))
-    assert set(REQUIRED_ON_DEV) - {"lint", "actionlint", "bump-validator"} <= ci_names
+    assert set(REQUIRED_ON_DEV) - {"lint", "bump-validator"} <= ci_names
     assert ci_names - set(REQUIRED_ON_DEV) == {"docker backend (end to end)"}
+    assert set(RETIRED_CHECKS) & set(REQUIRED_ON_MAIN) == set()
 
 
 def test_the_launcher_matrix_keeps_both_pythons_and_the_docker_job_follows_it():
@@ -1072,6 +1137,12 @@ def test_the_runner_stack_end_to_end_runs_in_the_launcher_leg_on_3_12_and_cannot
             assert "||" not in each.get("run", ""), each["name"]
 
 
+def static_deploy_group_names() -> list[str]:
+    """The names of the steps of `static` from the first deploy-group step on."""
+    names = [s.get("name") for s in load("ci.yml")["jobs"]["static"]["steps"]]
+    return names[names.index(DEPLOY_GROUP_START) :]
+
+
 def test_no_job_or_step_of_ci_can_hide_a_failure():
     ci = load("ci.yml")
     assert not contains_key(ci, "continue-on-error")
@@ -1093,10 +1164,113 @@ def test_no_job_or_step_of_ci_can_hide_a_failure():
             **dict.fromkeys(names_of_fold(), on_3_12),
         },
         "docker": {},
-        "images": {},
+        "static": dict.fromkeys(static_deploy_group_names(), ALWAYS),
         "recipes": {},
-        "deploy": {},
     }
+
+
+# `static`: the former `images` and `deploy` jobs as one required check -------------------------------
+
+# Every command line of the two jobs `static` replaced (their `run` scripts, comments dropped), by the
+# group it belongs to. A command dropped from `static` would stop being checked on a pull request while
+# the required check stayed green.
+ACTIONLINT_INSTALL = (
+    "set -euo pipefail",
+    'cd "$RUNNER_TEMP"',
+    'curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/'
+    'v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"',
+    'echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -',
+    "tar -xzf actionlint.tar.gz actionlint",
+    "sudo install -m 0755 actionlint /usr/local/bin/actionlint",
+    "actionlint --version",
+)
+IMAGES_GROUP_COMMANDS = (
+    *ACTIONLINT_INSTALL,
+    "uv sync --frozen",
+    "uv lock --check",
+    "uv run pytest tests/images --cov=recipes --cov=scripts",
+)
+DEPLOY_GROUP_COMMANDS = (
+    'echo "ref=$(python3 -c \'import json; print(json.load(open("tests/contract/'
+    'nemar-cli-tapis-pin.json"))["ref"])\')" >> "$GITHUB_OUTPUT"',
+    'echo "ref=$(python3 -c \'import json; print(json.load(open("tests/contract/'
+    'nemar-cli-observation-pin.json"))["ref"])\')" >> "$GITHUB_OUTPUT"',
+    "uv sync --frozen",
+    "uv run python scripts/derive_tapis_schemas.py --check",
+    "uv run python scripts/build_launcher_zip.py --check",
+    "uv run python scripts/build_observer_zip.py --check",
+    "uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85",
+    "uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/observer",
+)
+
+
+def test_static_runs_every_command_of_the_images_and_deploy_jobs_it_replaced():
+    lines = run_lines(load("ci.yml")["jobs"]["static"])
+    assert lines == [*IMAGES_GROUP_COMMANDS, *DEPLOY_GROUP_COMMANDS]
+    # both groups sync the lock, so a group that lost its sync would fail here and not in a run
+    assert lines.count("uv sync --frozen") == 2
+
+
+def test_static_is_one_job_named_static_that_nothing_can_skip_or_soften():
+    job = load("ci.yml")["jobs"]["static"]
+    assert set(job) == {
+        "runs-on",
+        "env",
+        "steps",
+    }  # no `name`, `if`, `continue-on-error`, `timeout-minutes`
+    assert job["runs-on"] == "ubuntu-24.04"
+    env = job["env"]
+    # the five keys of the two jobs, by the group that reads them; the three switches that make a skipped
+    # comparison a failure are "1", and the two checkout paths are the ones the steps below create
+    assert env == {
+        "NEMAR_REQUIRE_ACTIONLINT": "1",
+        "NEMAR_REQUIRE_TAPIS_DRIFT": "1",
+        "NEMAR_CLI_TAPIS_DIR": "${{ github.workspace }}/.nemar-cli-tapis",
+        "NEMAR_REQUIRE_OBSERVATION_DRIFT": "1",
+        "NEMAR_CLI_OBSERVATION_DIR": "${{ github.workspace }}/.nemar-cli-observation",
+    }
+    for step in job["steps"]:
+        assert "continue-on-error" not in step, step.get("name")
+        assert "||" not in step.get("run", ""), step.get("name")  # a `|| true` would hide a failure
+    for name, jobs in (("ci.yml", load("ci.yml")["jobs"]), (LINT, load(LINT)["jobs"])):
+        for key, each in jobs.items():
+            assert "if" not in each, (name, key)
+            assert "continue-on-error" not in each, (name, key)
+
+
+def test_static_names_every_check_by_the_group_it_came_from_and_runs_the_deploy_group_after_a_failure():
+    steps = load("ci.yml")["jobs"]["static"]["steps"]
+    names = [s.get("name") for s in steps]
+    assert names.count(DEPLOY_GROUP_START) == 1
+    start = names.index(DEPLOY_GROUP_START)
+    # the images group: no condition, so it runs first and a failure there is a failure of the job
+    for step in steps[:start]:
+        assert "if" not in step, step.get("name") or step.get("uses")
+    # the deploy group: exactly the condition that runs a step after an earlier one failed
+    for step in steps[start:]:
+        assert step["if"] == ALWAYS, step["name"]
+    # every step that checks something says which former job it came from
+    checks = [s for s in steps if "pytest" in s.get("run", "") or "--check" in s.get("run", "")]
+    assert len(checks) == 3
+    for step in checks:
+        assert step["name"].startswith(("images: ", "deploy: ")), step["name"]
+    assert [s["name"].split(":")[0] for s in checks] == ["images", "deploy", "deploy"]
+    assert steps.index(checks[0]) < start <= steps.index(checks[1])
+    # the ids the two nemar-cli checkouts of the deploy group read their pins from
+    assert [s.get("id") for s in steps if "id" in s] == ["pin", "observation-pin"]
+
+
+@pytest.mark.parametrize("name", ["ci.yml", LINT])
+def test_no_step_or_default_of_ci_or_lint_changes_the_shell_a_run_step_uses(name):
+    # With no `shell` key a run step uses `bash -e {0}`, so a failing command in the middle of a script
+    # fails the step. `shell: bash {0}` on a step, or `defaults: run: shell: bash {0}` on the workflow or
+    # a job, drops `-e`: a failing `--check` script followed by a passing command would leave `static`
+    # or `lint` green. Neither key may appear.
+    document = load(name)
+    assert not contains_key(document, "defaults"), name
+    for key, job in document["jobs"].items():
+        for step in job["steps"]:
+            assert "shell" not in step, (name, key, step.get("name") or step.get("run"))
 
 
 def test_ci_cancels_a_superseded_pull_request_run_and_never_a_push_run():

@@ -85,7 +85,7 @@ It records the nemar-cli commit, and the SHA-256 of the schema and of the two fi
 - `test_the_schema_copy_is_the_pinned_bytes` and `test_the_fixture_copies_are_the_pinned_bytes` need no checkout and always run.
 - `test_the_copies_match_nemar_cli_at_the_pinned_ref` and `test_the_fixtures_match_nemar_cli_at_the_pinned_ref` compare with nemar-cli's own files at the pinned commit through `git show`, using a checkout named by `NEMAR_CLI_OBSERVATION_DIR` or a `nemar-cli` directory beside this checkout.
   Without one they skip with a message that says the check did not run.
-  In CI the `deploy` job checks out exactly the pinned commit (sparse) and sets `NEMAR_REQUIRE_OBSERVATION_DRIFT=1`, which turns that skip into a failure.
+  In CI the deploy group of the `static` job checks out exactly the pinned commit (sparse) and sets `NEMAR_REQUIRE_OBSERVATION_DRIFT=1`, which turns that skip into a failure.
 - `ObserverRoute.bodies()` in `tests/observer_support.py` checks every document the observer posts against the schema, so each observer test that reads a body also proves it valid.
   `tests/observer/test_observation_schema.py` adds the failure shapes (a command that fails, is missing, hangs or prints another format, an export cut to 1 MiB, odd `sacct` rows), pins the schema's words to the constants in `observe.py`, and refuses documents the observer does not write.
 - An advisory CI job, `nemar-cli-observation-latest` (in `nemar-cli-drift.yml`), warns without failing when nemar-cli's compute epic branch has changed the schema or the fixtures since the pinned commit (or when the comparison cannot be made).
