@@ -1,8 +1,9 @@
 name: ci
 
-# Starts on a pull request and on a push to `main` or `dev`; a push to any other branch starts `lint` and
-# `actionlint` only (lint.yml), and the pull request that follows starts this workflow once. There is no
-# path filter: the jobs below are required checks, and a skipped workflow would leave them waiting.
+# Starts on a pull request and on a push to `main` or `dev`; a push to any other branch starts `lint` only
+# (lint.yml: ruff, ruff format, ty and actionlint), and the pull request that follows starts this workflow
+# once. There is no path filter: the jobs below are required checks, and a skipped workflow would leave them
+# waiting.
 on:
   push:
     branches: ["main", "dev"]
@@ -33,8 +34,8 @@ env:
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
-# `lint` and `actionlint`, the other two required checks, are lint.yml: they run on every push to any branch
-# and on every pull request, and are not repeated here.
+# `lint`, the other required check, is lint.yml: it runs ruff, ruff format, ty and actionlint on every push to
+# any branch and on every pull request, and is not repeated here.
 jobs:
   launcher:
     name: launcher (python ${{ matrix.python }})
@@ -217,13 +218,27 @@ jobs:
       - name: Launch end to end (real Docker)
         run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
 
-  images:
-    # The runtime image's declaration, lock, signalJourney schema digest, smoke fixture, Dockerfile and workflows.
-    # The image itself is built and smoke-tested by image-nemar-python.yml.
+  static:
+    # The former `images` and `deploy` jobs as one required check, in this order: the images group (the
+    # runtime image's declaration, lock, signalJourney schema digest, smoke fixture, Dockerfile and
+    # workflows, which image-nemar-python.yml builds and smoke-tests), then the deploy group (the Tapis
+    # application and system definitions, the schemas derived from Tapis's own OpenAPI files, the
+    # registration script and the queue observer, docs/operator.md). One job, so the rulesets list one name.
+    # Each group's checks keep their own step names (`images: ...`, `deploy: ...`), so a failure still says
+    # which former job it came from. Every step of the deploy group has `if: ${{ !cancelled() }}`, so an
+    # images failure does not hide a deploy failure; the condition only decides that a step runs, and a
+    # failed step fails the job, so nothing here can make the job pass. There is no job-level `if`, no
+    # `continue-on-error` and no `timeout-minutes`, as in the two jobs this one replaces.
     runs-on: ubuntu-24.04
     env:
-      # In CI the workflow linter may not be skipped unnoticed.
+      # In CI the workflow linter may not be skipped unnoticed (the images group).
       NEMAR_REQUIRE_ACTIONLINT: "1"
+      # The deploy group: in CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
+      NEMAR_REQUIRE_TAPIS_DRIFT: "1"
+      NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
+      # ... nor the comparison of the observation schema and fixtures with nemar-cli's.
+      NEMAR_REQUIRE_OBSERVATION_DRIFT: "1"
+      NEMAR_CLI_OBSERVATION_DIR: ${{ github.workspace }}/.nemar-cli-observation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -241,11 +256,66 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Gates
+      - name: "images: the lock and the pins of the image workflow"
         run: |
           uv sync --frozen
           uv lock --check
           uv run pytest tests/images --cov=recipes --cov=scripts
+
+      # The deploy group. The nemar-cli checkouts come after the images group, so tests/images runs in the
+      # tree it always ran in.
+      - name: Read the nemar-cli pin of the Tapis client
+        if: ${{ !cancelled() }}
+        id: pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the definitions are compared with the client's own source)
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli-tapis
+          sparse-checkout: |
+            /backend/src/services/tapis/
+            /shared/contract/compute.ts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Read the nemar-cli pin of the observation schema
+        if: ${{ !cancelled() }}
+        id: observation-pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the observation schema and fixtures are compared with its own)
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.observation-pin.outputs.ref }}
+          path: .nemar-cli-observation
+          sparse-checkout: |
+            /shared/contract/compute-observation.schema.json
+            /test/fixtures/compute-observation/
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: "deploy: the Tapis definitions, the zips and the observer"
+        if: ${{ !cancelled() }}
+        run: |
+          uv sync --frozen
+          # The schemas are what the vendored specifications derive, and nothing else.
+          uv run python scripts/derive_tapis_schemas.py --check
+          # The digests recorded in the applications are those of the reproducible zips.
+          uv run python scripts/build_launcher_zip.py --check
+          uv run python scripts/build_observer_zip.py --check
+          # Each application and each rendered template validates; registration, rendering,
+          # hygiene and the observer are tested against local stand-ins.
+          uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
+
+      - name: "deploy: the observer on its Python floor (3.9)"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/observer
 
   recipes:
     # The recipes run in the runtime environment (eegprep, NumPy, SciPy, threadpoolctl), which the
@@ -268,69 +338,3 @@ jobs:
       # image-nemar-python.yml, where the isolation is real.
       - name: Launch end to end (stand-in runtime)
         run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer and not docker and not runner_stack"
-
-  deploy:
-    # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
-    # files, the registration script and the queue observer (docs/operator.md).
-    name: deploy (tapis definitions and observer)
-    runs-on: ubuntu-24.04
-    env:
-      # In CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
-      NEMAR_REQUIRE_TAPIS_DRIFT: "1"
-      NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
-      # ... nor the comparison of the observation schema and fixtures with nemar-cli's.
-      NEMAR_REQUIRE_OBSERVATION_DRIFT: "1"
-      NEMAR_CLI_OBSERVATION_DIR: ${{ github.workspace }}/.nemar-cli-observation
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Read the nemar-cli pin of the Tapis client
-        id: pin
-        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
-
-      - name: Check out nemar-cli at that commit (the definitions are compared with the client's own source)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: nemarOrg/nemar-cli
-          ref: ${{ steps.pin.outputs.ref }}
-          path: .nemar-cli-tapis
-          sparse-checkout: |
-            /backend/src/services/tapis/
-            /shared/contract/compute.ts
-          sparse-checkout-cone-mode: false
-          fetch-depth: 1
-
-      - name: Read the nemar-cli pin of the observation schema
-        id: observation-pin
-        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
-
-      - name: Check out nemar-cli at that commit (the observation schema and fixtures are compared with its own)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: nemarOrg/nemar-cli
-          ref: ${{ steps.observation-pin.outputs.ref }}
-          path: .nemar-cli-observation
-          sparse-checkout: |
-            /shared/contract/compute-observation.schema.json
-            /test/fixtures/compute-observation/
-          sparse-checkout-cone-mode: false
-          fetch-depth: 1
-
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Gates
-        run: |
-          uv sync --frozen
-          # The schemas are what the vendored specifications derive, and nothing else.
-          uv run python scripts/derive_tapis_schemas.py --check
-          # The digests recorded in the applications are those of the reproducible zips.
-          uv run python scripts/build_launcher_zip.py --check
-          uv run python scripts/build_observer_zip.py --check
-          # Each application and each rendered template validates; registration, rendering,
-          # hygiene and the observer are tested against local stand-ins.
-          uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
-
-      - name: Observer tests on its Python floor (3.9)
-        run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/observer
