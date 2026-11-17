@@ -131,7 +131,9 @@ def test_every_eeg_store_is_processed_or_counted(ran):
         ("failed", "convert_failed"),
     ]
     assert rows[z.MISSING]["step"] == "load"
-    assert rows[z.MISSING]["detail"] == "ArrayNotFoundError"  # a class name, never the address
+    # a class name, never the address; the reader asks for the store root (its electrode attributes)
+    # before the signal, so a store with no files fails there, as a transport error
+    assert rows[z.MISSING]["detail"] == "TransportError"
     assert rows[z.BAD_UNIT]["detail"] == "ValueError"
     # a scale so large that the values overflow: refused when the read is named by its content, which
     # is before the loader's own check of the values (`non_finite_samples`) is reached
