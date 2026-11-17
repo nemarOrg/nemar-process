@@ -66,7 +66,7 @@ The smoke fixture is still written with a key in its `etc` (`scripts/make_smoke_
 
 ### The commit the images pin (`nemar-ica`, 2026-11-15)
 
-No eegprep release holds pAMICA's `pop_runica(icatype='pamica')` (sccn/eegprep#617), the ASR state (#621) or eegprep-lean (#616): PyPI's newest is 0.5.0 (2026-11-04), and `develop` still says `0.5.0`.
+No eegprep release holds pAMICA's `pop_runica(icatype='pamica')` (sccn/eegprep#617), the ASR state (#621) or eegprep-lean (#616, and #626 and #627 for its reader of a store's electrode positions): PyPI's newest is 0.5.0 (2026-11-04), and `develop` still says `0.5.0`.
 The images therefore take eegprep from the merge commit of #617 on `develop`, `edf694c8344b9c4c68672eac3acf9a819f1462a8`, and every record, the engine stamp and `nemar-recipe version` name it (`0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8`).
 A release that contains it moves the pin to that release, which drops the suffix and gives a new engine string.
 Three behaviors of 0.5.0 that this repository's tests pinned have changed at that commit, and the tests were changed to say so:
@@ -75,7 +75,7 @@ Three behaviors of 0.5.0 that this repository's tests pinned have changed at tha
 - `pop_loadset` returns an empty `etc` as a dictionary (sccn/eegprep#533 is fixed for that case); the loader's repair of a non-dict `etc` stays, and its load step now records `etcNormalized` false for such a set where it recorded true.
 - A set with no sampling rate raises a `ValueError` at load; it used to load and fail the first check after it with a `TypeError`.
 
-One gap found by `nemar-ica`, filed upstream as sccn/eegprep issue 625 (it is not worked around): the Zarr reader in eegprep-lean (`to_eeg`) builds label-only channel locations, and does not read the electrode positions, system and units that a store carries in its root attributes (pull request 626 is the fix), so ICLabel cannot classify a recording read from a store. That `pop_iclabel` raises a `ValueError` from `topoplot` ("no channel has a finite theta and radius") on channels with no locations is correct behavior; the gap is the reader.
+One gap found by `nemar-ica`, filed upstream as sccn/eegprep issue 625 and never worked around: the Zarr reader in eegprep-lean (`to_eeg`) built label-only channel locations, and did not read the electrode positions, system and units that a store carries in its root attributes, so ICLabel could not classify a recording read from a store. Pull request 626 fixed it, pull request 627 then fixed three edge cases of that reading, and the images take eegprep-lean from its `develop` merge commit (`2736f99265f278ea9b9184a8b639a2e384f7859b`, which holds #626 and #616), so ICLabel classifies a recording read from a store that declares positions. That `pop_iclabel` raises a `ValueError` from `topoplot` ("no channel has a finite theta and radius") on channels with no locations is correct behavior, and a store that declares none, or whose unit or coordinate system the reader refuses, still ends at `iclabel` with the detail `iclabel_no_locations`.
 
 ### Gaps found by the `nemar-floor` recipe (phase 3, 2026-11-04 and 2026-11-05)
 
@@ -97,11 +97,19 @@ Public wording only: "a processing pipeline wants X".
 
 ### The Zarr reader (`nemar-floor --input zarr`, 2026-11-13)
 
-The recipe reads the serving copy with eegprep-lean from the merge commit of sccn/eegprep#616 on `develop`, installed from a pinned commit (see [recipes.md](recipes.md)).
-The first pinned commit refused the unit the live index uses for microvolts, the micro sign (`µV`), so every real store failed; the recipe renamed the label to `uV` until the commit 14ba46e8 of that pull request accepted the micro sign and the Greek mu.
-The pin is the merge commit (`af9145121ed8a69eab86bc2f5c425a6bdcced5cc`), which contains that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
+The recipe reads the serving copy with eegprep-lean from the `develop` merge commit of sccn/eegprep#627, which holds #626 and #616, installed from a pinned commit (see [recipes.md](recipes.md)).
+The first pinned commit refused the unit the live index uses for microvolts, the micro sign (`µV`), so every real store failed; the recipe renamed the label to `uV` until the commit 14ba46e8 of sccn/eegprep#616 accepted the micro sign and the Greek mu.
+The pin is the merge commit of #627 (`2736f99265f278ea9b9184a8b639a2e384f7859b`; the merge commits of #626 and #616 were `e53d3aa748a8ebd9816110463485b1d8edf624e5` and `af9145121ed8a69eab86bc2f5c425a6bdcced5cc`), which contains that commit, the recipe passes the unit through unchanged, and a test reads one store per spelling and compares the values.
 
-Patch note for the reader that sccn/eegprep#616 merged (still true at its merge commit and on `develop`, where the package has not changed since): `load_recording` checks the size the index declares against `max_bytes` before it reads, and the shape of what it read afterwards (a store shorter than its index is refused), but it should also check each array's `zarr.json` (shape, chunk and shard grid, data type) against the index's declared channels and samples before it decodes anything, so that a store whose metadata disagrees with its index is refused by the reader and not left to the caller's size bound.
+Patch note for the reader that sccn/eegprep#616 merged (still true at the merge commit of #627, the pin): `load_recording` checks the size the index declares against `max_bytes` before it reads, and the shape of what it read afterwards (a store shorter than its index is refused), but it should also check each array's `zarr.json` (shape, chunk and shard grid, data type) against the index's declared channels and samples before it decodes anything, so that a store whose metadata disagrees with its index is refused by the reader and not left to the caller's size bound.
+
+The reader of a store's electrode positions that sccn/eegprep#626 merged had three edge cases, found by reading it against the platform's locations digest and fixed by sccn/eegprep#627, the pin; none was worked around here, and no recipe code depends on the old behavior.
+What the pinned reader does now:
+
+- An integer coordinate too large for a binary64 (any of at least 2^1024 minus 2^970, or an integer literal of more than 4300 digits, which made Python's own parse raise before any entry existed) is a channel without a position, as the definition says, because the store root's integers are parsed as binary64; the store is read in full and digested.
+- Every zero coordinate is read as positive zero, whatever its sign or spelling (`-0`, `-0.0`, `0`), as the digest hashes it, so two stores that differ only in the sign of a zero hand eegprep the same values, the sign of `Y` and of `theta` included.
+  The BIDS import still keeps a negative zero that a float column of an `electrodes.tsv` spells with a minus sign, so for such a file `Y` and `theta` can differ in sign between the two routes; the locations digest is not affected.
+- A position map that is not an object is refused, as the definition refuses it, as `ElectrodePositionsNotAnObject` (a subclass of `IndexError_`), so a run records the reason by the class name, and an `attributes` that is empty or null is no attributes.
 
 The rank test of the location guard (sccn/eegprep#539) uses NumPy's default tolerance, which is of the order of machine precision times the number of channels.
 A montage that is flat to a picometer therefore has numerical rank 3 and passes, and `clean_channels` still returns a degraded answer for it: with the 19 positions of the reproduction in that issue flattened onto a plane (thickness 1e-9 mm to 0.1 mm), it removed 2 of 19 channels from data that lose none with the true positions.

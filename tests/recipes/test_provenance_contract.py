@@ -27,7 +27,7 @@ from nemar_process import cli, sj
 from nemar_process.common import build, determinism, records, zarr_hosts, zarr_input
 from nemar_process.recipes import REGISTRY
 from recipe_support import DATASET, DATASET_ID, DATASET_VERSION, ROOT
-from zarr_support import no_fence, served  # noqa: F401  fixtures
+from zarr_support import no_fence  # noqa: F401  fixture
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 DIGEST = "sha256:" + "e" * 64
@@ -348,7 +348,7 @@ def run_bids(out: Path, recipe_id: str = "nemar-floor") -> int:
     )
 
 
-def run_zarr(out: Path, stand_in_port: int) -> int:
+def run_zarr(out: Path, stand_in_port: int, recipe_id: str = "nemar-floor") -> int:
     stand_in = z.StandIn(stand_in_port)
     patch = pytest.MonkeyPatch()
     patch.setattr(zarr_input, "fetch_https", stand_in.fetch)
@@ -358,7 +358,7 @@ def run_zarr(out: Path, stand_in_port: int) -> int:
             return cli.main(
                 [
                     "run",
-                    "nemar-floor",
+                    recipe_id,
                     "--input",
                     "zarr",
                     "--out",
@@ -373,31 +373,39 @@ def run_zarr(out: Path, stand_in_port: int) -> int:
                     z.SOURCE_COMMIT,
                     "--image-digest",
                     DIGEST,
+                    *FEW_ITERATIONS.get(recipe_id, []),
                 ]
             )
     finally:
         patch.undo()
 
 
-# A recipe and input whose run writes no recording record on the serving copy: ICLabel needs a scalp
-# map, the Zarr reader in eegprep-lean builds label-only channel locations (it does not read the
-# store's electrode attributes yet, sccn/eegprep issue 625), and eegprep raises on a channel with
-# none, so every store of nemar-ica --input zarr ends `step_failed` at `iclabel` with the detail `iclabel_no_locations`,
-# before ASR and the fit (tests/recipes/test_nemar_ica_zarr.py pins it, and the dataset record it still
-# writes). It joins the contract when it is decided what a recording without locations comes to.
-NO_RECORDING_RECORDS = {("nemar-ica", "zarr")}
-
 VARIANTS = sorted(
-    (recipe_id, kind)
-    for recipe_id, recipe in REGISTRY.items()
-    for kind in recipe.inputs
-    if (recipe_id, kind) not in NO_RECORDING_RECORDS
+    (recipe_id, kind) for recipe_id, recipe in REGISTRY.items() for kind in recipe.inputs
 )
-"""Every recipe with every input it reads, as (recipe id, input), but the ones above."""
+"""Every recipe with every input it reads, as (recipe id, input)."""
 
 
 @pytest.fixture(scope="module")
-def products(served, tmp_path_factory):  # noqa: F811
+def served(tmp_path_factory):
+    """The Zarr stand-in whose first store declares electrode positions (CapTrak, millimeters), so that
+    nemar-ica's precondition (eegprep's own rule: one located channel) passes on it and every recipe
+    writes a recording record; the stand-in's other stores declare none."""
+    declared = z.root_attributes(
+        z.POSITIONS,
+        "CapTrak",
+        "mm",
+        source="subject",
+        file="sub-01/eeg/sub-01_electrodes.tsv",
+        coordsystem_file="sub-01/eeg/sub-01_coordsystem.json",
+    )
+    stand_in = z.Served(tmp_path_factory.mktemp("served"), attributes={z.EEG_ONE: declared})
+    yield stand_in
+    stand_in.close()
+
+
+@pytest.fixture(scope="module")
+def products(served, tmp_path_factory):
     """One run of every registered recipe on each input's fixture: (recipe id, input) to directory."""
     served.requested.clear()
     served.policy = z.default_policy
@@ -405,7 +413,7 @@ def products(served, tmp_path_factory):  # noqa: F811
     for recipe_id, kind in VARIANTS:
         recipe = REGISTRY[recipe_id].reading(kind)
         out = tmp_path_factory.mktemp("{}-{}".format(recipe.label, kind))
-        code = run_bids(out, recipe_id) if kind == "bids" else run_zarr(out, served.port)
+        code = run_bids(out, recipe_id) if kind == "bids" else run_zarr(out, served.port, recipe_id)
         assert code == 0, (recipe_id, kind)
         made[(recipe_id, kind)] = out
     return made

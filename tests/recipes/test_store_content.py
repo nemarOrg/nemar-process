@@ -10,17 +10,43 @@ Two rules decide the header's text: labels are all or none, and the unit is shar
 unit is no unit). Text is hashed exactly as given, with no Unicode normalization and no trimming, and
 paths sort by code point. Each vector is also computed here from the definition alone (``struct`` and
 ``hashlib``, in ``reference_digest``), apart from the recipe's own functions.
+
+The last two sections are the platform's amendment of 2026-11-16 (ADR 0123): the per-store locations
+digest, ``nemar.store-locations.v1``, and the input digest of version 2, ``nemar.input-digest.v2``,
+over rows of four fields. Their vectors are the platform's file at its merge commit
+(``tests/fixtures/derivatives-vectors.json``, byte for byte; ``VECTORS_COMMIT`` names the commit), read
+with ``json.loads(..., parse_int=float)`` as the file's note says, never edited here: a vector that
+does not match is a finding. Every locations vector goes through eegprep-lean's own parser
+(``ElectrodeAttributes.from_attributes``) and then through ``store_locations_sha256``, the path a
+store's root attributes take in a run, and again as a store root written with the numbers spelled as
+the platform's file spells them (``-0``, a 400-digit integer) and read by eegprep-lean's
+``read_electrode_attributes``, which parses the root itself: the integer too large for binary64 is a
+channel without a position there, as it is in the definition.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import math
 import re
 import struct
+import sys
 from fractions import Fraction
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
+from eegprep_lean import (
+    DatasetIndex,
+    ElectrodeAttributes,
+    ElectrodePositionsNotAnObject,
+    Response,
+    Store,
+    read_electrode_attributes,
+)
 from eegprep_lean.window import Window, to_physical
 from nemar_process.common import zarr_input as z
 
@@ -95,7 +121,7 @@ def window(
     *, unit: str | None = MICRO_SIGN, labels: tuple[str, ...] | None = LABELS, **fields
 ) -> Window:
     """A real eegprep-lean window: the group's rate is 250 Hz, and the recording came from 500 Hz."""
-    values = {
+    values: dict[str, Any] = {
         "data": physical(),
         "channels": (0, 1),
         "start_sample": 0,
@@ -567,9 +593,9 @@ def test_a_row_that_is_not_one_of_the_input_digests_is_refused(rows):
 
 def test_the_rows_of_a_record_are_in_path_order_whatever_order_the_stores_were_read_in():
     read = {
-        "sub-10/eeg/sub-10_task-rest_eeg.edf": ("eeg", "c" * 64),
-        "sub-02/eeg/sub-02_task-rest_eeg.edf": ("eeg", "b" * 64),
-        "sub-01/eeg/sub-01_task-rest_eeg.edf": ("eeg_250hz", "a" * 64),
+        "sub-10/eeg/sub-10_task-rest_eeg.edf": z.StoreContent("eeg", "c" * 64, "3" * 64),
+        "sub-02/eeg/sub-02_task-rest_eeg.edf": z.StoreContent("eeg", "b" * 64, "2" * 64),
+        "sub-01/eeg/sub-01_task-rest_eeg.edf": z.StoreContent("eeg_250hz", "a" * 64, "1" * 64),
     }
     rows = z.content_rows(read)
     assert [r["path"] for r in rows] == sorted(read)
@@ -577,13 +603,654 @@ def test_the_rows_of_a_record_are_in_path_order_whatever_order_the_stores_were_r
         "path": "sub-01/eeg/sub-01_task-rest_eeg.edf",
         "group": "eeg_250hz",
         "content_sha256": "a" * 64,
+        "locations": "1" * 64,
     }
-    assert list(rows[0]) == ["path", "group", "content_sha256"]
+    assert list(rows[0]) == ["path", "group", "content_sha256", "locations"]
     assert z.content_rows({}) == []
 
 
 def test_the_rows_of_a_record_sort_by_code_point_too():
-    read = dict.fromkeys(reversed(CODE_POINT_PATHS), ("eeg", WITH_METADATA))
+    read = dict.fromkeys(reversed(CODE_POINT_PATHS), z.StoreContent("eeg", WITH_METADATA, "1" * 64))
     rows = z.content_rows(read)
     assert [r["path"] for r in rows] == list(CODE_POINT_PATHS)
-    assert z.input_digest(rows) == CODE_POINT_DIGEST
+    assert z.input_digest_v2(rows) == z.input_digest_v2(list(reversed(rows)))
+    assert z.input_digest(rows) == CODE_POINT_DIGEST  # version 1 reads three of the four fields
+
+
+# ---- the locations digest: nemar.store-locations.v1 -------------------------------------------
+
+# the commit of nemar-cli `dev` whose `shared/contract/derivatives-vectors.json` is the fixture below
+VECTORS_COMMIT = "ed9cfefa756213ce92146aadaa4c5b7507dc23cb"
+VECTORS = Path(__file__).resolve().parent.parent / "fixtures" / "derivatives-vectors.json"
+VECTORS_SHA256 = "f1c98048efecc998bdb79439040f9a47eaa108f7297fc7065648c83252d1f25d"
+HUGE = "an integer too large for binary64"
+# what stands for each refused locations vector: the reader (eegprep-lean refuses the attribute), this
+# module (the group or the text has no digest), or neither because the vector is about the platform's
+# own input, the whole attributes object, which the reader reduces before this module sees anything
+REFUSED_BY_THE_READER = {"positions an array", "positions a string"}
+REFUSED_HERE = {
+    "a system holding a line feed",
+    "units holding a carriage return",
+    "a system holding a lone surrogate",
+    "no labels",
+    "a label that is not text",
+}
+SET_ASIDE = {"attributes an array"}
+
+
+def vectors(**options):
+    """The platform's vectors as a JSON reader of binary64 numbers reads them (``parse_int=float``:
+    ``-0`` is negative zero, as ``JSON.parse`` reads it, and a 400-digit integer is an infinity)."""
+    return json.loads(VECTORS.read_text(encoding="utf-8"), parse_int=float, **options)
+
+
+class Spelled(str):
+    """A JSON number exactly as the platform's file spells it: ``-0``, ``-0.0``, a 400-digit integer."""
+
+
+def spelled_vectors() -> dict:
+    """The platform's vectors with every number kept as its own text, so that a store root can be written
+    with the file's spelling and eegprep-lean's reader is what decides what each number means."""
+    return json.loads(VECTORS.read_text(encoding="utf-8"), parse_int=Spelled, parse_float=Spelled)
+
+
+def spelled(value: Any) -> str:
+    """The JSON text of a tree whose numbers are ``Spelled``: each is written as it was read."""
+    if isinstance(value, Spelled):
+        return str(value)
+    if isinstance(value, dict):
+        members = (json.dumps(key) + ":" + spelled(item) for key, item in value.items())
+        return "{" + ",".join(members) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(spelled(item) for item in value) + "]"
+    return json.dumps(value)
+
+
+class RootDocument:
+    """The host of one store: it answers every request with the store root's ``zarr.json``. The only
+    thing replaced is the network; the reader's own JSON parse and its filter of the entries run."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def get(self, url: str, *, start: int | None = None, end: int | None = None) -> Response:
+        return Response(200, self.body)
+
+
+def through_the_reader(attributes: Any) -> ElectrodeAttributes | None:
+    """What eegprep-lean's ``read_electrode_attributes`` makes of a store root that holds these attributes
+    (a tree whose numbers are ``Spelled``): the root's text parsed by the reader itself, then its filter."""
+    body = ('{"attributes":' + spelled(attributes) + "}").encode("ascii")
+    store = Store(path="sub-01/eeg/sub-01_task-rest_eeg.edf", zarr="sub-01.zarr", groups=())
+    index = DatasetIndex("nm000000", 1, "http://127.0.0.1/", 1, (store,))
+    return asyncio.run(read_electrode_attributes(index, store, transport=RootDocument(body)))
+
+
+def locations_cases(source=vectors):
+    """Every locations vector, and each variant its ``also_with`` lists (a shallow merge over it), as
+    ``source`` reads the file."""
+    cases = []
+    for vector in source()["store_locations"]:
+        cases.append(pytest.param(vector, id=vector["name"]))
+        for index, variant in enumerate(vector.get("also_with", [])):
+            merged = {**vector, **variant}
+            cases.append(
+                pytest.param(merged, id="{} (variant {})".format(vector["name"], index + 1))
+            )
+    return cases
+
+
+def production_locations(labels, attributes) -> tuple[str, str]:
+    """The text and the digest the way a run makes them: the root attributes through eegprep-lean's own
+    parser, then the group's labels and what the parser kept."""
+    electrodes = ElectrodeAttributes.from_attributes(attributes)
+    return z.store_locations_text(labels, electrodes), z.store_locations_sha256(labels, electrodes)
+
+
+def test_the_vectors_are_the_platforms_file_at_its_merge_commit_and_were_never_edited():
+    # `git hash-object` of the file in nemar-cli at VECTORS_COMMIT is 0783ae69ec9a590cd849382cc02c5fdd31e0f72b
+    assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == VECTORS_SHA256
+    assert vectors()["format"] == "nemar.derivative-vectors.v1"
+    assert len(VECTORS_COMMIT) == 40
+
+
+@pytest.mark.parametrize("vector", locations_cases())
+def test_every_locations_vector_gives_the_platforms_text_and_digest(vector):
+    text, digest = production_locations(vector["labels"], vector["attributes"])
+    assert text == vector["text"]
+    assert digest == vector["sha256"]
+    assert hashlib.sha256(vector["text"].encode("utf-8")).hexdigest() == vector["sha256"]
+
+
+@pytest.mark.parametrize("vector", locations_cases(spelled_vectors))
+def test_every_locations_vector_gives_the_same_text_and_digest_through_the_reader_itself(vector):
+    """Each of the 13 vectors (and each variant), the integer too large for binary64 among them, as a
+    store root spelled like the platform's file and read by ``read_electrode_attributes``: no vector is
+    given a parse the reader does not do, so the reader's reading of ``-0`` and of 400 digits is the
+    one the digest is built on."""
+    electrodes = through_the_reader(vector["attributes"])
+    assert z.store_locations_text(vector["labels"], electrodes) == vector["text"]
+    assert z.store_locations_sha256(vector["labels"], electrodes) == vector["sha256"]
+
+
+def test_a_vector_with_also_equal_to_has_the_digest_of_the_vector_it_names():
+    found = {vector["name"]: vector for vector in vectors()["store_locations"]}
+    named = [vector for vector in found.values() if "also_equal_to" in vector]
+    assert len(named) == 3
+    for vector in named:
+        other = found[vector["also_equal_to"]]
+        assert production_locations(vector["labels"], vector["attributes"])[1] == other["sha256"]
+        assert production_locations(other["labels"], other["attributes"])[1] == other["sha256"]
+
+
+def test_the_locations_vectors_hold_every_case_the_definition_names():
+    names = {vector["name"] for vector in vectors()["store_locations"]}
+    assert HUGE in names
+    assert {
+        "declared",
+        "zeros and integers",
+        "provenance is not hashed",
+        "inherited names",
+    } <= names
+    assert len(names) == 13
+
+
+def test_every_refused_locations_vector_is_refused_by_the_reader_or_by_the_digest():
+    cases = vectors()["refused"]["store_locations"]
+    assert {case["name"] for case in cases} == REFUSED_BY_THE_READER | REFUSED_HERE | SET_ASIDE
+    for case in cases:
+        name = case["name"]
+        if name in REFUSED_BY_THE_READER:
+            with pytest.raises(ElectrodePositionsNotAnObject):
+                ElectrodeAttributes.from_attributes(case["attributes"])
+        elif name in REFUSED_HERE:
+            with pytest.raises(z.Undigestable):
+                production_locations(case["labels"], case["attributes"])
+
+
+def test_the_reader_names_its_refusals_and_reduces_the_vector_it_sets_aside():
+    """Through a store root: a position map that is an array or a string is refused as
+    ``ElectrodePositionsNotAnObject`` (the name a run records), and an ``attributes`` that is an array
+    is reduced to no attributes, so the store declares no positions."""
+    cases = spelled_vectors()["refused"]["store_locations"]
+    for case in cases:
+        if case["name"] in REFUSED_BY_THE_READER:
+            with pytest.raises(ElectrodePositionsNotAnObject):
+                through_the_reader(case["attributes"])
+        elif case["name"] in SET_ASIDE:
+            assert through_the_reader(case["attributes"]) is None
+
+
+def test_an_integer_too_large_for_binary64_is_a_channel_without_a_position_through_the_reader():
+    """Vector e2 as the platform's file spells it, a 400-digit integer literal, through eegprep-lean's
+    reader: the reader parses the root as binary64 (``JSON.parse`` reads it as an infinity), so Fz has no
+    position and Cz keeps its own, with the platform's text and digest and no refusal. The threshold is
+    2**1024 - 2**970, which rounds to 2**1024 and gives no position (one less rounds to the largest
+    binary64 and is kept), and a literal longer than Python's own 4300-digit limit no longer fails the
+    read before any entry exists."""
+    vector = next(v for v in spelled_vectors()["store_locations"] if v["name"] == HUGE)
+    assert len(vector["attributes"]["electrode_positions"]["Fz"][2]) == 400
+    electrodes = through_the_reader(vector["attributes"])
+    assert electrodes is not None
+    assert electrodes.positions == {"Cz": (1.5, 2.5, 3.5)}
+    assert z.store_locations_text(vector["labels"], electrodes) == vector["text"]
+    assert z.store_locations_sha256(vector["labels"], electrodes) == vector["sha256"]
+
+    def last_coordinate(integer: str):
+        positions = {"Fz": [Spelled("1"), Spelled("2"), Spelled(integer)]}
+        read = through_the_reader({"electrode_positions": positions})
+        assert read is not None
+        return read.positions.get("Fz")
+
+    assert last_coordinate(str(2**1024 - 2**970)) is None
+    assert last_coordinate(str(2**1024 - 2**970 - 1)) == (1.0, 2.0, sys.float_info.max)
+    assert last_coordinate("9" * 5000) is None
+    # a caller that hands from_attributes Python integers, with no root to parse, is as well served
+    for integer, kept in (
+        (2**1024 - 2**970, None),
+        (2**1024 - 2**970 - 1, (1.0, 2.0, sys.float_info.max)),
+    ):
+        read = ElectrodeAttributes.from_attributes({"electrode_positions": {"Fz": [1, 2, integer]}})
+        assert read is not None
+        assert read.positions.get("Fz") == kept
+
+
+def test_the_digest_alone_gives_no_position_to_an_integer_the_reader_could_never_have_kept():
+    """``store_locations_text`` takes an ``ElectrodeAttributes`` from any caller, one made by hand with
+    an integer past binary64's range included, on which ``math.isfinite`` and ``float`` raise
+    ``OverflowError``: that is caught there, for the platform's answer (position alone)."""
+    vector = next(v for v in vectors()["store_locations"] if v["name"] == HUGE)
+    huge = 10**399
+    entries = {"Fz": (1.0, 2.0, huge), "Cz": (1.5, 2.5, 3.5)}
+    electrodes = ElectrodeAttributes(
+        positions=entries, coordinate_system="CapTrak", coordinate_units="mm"
+    )
+    assert z.store_locations_text(vector["labels"], electrodes) == vector["text"]
+
+
+def test_every_zero_the_reader_keeps_is_positive_zero_whatever_its_spelling():
+    """The vector of ``-0``, ``0``, ``-0.0``, ``12`` and ``12.0`` and its all-float twin, through the
+    reader: the same positions to the last bit, no zero negative (the reader reads ``-0`` as
+    ``-0.0`` as ``JSON.parse`` does, then makes it positive), and the vectors' one digest."""
+    named = {v["name"]: v for v in spelled_vectors()["store_locations"]}
+    mixed = through_the_reader(named["zeros and integers"]["attributes"])
+    floats = through_the_reader(named["zeros and integers as floats"]["attributes"])
+    assert mixed is not None
+    assert floats is not None
+    assert repr(mixed.positions) == repr(floats.positions)  # repr tells 0.0 from -0.0
+    assert len(mixed.positions) == 3
+    zeros = [axis for point in mixed.positions.values() for axis in point if axis == 0]
+    assert len(zeros) == 6
+    assert all(math.copysign(1.0, axis) == 1.0 for axis in zeros)
+    labels = named["zeros and integers"]["labels"]
+    digest = z.store_locations_sha256(labels, mixed)
+    assert digest == named["zeros and integers"]["sha256"]
+    assert digest == z.store_locations_sha256(labels, floats)
+
+
+# computed with Bun from nemar-cli's shared/contract/derivatives.ts (`storeLocationsText` and
+# `storeLocationsSha256` as on `dev`, whose version of both is the one of VECTORS_COMMIT): the labels Cz, Cz and
+# Fz over the attributes of the platform's vector `declared`
+REPEATED_TEXT = (
+    "nemar.store-locations.v1\nsystem CapTrak\nunits mm\n"
+    "position 3fd0000000000000 bff8000000000000 4057f00000000000\n"
+    "position 3fd0000000000000 bff8000000000000 4057f00000000000\n"
+    "position 3fe0000000000000 404f0ccccccccccd 4053d33333333333\n"
+)
+REPEATED_SHA256 = "52dfe1a6baf734a10ff0fc880c7e5caac094dbf98147a4cb0412036f4587da4f"
+
+
+def test_a_group_with_a_repeated_label_gives_each_of_its_channels_the_entry_of_that_label():
+    """The join is by label alone: two channels called Cz both get Cz's position, in stored order, as
+    in the platform's module (a store whose labels repeat is not refused or renamed here)."""
+    declared = next(v for v in vectors()["store_locations"] if v["name"] == "declared")
+    text, digest = production_locations(["Cz", "Cz", "Fz"], declared["attributes"])
+    assert text == REPEATED_TEXT
+    assert digest == REPEATED_SHA256
+    assert hashlib.sha256(REPEATED_TEXT.encode("utf-8")).hexdigest() == REPEATED_SHA256
+
+
+def test_the_digest_takes_only_numbers_that_are_three_finite_non_booleans():
+    """What ``from_attributes`` already drops is dropped here too: the digest alone, on entries a
+    parser could never have kept."""
+    entries: dict[str, Any] = {
+        "boolean": (True, 2.0, 3.0),
+        "last boolean": (1.0, 2.0, False),
+        "nan": (1.0, float("nan"), 3.0),
+        "inf": (float("-inf"), 2.0, 3.0),
+        "two": (1.0, 2.0),
+        "four": (1.0, 2.0, 3.0, 4.0),
+        "text": "1 2 3",
+        "none": None,
+        "Cz": (1.5, 2.5, 3.5),
+    }
+    electrodes = ElectrodeAttributes(
+        positions=entries, coordinate_system="CapTrak", coordinate_units="mm"
+    )
+    labels = list(entries)
+    text = z.store_locations_text(labels, electrodes)
+    lines = text.splitlines()
+    assert lines[:3] == ["nemar.store-locations.v1", "system CapTrak", "units mm"]
+    assert lines[3:-1] == ["position"] * 8
+    assert lines[-1] == "position 3ff8000000000000 4004000000000000 400c000000000000"
+
+
+def test_a_zero_is_hashed_as_positive_zero_and_a_negative_number_keeps_its_sign():
+    electrodes = ElectrodeAttributes(
+        positions={"Fz": (-0.0, 0.0, -1.0)}, coordinate_system="CapTrak", coordinate_units="mm"
+    )
+    line = z.store_locations_text(["Fz"], electrodes).splitlines()[-1]
+    assert line == "position 0000000000000000 0000000000000000 bff0000000000000"
+
+
+def test_the_system_and_units_enter_the_text_only_with_positions_and_only_when_stated():
+    stated = {"electrode_coordinate_system": "CapTrak", "electrode_coordinate_units": "mm"}
+    none = z.store_locations_text(["Fz"], ElectrodeAttributes.from_attributes(stated))
+    assert none == "nemar.store-locations.v1\nsystem\nunits\nposition\n"
+    empty = ElectrodeAttributes.from_attributes({"electrode_positions": {}, **stated})
+    assert z.store_locations_text(["Fz"], empty).splitlines()[1:3] == ["system CapTrak", "units mm"]
+    bare = ElectrodeAttributes.from_attributes({"electrode_positions": {}})
+    assert (
+        z.store_locations_text(["Fz"], bare)
+        == "nemar.store-locations.v1\nsystem\nunits\nposition\n"
+    )
+    # a store that declares nothing and a store that declares an empty map are different texts
+    assert z.store_locations_sha256(["Fz"], None) != z.store_locations_sha256(["Fz"], empty)
+
+
+def test_the_converters_provenance_attributes_are_never_hashed():
+    attributes = {
+        "electrode_positions": {"Fz": [1.0, 2.0, 3.0]},
+        "electrode_coordinate_system": "CapTrak",
+        "electrode_coordinate_units": "mm",
+    }
+    first = ElectrodeAttributes.from_attributes(attributes)
+    second = ElectrodeAttributes.from_attributes(
+        {
+            **attributes,
+            "electrode_positions_source": "subject",
+            "electrode_positions_file": "sub-01/eeg/sub-01_electrodes.tsv",
+            "electrode_coordsystem_file": "sub-01/eeg/sub-01_coordsystem.json",
+        }
+    )
+    assert first is not None
+    assert second is not None
+    assert (first.source, second.source) == (None, "subject")  # the reader does carry them
+    assert z.store_locations_sha256(["Fz"], first) == z.store_locations_sha256(["Fz"], second)
+    third = ElectrodeAttributes.from_attributes(
+        {
+            **attributes,
+            "electrode_positions_source": "dataset",
+            "electrode_positions_file": "electrodes.tsv",
+        }
+    )
+    assert z.store_locations_sha256(["Fz"], third) == z.store_locations_sha256(["Fz"], first)
+
+
+def test_the_digest_depends_on_each_coordinate_the_system_and_the_units():
+    def digest(position=(1.0, 2.0, 3.0), system="CapTrak", units="mm", label="Fz"):
+        electrodes = ElectrodeAttributes(
+            positions={label: position}, coordinate_system=system, coordinate_units=units
+        )
+        return z.store_locations_sha256(["Fz"], electrodes)
+
+    seen = {digest()}
+    for changed in (
+        digest(position=(1.5, 2.0, 3.0)),
+        digest(position=(1.0, 2.5, 3.0)),
+        digest(position=(1.0, 2.0, 3.5)),
+        digest(system="MNI305"),
+        digest(units="cm"),
+        digest(label="fz"),  # no case fold: the entry joins no channel
+    ):
+        seen.add(changed)
+    assert len(seen) == 7
+
+
+def test_the_join_is_by_the_exact_label_and_only_for_a_group_every_channel_of_which_is_labeled():
+    electrodes = ElectrodeAttributes(
+        positions={"Fz": (1.0, 2.0, 3.0), "Cz": (4.0, 5.0, 6.0)},
+        coordinate_system="CapTrak",
+        coordinate_units="mm",
+    )
+    both = z.store_locations_text(["Fz", "Cz"], electrodes).splitlines()[3:]
+    assert both == [
+        "position 3ff0000000000000 4000000000000000 4008000000000000",
+        "position 4010000000000000 4014000000000000 4018000000000000",
+    ]
+    for unlabeled in (["Fz", None], ["Fz", ""], [None, None]):
+        assert z.store_locations_text(unlabeled, electrodes).splitlines()[3:] == ["position"] * 2
+    assert z.store_locations_text(["Cz", "Fz"], electrodes).splitlines()[3:] == both[::-1]
+
+
+@pytest.mark.parametrize(
+    ("labels", "channels"),
+    [
+        ([], None),
+        ((), None),
+        ("Fz", None),
+        (None, None),
+        (None, 0),
+        (["Fz", 5], None),
+        (["Fz", b"Cz"], None),
+        (["Fz", "Cz"], 3),
+        (5, None),
+    ],
+    ids=[
+        "no labels",
+        "an empty tuple",
+        "a string of labels",
+        "no labels and no count",
+        "no labels and no channel",
+        "a label that is a number",
+        "a label that is bytes",
+        "labels that are not one per channel",
+        "labels that are a number",
+    ],
+)
+def test_a_group_with_no_channel_or_with_labels_that_are_not_text_has_no_locations_digest(
+    labels, channels
+):
+    electrodes = ElectrodeAttributes(positions={}, coordinate_system="", coordinate_units="")
+    with pytest.raises(z.Undigestable):
+        z.store_locations_text(labels, electrodes, channels)
+
+
+def test_a_group_with_no_labels_at_all_is_every_position_alone_by_its_channel_count():
+    electrodes = ElectrodeAttributes(
+        positions={"Fz": (1.0, 2.0, 3.0)}, coordinate_system="CapTrak", coordinate_units="mm"
+    )
+    assert z.store_locations_text(None, electrodes, 3).splitlines()[3:] == ["position"] * 3
+
+
+@pytest.mark.parametrize(
+    "system", ["Cap\nTrak", "Cap\rTrak", "Cap\ud800Trak"], ids=["line feed", "return", "surrogate"]
+)
+def test_a_system_or_units_that_could_not_be_a_line_has_no_digest_but_dropped_text_is_not_looked_at(
+    system,
+):
+    electrodes = ElectrodeAttributes(positions={}, coordinate_system=system, coordinate_units="mm")
+    with pytest.raises(z.Undigestable):
+        z.store_locations_text(["Fz"], electrodes)
+    units = ElectrodeAttributes(positions={}, coordinate_system="CapTrak", coordinate_units=system)
+    with pytest.raises(z.Undigestable):
+        z.store_locations_text(["Fz"], units)
+    # with no positions attribute at all the text is dropped, never looked at
+    assert z.store_locations_text(["Fz"], None).splitlines() == [
+        "nemar.store-locations.v1",
+        "system",
+        "units",
+        "position",
+    ]
+
+
+def test_a_system_that_is_not_text_is_the_empty_string_as_the_reader_reads_it():
+    not_text: tuple[Any, ...] = (None, 5, ["CapTrak"], b"CapTrak")
+    for value in not_text:
+        electrodes = ElectrodeAttributes(
+            positions={"Fz": (1.0, 2.0, 3.0)}, coordinate_system=value, coordinate_units="mm"
+        )
+        assert z.store_locations_text(["Fz"], electrodes).splitlines()[1] == "system"
+
+
+def test_the_window_digest_reads_the_windows_labels_attributes_and_rows():
+    positions = ElectrodeAttributes(
+        positions={"Fz": (1.0, 2.0, 3.0), "Cz": (4.0, 5.0, 6.0)},
+        coordinate_system="CapTrak",
+        coordinate_units="mm",
+    )
+    located = window(electrodes=positions)
+    assert z.window_locations_sha256(located) == z.store_locations_sha256(LABELS, positions)
+    bare = window()  # a window the store root was not read into, or a store that declares none
+    assert z.window_locations_sha256(bare) == z.store_locations_sha256(LABELS, None)
+    assert z.window_locations_sha256(bare) != z.window_locations_sha256(located)
+    # no labels for every row: every position alone, one per row of the data
+    unlabeled = z.window_locations_sha256(window(labels=None, electrodes=positions))
+    assert unlabeled == z.store_locations_sha256(None, positions, 2)
+    assert z.store_locations_text(None, positions, 2).splitlines()[3:] == ["position", "position"]
+    with pytest.raises(z.Undigestable):
+        z.window_locations_sha256(window(data=physical()[0], labels=None, electrodes=positions))
+
+
+# ---- the input digest of version 2: nemar.input-digest.v2 ------------------------------------
+
+DECLARED = "cd750c5311b0bb17c8b9221f87fa26fafa40be117a684f6389671b4526fc76b5"
+ROW_V2 = ("sub-01/eeg/sub-01_task-rest_eeg.edf", "eeg", WITH_METADATA, DECLARED)
+
+
+def row_v2(path: str, group: str, digest: str, locations: str) -> dict[str, str]:
+    return {"path": path, "group": group, "content_sha256": digest, "locations": locations}
+
+
+@pytest.mark.parametrize(
+    "vector", vectors()["input_digest_v2"], ids=[v["name"] for v in vectors()["input_digest_v2"]]
+)
+def test_every_input_digest_v2_vector_gives_the_platforms_digest(vector):
+    rows = vector["rows"]
+    assert z.input_digest_v2(rows) == vector["digest"]
+    assert z.input_digest_v2(list(reversed(rows))) == vector["digest"]
+    # and written out from the definition alone: the header line, then the rows in code point order
+    ordered = sorted(rows, key=lambda r: r["path"].encode("utf-8"))
+    text = "nemar.input-digest.v2\n" + "".join(
+        "{path}\t{group}\t{content_sha256}\t{locations}\n".format(**r) for r in ordered
+    )
+    assert text == vector["text"]
+    assert "sha256:" + sha(text) == vector["digest"]
+
+
+def test_the_platforms_locations_digest_is_the_declared_vectors():
+    declared = next(v for v in vectors()["store_locations"] if v["name"] == "declared")
+    assert declared["sha256"] == DECLARED
+
+
+def test_every_refused_input_digest_v2_vector_is_refused():
+    cases = vectors()["refused"]["input_digest_v2"]
+    assert [case["name"] for case in cases] == [
+        "locations NONE",
+        "locations of 63 hexadecimal digits",
+        "locations missing",
+        "a row that is a list",
+    ]
+    for case in cases:
+        with pytest.raises(z.Undigestable):
+            z.input_digest_v2(case["rows"])
+
+
+def test_a_version_1_text_and_a_version_2_text_are_never_the_same_bytes():
+    one = [row(*ROW_V2[:3])]
+    two = [row_v2(*ROW_V2)]
+    assert z.input_digest(one) == INPUT_DIGEST
+    assert z.input_digest_v2(two) != INPUT_DIGEST
+    # version 1 reads the three fields of a four-field row, and says nothing of the fourth
+    assert z.input_digest(two) == INPUT_DIGEST
+    assert z.input_digest_v2(two) != z.input_digest(two)
+
+
+def test_the_version_2_digest_depends_on_each_field_of_a_row_the_locations_included():
+    base = row_v2(*ROW_V2)
+    seen = {z.input_digest_v2([base])}
+    for field, value in (
+        ("path", "sub-02/eeg/sub-02_task-rest_eeg.edf"),
+        ("group", "eeg_250hz"),
+        ("content_sha256", "f" * 64),
+        ("locations", "f" * 64),
+        ("locations", "none"),
+    ):
+        seen.add(z.input_digest_v2([{**base, field: value}]))
+    assert len(seen) == 6
+
+
+def test_the_version_2_digest_is_over_the_rows_in_path_order_whatever_order_they_come_in():
+    rows = [
+        row_v2("sub-02/eeg/sub-02_task-rest_eeg.edf", "eeg", "b" * 64, "none"),
+        row_v2("sub-01/eeg/sub-01_task-rest_eeg.edf", "eeg", "a" * 64, "1" * 64),
+    ]
+    expected = "sha256:" + sha(
+        "nemar.input-digest.v2\n"
+        "sub-01/eeg/sub-01_task-rest_eeg.edf\teeg\t{}\t{}\n"
+        "sub-02/eeg/sub-02_task-rest_eeg.edf\teeg\t{}\tnone\n".format("a" * 64, "1" * 64, "b" * 64)
+    )
+    assert z.input_digest_v2(rows) == expected
+    assert z.input_digest_v2(rows[::-1]) == expected
+
+
+def test_the_version_2_digest_of_no_rows_is_the_digest_of_the_header_alone():
+    assert z.input_digest_v2([]) == "sha256:" + sha("nemar.input-digest.v2\n")
+    assert z.input_digest_v2([]) != z.input_digest([])
+
+
+@pytest.mark.parametrize(
+    "locations",
+    [
+        "NONE",
+        "None",
+        " none",
+        "none\n",
+        "",
+        "none ",
+        "A" * 64,
+        "a" * 63,
+        "a" * 65,
+        "a" * 64 + "\n",
+        "\n" + "a" * 64,
+        "sha256:" + "a" * 64,
+        "g" * 64,
+        None,
+        5,
+        ["none"],
+    ],
+    ids=[
+        "NONE",
+        "None",
+        "a space before none",
+        "none and a line feed",
+        "empty",
+        "a space after none",
+        "an upper-case digest",
+        "63 digits",
+        "65 digits",
+        "a trailing line feed",
+        "a leading line feed",
+        "with its prefix",
+        "not hexadecimal",
+        "null",
+        "a number",
+        "a list",
+    ],
+)
+def test_a_locations_that_is_neither_a_digest_nor_exactly_none_is_refused(locations):
+    base = row_v2(*ROW_V2)
+    with pytest.raises(z.Undigestable):
+        z.input_digest_v2([{**base, "locations": locations}])
+
+
+def test_none_and_a_digest_are_the_two_shapes_of_locations():
+    base = row_v2(*ROW_V2)
+    assert z.input_digest_v2([{**base, "locations": "none"}]).startswith("sha256:")
+    assert z.input_digest_v2([{**base, "locations": "0" * 64}]).startswith("sha256:")
+
+
+def test_a_row_without_locations_is_refused_as_a_row_of_version_2_and_not_of_version_1():
+    base = row(*ROW_V2[:3])
+    with pytest.raises(z.Undigestable):
+        z.input_digest_v2([base])
+    assert z.input_digest([base]) == INPUT_DIGEST
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            row_v2("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64, "none"),
+            row_v2("sub-01/eeg/a_eeg.edf", "eeg", "b" * 64, "1" * 64),
+        ],
+        [row_v2("", "eeg", "a" * 64, "none")],
+        [row_v2("sub-01/eeg/a_eeg.edf", "", "a" * 64, "none")],
+        [row_v2("sub-01/eeg/a\t_eeg.edf", "eeg", "a" * 64, "none")],
+        [row_v2("sub-01/eeg/a_eeg.edf", "ee\ng", "a" * 64, "none")],
+        [row_v2("sub-01/eeg/a_eeg.edf", "eeg", "A" * 64, "none")],
+        [row_v2("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64 + "\n", "none")],
+        [row_v2("sub-01/eeg/a\ud800_eeg.edf", "eeg", "a" * 64, "none")],
+        [["sub-01/eeg/a_eeg.edf", "eeg", "a" * 64, "none"]],
+        [("sub-01/eeg/a_eeg.edf", "eeg", "a" * 64, "none")],
+        [None],
+        [row_v2(*ROW_V2), None],
+    ],
+    ids=[
+        "a path repeated",
+        "an empty path",
+        "an empty group",
+        "a tab in a path",
+        "a line feed in a group",
+        "an upper-case content digest",
+        "a content digest with a line feed",
+        "a lone surrogate in a path",
+        "a row that is a list",
+        "a row that is a tuple",
+        "a row that is none",
+        "a good row and a bad one",
+    ],
+)
+def test_every_refusal_of_version_1_holds_in_version_2_too(rows):
+    with pytest.raises(z.Undigestable):
+        z.input_digest_v2(rows)
