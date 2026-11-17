@@ -242,7 +242,20 @@ The fixture is synthetic and a smoke input only (see its README); the scientific
 
 The pull-request job's `cpu` leg also runs the launch end to end in the SIF it just built: `tests/e2e/test_floor_launch.py` runs the real launcher against a stand-in data plane that serves the scientific fixture, runs `nemar-recipe run nemar-floor` in the SIF as a job would, uploads to stand-in outputs routes, and compares the result with a direct run of the same fixture.
 It runs in the unprivileged `test` job only (the signing job holds the OpenID Connect (OIDC) token and runs no test from this repository).
-The same leg runs `tests/e2e/test_ica_launch.py` in the SIF: `nemar-ica` with pAMICA and with the image's `amica15` binary on the fixture at full length (it prints the informational `E1R` line, the comparison of the two engines, and asserts nothing about it), and the binary twice for 50 iterations each on the same recording, whose two weight files must differ because nothing seeds the binary.
+The same leg runs `tests/e2e/test_ica_launch.py` in the SIF: `nemar-ica` with pAMICA and with the image's `amica15` binary on the fixture.
+The length of that run is chosen from the event and the base branch of a pull request and from nothing else (the step's `NEMAR_ICA_E2E_LENGTH`; no label, title or branch name is read).
+On a pull request into any branch but `main` the run is short: all four runs stop at 50 iterations and the `E1R` test is skipped with its reason.
+On a pull request into `main` (a release), on the image tag and on the dispatch, where `publish` needs this job, the run is full: pAMICA and the first binary run use the recipe's own invocation (2000 iterations), and the test prints the informational `E1R` line, the comparison of the two engines, and asserts nothing about it.
+Both lengths run the binary twice for 50 iterations each on the same recording, whose two weight files must differ because nothing seeds the binary, and read every record against the length that ran.
+
+What the short run proves, on every image pull request: `nemar-recipe run nemar-ica` in the SIF built from the commit, under Apptainer with the launcher's isolation flags, exits zero for both engines and writes the recording's weights and record; the pAMICA record of a CPU image with no GPU states the device facts and the thread count; the binary's record names the pinned digest and says it starts from the clock and is not bit reproducible; two unseeded runs differ; and each record is internally consistent at 50 iterations.
+What only the full run proves (a pull request into `main`, the tag, the dispatch): the invocation the registry uses, with no `--ica-max-iter`, completes in the SIF within the job's time and says 2000 iterations in its record; the binary's 2000-iteration output reads consistently; nothing fails between iteration 50 and 2000; and the `E1R` line is printed.
+Neither length runs `nemar-ica` through `nemar-launch`: these runs are `apptainer exec` with the launcher's flags, and the run through the real launcher in the SIF is the floor's test in the same step, at both lengths.
+Neither runs the CUDA flavor in a SIF (it has none) or on a GPU.
+
+The workflow starts on the default pull request types, so a pull request opened into another branch and later retargeted to `main` keeps the checks of its short run until its next push or until it is closed and reopened, which runs the full length.
+Nothing is published on the strength of a short run: the tag and the dispatch run the full length before `publish`, which needs this job.
+
 The `cuda` leg runs one tiny `nemar-ica` run in its image with no GPU visible, and checks that the record says the CPU ran (`device` `cpu`, `device_reason` `no_gpu`, `fallback` true, `image_flavor` `cuda`, torch `2.12.1+cu129`): the image and the path the registry uses.
 
 ## Published images
