@@ -131,7 +131,9 @@ def test_every_eeg_store_is_processed_or_counted(ran):
         ("failed", "convert_failed"),
     ]
     assert rows[z.MISSING]["step"] == "load"
-    assert rows[z.MISSING]["detail"] == "ArrayNotFoundError"  # a class name, never the address
+    # a class name, never the address; the reader asks for the store root (its electrode attributes)
+    # before the signal, so a store with no files fails there, as a transport error
+    assert rows[z.MISSING]["detail"] == "TransportError"
     assert rows[z.BAD_UNIT]["detail"] == "ValueError"
     # a scale so large that the values overflow: refused when the read is named by its content, which
     # is before the loader's own check of the values (`non_finite_samples`) is reached
@@ -279,6 +281,9 @@ CONTENT = {
 READ_IN_FULL = sorted(CONTENT)
 UNREAD = sorted([z.HUGE, z.MISSING, z.NON_FINITE])
 GROUP = "eeg_250hz"
+# the stand-in's stores carry no root attributes: each is a store that declares no positions, whose
+# locations digest is the text of eight channels with every position alone
+BARE_LOCATIONS = z.reference_locations_sha256()
 
 
 def reference_digest(path: str) -> str:
@@ -293,35 +298,43 @@ def test_the_dataset_record_names_the_content_of_every_store_read_in_full(ran):
         "nemar"
     ]["input"]
     assert nemar["stores_content"] == [
-        {"path": path, "group": GROUP, "content_sha256": reference_digest(path)}
+        {
+            "path": path,
+            "group": GROUP,
+            "content_sha256": reference_digest(path),
+            "locations": BARE_LOCATIONS,
+        }
         for path in READ_IN_FULL
     ]
     assert nemar["stores_unread"] == UNREAD
     assert set(nemar["stores"]) == {row["path"] for row in nemar["stores_content"]} | set(UNREAD)
 
 
-def test_the_input_digest_is_the_digest_of_the_rows_the_record_lists(ran):
+def test_the_input_digest_is_the_version_2_digest_of_the_rows_the_record_lists(ran):
     _, _, out, *_ = ran
     nemar = json.loads((out / "desc-nemarfloor_signalJourney.json").read_text())["extensions"][
         "nemar"
     ]["input"]
-    text = "".join(
-        "{}\t{}\t{}\n".format(row["path"], row["group"], row["content_sha256"])
+    text = "nemar.input-digest.v2\n" + "".join(
+        "{}\t{}\t{}\t{}\n".format(
+            row["path"], row["group"], row["content_sha256"], row["locations"]
+        )
         for row in sorted(nemar["stores_content"], key=lambda row: row["path"])
     )
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", nemar["input_digest"])
     assert nemar["input_digest"] == "sha256:" + hashlib.sha256(text.encode()).hexdigest()
-    assert nemar["input_digest"] == zarr_input.input_digest(nemar["stores_content"])
+    assert nemar["input_digest"] == zarr_input.input_digest_v2(nemar["stores_content"])
 
 
 def test_a_recordings_record_names_the_group_and_content_it_was_made_from(ran):
     _, _, out, *_ = ran
     for path in PROCESSED:
-        mine = json.loads(product(out, path, "signalJourney.json").read_text())["extensions"][
-            "nemar"
-        ]["input"]
+        record = json.loads(product(out, path, "signalJourney.json").read_text())["extensions"]
+        mine = record["nemar"]["input"]
         assert mine["group"] == GROUP
         assert mine["content_sha256"] == reference_digest(path), path
+        assert mine["locations"] == BARE_LOCATIONS, path
+        assert record["nemar"]["reader_locations"] is None  # the store declares no positions
         # the other fields of the store's input are what they were
         assert mine["kind"] == "zarr"
         assert "stores_content" not in mine  # the dataset's list is the dataset's alone

@@ -22,10 +22,14 @@ needs around it:
 
 * every store read in full is named by the content that was read: ``window_content_sha256`` is the
   SHA-256 of the physical values of the window eegprep-lean returned under a header of the
-  serving rate, unit and labels (``nemar.store-content.v1``, the platform's definition), and
-  ``input_digest`` is the digest of a dataset's stores by path, group and content, so a derivative
-  can be keyed on what was read and not on the index file, whose bytes change when any one store
-  of the dataset is converted again.
+  serving rate, unit and labels (``nemar.store-content.v1``, the platform's definition), and by the
+  electrode positions it was handed: ``window_locations_sha256`` is the SHA-256 of the positions,
+  coordinate system and units the store states for that group's channels
+  (``nemar.store-locations.v1``, the platform's definition, amended 2026-11-16). ``input_digest_v2``
+  is the digest of a dataset's stores by path, group, content and locations
+  (``nemar.input-digest.v2``), so a derivative can be keyed on what was read and not on the index
+  file, whose bytes change when any one store of the dataset is converted again, and on everything
+  the recipe was handed, positions included.
 
 ``eegprep_lean`` and ``eegprep`` are imported where they are used, so this module (and the tests of
 the attestation) import without them.
@@ -34,6 +38,7 @@ the attestation) import without them.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
@@ -51,7 +56,7 @@ from urllib.parse import urljoin
 
 import numpy as np
 
-from nemar_process.common import io, naming, versions, zarr_hosts
+from nemar_process.common import io, naming, qc, versions, zarr_hosts
 from nemar_process.common.errors import (
     CONVERT_FAILED,
     OUT_OF_MEMORY,
@@ -486,6 +491,12 @@ def validate_document(document: Any) -> None:
 # ---- what was read: the content digest of a store and the input digest of a dataset -----------
 
 STORE_CONTENT_FORMAT = "nemar.store-content.v1"
+STORE_LOCATIONS_FORMAT = "nemar.store-locations.v1"
+INPUT_DIGEST_V2_FORMAT = "nemar.input-digest.v2"
+# The `locations` of a version 2 row when a recipe by design hands eegprep no positions from the store.
+# It never means that the store has none (that is a digest, of a text with every position alone), and
+# no recipe of this repository writes it: both Zarr recipes hand positions through ``to_eeg``.
+LOCATIONS_NONE = "none"
 LINE_BREAKS = ("\r", "\n")
 ROW_BREAKS = (*LINE_BREAKS, "\t")  # a row's pieces are tab-separated lines
 # Matched whole with ``fullmatch``: a ``$`` would accept a trailing line feed.
@@ -500,10 +511,12 @@ class Undigestable(ValueError):
 
 
 class StoreContent(NamedTuple):
-    """What a store's digest names: the channel group that was read, and the SHA-256 of its content."""
+    """What a store's digests name: the channel group that was read, the SHA-256 of its content, and
+    the SHA-256 of the electrode positions it was handed (``nemar.store-locations.v1``)."""
 
     group: str
     sha256: str
+    locations: str
 
 
 def _utf8(name: str, text: Any) -> bytes:
@@ -621,14 +634,135 @@ def window_content_sha256(window: Any) -> str:
     return store_content_sha256(values, window.rate, units, window.labels)
 
 
+def _stated(value: Any) -> str:
+    """A system or units value as text: a string as it is, anything else the empty string (eegprep-lean
+    reads it the same way)."""
+    return value if isinstance(value, str) else ""
+
+
+def _coordinates(entry: Any) -> tuple[float, float, float] | None:
+    """The three coordinates of a position entry, or None: a list of exactly three numbers, each
+    finite and none a boolean (Python's ``True`` is an ``int``, so a boolean coordinate is the trap).
+
+    A number that is not finite as a binary64 has no position, and that is no refusal: a NaN, an
+    infinity, and an integer too large for a binary64, on which ``math.isfinite`` and ``float`` raise
+    ``OverflowError``, which is caught here for the same answer a JSON reader that reads it as an
+    infinity gives. That is the platform's definition. Through the pinned reader such an integer
+    (any of at least 2**1024 - 2**970) never reaches this function: eegprep-lean's ``_position`` raises
+    the same ``OverflowError`` while it reads the store root, so the whole store fails (``read_failed``,
+    no row), and so does an ``electrode_positions`` that is not an object (``IndexError_``). The
+    follow-up is eegprep-lean's (read such an integer as no position); the catch here keeps this digest
+    equal to the definition for any caller.
+    """
+    if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+        return None
+    try:
+        if not all(
+            isinstance(axis, (int, float)) and not isinstance(axis, bool) and math.isfinite(axis)
+            for axis in entry
+        ):
+            return None
+        return float(entry[0]), float(entry[1]), float(entry[2])
+    except OverflowError:
+        return None
+
+
+def _coordinate_hex(value: float) -> str:
+    """The 16 lower-case hexadecimal digits of a coordinate as an IEEE-754 binary64, big-endian, as
+    the rate is written. A zero is written as positive zero whatever its sign: Python reads the JSON
+    number ``-0`` as the integer 0 and ``-0.0`` as negative zero, where ``JSON.parse`` reads both as
+    negative zero, so without the rule one store would have two digests."""
+    return struct.pack(">d", 0.0 if value == 0 else value).hex()
+
+
+def store_locations_text(
+    labels: Sequence[str | None] | None, electrodes: Any, channels: int | None = None
+) -> str:
+    """The text of ``nemar.store-locations.v1``: what a reader handed eegprep for one read group, as
+    the store states it (before any unit change, axis change or recentering), each line ending in a
+    line feed.
+
+    ``nemar.store-locations.v1``; ``system`` and, after a space, the coordinate system text; ``units``
+    and the unit text; then one line per channel in stored order, ``position`` and the 16 hexadecimal
+    digits of each of x, y and z (``_coordinate_hex``), or ``position`` alone.
+
+    ``electrodes`` is what eegprep-lean read from the store root (``Window.electrodes``): None when
+    the store declares no positions, else an ``ElectrodeAttributes``, whose positions, system and
+    units are the store's, already reduced to entries of three finite numbers. ``labels`` is the
+    group's channel labels in stored order (``Window.labels``, where None is that not every channel
+    has one; ``channels`` is then the count of channels, which a list of labels carries itself). The
+    system and units lines carry text only when positions are present and the text is non-empty. A
+    channel gets coordinates only when every channel of the group has a non-empty label (the all or
+    none rule of ``nemar.store-content.v1``, so an unlabeled group joins nothing), positions are
+    present, they hold an entry under exactly that label (no case fold, no trimming, no Unicode
+    normalization), and that entry is three finite numbers. Labels are not written: the content
+    digest of the same group fixes them and their order.
+
+    Not hashed: the converter's provenance (``source``, ``file``) and any entry under a label the
+    group does not have. They do not change what eegprep receives, so a recipe that branches on one
+    must first change the definition. ``Undigestable`` for a group with no channel, labels that are
+    not one text or None per channel, and a system or units text that enters the text and holds a
+    carriage return, a line feed or a lone surrogate (text that is dropped is never looked at).
+    """
+    if labels is None:
+        if channels is None or channels < 1:
+            raise Undigestable("the group has no channel")
+        each: list[Any] = [None] * channels
+    else:
+        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)) or len(labels) < 1:
+            raise Undigestable("the labels are not a list of at least one entry")
+        each = list(labels)
+        if channels is not None and channels != len(each):
+            raise Undigestable("the labels are not one per channel")
+        if any(label is not None and not isinstance(label, str) for label in each):
+            raise Undigestable("a channel's label is not text")
+    present = electrodes is not None
+    system = _stated(electrodes.coordinate_system) if present else ""
+    units = _stated(electrodes.coordinate_units) if present else ""
+    lines = [
+        STORE_LOCATIONS_FORMAT,
+        _line("system", system or None),
+        _line("units", units or None),
+    ]
+    named = all(each)
+    for label in each:
+        found = _coordinates(electrodes.positions.get(label)) if present and named else None
+        if found is None:
+            lines.append("position")
+        else:
+            lines.append("position " + " ".join(_coordinate_hex(axis) for axis in found))
+    return "".join(line + "\n" for line in lines)
+
+
+def store_locations_sha256(
+    labels: Sequence[str | None] | None, electrodes: Any, channels: int | None = None
+) -> str:
+    """The locations digest of one channel group: SHA-256 of ``store_locations_text`` as 64 lower-case
+    hexadecimal digits. A store that states no position still has one (the text of a group with
+    every ``position`` alone), which is not ``none``."""
+    return hashlib.sha256(
+        store_locations_text(labels, electrodes, channels).encode("utf-8")
+    ).hexdigest()
+
+
+def window_locations_sha256(window: Any) -> str:
+    """The locations digest of an eegprep-lean ``Window``: its labels and its electrode attributes,
+    the channel count being its data's rows (the window states the labels all channels have, or None)."""
+    values = np.asarray(window.data)
+    channels = values.shape[0] if values.ndim == 2 else 0  # any other shape is refused here too
+    return store_locations_sha256(window.labels, window.electrodes, channels)
+
+
 def content_rows(read: Mapping[str, Sequence[str]]) -> list[dict[str, str]]:
-    """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256"}`` for
-    each store read in full, sorted by path in code point order. ``read`` maps a path to its group
-    and its digest."""
+    """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256",
+    "locations"}`` for each store read in full, sorted by path in code point order. ``read`` maps a
+    path to its group, its content digest and its locations digest (a ``StoreContent``)."""
     rows = []
     for path in sorted(read):  # a str sorts by code point, which is the order of its UTF-8 bytes
-        group, digest = read[path]
-        rows.append({"path": path, "group": group, "content_sha256": digest})
+        group, digest, locations = read[path]
+        rows.append(
+            {"path": path, "group": group, "content_sha256": digest, "locations": locations}
+        )
     return rows
 
 
@@ -643,19 +777,49 @@ def _row_text(name: str, text: Any) -> str:
     return text
 
 
-def _row_fields(row: Any) -> tuple[Any, Any, Any]:
-    """A row's path, group and content digest; ``Undigestable`` for a row that is not an object or
-    lacks one of them."""
+def _row_fields(row: Any, with_locations: bool = False) -> tuple[Any, ...]:
+    """A row's path, group and content digest (and its locations when ``with_locations``);
+    ``Undigestable`` for a row that is not an object or lacks one of them."""
     if not isinstance(row, Mapping):
         raise Undigestable("a row is not an object")
+    names = ("path", "group", "content_sha256", *(("locations",) if with_locations else ()))
     try:
-        return row["path"], row["group"], row["content_sha256"]
+        return tuple(row[name] for name in names)
     except KeyError as error:
         raise Undigestable("a row has no {}".format(error.args[0])) from error
 
 
+def _checked_rows(rows: Iterable[Any], with_locations: bool) -> list[tuple[str, ...]]:
+    """Every row's checked fields in path order (by the UTF-8 bytes of the path, whatever order
+    ``rows`` come in); ``Undigestable`` for a row that is not one of the input digest's."""
+    fields = sorted(
+        (_row_fields(row, with_locations) for row in rows),
+        key=lambda found: _utf8("path", found[0]),
+    )
+    checked = []
+    seen = set()
+    for raw_path, raw_group, digest, *rest in fields:
+        path, group = _row_text("path", raw_path), _row_text("group", raw_group)
+        if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest):
+            raise Undigestable("a content_sha256 is not 64 lower-case hexadecimal digits")
+        for locations in rest:
+            if not isinstance(locations, str) or not (
+                locations == LOCATIONS_NONE or CONTENT_SHA256.fullmatch(locations)
+            ):
+                raise Undigestable("a locations is not none or 64 lower-case hexadecimal digits")
+        if path in seen:
+            raise Undigestable("a path is repeated")
+        seen.add(path)
+        checked.append((path, group, digest, *rest))
+    return checked
+
+
 def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
-    """``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
+    """Version 1 of the input digest, no longer stated by any record this repository writes (a Zarr
+    record states ``input_digest_v2``); it stays defined because records written before version 2
+    state it, and it is the one definition of the platform's that has no locations.
+
+    ``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
     store read in full, sorted by path in code point order (the order of the paths' UTF-8 bytes,
     whatever order ``rows`` come in), each text as it is given.
 
@@ -665,21 +829,37 @@ def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
     lower-case hexadecimal digits. No rows is the digest of no text, and is not refused here (the key
     consumer's check for a non-empty ``stores_content`` comes first).
     """
-    fields = sorted((_row_fields(row) for row in rows), key=lambda found: _utf8("path", found[0]))
-    lines = []
-    seen = set()
-    for raw_path, raw_group, digest in fields:
-        path, group = _row_text("path", raw_path), _row_text("group", raw_group)
-        if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest):
-            raise Undigestable("a content_sha256 is not 64 lower-case hexadecimal digits")
-        if path in seen:
-            raise Undigestable("a path is repeated")
-        seen.add(path)
-        lines.append("{}\t{}\t{}\n".format(path, group, digest))
+    lines = ["{}\t{}\t{}\n".format(*fields) for fields in _checked_rows(rows, False)]
     return "sha256:" + hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
+def input_digest_v2(rows: Iterable[Mapping[str, str]]) -> str:
+    """``nemar.input-digest.v2``: ``sha256:`` and the SHA-256 of the line ``nemar.input-digest.v2``
+    and then one line ``path TAB group TAB content_sha256 TAB locations LF`` per store read in full,
+    sorted by path in code point order as in version 1.
+
+    ``locations`` is a store's locations digest (64 lower-case hexadecimal digits) or exactly
+    ``none``: the recipe by design handed eegprep no positions from that store, never "the store had
+    none", which is a digest of ``store_locations_text``. The header line means a version 1 text and
+    a version 2 text are never the same bytes. Every refusal of ``input_digest`` holds, and so does
+    a ``locations`` that is missing, not text, or neither shape (``Undigestable``); a row that is a
+    list is not an object and is refused. No rows is the digest of the header alone, and is not
+    refused here, as in version 1.
+    """
+    lines = ["{}\t{}\t{}\t{}\n".format(*fields) for fields in _checked_rows(rows, True)]
+    text = INPUT_DIGEST_V2_FORMAT + "\n" + "".join(lines)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # ---- the source -------------------------------------------------------------------------------
+
+
+def location_source(located: int) -> str:
+    """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
+    BIDS route's words (``io._location_source``). The converter embeds the positions of the
+    dataset's own electrodes file, and ``embedded`` cannot occur, because the serving copy keeps no
+    position from inside a data file."""
+    return "electrodes.tsv" if located > 0 else "none"
 
 
 def reader_string() -> str:
@@ -725,8 +905,13 @@ class ZarrSource:
         self.index: Any = None
         self.store_bytes: dict[str, int] = {}
         self.store_hosts: dict[str, list[str]] = {}
-        # what each store read in full was, by content (a store with none is in ``stores_unread``)
+        # what each store read in full was, by content and by the positions it was handed (a store
+        # with none is in ``stores_unread``)
         self.contents: dict[str, StoreContent] = {}
+        # what eegprep-lean says it did with each store's positions (``etc["nemar"]["locations"]``,
+        # copied as written), or None for a store that declares none, for each recording it turned
+        # into a dictionary
+        self.reader_locations: dict[str, dict[str, Any] | None] = {}
         self.scope: list[str] = []  # the source paths of the stores the run covers (``select``)
 
     # -- the index
@@ -877,6 +1062,12 @@ class ZarrSource:
         was read into a dictionary (the unit, ``eeg_checkset``, the checks of the loader) is
         ``convert_failed``, each with a class name or a fixed word; running out of memory in either
         is ``out_of_memory``. The unit is passed through as the serving copy states it.
+
+        The positions a store declares reach eegprep through ``to_eeg`` (eegprep-lean fills ``chanlocs``
+        from them, or refuses them with a reason it records); no template is ever applied. The load
+        reports ``electrodes.tsv`` as the location source when at least one channel of the dictionary
+        has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
+        from inside a data file), and the count is the BIDS route's (``qc.count_located``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -912,8 +1103,10 @@ class ZarrSource:
         try:
             # what was read, named before anything is made of it: a store whose metadata cannot be
             # digested is not used (its content could not be named), and one the floor then fails is
-            # still a store that was read in full
-            content = StoreContent(window.group_name, window_content_sha256(window))
+            # still a store that was read in full; the positions it was handed are named with it
+            content = StoreContent(
+                window.group_name, window_content_sha256(window), window_locations_sha256(window)
+            )
         except Undigestable as error:
             raise RecordingError(CONVERT_FAILED, "load", "undigestable_metadata") from error
         except MemoryError as error:
@@ -922,8 +1115,11 @@ class ZarrSource:
         try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
+            # the reader's own record of what it did with the store's positions, as it wrote it
+            reader_locations = copy.deepcopy(eeg["etc"]["nemar"].get("locations"))
             eeg = eeg_checkset(eeg)
             eeg, notes = io.normalize(eeg)
+            located = qc.count_located(eeg["chanlocs"])
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
         except RecordingError as error:
@@ -931,14 +1127,15 @@ class ZarrSource:
             raise RecordingError(CONVERT_FAILED, "load", error.code) from error
         except Exception as error:
             raise RecordingError(CONVERT_FAILED, "load", type(error).__name__) from error
+        self.reader_locations[path] = reader_locations
         return io.Loaded(
             eeg=eeg,
             function=LOAD_FUNCTION,
             parameters=load_parameters(self.max_bytes),
             etc_normalized=notes.etc_normalized,
             etc_keys_dropped=notes.keys_dropped,
-            location_source="none",
-            n_channels_with_locations=0,
+            location_source=location_source(located),
+            n_channels_with_locations=located,
             power_line_hz_declared=self.declared_power_line(path),
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
         )
@@ -990,33 +1187,44 @@ class ZarrSource:
         }
 
     def recording_extras(self, path: str) -> dict[str, Any]:
-        """What a recording's record adds to ``extensions.nemar``: its input and the reader.
+        """What a recording's record adds to ``extensions.nemar``: its input, the reader, and what
+        the reader did with the store's positions.
 
-        The input names the channel group that was read and the content digest of the store (when
-        this source read it: a recording handed in by a test was not read by it).
+        The input names the channel group that was read, the content digest of the store and its
+        locations digest (when this source read it: a recording handed in by a test was not read by
+        it). ``reader_locations`` is eegprep-lean's record of the positions (``etc["nemar"]["locations"]``:
+        its key names and values, never renamed or recomputed: what the store stated, how many
+        channels were located and, when none was, why), or null when the store declares no positions.
         """
         fields = self.input_fields(
             [path], self.store_bytes.get(path, 0), self.store_hosts.get(path, [])
         )
+        extras: dict[str, Any] = {"input": fields, "reader": reader_string()}
         if path in self.contents:
-            group, digest = self.contents[path]
-            fields["group"] = group
-            fields["content_sha256"] = digest
-        return {"input": fields, "reader": reader_string()}
+            content = self.contents[path]
+            fields["group"] = content.group
+            fields["content_sha256"] = content.sha256
+            fields["locations"] = content.locations
+        if path in self.reader_locations:
+            extras["reader_locations"] = copy.deepcopy(self.reader_locations[path])
+        return extras
 
     def dataset_extras(self) -> dict[str, Any]:
         """What the dataset record adds: every store in scope and every byte read (the index's too),
         and what was read by content.
 
         ``stores_content`` has a row for every store in scope whose group was read in full (sorted
-        by path), ``input_digest`` is the input digest of exactly those rows, and ``stores_unread``
-        lists the stores in scope that have no digest (never read, or not digestable), so that a
-        record that names its whole input says so with an empty list.
+        by path), each of four fields (``path``, ``group``, ``content_sha256`` and ``locations``, the
+        locations digest of the positions the store handed eegprep: no row says ``none``, because
+        both Zarr recipes hand positions through ``to_eeg``), ``input_digest`` is
+        ``nemar.input-digest.v2`` of exactly those rows (the field keeps its name), and
+        ``stores_unread`` lists the stores in scope that have no digest (never read, or not
+        digestable), so that a record that names its whole input says so with an empty list.
         """
         fields = self.input_fields(self.scope, self.transport.bytes_read, self.transport.contacted)
         rows = content_rows(self.contents)
         fields["stores_content"] = rows
-        fields["input_digest"] = input_digest(rows)
+        fields["input_digest"] = input_digest_v2(rows)
         fields["stores_unread"] = sorted(path for path in self.scope if path not in self.contents)
         return {"input": fields, "reader": reader_string()}
 
