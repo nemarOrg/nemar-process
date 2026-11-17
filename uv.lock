@@ -1409,7 +1409,7 @@ wheels = [
 
 [[package]]
 name = "nemar-process"
-version = "0.1.1-dev6"
+version = "0.1.1-dev7"
 source = { virtual = "." }
 
 [package.optional-dependencies]
