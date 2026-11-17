@@ -34,8 +34,8 @@ env:
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
-# `lint`, the other required check, is lint.yml: it runs ruff, ruff format, ty and actionlint on every push to
-# any branch and on every pull request, and is not repeated here.
+# `lint` is lint.yml, not a job here: it runs ruff, ruff format, ty and actionlint on every push to any branch
+# and on every pull request. `bump-validator` and `release-gate`, also required, are workflows of their own.
 jobs:
   launcher:
     name: launcher (python ${{ matrix.python }})
@@ -131,8 +131,8 @@ jobs:
         if: matrix.python == '3.9'
         run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
 
-      # The gates of the phase, in order, on 3.12. `lint` and `deploy` run ruff, ty and the launcher zip
-      # check, so they are not repeated here.
+      # The gates of the phase, in order, on 3.12. `lint` and the deploy group of `static` run ruff, ty and
+      # the launcher zip check, so they are not repeated here.
       - name: Gates
         if: matrix.python == '3.12'
         run: |
