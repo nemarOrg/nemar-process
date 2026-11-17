@@ -3,8 +3,9 @@
 The job warns, without failing, when nemar-cli's compute epic branch has changed the Tapis client or
 contract files since the pinned commit. Its one real hazard is silence of the wrong kind: when the
 API call itself fails (the branch is deleted once the epic merges, or the commit is unknown) the job
-must SAY it could not compare, never "unchanged". The script is taken from ``ci.yml`` itself and run
-with ``bash``; ``gh`` is a stand-in executable on ``PATH`` (the GitHub API is outside this repository).
+must SAY it could not compare, never "unchanged". The script is taken from ``nemar-cli-drift.yml``
+itself and run with ``bash``; ``gh`` is a stand-in executable on ``PATH`` (the GitHub API is outside
+this repository).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import pytest
 import tapis_support as ts
 import yaml
 
-CI = ts.ROOT / ".github" / "workflows" / "ci.yml"
+CI = ts.ROOT / ".github" / "workflows" / "nemar-cli-drift.yml"
 JOB = "nemar-cli-tapis-latest"
 PIN = json.loads((ts.ROOT / "tests" / "contract" / "nemar-cli-tapis-pin.json").read_text())
 BRANCH = "feature/issue-2005-epic-compute-core"
