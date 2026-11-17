@@ -584,8 +584,9 @@ def test_a_job_that_overruns_leaves_no_process_behind(tmp_path):
             signal.pthread_sigmask(signal.SIG_SETMASK, held)
         [done] = rig.routes.bodies("complete")
         assert pid_file.exists(), (
-            "the stand-in never wrote grandchild.pid (exit {}): 1 means it started without SIGTERM "
-            "blocked, 137 that the runner's SIGKILL came first".format(done["exit_number"])
+            "the stand-in never wrote grandchild.pid (exit {}): 1 is the stand-in's own failure, the "
+            "self-check if it started without SIGTERM blocked, 137 that the runner's SIGKILL "
+            "came first".format(done["exit_number"])
         )
         pid = int(pid_file.read_text())
         wait_for(lambda: not alive(pid), 5, "the grandchild to be gone")
