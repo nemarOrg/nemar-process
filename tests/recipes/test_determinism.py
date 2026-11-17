@@ -11,8 +11,8 @@ import inspect
 import os
 
 import pytest
-from nemar_process.common import COMMON_VERSION, determinism
-from recipe_support import PINNED_COMMON_VERSION
+from nemar_process.common import COMMON_VERSION, determinism, versions
+from recipe_support import PINNED_COMMON_VERSION, PINNED_EEGPREP_TEXT
 from threadpoolctl import threadpool_info
 
 
@@ -55,7 +55,8 @@ def test_engine_info_says_what_ran():
     with determinism.pinned_threads():
         info = determinism.engine_info()
     assert info["package"] == "eegprep"
-    assert info["version"] == importlib.metadata.version("eegprep")
+    assert info["version"] == versions.distribution_version("eegprep")
+    assert info["version"] == PINNED_EEGPREP_TEXT  # the commit eegprep was installed from
     assert info["numpy"] == importlib.metadata.version("numpy")
     assert info["scipy"] == importlib.metadata.version("scipy")
     assert info["python"].count(".") == 2

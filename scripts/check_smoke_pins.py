@@ -14,8 +14,9 @@ declares, so the tests, the pull-request job and the release job all ask the sam
   takes from PyPI for the resolution that selects no flavor; in an image, which is Linux, the
   ``+cpu`` build alone), and in the CUDA flavor the CUDA 12.9 build (which also lists its GPU
   architectures); Python is the 3.12 series;
-* the recipe command ran and names the pinned eegprep and the recipes the repository registers
-  (``recipe_command``), and with ``--image`` it was the script ``nemar-recipe`` on the path;
+* the recipe command ran and names the pinned eegprep (its version with the commit it was taken from,
+  ``recorded_versions``) and the recipes the repository registers (``recipe_command``), and with
+  ``--image`` it was the script ``nemar-recipe`` on the path;
 * with ``--image``: the thread and hash environment the Dockerfile sets, the environment at
   ``/opt/venv``, the flavor the image says it is (``--flavor`` names the one expected), and the
   native AMICA binary: its SHA-256 is the pinned one, ``ldd`` lists nothing as not found, and one
@@ -119,6 +120,31 @@ def declared_names(pyproject: Path) -> set[str]:
         if match:
             names.add(normalize(match.group(1)))
     return names
+
+
+def declared_commits(pyproject: Path) -> dict[str, str]:
+    """``{distribution: commit}`` for every requirement of the runtime group that is taken from a git
+    commit (``name[extras] @ git+https://host/path@<40 hexadecimal digits>``)."""
+    commits = {}
+    for requirement in runtime_group(tomllib.loads(pyproject.read_text(encoding="utf-8"))):
+        match = re.match(
+            r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*@\s*git\+[^@\s]+@([0-9a-f]{40})\b",
+            requirement,
+        )
+        if match:
+            commits[normalize(match.group(1))] = match.group(2)
+    return commits
+
+
+def recorded_versions(pyproject: Path, versions: dict[str, set[str]]) -> dict[str, set[str]]:
+    """The version text a record gives each distribution: ``<version>+<commit>`` for one taken from a
+    git commit (the commit is what tells two builds of one version apart: ``common/versions.py``),
+    its version for any other."""
+    commits = declared_commits(pyproject)
+    return {
+        name: {"{}+{}".format(v, commits[name]) for v in found} if name in commits else set(found)
+        for name, found in versions.items()
+    }
 
 
 def lock_versions(lock: Path) -> dict[str, set[str]]:
@@ -332,7 +358,9 @@ def check(
             "python is {}, not the {}x series".format(smoke.get("python"), PYTHON_SERIES)
         )
     problems += recipe_command_problems(
-        smoke.get("recipe_command"), expected_versions(pyproject, lock, shape), image
+        smoke.get("recipe_command"),
+        recorded_versions(pyproject, expected_versions(pyproject, lock, shape)),
+        image,
     )
     if no_gpu:
         if (smoke.get("torch") or {}).get("cuda_available") is not False:

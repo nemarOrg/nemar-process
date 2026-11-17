@@ -45,14 +45,13 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib import metadata
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urljoin
 
 import numpy as np
 
-from nemar_process.common import io, naming, zarr_hosts
+from nemar_process.common import io, naming, versions, zarr_hosts
 from nemar_process.common.errors import (
     CONVERT_FAILED,
     OUT_OF_MEMORY,
@@ -686,18 +685,10 @@ def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
 def reader_string() -> str:
     """``eegprep-lean@<version>+<commit>``, the commit read from how pip or uv installed it.
 
-    A reader installed from a release has no commit to name and is ``eegprep-lean@<version>``.
+    A reader installed from a release has no commit to name and is ``eegprep-lean@<version>``. The
+    rule is the one every record applies to eegprep too (``versions.distribution_version``).
     """
-    distribution = metadata.distribution(READER_DISTRIBUTION)
-    text = distribution.read_text("direct_url.json")
-    found = None
-    if text:
-        try:
-            found = json.loads(text).get("vcs_info", {}).get("commit_id")
-        except (ValueError, AttributeError):
-            found = None
-    suffix = "+{}".format(found) if isinstance(found, str) and COMMIT.fullmatch(found) else ""
-    return "{}@{}{}".format(READER_DISTRIBUTION, distribution.version, suffix)
+    return "{}@{}".format(READER_DISTRIBUTION, versions.distribution_version(READER_DISTRIBUTION))
 
 
 class ZarrSource:

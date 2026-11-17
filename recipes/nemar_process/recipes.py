@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from nemar_process.common.recipe import Recipe
 from nemar_process.nemar_floor import RECIPE as NEMAR_FLOOR
+from nemar_process.nemar_ica import RECIPE as NEMAR_ICA
 
-REGISTRY: dict[str, Recipe] = {NEMAR_FLOOR.id: NEMAR_FLOOR}
+REGISTRY: dict[str, Recipe] = {NEMAR_FLOOR.id: NEMAR_FLOOR, NEMAR_ICA.id: NEMAR_ICA}
 
 RETIRED: dict[str, str] = {"nemar-floor-zarr": "nemar-floor --input zarr"}
 """Names that were recipes and are now a recipe with an argument: the old name to the command that

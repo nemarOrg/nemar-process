@@ -13,6 +13,7 @@ import re
 import pytest
 from nemar_process.common import COMMON_VERSION, plan
 from nemar_process.common.determinism import utc_now
+from recipe_support import PINNED_EEGPREP_TEXT
 
 
 def sample_plan():
@@ -203,12 +204,10 @@ def test_the_band_stop_design_eegprep_applied_is_recorded_from_its_own_design():
 
 
 def test_software_is_eegprep_at_its_version_or_this_layer_at_its_own():
-    import importlib.metadata
-
     eegprep = plan.software_of("eegprep.clean_drifts")
     assert eegprep == {
         "name": "eegprep",
-        "version": importlib.metadata.version("eegprep"),
+        "version": PINNED_EEGPREP_TEXT,  # eegprep's version with the commit it was installed from
         "url": "https://github.com/sccn/eegprep",
         "functionCall": "eegprep.clean_drifts",
     }

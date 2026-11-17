@@ -24,7 +24,7 @@ import pytest
 import zarr_support as z
 from nemar_process import sj
 from nemar_process.common import records, zarr_input
-from recipe_support import PINNED_EEGPREP_VERSION, PINNED_RECIPE_VERSION, ROOT
+from recipe_support import PINNED_EEGPREP_TEXT, PINNED_RECIPE_VERSION, ROOT
 from zarr_support import no_fence, routing, served  # noqa: F401  fixtures
 
 ARGS = [
@@ -191,7 +191,7 @@ def test_the_records_validate_and_say_where_the_data_came_from(ran, served):  # 
     assert nemar["ignored_datatypes"] == {"emg": 1}
     assert re.fullmatch(r"eegprep-lean@\d+\.\d+\.\d+\+[0-9a-f]{40}", nemar["reader"])
     assert nemar["engine"]["package"] == "eegprep"
-    assert nemar["engine"]["version"] == PINNED_EEGPREP_VERSION
+    assert nemar["engine"]["version"] == PINNED_EEGPREP_TEXT
     assert nemar["image"]["digest"] == "sha256:" + "0" * 64
     assert dataset["processingSteps"][0]["name"] == "eegprep_lean.load_recording"
     for path in PROCESSED:
