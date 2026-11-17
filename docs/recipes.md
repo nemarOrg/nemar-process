@@ -636,11 +636,13 @@ No minimum number of samples is enforced: a short recording is fitted, and `stop
 
 ### The comparison with EEGLAB's AMICA is informational
 
-The image workflow runs pAMICA and the image's `amica15` binary on the repository's EEG fixture at full length (one thread, CPU float64, 2000 iterations) and prints the line E1R (the informational reading of the comparison of the two engines, named for the equivalence check E1 it replaced as a gate): `E1R (informational) min=... median=... amari=... reference: min>=0.95 median>=0.99 amari<=0.05`: the Hungarian-matched absolute correlations of the sensor-space unmixing rows and the Amari distance.
+At the full length (a pull request into `main`, the image tag and the dispatch) the image workflow runs pAMICA and the image's `amica15` binary on the repository's EEG fixture (one thread, CPU float64, 2000 iterations) and prints the line E1R (the informational reading of the comparison of the two engines, named for the equivalence check E1 it replaced as a gate): `E1R (informational) min=... median=... amari=... reference: min>=0.95 median>=0.99 amari<=0.05`: the Hungarian-matched absolute correlations of the sensor-space unmixing rows and the Amari distance.
 Nothing asserts on those numbers and nothing here turns them into a claim.
 The binary starts from the clock, so the comparison moves from run to run: on EEGLAB's 32-channel sample one head printed `min=0.9995 median=1.0000 amari=0.0218` and another `min=0.5262 median=0.9365 amari=1.6478`; two pAMICA seeds agree at a minimum of 0.526 and a median of 0.936 there with eegprep's defaults (the measurement of sccn/eegprep#617).
 A run with another seed gives a different decomposition beyond the strongest components.
-The same job runs the binary twice for 50 iterations each on the same recording and requires the two weight files to differ, as the unseeded binary implies.
+A pull request into any other branch runs the same module at a short length, every run 50 iterations, and prints no E1R line (the test is skipped with its reason); `docs/images.md` says what each length proves.
+At both lengths the same job runs the binary twice for 50 iterations each on the same recording and requires the two weight files to differ, as the unseeded binary implies.
+Neither length runs `nemar-ica` through `nemar-launch`: these runs are `apptainer exec` with the launcher's isolation flags, and the run through the real launcher in the image is the floor's.
 
 ### Locations, and what the Zarr input cannot do yet
 

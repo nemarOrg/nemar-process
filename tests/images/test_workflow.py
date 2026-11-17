@@ -680,3 +680,64 @@ def test_the_end_to_end_step_of_the_cpu_leg_also_runs_the_nemar_ica_tests():
     assert (ROOT / "tests/e2e/test_ica_launch.py").is_file()
     marked = (ROOT / "tests/e2e/test_ica_launch.py").read_text(encoding="utf-8")
     assert marked.count("@pytest.mark.apptainer") >= 3
+
+
+# the length of the nemar-ica end to end (CI-2) ----------------------------------------------------------
+
+ICA_LENGTH_VARIABLE = "NEMAR_ICA_E2E_LENGTH"
+ICA_LENGTH_EXPRESSION = (
+    "${{ github.event_name == 'pull_request' && github.base_ref != 'main' && 'short' || 'full' }}"
+)
+END_TO_END_STEP = "Run the floor through the launcher, and nemar-ica, in the SIF"
+
+
+def end_to_end_step() -> dict:
+    steps = workflow()["jobs"]["test"]["steps"]
+    (step,) = [
+        s for s in steps if s.get("name", "").startswith("Run the floor through the launcher")
+    ]
+    return step
+
+
+def test_the_end_to_end_step_chooses_the_length_of_the_nemar_ica_run_in_its_env_and_nowhere_else():
+    step = end_to_end_step()
+    assert set(step) == {"name", "if", "env", "run"}
+    # exactly the five keys: the three the step required before, the SIF, and the length
+    assert step["env"] == {
+        "NEMAR_REQUIRE_APPTAINER": "1",
+        "NEMAR_REQUIRE_RECIPE_SIF": "1",
+        "NEMAR_REQUIRE_RUNTIME": "1",
+        "NEMAR_RECIPE_SIF": "${{ github.workspace }}/nemar-python.sif",
+        ICA_LENGTH_VARIABLE: ICA_LENGTH_EXPRESSION,
+    }
+    # the rest of the step is what it was: a length put in front of the command, or the name or the
+    # condition changed, would not be the one expression above
+    assert step["name"] == END_TO_END_STEP
+    assert step["if"] == "matrix.flavor == 'cpu'"
+    assert (
+        step["run"]
+        == "uv run --frozen --group runtime --extra cpu pytest tests/e2e -m apptainer -v"
+    )
+
+
+def test_no_other_step_of_any_job_mentions_the_length_and_no_script_reads_the_base_branch():
+    jobs = workflow()["jobs"]
+    for job_name, job in jobs.items():
+        for step in job["steps"]:
+            if step.get("name") == END_TO_END_STEP:
+                continue
+            assert ICA_LENGTH_VARIABLE not in str(step), (job_name, step.get("name"))
+    # nothing from the event reaches a shell: no `run` of the file interpolates the base branch
+    for job_name, job in jobs.items():
+        for step in job["steps"]:
+            assert "github.base_ref" not in step.get("run", ""), (job_name, step.get("name"))
+            assert "github.head_ref" not in step.get("run", ""), (job_name, step.get("name"))
+    # the job-level and workflow-level `env` do not carry it either
+    assert ICA_LENGTH_VARIABLE not in str(workflow().get("env", {}))
+    for job in jobs.values():
+        assert ICA_LENGTH_VARIABLE not in str(job.get("env", {}))
+
+
+def test_the_nemar_ica_module_reads_the_length_variable_the_workflow_sets():
+    module = (ROOT / "tests/e2e/test_ica_launch.py").read_text(encoding="utf-8")
+    assert ICA_LENGTH_VARIABLE in module

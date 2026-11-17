@@ -265,8 +265,12 @@ jobs:
       # stand-in outputs routes. The test needs the runtime environment to compare the result with a
       # direct run of the same fixture. The same step runs tests/e2e/test_ica_launch.py (every test
       # of tests/e2e with the `apptainer` marker): nemar-ica in this SIF with pAMICA and with the
-      # image's AMICA binary on the fixture, which prints the informational E1R line and checks that
-      # two short runs of the unseeded binary are not byte identical.
+      # image's AMICA binary on the fixture, and checks that two runs of the unseeded binary are not
+      # byte identical. nemar-ica runs at a short length (every run 50 iterations, no E1R line) on a
+      # pull request into any branch but main, and at the full length (2000 iterations, the
+      # informational E1R line) on a pull request into main, on the image tag and on the dispatch,
+      # where `publish` needs this job. The length comes from the event and the base branch alone,
+      # never from a label, a title or the head branch's name (docs/images.md).
       - name: Run the floor through the launcher, and nemar-ica, in the SIF
         if: matrix.flavor == 'cpu'
         env:
@@ -274,6 +278,7 @@ jobs:
           NEMAR_REQUIRE_RECIPE_SIF: "1"
           NEMAR_REQUIRE_RUNTIME: "1"
           NEMAR_RECIPE_SIF: ${{ github.workspace }}/nemar-python.sif
+          NEMAR_ICA_E2E_LENGTH: ${{ github.event_name == 'pull_request' && github.base_ref != 'main' && 'short' || 'full' }}
         run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m apptainer -v
 
   publish:
