@@ -54,7 +54,7 @@ REQUIRED_ON_DEV = (
     "bump-validator",
 )
 REQUIRED_ON_MAIN = (*REQUIRED_ON_DEV, "release-gate")
-BRANCHES_WITHOUT_A_PULL_REQUEST_RUN = ("feature/x", "feature/issue-7-epic-y", "fix/z", "probe/q")
+BRANCHES_THAT_START_ONLY_LINT = ("feature/x", "feature/issue-7-epic-y", "fix/z", "probe/q")
 GUARD = f"github.event.head_commit.author.email != '{BOT_EMAIL}'"
 
 
@@ -111,7 +111,10 @@ def display_names(key: str, job: dict) -> list[str]:
     template = job.get("name", key)
     axes = set(re.findall(r"\$\{\{\s*matrix\.(\w+)\s*\}\}", template))
     matrix = job.get("strategy", {}).get("matrix", {})
-    if len(axes) != 1 or not isinstance(matrix.get(next(iter(axes), ""), None), list):
+    # an `exclude` or an `include` changes which legs exist: the legs are then not read from the axis
+    if len(axes) != 1 or {"exclude", "include"} & set(matrix):
+        return [template]
+    if not isinstance(matrix.get(next(iter(axes)), None), list):
         return [template]
     (axis,) = axes
     return [
@@ -904,11 +907,11 @@ def test_a_push_to_a_feature_branch_starts_lint_and_nothing_heavy():
     lint = triggers(load(LINT))
     ci = triggers(load("ci.yml"))["push"]["branches"]
     drift = triggers(load(DRIFT))["push"]["branches"]
-    for branch in ("main", "dev", *BRANCHES_WITHOUT_A_PULL_REQUEST_RUN):
+    for branch in ("main", "dev", *BRANCHES_THAT_START_ONLY_LINT):
         assert any(matches(glob, branch) for glob in lint["push"]["branches"]), branch
     for branch in ("main", "dev"):
         assert any(matches(glob, branch) for glob in ci), branch
-    for branch in BRANCHES_WITHOUT_A_PULL_REQUEST_RUN:
+    for branch in BRANCHES_THAT_START_ONLY_LINT:
         assert not any(matches(glob, branch) for glob in ci), branch
         assert not any(matches(glob, branch) for glob in drift), branch
 
@@ -1005,9 +1008,20 @@ def test_every_required_check_is_reported_by_exactly_one_job():
 
 def test_the_launcher_matrix_keeps_both_pythons_and_the_docker_job_follows_it():
     jobs = load("ci.yml")["jobs"]
-    assert jobs["launcher"]["strategy"]["matrix"]["python"] == ["3.9", "3.12"]
+    matrix = jobs["launcher"]["strategy"]["matrix"]
+    assert set(matrix) == {"python"}  # no `exclude` or `include` can drop or add a leg
+    assert matrix["python"] == ["3.9", "3.12"]
     keys = list(jobs)
     assert keys[keys.index("launcher") + 1] == "docker"  # tests/runner slices the text between them
+
+
+def names_of_fold() -> tuple[str, ...]:
+    return (
+        "Check out nemar-cli in full at the pinned commit (the stack runs from it)",
+        "Install the stack's dependencies",
+        "Build the tiny image into a SIF",
+        "The runner against the local stack",
+    )
 
 
 def test_the_runner_stack_end_to_end_runs_in_the_launcher_leg_on_3_12_and_cannot_skip():
@@ -1021,17 +1035,17 @@ def test_the_runner_stack_end_to_end_runs_in_the_launcher_leg_on_3_12_and_cannot
     assert step["name"] == "The runner against the local stack"
     assert step["if"] == "matrix.python == '3.12'"
     assert "continue-on-error" not in step
-    assert " -m " not in step["run"]  # no marker deselects it
+    # exactly this command: no marker deselects it and nothing after it can turn its failure into success
+    assert step["run"] == "uv run --frozen pytest tests/e2e/test_runner_stack.py -q -rs"
     assert launcher["env"]["NEMAR_REQUIRE_APPTAINER"] == "1"  # a missing Apptainer fails it
     assert step["env"]["NEMAR_CLI_DIR"] == "${{ github.workspace }}/.nemar-cli-stack"
+    assert set(step["env"]) == {"NEMAR_CLI_DIR", "NEMAR_E2E_SIF_DIR"}
+    for each in launcher["steps"]:  # no step softens the job's requirement for itself
+        assert "NEMAR_REQUIRE_APPTAINER" not in each.get("env", {}), each.get("name")
     assert launcher["timeout-minutes"] == 45
     # the other steps of the fold, each only on the 3.12 leg, and a full (not sparse) checkout
     names = [s.get("name") for s in launcher["steps"]]
-    for fold in (
-        "Check out nemar-cli in full at the pinned commit (the stack runs from it)",
-        "Install the stack's dependencies",
-        "Build the tiny image into a SIF",
-    ):
+    for fold in names_of_fold()[:3]:
         (fold_step,) = [s for s in launcher["steps"] if s.get("name") == fold]
         assert fold_step["if"] == "matrix.python == '3.12'", fold
         assert names.index(fold) < names.index(step["name"]), fold
@@ -1047,6 +1061,15 @@ def test_the_runner_stack_end_to_end_runs_in_the_launcher_leg_on_3_12_and_cannot
     # the gates step still leaves the marker to the fold, so the file runs once and with Apptainer
     gates = next(s for s in launcher["steps"] if s.get("name") == "Gates")
     assert 'not runner_stack"' in gates["run"]
+    assert gates["run"] == (
+        "uv sync --frozen\n"
+        "uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images "
+        '-m "not docker and not runner_stack"\n'
+    )
+    # no command of the fold or of the gates is followed by `|| ...`, which would hide its failure
+    for each in launcher["steps"]:
+        if each.get("name") in {*names_of_fold(), "Gates"}:
+            assert "||" not in each.get("run", ""), each["name"]
 
 
 def test_no_job_or_step_of_ci_can_hide_a_failure():
@@ -1055,6 +1078,25 @@ def test_no_job_or_step_of_ci_can_hide_a_failure():
     for name, job in ci["jobs"].items():
         assert "if" not in job, name  # a skipped required job reports success
     assert ci["permissions"] == {"contents": "read"}
+    # Every step-level `if` of ci.yml, by step: a step that is skipped on a pull request would let a
+    # required job pass without running what it is there for.
+    on_3_12 = "matrix.python == '3.12'"
+    conditions = {
+        job: {s.get("name"): s["if"] for s in body["steps"] if "if" in s}
+        for job, body in ci["jobs"].items()
+    }
+    assert conditions == {
+        "launcher": {
+            "Build the test image": "steps.sif-cache.outputs.cache-hit != 'true'",
+            "Launcher tests on 3.9": "matrix.python == '3.9'",
+            "Gates": on_3_12,
+            **dict.fromkeys(names_of_fold(), on_3_12),
+        },
+        "docker": {},
+        "images": {},
+        "recipes": {},
+        "deploy": {},
+    }
 
 
 def test_ci_cancels_a_superseded_pull_request_run_and_never_a_push_run():
