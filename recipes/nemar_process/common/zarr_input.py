@@ -648,11 +648,10 @@ def _coordinates(entry: Any) -> tuple[float, float, float] | None:
     infinity, and an integer too large for a binary64, on which ``math.isfinite`` and ``float`` raise
     ``OverflowError``, which is caught here for the same answer a JSON reader that reads it as an
     infinity gives. That is the platform's definition. Through the pinned reader such an integer
-    (any of at least 2**1024 - 2**970) never reaches this function: eegprep-lean's ``_position`` raises
-    the same ``OverflowError`` while it reads the store root, so the whole store fails (``read_failed``,
-    no row), and so does an ``electrode_positions`` that is not an object (``IndexError_``). The
-    follow-up is eegprep-lean's (read such an integer as no position); the catch here keeps this digest
-    equal to the definition for any caller.
+    (any of at least 2**1024 - 2**970, an integer literal of more than 4300 digits included) is
+    already a channel without a position before this function is reached, because eegprep-lean parses
+    the store root's integers as binary64; the catch here keeps this digest equal to the definition
+    for a caller that builds an ``ElectrodeAttributes`` by hand.
     """
     if not isinstance(entry, (list, tuple)) or len(entry) != 3:
         return None
@@ -669,9 +668,10 @@ def _coordinates(entry: Any) -> tuple[float, float, float] | None:
 
 def _coordinate_hex(value: float) -> str:
     """The 16 lower-case hexadecimal digits of a coordinate as an IEEE-754 binary64, big-endian, as
-    the rate is written. A zero is written as positive zero whatever its sign: Python reads the JSON
-    number ``-0`` as the integer 0 and ``-0.0`` as negative zero, where ``JSON.parse`` reads both as
-    negative zero, so without the rule one store would have two digests."""
+    the rate is written. A zero is written as positive zero whatever its sign: ``JSON.parse`` reads
+    ``-0`` and ``-0.0`` as negative zero and Python's own parse reads ``-0`` as the integer 0, so
+    without the rule one store could have two digests. eegprep-lean's reader already makes every zero
+    positive; the rule keeps this digest the definition's for any caller."""
     return struct.pack(">d", 0.0 if value == 0 else value).hex()
 
 

@@ -18,13 +18,18 @@ over rows of four fields. Their vectors are the platform's file at its merge com
 with ``json.loads(..., parse_int=float)`` as the file's note says, never edited here: a vector that
 does not match is a finding. Every locations vector goes through eegprep-lean's own parser
 (``ElectrodeAttributes.from_attributes``) and then through ``store_locations_sha256``, the path a
-store's root attributes take in a run.
+store's root attributes take in a run, and again as a store root written with the numbers spelled as
+the platform's file spells them (``-0``, a 400-digit integer) and read by eegprep-lean's
+``read_electrode_attributes``, which parses the root itself: the integer too large for binary64 is a
+channel without a position there, as it is in the definition.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import re
 import struct
 import sys
@@ -34,7 +39,14 @@ from typing import Any
 
 import numpy as np
 import pytest
-from eegprep_lean import ElectrodeAttributes, IndexError_
+from eegprep_lean import (
+    DatasetIndex,
+    ElectrodeAttributes,
+    ElectrodePositionsNotAnObject,
+    Response,
+    Store,
+    read_electrode_attributes,
+)
 from eegprep_lean.window import Window, to_physical
 from nemar_process.common import zarr_input as z
 
@@ -632,10 +644,53 @@ def vectors(**options):
     return json.loads(VECTORS.read_text(encoding="utf-8"), parse_int=float, **options)
 
 
-def locations_cases():
-    """Every locations vector, and each variant its ``also_with`` lists (a shallow merge over it)."""
+class Spelled(str):
+    """A JSON number exactly as the platform's file spells it: ``-0``, ``-0.0``, a 400-digit integer."""
+
+
+def spelled_vectors() -> dict:
+    """The platform's vectors with every number kept as its own text, so that a store root can be written
+    with the file's spelling and eegprep-lean's reader is what decides what each number means."""
+    return json.loads(VECTORS.read_text(encoding="utf-8"), parse_int=Spelled, parse_float=Spelled)
+
+
+def spelled(value: Any) -> str:
+    """The JSON text of a tree whose numbers are ``Spelled``: each is written as it was read."""
+    if isinstance(value, Spelled):
+        return str(value)
+    if isinstance(value, dict):
+        members = (json.dumps(key) + ":" + spelled(item) for key, item in value.items())
+        return "{" + ",".join(members) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(spelled(item) for item in value) + "]"
+    return json.dumps(value)
+
+
+class RootDocument:
+    """The host of one store: it answers every request with the store root's ``zarr.json``. The only
+    thing replaced is the network; the reader's own JSON parse and its filter of the entries run."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def get(self, url: str, *, start: int | None = None, end: int | None = None) -> Response:
+        return Response(200, self.body)
+
+
+def through_the_reader(attributes: Any) -> ElectrodeAttributes | None:
+    """What eegprep-lean's ``read_electrode_attributes`` makes of a store root that holds these attributes
+    (a tree whose numbers are ``Spelled``): the root's text parsed by the reader itself, then its filter."""
+    body = ('{"attributes":' + spelled(attributes) + "}").encode("ascii")
+    store = Store(path="sub-01/eeg/sub-01_task-rest_eeg.edf", zarr="sub-01.zarr", groups=())
+    index = DatasetIndex("nm000000", 1, "http://127.0.0.1/", 1, (store,))
+    return asyncio.run(read_electrode_attributes(index, store, transport=RootDocument(body)))
+
+
+def locations_cases(source=vectors):
+    """Every locations vector, and each variant its ``also_with`` lists (a shallow merge over it), as
+    ``source`` reads the file."""
     cases = []
-    for vector in vectors()["store_locations"]:
+    for vector in source()["store_locations"]:
         cases.append(pytest.param(vector, id=vector["name"]))
         for index, variant in enumerate(vector.get("also_with", [])):
             merged = {**vector, **variant}
@@ -667,6 +722,17 @@ def test_every_locations_vector_gives_the_platforms_text_and_digest(vector):
     assert hashlib.sha256(vector["text"].encode("utf-8")).hexdigest() == vector["sha256"]
 
 
+@pytest.mark.parametrize("vector", locations_cases(spelled_vectors))
+def test_every_locations_vector_gives_the_same_text_and_digest_through_the_reader_itself(vector):
+    """Each of the 13 vectors (and each variant), the integer too large for binary64 among them, as a
+    store root spelled like the platform's file and read by ``read_electrode_attributes``: no vector is
+    given a parse the reader does not do, so the reader's reading of ``-0`` and of 400 digits is the
+    one the digest is built on."""
+    electrodes = through_the_reader(vector["attributes"])
+    assert z.store_locations_text(vector["labels"], electrodes) == vector["text"]
+    assert z.store_locations_sha256(vector["labels"], electrodes) == vector["sha256"]
+
+
 def test_a_vector_with_also_equal_to_has_the_digest_of_the_vector_it_names():
     found = {vector["name"]: vector for vector in vectors()["store_locations"]}
     named = [vector for vector in found.values() if "also_equal_to" in vector]
@@ -695,19 +761,65 @@ def test_every_refused_locations_vector_is_refused_by_the_reader_or_by_the_diges
     for case in cases:
         name = case["name"]
         if name in REFUSED_BY_THE_READER:
-            with pytest.raises(IndexError_):
+            with pytest.raises(ElectrodePositionsNotAnObject):
                 ElectrodeAttributes.from_attributes(case["attributes"])
         elif name in REFUSED_HERE:
             with pytest.raises(z.Undigestable):
                 production_locations(case["labels"], case["attributes"])
 
 
-def test_an_integer_too_large_for_binary64_gives_a_group_with_no_position_for_that_channel():
-    """Vector e2 through eegprep-lean's parser as the vectors are read (the integer is an infinity),
-    and on the digest alone with the integer itself, which is the case ``OverflowError`` is caught
-    for (``math.isfinite`` and ``float`` raise it on an integer past binary64's range)."""
+def test_the_reader_names_its_refusals_and_reduces_the_vector_it_sets_aside():
+    """Through a store root: a position map that is an array or a string is refused as
+    ``ElectrodePositionsNotAnObject`` (the name a run records), and an ``attributes`` that is an array
+    is reduced to no attributes, so the store declares no positions."""
+    cases = spelled_vectors()["refused"]["store_locations"]
+    for case in cases:
+        if case["name"] in REFUSED_BY_THE_READER:
+            with pytest.raises(ElectrodePositionsNotAnObject):
+                through_the_reader(case["attributes"])
+        elif case["name"] in SET_ASIDE:
+            assert through_the_reader(case["attributes"]) is None
+
+
+def test_an_integer_too_large_for_binary64_is_a_channel_without_a_position_through_the_reader():
+    """Vector e2 as the platform's file spells it, a 400-digit integer literal, through eegprep-lean's
+    reader: the reader parses the root as binary64 (``JSON.parse`` reads it as an infinity), so Fz has no
+    position and Cz keeps its own, with the platform's text and digest and no refusal. The threshold is
+    2**1024 - 2**970, which rounds to 2**1024 and gives no position (one less rounds to the largest
+    binary64 and is kept), and a literal longer than Python's own 4300-digit limit no longer fails the
+    read before any entry exists."""
+    vector = next(v for v in spelled_vectors()["store_locations"] if v["name"] == HUGE)
+    assert len(vector["attributes"]["electrode_positions"]["Fz"][2]) == 400
+    electrodes = through_the_reader(vector["attributes"])
+    assert electrodes is not None
+    assert electrodes.positions == {"Cz": (1.5, 2.5, 3.5)}
+    assert z.store_locations_text(vector["labels"], electrodes) == vector["text"]
+    assert z.store_locations_sha256(vector["labels"], electrodes) == vector["sha256"]
+
+    def last_coordinate(integer: str):
+        positions = {"Fz": [Spelled("1"), Spelled("2"), Spelled(integer)]}
+        read = through_the_reader({"electrode_positions": positions})
+        assert read is not None
+        return read.positions.get("Fz")
+
+    assert last_coordinate(str(2**1024 - 2**970)) is None
+    assert last_coordinate(str(2**1024 - 2**970 - 1)) == (1.0, 2.0, sys.float_info.max)
+    assert last_coordinate("9" * 5000) is None
+    # a caller that hands from_attributes Python integers, with no root to parse, is as well served
+    for integer, kept in (
+        (2**1024 - 2**970, None),
+        (2**1024 - 2**970 - 1, (1.0, 2.0, sys.float_info.max)),
+    ):
+        read = ElectrodeAttributes.from_attributes({"electrode_positions": {"Fz": [1, 2, integer]}})
+        assert read is not None
+        assert read.positions.get("Fz") == kept
+
+
+def test_the_digest_alone_gives_no_position_to_an_integer_the_reader_could_never_have_kept():
+    """``store_locations_text`` takes an ``ElectrodeAttributes`` from any caller, one made by hand with
+    an integer past binary64's range included, on which ``math.isfinite`` and ``float`` raise
+    ``OverflowError``: that is caught there, for the platform's answer (position alone)."""
     vector = next(v for v in vectors()["store_locations"] if v["name"] == HUGE)
-    assert production_locations(vector["labels"], vector["attributes"])[0] == vector["text"]
     huge = 10**399
     entries = {"Fz": (1.0, 2.0, huge), "Cz": (1.5, 2.5, 3.5)}
     electrodes = ElectrodeAttributes(
@@ -716,25 +828,24 @@ def test_an_integer_too_large_for_binary64_gives_a_group_with_no_position_for_th
     assert z.store_locations_text(vector["labels"], electrodes) == vector["text"]
 
 
-def test_eegprep_lean_as_pinned_raises_on_that_integer_when_the_root_is_read_without_parse_int():
-    """The follow-up for the owner of eegprep-lean's reader (sccn/eegprep pull request 626): its
-    ``_position`` calls ``math.isfinite`` on a Python ``int``, which raises ``OverflowError`` for an
-    integer past binary64's range, where the platform's definition gives that channel no position. A
-    store the converter writes holds floats, so no store is affected; when eegprep-lean reads such an
-    integer as no position this test is the one to drop."""
-    raw = json.loads(VECTORS.read_text(encoding="utf-8"))
-    vector = next(v for v in raw["store_locations"] if v["name"] == HUGE)
-    assert isinstance(vector["attributes"]["electrode_positions"]["Fz"][2], int)
-    with pytest.raises(OverflowError):
-        ElectrodeAttributes.from_attributes(vector["attributes"])
-    # the threshold: 2**1024 - 2**970 rounds to 2**1024 and raises, one less rounds to the largest binary64
-    past = {"electrode_positions": {"Fz": [1, 2, 2**1024 - 2**970]}}
-    with pytest.raises(OverflowError):
-        ElectrodeAttributes.from_attributes(past)
-    below = {"electrode_positions": {"Fz": [1, 2, 2**1024 - 2**970 - 1]}}
-    kept = ElectrodeAttributes.from_attributes(below)
-    assert kept is not None
-    assert kept.positions["Fz"] == (1.0, 2.0, sys.float_info.max)
+def test_every_zero_the_reader_keeps_is_positive_zero_whatever_its_spelling():
+    """The vector of ``-0``, ``0``, ``-0.0``, ``12`` and ``12.0`` and its all-float twin, through the
+    reader: the same positions to the last bit, no zero negative (the reader reads ``-0`` as
+    ``-0.0`` as ``JSON.parse`` does, then makes it positive), and the vectors' one digest."""
+    named = {v["name"]: v for v in spelled_vectors()["store_locations"]}
+    mixed = through_the_reader(named["zeros and integers"]["attributes"])
+    floats = through_the_reader(named["zeros and integers as floats"]["attributes"])
+    assert mixed is not None
+    assert floats is not None
+    assert repr(mixed.positions) == repr(floats.positions)  # repr tells 0.0 from -0.0
+    assert len(mixed.positions) == 3
+    zeros = [axis for point in mixed.positions.values() for axis in point if axis == 0]
+    assert len(zeros) == 6
+    assert all(math.copysign(1.0, axis) == 1.0 for axis in zeros)
+    labels = named["zeros and integers"]["labels"]
+    digest = z.store_locations_sha256(labels, mixed)
+    assert digest == named["zeros and integers"]["sha256"]
+    assert digest == z.store_locations_sha256(labels, floats)
 
 
 # computed with Bun from nemar-cli's shared/contract/derivatives.ts (`storeLocationsText` and

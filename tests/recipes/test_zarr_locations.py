@@ -10,8 +10,11 @@ zarr and served over real HTTP; the only stand-in is the one for the two externa
 What is pinned: the cross-route answer (a store built from the EEG fixture gives the BIDS route's
 ``chanlocs``), the floor's branch and the location fields it records, nemar-ica's precondition (eegprep's
 own rule: one located channel passes), the rows of the dataset record (each carries the locations digest;
-none says ``none``), the reader's record copied unchanged, and that a coordinate changes the key while
-the content digest and the converter's provenance do not.
+none says ``none``), the reader's record copied unchanged, that a coordinate changes the key while
+the content digest and the converter's provenance do not, and the three edge cases of the reader that
+the digest's definition decides: an integer coordinate no binary64 can hold is a channel without a
+position (never a failed store), every zero is positive zero whatever its spelling, and a position map
+that is no object is refused under its own name.
 """
 
 from __future__ import annotations
@@ -22,11 +25,13 @@ import hashlib
 import io as stdlib_io
 import json
 import re
+import struct
 from pathlib import Path
 
 import numpy as np
 import pytest
 import zarr_support as z
+from eegprep_lean import ElectrodePositionsNotAnObject, IndexError_
 from nemar_process import cli as command
 from nemar_process.common import qc, zarr_hosts, zarr_input
 from nemar_process.common.errors import RecordingError
@@ -45,9 +50,20 @@ OVERFLOW = "sub-19/eeg/sub-19_task-rest_eeg.edf"  # an integer coordinate no bin
 NOT_OBJECT = "sub-20/eeg/sub-20_task-rest_eeg.edf"  # electrode_positions that is a list
 ATTRIBUTES_LIST = "sub-21/eeg/sub-21_task-rest_eeg.edf"  # a root whose `attributes` is a list
 ATTRIBUTES_NULL = "sub-22/eeg/sub-22_task-rest_eeg.edf"  # and one whose `attributes` is null
+LONG_LITERAL = "sub-23/eeg/sub-23_task-rest_eeg.edf"  # an integer literal of more than 4300 digits
+# one store for each spelling of a zero x coordinate of E8, the electrode whose zero has a negative y
+# beside it, which is where the sign of a zero reaches the sign of Y and theta
+ZEROS = {
+    "-0": "sub-24/eeg/sub-24_task-rest_eeg.edf",
+    "-0.0": "sub-25/eeg/sub-25_task-rest_eeg.edf",
+    "0": "sub-26/eeg/sub-26_task-rest_eeg.edf",
+    "0.0": "sub-27/eeg/sub-27_task-rest_eeg.edf",
+}
 # the smallest integer a binary64 cannot hold: it is halfway between the largest one and 2**1024, and
 # rounds to the latter
 PAST_BINARY64 = 2**1024 - 2**970
+LONG_DIGITS = "9" * 4400  # Python's own limit on turning an integer into text is 4300 digits
+SPELLED = "spelled in the file"  # the placeholder a coordinate holds until its text is written
 ARGS = [
     "--zarr-base",
     z.ORIGIN,
@@ -72,13 +88,28 @@ def provenance_of_a_subject_file():
     return {"source": "subject", "file": ELECTRODES_FILE, "coordsystem_file": COORDSYSTEM_FILE}
 
 
+def root_file(stand_in, path: str) -> Path:
+    return stand_in.root / z.DATASET / "zarr" / z.zarr_name(path) / "zarr.json"
+
+
 def set_root_attributes(stand_in, path: str, value) -> None:
     """Replace the ``attributes`` member of a store's root ``zarr.json`` with ``value``: a list or null,
     which zarr itself never writes and a damaged or foreign store might."""
-    file = stand_in.root / z.DATASET / "zarr" / z.zarr_name(path) / "zarr.json"
+    file = root_file(stand_in, path)
     document = json.loads(file.read_text(encoding="utf-8"))
     document["attributes"] = value
     file.write_text(json.dumps(document), encoding="utf-8")
+
+
+def spell_number(stand_in, path: str, text: str) -> None:
+    """Write the JSON number ``text`` where the store's root holds the placeholder ``SPELLED``: a number
+    zarr's own writer cannot produce (``-0``, an integer of more than 4300 digits), as a converter that
+    wrote it by another route would have."""
+    file = root_file(stand_in, path)
+    root = file.read_text(encoding="utf-8")
+    quoted = json.dumps(SPELLED)
+    assert root.count(quoted) == 1
+    file.write_text(root.replace(quoted, text), encoding="utf-8")
 
 
 def fixture_positions() -> dict[str, tuple[float, float, float]]:
@@ -116,14 +147,22 @@ def located(tmp_path_factory, bids):
         (BAD_UNITS, attributes(units="furlongs")),
         (BAD_SYSTEM, attributes(system="Other")),
         (NO_MATCH, attributes({"X{}".format(i): (1.0, 2.0, 3.0) for i in range(1, 9)})),
-        (OVERFLOW, attributes({"E1": (1, 2, PAST_BINARY64)})),
+        (OVERFLOW, attributes({**POSITIONS, "E3": (-60.0, 0.0, PAST_BINARY64)})),
+        (LONG_LITERAL, attributes({**POSITIONS, "E3": (-60.0, 0.0, SPELLED)})),
         (NOT_OBJECT, {**attributes(), "electrode_positions": [[1.0, 2.0, 3.0]]}),
         (ATTRIBUTES_LIST, None),
         (ATTRIBUTES_NULL, None),
+        *(
+            (path, attributes({**POSITIONS, "E8": (SPELLED, -40.0, 85.0)}))
+            for path in ZEROS.values()
+        ),
     ):
         z.add_store(stand_in, path, signal, attributes=given)
     set_root_attributes(stand_in, ATTRIBUTES_LIST, [])
     set_root_attributes(stand_in, ATTRIBUTES_NULL, None)
+    spell_number(stand_in, LONG_LITERAL, LONG_DIGITS)
+    for spelling, path in ZEROS.items():
+        spell_number(stand_in, path, spelling)
     yield stand_in
     stand_in.close()
 
@@ -320,29 +359,79 @@ def test_a_root_whose_attributes_are_a_list_or_null_is_a_store_that_declares_no_
     assert (loaded.location_source, loaded.n_channels_with_locations) == ("none", 0)
 
 
-@pytest.mark.parametrize(
-    ("path", "detail"),
-    [(OVERFLOW, "OverflowError"), (NOT_OBJECT, "IndexError_")],
-    ids=["an integer past binary64", "positions that are no object"],
-)
-def test_the_pinned_reader_fails_the_whole_store_where_the_definition_drops_one_channel(
-    located, path, detail
-):
-    """eegprep-lean's ``_position`` raises on an integer of at least 2**1024 - 2**970 (the platform's
-    definition gives that channel no position), and it refuses a position map that is no object (the
-    definition refuses it too): either way the store is a failed read, not digested, with no row."""
+def only_unread_is(source, path):
+    """The dataset record's view of a store that was read in full: it has its row and is not unread."""
+    nemar = source.dataset_extras()["input"]
+    assert [row["path"] for row in nemar["stores_content"]] == [path]
+    assert nemar["stores_unread"] == []
+
+
+@pytest.mark.parametrize("path", [OVERFLOW, LONG_LITERAL], ids=["past binary64", "4400 digits"])
+def test_an_integer_coordinate_no_binary64_can_hold_is_a_channel_without_a_position(located, path):
+    """The definition gives such a channel no position and the store is still read and digested, as the
+    reader (eegprep-lean) reads the store root's integers as binary64: the integer past the range, and
+    an integer literal longer than Python's own 4300-digit limit, which fails before any entry exists
+    unless the root is parsed as binary64. The other seven electrodes are located."""
     source = opened(located, path)
+    loaded = source.load(path)
+    assert source.reader_locations[path] == {
+        "coordinate_system": CAPTRAK,
+        "coordinate_units": "mm",
+        "located": 7,
+    }
+    assert (loaded.location_source, loaded.n_channels_with_locations) == ("electrodes.tsv", 7)
+    chanlocs = loaded.eeg["chanlocs"]
+    assert [c["labels"] for c in chanlocs] == list(z.LABELS)
+    assert [qc.located(c) for c in chanlocs] == [label != "E3" for label in z.LABELS]
+    without = {label: point for label, point in POSITIONS.items() if label != "E3"}
+    assert source.contents[path].locations == z.reference_locations_sha256(without, CAPTRAK, "mm")
+    only_unread_is(source, path)
+
+
+def test_positions_that_are_no_object_are_refused_under_the_readers_own_name(located):
+    """A position map that is no object is refused, as the definition refuses it: the store is a failed
+    read, not digested, with no row, and what the record keeps is the refusal's own class name
+    (``type(error).__name__``), which is a subclass of the reader's ``IndexError_``, never a message."""
+    assert issubclass(ElectrodePositionsNotAnObject, IndexError_)
+    source = opened(located, NOT_OBJECT)
     with pytest.raises(RecordingError) as raised:
-        source.load(path)
+        source.load(NOT_OBJECT)
     assert (raised.value.code, raised.value.step, raised.value.detail) == (
         "read_failed",
         "load",
-        detail,
+        "ElectrodePositionsNotAnObject",
     )
-    assert path not in source.contents
+    assert NOT_OBJECT not in source.contents
     nemar = source.dataset_extras()["input"]
     assert nemar["stores_content"] == []
-    assert nemar["stores_unread"] == [path]
+    assert nemar["stores_unread"] == [NOT_OBJECT]
+
+
+def chanloc_bits(chanlocs) -> list[tuple[str, str]]:
+    """Every number of every channel as its binary64 bytes, so that -0.0 and 0.0 differ."""
+    names = ("X", "Y", "Z", "theta", "radius", "sph_theta", "sph_phi", "sph_radius")
+    return [
+        (chanloc["labels"], struct.pack(">d", float(chanloc[name])).hex())
+        for chanloc in chanlocs
+        for name in names
+        if name in chanloc
+    ]
+
+
+def test_every_spelling_of_a_zero_coordinate_gives_the_same_values_and_the_same_digest(located):
+    """``-0``, ``-0.0``, ``0`` and ``0.0`` as E8's x coordinate: the reader reads each as positive zero
+    (as the digest hashes it), so the channel locations are the same numbers to the last bit, the sign
+    of Y and of theta included, and the stores have one locations digest, the definition's."""
+    loaded = {}
+    for spelling, path in ZEROS.items():
+        source = opened(located, path)
+        chanlocs = source.load(path).eeg["chanlocs"]
+        loaded[spelling] = (chanloc_bits(chanlocs), source.contents[path].locations)
+    answer = loaded["0"]
+    assert len(answer[0]) >= 8 * 8
+    for spelling, got in loaded.items():
+        assert got == answer, spelling
+    assert answer[1] == z.reference_locations_sha256(POSITIONS, CAPTRAK, "mm")
 
 
 # ---- the floor --------------------------------------------------------------------------------
