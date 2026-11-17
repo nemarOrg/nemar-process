@@ -43,6 +43,18 @@ RATE = 250.0
 N_CHANNELS = 8
 N_SAMPLES = 17_500  # 70 s: past the floor's short-recording rule, so every step runs
 LABELS = tuple("E{}".format(i + 1) for i in range(N_CHANNELS))
+# eight positions for those labels, in millimeters in a head-based RAS frame (CapTrak: +X right, +Y toward
+# the nose, +Z up), spread so that the floor's location guard (rank 3) accepts them
+POSITIONS = {
+    "E1": (-40.0, 70.0, 40.0),
+    "E2": (40.0, 70.0, 40.0),
+    "E3": (-60.0, 0.0, 60.0),
+    "E4": (60.0, 0.0, 60.0),
+    "E5": (-40.0, -70.0, 40.0),
+    "E6": (40.0, -70.0, 40.0),
+    "E7": (0.0, 40.0, 80.0),
+    "E8": (0.0, -40.0, 85.0),
+}
 EEG_ONE = "sub-01/eeg/sub-01_task-rest_eeg.edf"
 EEG_TWO = "sub-02/eeg/sub-02_task-rest_eeg.edf"
 EMG = "sub-03/emg/sub-03_task-rest_emg.edf"

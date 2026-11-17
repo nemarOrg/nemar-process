@@ -29,20 +29,11 @@ import pytest
 import zarr_support as z
 from nemar_process import cli as command
 from nemar_process.common import qc, zarr_hosts, zarr_input
+from nemar_process.common.errors import RecordingError
 from recipe_support import DATASET, loaded_fixture
 
 CAPTRAK = "CapTrak"
-# eight positions in millimeters in a head-based RAS frame (+X right, +Y toward the nose, +Z up)
-POSITIONS = {
-    "E1": (-40.0, 70.0, 40.0),
-    "E2": (40.0, 70.0, 40.0),
-    "E3": (-60.0, 0.0, 60.0),
-    "E4": (60.0, 0.0, 60.0),
-    "E5": (-40.0, -70.0, 40.0),
-    "E6": (40.0, -70.0, 40.0),
-    "E7": (0.0, 40.0, 80.0),
-    "E8": (0.0, -40.0, 85.0),
-}
+POSITIONS = z.POSITIONS
 ELECTRODES_FILE = "sub-01/eeg/sub-01_electrodes.tsv"
 COORDSYSTEM_FILE = "sub-01/eeg/sub-01_coordsystem.json"
 CROSS = "sub-14/eeg/sub-14_task-rest_eeg.edf"  # the EEG fixture's labels and its electrodes.tsv
@@ -50,6 +41,13 @@ STANDARD = "sub-15/eeg/sub-15_task-rest_eeg.edf"  # the fixture's labels, no roo
 BAD_UNITS = "sub-16/eeg/sub-16_task-rest_eeg.edf"
 BAD_SYSTEM = "sub-17/eeg/sub-17_task-rest_eeg.edf"
 NO_MATCH = "sub-18/eeg/sub-18_task-rest_eeg.edf"
+OVERFLOW = "sub-19/eeg/sub-19_task-rest_eeg.edf"  # an integer coordinate no binary64 can hold
+NOT_OBJECT = "sub-20/eeg/sub-20_task-rest_eeg.edf"  # electrode_positions that is a list
+ATTRIBUTES_LIST = "sub-21/eeg/sub-21_task-rest_eeg.edf"  # a root whose `attributes` is a list
+ATTRIBUTES_NULL = "sub-22/eeg/sub-22_task-rest_eeg.edf"  # and one whose `attributes` is null
+# the smallest integer a binary64 cannot hold: it is halfway between the largest one and 2**1024, and
+# rounds to the latter
+PAST_BINARY64 = 2**1024 - 2**970
 ARGS = [
     "--zarr-base",
     z.ORIGIN,
@@ -72,6 +70,15 @@ def attributes(positions=POSITIONS, system=CAPTRAK, units="mm", **provenance):
 
 def provenance_of_a_subject_file():
     return {"source": "subject", "file": ELECTRODES_FILE, "coordsystem_file": COORDSYSTEM_FILE}
+
+
+def set_root_attributes(stand_in, path: str, value) -> None:
+    """Replace the ``attributes`` member of a store's root ``zarr.json`` with ``value``: a list or null,
+    which zarr itself never writes and a damaged or foreign store might."""
+    file = stand_in.root / z.DATASET / "zarr" / z.zarr_name(path) / "zarr.json"
+    document = json.loads(file.read_text(encoding="utf-8"))
+    document["attributes"] = value
+    file.write_text(json.dumps(document), encoding="utf-8")
 
 
 def fixture_positions() -> dict[str, tuple[float, float, float]]:
@@ -109,8 +116,14 @@ def located(tmp_path_factory, bids):
         (BAD_UNITS, attributes(units="furlongs")),
         (BAD_SYSTEM, attributes(system="Other")),
         (NO_MATCH, attributes({"X{}".format(i): (1.0, 2.0, 3.0) for i in range(1, 9)})),
+        (OVERFLOW, attributes({"E1": (1, 2, PAST_BINARY64)})),
+        (NOT_OBJECT, {**attributes(), "electrode_positions": [[1.0, 2.0, 3.0]]}),
+        (ATTRIBUTES_LIST, None),
+        (ATTRIBUTES_NULL, None),
     ):
         z.add_store(stand_in, path, signal, attributes=given)
+    set_root_attributes(stand_in, ATTRIBUTES_LIST, [])
+    set_root_attributes(stand_in, ATTRIBUTES_NULL, None)
     yield stand_in
     stand_in.close()
 
@@ -293,6 +306,45 @@ def test_positions_the_reader_refuses_are_a_reason_in_the_record_and_no_location
     assert row["locations"] != z.reference_locations_sha256()
 
 
+@pytest.mark.parametrize("path", [ATTRIBUTES_LIST, ATTRIBUTES_NULL], ids=["a list", "null"])
+def test_a_root_whose_attributes_are_a_list_or_null_is_a_store_that_declares_no_positions(
+    located, path
+):
+    """The reader reduces such a root to no attributes (``document.get("attributes") or {}``), so the
+    store has the digest of a store without positions and no reader record; the platform's refused vector
+    of an attributes value that is an array never reaches the digest."""
+    source = opened(located, path)
+    loaded = source.load(path)
+    assert source.reader_locations[path] is None
+    assert source.contents[path].locations == z.reference_locations_sha256()
+    assert (loaded.location_source, loaded.n_channels_with_locations) == ("none", 0)
+
+
+@pytest.mark.parametrize(
+    ("path", "detail"),
+    [(OVERFLOW, "OverflowError"), (NOT_OBJECT, "IndexError_")],
+    ids=["an integer past binary64", "positions that are no object"],
+)
+def test_the_pinned_reader_fails_the_whole_store_where_the_definition_drops_one_channel(
+    located, path, detail
+):
+    """eegprep-lean's ``_position`` raises on an integer of at least 2**1024 - 2**970 (the platform's
+    definition gives that channel no position), and it refuses a position map that is no object (the
+    definition refuses it too): either way the store is a failed read, not digested, with no row."""
+    source = opened(located, path)
+    with pytest.raises(RecordingError) as raised:
+        source.load(path)
+    assert (raised.value.code, raised.value.step, raised.value.detail) == (
+        "read_failed",
+        "load",
+        detail,
+    )
+    assert path not in source.contents
+    nemar = source.dataset_extras()["input"]
+    assert nemar["stores_content"] == []
+    assert nemar["stores_unread"] == [path]
+
+
 # ---- the floor --------------------------------------------------------------------------------
 
 
@@ -347,6 +399,30 @@ def test_nemar_ica_passes_its_precondition_on_a_located_store_and_records_iclabe
         probabilities = [float(value) for value in body.split("\t")[2:]]
         assert len(probabilities) == len(classes)
         assert sum(probabilities) == pytest.approx(1.0, abs=1e-3)
+    # the record says what the reader located, and names the positions the recipe was handed
+    nemar = record_of(out, z.EEG_ONE, "ica")["extensions"]["nemar"]
+    assert nemar["reader_locations"] == {
+        "coordinate_system": CAPTRAK,
+        "coordinate_units": "mm",
+        "source": "subject",
+        "file": ELECTRODES_FILE,
+        "located": 8,
+    }
+    assert nemar["input"]["locations"] == z.reference_locations_sha256(POSITIONS, CAPTRAK, "mm")
+    # and the dataset's digest is version 2 of rows that each carry theirs (the store that failed
+    # at iclabel was read in full, so it has its row)
+    dataset = dataset_record(out, "ica")["extensions"]["nemar"]["input"]
+    rows = dataset["stores_content"]
+    assert [row["path"] for row in rows] == [z.EEG_ONE, z.EEG_TWO]
+    assert [row["locations"] for row in rows] == [
+        z.reference_locations_sha256(POSITIONS, CAPTRAK, "mm"),
+        z.reference_locations_sha256(),
+    ]
+    assert dataset["stores_unread"] == []
+    assert dataset["input_digest"] == zarr_input.input_digest_v2(rows)
+    assert dataset["input_digest"] != zarr_input.input_digest(
+        [{key: row[key] for key in ("path", "group", "content_sha256")} for row in rows]
+    )
 
 
 def test_nemar_ica_still_fails_a_store_without_positions_at_iclabel_before_the_fit(ica_run):

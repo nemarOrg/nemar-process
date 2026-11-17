@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import struct
+import sys
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -725,6 +726,36 @@ def test_eegprep_lean_as_pinned_raises_on_that_integer_when_the_root_is_read_wit
     assert isinstance(vector["attributes"]["electrode_positions"]["Fz"][2], int)
     with pytest.raises(OverflowError):
         ElectrodeAttributes.from_attributes(vector["attributes"])
+    # the threshold: 2**1024 - 2**970 rounds to 2**1024 and raises, one less rounds to the largest binary64
+    past = {"electrode_positions": {"Fz": [1, 2, 2**1024 - 2**970]}}
+    with pytest.raises(OverflowError):
+        ElectrodeAttributes.from_attributes(past)
+    below = {"electrode_positions": {"Fz": [1, 2, 2**1024 - 2**970 - 1]}}
+    kept = ElectrodeAttributes.from_attributes(below)
+    assert kept is not None
+    assert kept.positions["Fz"] == (1.0, 2.0, sys.float_info.max)
+
+
+# computed with Bun from nemar-cli's shared/contract/derivatives.ts (`storeLocationsText` and
+# `storeLocationsSha256` as on `dev`, whose version of both is the one of V2_MERGE): the labels Cz, Cz and
+# Fz over the attributes of the platform's vector `declared`
+REPEATED_TEXT = (
+    "nemar.store-locations.v1\nsystem CapTrak\nunits mm\n"
+    "position 3fd0000000000000 bff8000000000000 4057f00000000000\n"
+    "position 3fd0000000000000 bff8000000000000 4057f00000000000\n"
+    "position 3fe0000000000000 404f0ccccccccccd 4053d33333333333\n"
+)
+REPEATED_SHA256 = "52dfe1a6baf734a10ff0fc880c7e5caac094dbf98147a4cb0412036f4587da4f"
+
+
+def test_a_group_with_a_repeated_label_gives_each_of_its_channels_the_entry_of_that_label():
+    """The join is by label alone: two channels called Cz both get Cz's position, in stored order, as
+    in the platform's module (a store whose labels repeat is not refused or renamed here)."""
+    declared = next(v for v in vectors()["store_locations"] if v["name"] == "declared")
+    text, digest = production_locations(["Cz", "Cz", "Fz"], declared["attributes"])
+    assert text == REPEATED_TEXT
+    assert digest == REPEATED_SHA256
+    assert hashlib.sha256(REPEATED_TEXT.encode("utf-8")).hexdigest() == REPEATED_SHA256
 
 
 def test_the_digest_takes_only_numbers_that_are_three_finite_non_booleans():
