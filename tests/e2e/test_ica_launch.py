@@ -148,6 +148,12 @@ def e1r_skip_reason(length: str) -> str | None:
     )
 
 
+def skip_when_given(reason: str | None) -> None:
+    """Skip the running test for a reason, or do nothing for None."""
+    if reason is not None:
+        pytest.skip(reason)
+
+
 def length_line(length: str, environment: Mapping[str, str]) -> str:
     """The log line of the length that runs, with the raw value of the variable it was read from."""
     raw = environment.get(LENGTH_VARIABLE)
@@ -267,8 +273,7 @@ def test_e1r_pamica_against_the_binary_is_printed_and_asserts_nothing(runs, caps
     """Informational (the owner's ruling): the numbers move from run to run because the binary starts from
     the clock; the reference values are printed beside them and nothing here compares them.
     Only the full-length run prints it: the short run stops every fit at 50 iterations."""
-    if E1R_SKIP is not None:
-        pytest.skip(E1R_SKIP)
+    skip_when_given(E1R_SKIP)
     base, _ = runs
     pamica = read_matrix_tsv(product_of(base, "pamica") / (STEM + "unmixing.tsv"))
     amica = read_matrix_tsv(product_of(base, "amica") / (STEM + "unmixing.tsv"))
@@ -367,6 +372,17 @@ def test_the_e1r_test_runs_at_the_full_length_and_is_skipped_at_the_short_one_wi
     )
 
 
+def test_a_skip_reason_skips_the_test_and_none_does_not():
+    with pytest.raises(pytest.skip.Exception, match="a reason"):
+        skip_when_given("a reason")
+    try:
+        skip_when_given(None)
+    except pytest.skip.Exception:
+        pytest.fail(
+            "no reason is no skip"
+        )  # a skip here would be reported as a skip, not a failure
+
+
 @pytest.mark.parametrize(
     ("length", "environment", "line"),
     [
@@ -405,12 +421,15 @@ def test_the_module_takes_its_length_from_the_environment_and_only_from_it():
 
 
 GLUE = {
-    "runs": {"PLAN", "LENGTH"},
+    "runs": {"PLAN", "LENGTH", "read_length"},
     "test_the_pamica_record_of_a_cpu_image_with_no_gpu_says_so": {"EXPECTED_ITERATIONS"},
     "test_the_binarys_record_is_internally_consistent_at_the_length_that_ran": {
         "EXPECTED_ITERATIONS"
     },
-    "test_e1r_pamica_against_the_binary_is_printed_and_asserts_nothing": {"E1R_SKIP"},
+    "test_e1r_pamica_against_the_binary_is_printed_and_asserts_nothing": {
+        "E1R_SKIP",
+        "skip_when_given",
+    },
 }
 FUNCTIONS = {"read_length", "check_length", "run_plan", "expected_max_iter", "e1r_skip_reason"}
 
