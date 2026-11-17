@@ -39,6 +39,7 @@ jobs:
   launcher:
     name: launcher (python ${{ matrix.python }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -129,91 +130,44 @@ jobs:
         if: matrix.python == '3.9'
         run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
 
-      # The gates of the phase, in order, on 3.12.
+      # The gates of the phase, in order, on 3.12. `lint` and `deploy` run ruff, ty and the launcher zip
+      # check, so they are not repeated here.
       - name: Gates
         if: matrix.python == '3.12'
         run: |
           uv sync --frozen
-          uv run ruff check .
-          uv run ruff format --check .
-          uv run ty check
           uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images -m "not docker and not runner_stack"
-          uv run python scripts/build_launcher_zip.py --check
 
-  docker:
-    # The launcher with NEMAR_CONTAINER_RUNTIME=docker against the runner's own Docker daemon and a
-    # real image pinned by digest (DM-10): isolation as the container sees it, and the memory kill.
-    # The other jobs deselect this test (`-m "not docker"`); here a missing daemon is a failure.
-    name: docker backend (end to end)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      NEMAR_REQUIRE_DOCKER: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: ${{ env.UV_VERSION }}
-      - name: Docker version
-        run: docker version
-      - name: Launch end to end (real Docker)
-        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
-
-  runner-stack:
-    # `nemar-runner once` against NEMAR's own local stack (nemar-cli's compute-local-stack.ts, started from a
-    # full checkout at the pin) through the real claim, heartbeat, outputs and complete routes, with a real
-    # Apptainer container built here (DM-18, gate G3). The other jobs deselect this marker; here neither a
-    # missing Apptainer, a missing image nor a missing checkout may skip (NEMAR_REQUIRE_APPTAINER).
-    name: runner against the local stack (real routes, real Apptainer)
-    # ubuntu-24.04 like the other Apptainer jobs: the pinned .deb installs there and the job sets no sysctl,
-    # as none of them does.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    env:
-      NEMAR_REQUIRE_APPTAINER: "1"
-      NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
-      NEMAR_E2E_SIF_DIR: ${{ github.workspace }}/.cache/runner-stack-sif
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Read the nemar-cli pin
-        id: pin
-        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
-
+      # `nemar-runner once` against NEMAR's own local stack (nemar-cli's compute-local-stack.ts, started from a
+      # full checkout at the pin) through the real claim, heartbeat, outputs and complete routes, with a real
+      # Apptainer container built here (DM-18, gate G3). The Gates step deselects this marker; here neither a
+      # missing Apptainer, a missing image nor a missing checkout may skip (NEMAR_REQUIRE_APPTAINER, above).
       # Not sparse: the stack imports nemar-cli's backend and its test helpers (Miniflare, the migrations).
-      - name: Check out nemar-cli at the pinned commit (the stack runs from it)
+      # A second checkout beside the sparse one, which the drift tests of both legs keep.
+      - name: Check out nemar-cli in full at the pinned commit (the stack runs from it)
+        if: matrix.python == '3.12'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: nemarOrg/nemar-cli
           ref: ${{ steps.pin.outputs.ref }}
-          path: .nemar-cli
+          path: .nemar-cli-stack
           fetch-depth: 1
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
 
       # Development dependencies included (Miniflare, the test helpers), and no lifecycle script: the
       # checkout's husky would set core.hooksPath. The backend has its own lockfile.
       - name: Install the stack's dependencies
+        if: matrix.python == '3.12'
         run: |
           set -euo pipefail
-          (cd .nemar-cli && bun install --frozen-lockfile --ignore-scripts)
-          (cd .nemar-cli/backend && bun install --frozen-lockfile --ignore-scripts)
-
-      - name: Install Apptainer
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o apptainer.deb "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
-          echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -
-          sudo apt-get update -qq
-          sudo apt-get install -y ./apptainer.deb
-          apptainer --version
+          (cd .nemar-cli-stack && bun install --frozen-lockfile --ignore-scripts)
+          (cd .nemar-cli-stack/backend && bun install --frozen-lockfile --ignore-scripts)
 
       # The SIF is named by the Docker image id, which is the digest the stack's `--image` carries and
       # the file name the runner looks for (`<sif_root>/<hex>.sif`).
       - name: Build the tiny image into a SIF
+        if: matrix.python == '3.12'
+        env:
+          NEMAR_E2E_SIF_DIR: ${{ github.workspace }}/.cache/runner-stack-sif
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
@@ -237,12 +191,31 @@ jobs:
           done
           ls -l "$NEMAR_E2E_SIF_DIR"
 
+      - name: The runner against the local stack
+        if: matrix.python == '3.12'
+        env:
+          NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli-stack
+          NEMAR_E2E_SIF_DIR: ${{ github.workspace }}/.cache/runner-stack-sif
+        run: uv run --frozen pytest tests/e2e/test_runner_stack.py -q -rs
+
+  docker:
+    # The launcher with NEMAR_CONTAINER_RUNTIME=docker against the runner's own Docker daemon and a
+    # real image pinned by digest (DM-10): isolation as the container sees it, and the memory kill.
+    # The other jobs deselect this test (`-m "not docker"`); here a missing daemon is a failure.
+    name: docker backend (end to end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEMAR_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
-
-      - name: The runner against the local stack
-        run: uv run --frozen pytest tests/e2e/test_runner_stack.py -q -rs
+      - name: Docker version
+        run: docker version
+      - name: Launch end to end (real Docker)
+        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
 
   images:
     # The runtime image's declaration, lock, signalJourney schema digest, smoke fixture, Dockerfile and workflows.

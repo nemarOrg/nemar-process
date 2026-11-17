@@ -986,6 +986,7 @@ def test_every_required_check_is_reported_by_exactly_one_job():
     assert set(job_names(load(LINT))) == {"lint", "actionlint"}
     ci_names = set(job_names(load("ci.yml")))
     assert set(REQUIRED_ON_DEV) - {"lint", "actionlint", "bump-validator"} <= ci_names
+    assert ci_names - set(REQUIRED_ON_DEV) == {"docker backend (end to end)"}
 
 
 def test_the_launcher_matrix_keeps_both_pythons_and_the_docker_job_follows_it():
@@ -993,6 +994,45 @@ def test_the_launcher_matrix_keeps_both_pythons_and_the_docker_job_follows_it():
     assert jobs["launcher"]["strategy"]["matrix"]["python"] == ["3.9", "3.12"]
     keys = list(jobs)
     assert keys[keys.index("launcher") + 1] == "docker"  # tests/runner slices the text between them
+
+
+def test_the_runner_stack_end_to_end_runs_in_the_launcher_leg_on_3_12_and_cannot_skip():
+    jobs = load("ci.yml")["jobs"]
+    launcher = jobs["launcher"]
+    found = [
+        s for s in launcher["steps"] if "pytest tests/e2e/test_runner_stack.py" in s.get("run", "")
+    ]
+    assert len(found) == 1
+    (step,) = found
+    assert step["name"] == "The runner against the local stack"
+    assert step["if"] == "matrix.python == '3.12'"
+    assert "continue-on-error" not in step
+    assert " -m " not in step["run"]  # no marker deselects it
+    assert launcher["env"]["NEMAR_REQUIRE_APPTAINER"] == "1"  # a missing Apptainer fails it
+    assert step["env"]["NEMAR_CLI_DIR"] == "${{ github.workspace }}/.nemar-cli-stack"
+    assert launcher["timeout-minutes"] == 45
+    # the other steps of the fold, each only on the 3.12 leg, and a full (not sparse) checkout
+    names = [s.get("name") for s in launcher["steps"]]
+    for fold in (
+        "Check out nemar-cli in full at the pinned commit (the stack runs from it)",
+        "Install the stack's dependencies",
+        "Build the tiny image into a SIF",
+    ):
+        (fold_step,) = [s for s in launcher["steps"] if s.get("name") == fold]
+        assert fold_step["if"] == "matrix.python == '3.12'", fold
+        assert names.index(fold) < names.index(step["name"]), fold
+    (checkout,) = [
+        s for s in launcher["steps"] if s.get("name", "").startswith("Check out nemar-cli in full")
+    ]
+    assert checkout["with"]["path"] == ".nemar-cli-stack"
+    assert "sparse-checkout" not in checkout["with"]
+    assert "runner-stack" not in jobs
+    for key, job in jobs.items():
+        if key != "launcher":
+            assert "test_runner_stack" not in str(job), key
+    # the gates step still leaves the marker to the fold, so the file runs once and with Apptainer
+    gates = next(s for s in launcher["steps"] if s.get("name") == "Gates")
+    assert 'not runner_stack"' in gates["run"]
 
 
 def test_no_job_or_step_of_ci_can_hide_a_failure():
