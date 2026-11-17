@@ -567,7 +567,7 @@ Logs show a URL as host and path only (`net.redact`, which never raises), and ne
 
 ```bash
 uv sync --frozen
-uv run pre-commit install        # once per clone: ruff on the staged files, with --fix --unsafe-fixes
+uv run pre-commit install        # once per clone: ruff on the staged files and ty before each commit (below)
 uv run ruff check . && uv run ruff format --check . && uv run ty check
 uv run pytest --cov=launcher --cov-fail-under=85
 uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
@@ -583,3 +583,30 @@ They skip locally, with the reason stated, where there is none, and run in CI ag
 In CI `NEMAR_REQUIRE_APPTAINER=1` turns a missing binary into a failure.
 The runtime configuration tests (`test_runtime_config.py`) also change the runtime's system configuration with `sudo`, as the hosted CI runner permits, and put it back.
 To run the container tests on a Linux machine with Apptainer, `uv run pytest -m apptainer`; `NEMAR_TEST_SIF` names a prebuilt image to skip the pull.
+
+### Pre-commit hooks
+
+`.pre-commit-config.yaml` runs the static checks of CI's `lint` job before a commit lands, so a lint failure rarely reaches CI.
+Install it once per clone, and run it over the whole tree whenever you like:
+
+```bash
+uv run pre-commit install
+uv run pre-commit run --all-files
+```
+
+The four hooks are local and run through `uv run --frozen`, so the tools are the versions `uv.lock` pins and the hooks hold no pin of their own.
+`uv` has to be on the `PATH` of whatever makes the commit.
+
+| Hook | Runs | On |
+|---|---|---|
+| `ruff-check` | `ruff check --fix --unsafe-fixes --exit-non-zero-on-fix --force-exclude` | the staged Python files |
+| `ruff-format` | `ruff format --force-exclude` | the staged Python files |
+| `ty-check` | `ty check` | the whole project, once per commit, when a staged file is Python |
+| `ty-check-floor` | `ty check --python-version 3.9 launcher observer` | the launcher and the observer, once per commit, when a staged file is Python |
+
+A hook that changed a file fails the commit: stage the result and commit again.
+`--unsafe-fixes` also applies the fixes ruff marks unsafe (it deletes a `print` that a rule flags), so read the diff before staging it.
+ty resolves imports from the project environment.
+If you have installed the runtime group into it (`--group runtime`), run `uv sync --frozen` first: ty then also finds eegprep and torch, and can report what CI's `lint` job, which has the development environment alone, does not.
+
+`tests/test_precommit.py` reads `.pre-commit-config.yaml` and the workflow file that defines the `lint` job, and fails when a hook's ruff or ty command differs from CI's or a hook pins a tool version of its own.

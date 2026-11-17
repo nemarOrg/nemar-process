@@ -1,9 +1,43 @@
-# Install once per clone: `uv run pre-commit install`.
-# pre-commit passes only the staged files, so the hook checks what is about to be committed.
+# Install once per clone: `uv run pre-commit install`. Run everything once: `uv run pre-commit run --all-files`.
+#
+# Every hook is local and runs through `uv run --frozen`, so the tools are the ones uv.lock pins, the
+# same ones CI's `lint` job runs, and there is no second pin here that could drift (no `repo:` URL,
+# no `rev`, no `additional_dependencies`). The commands are the `lint` job's commands in
+# .github/workflows/: tests/test_precommit.py reads both and fails when they differ.
+#
+# ruff gets only the staged files. `--force-exclude` keeps the `extend-exclude` list of ruff.toml in
+# force for a file named on the command line (CI's `.` walk honors it anyway). The fixes are applied
+# to the working tree, and a hook that changed a file fails the commit: stage the result and commit
+# again. ty needs the whole project, not single files, so it runs once per commit (only when a staged
+# file is Python) over the targets CI uses.
+minimum_pre_commit_version: "4.0.0"
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.3
+  - repo: local
     hooks:
       - id: ruff-check
-        args: [--fix, --unsafe-fixes]
+        name: ruff check
+        entry: uv run --frozen ruff check --fix --unsafe-fixes --exit-non-zero-on-fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
       - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ty-check
+        name: ty check
+        entry: uv run --frozen ty check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
+      # The launcher and the observer must stay on the Python 3.9 floor.
+      - id: ty-check-floor
+        name: ty check (python 3.9 floor)
+        entry: uv run --frozen ty check --python-version 3.9 launcher observer
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
