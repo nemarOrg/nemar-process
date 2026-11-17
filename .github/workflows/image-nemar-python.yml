@@ -270,7 +270,7 @@ jobs:
       # pull request into any branch but main, and at the full length (2000 iterations, the
       # informational E1R line) on a pull request into main, on the image tag and on the dispatch,
       # where `publish` needs this job. The length comes from the event and the base branch alone,
-      # never from a label, a title or a branch name (docs/images.md).
+      # never from a label, a title or the head branch's name (docs/images.md).
       - name: Run the floor through the launcher, and nemar-ica, in the SIF
         if: matrix.flavor == 'cpu'
         env:
