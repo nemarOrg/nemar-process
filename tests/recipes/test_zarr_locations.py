@@ -437,6 +437,15 @@ def digests(stand_in) -> tuple[str, str, str]:
     return content.sha256, content.locations, source.dataset_extras()["input"]["input_digest"]
 
 
+def stated(stand_in, path: str) -> dict:
+    """The reader's record of one store's positions, after the source read it."""
+    source = opened(stand_in, path)
+    source.load(path)
+    record = source.reader_locations[path]
+    assert record is not None
+    return record
+
+
 def test_stores_that_differ_in_one_coordinate_have_one_content_and_two_keys(variants):
     declared, moved = digests(variants["declared"]), digests(variants["moved"])
     assert declared[0] == moved[0]  # the values, labels, units and rate are the same
@@ -451,15 +460,10 @@ def test_stores_that_differ_only_in_the_converters_provenance_have_the_same_keys
     assert declared == provenance  # the content, the locations and the input digest
     assert declared[1] == z.reference_locations_sha256(POSITIONS, CAPTRAK, "mm")
     # while the reader's record does carry them, per store
-    first, second = (
-        opened(variants["declared"], z.EEG_ONE),
-        opened(variants["provenance"], z.EEG_ONE),
-    )
-    first.load(z.EEG_ONE)
-    second.load(z.EEG_ONE)
-    assert first.reader_locations[z.EEG_ONE]["source"] == "subject"
-    assert second.reader_locations[z.EEG_ONE]["source"] == "dataset"
-    assert first.reader_locations[z.EEG_ONE]["file"] != second.reader_locations[z.EEG_ONE]["file"]
+    first = stated(variants["declared"], z.EEG_ONE)
+    second = stated(variants["provenance"], z.EEG_ONE)
+    assert (first["source"], second["source"]) == ("subject", "dataset")
+    assert first["file"] != second["file"]
 
 
 def test_a_recording_the_source_did_not_read_has_no_reader_record(located):
