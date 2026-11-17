@@ -1260,6 +1260,19 @@ def test_static_names_every_check_by_the_group_it_came_from_and_runs_the_deploy_
     assert [s.get("id") for s in steps if "id" in s] == ["pin", "observation-pin"]
 
 
+@pytest.mark.parametrize("name", ["ci.yml", LINT])
+def test_no_step_or_default_of_ci_or_lint_changes_the_shell_a_run_step_uses(name):
+    # With no `shell` key a run step uses `bash -e {0}`, so a failing command in the middle of a script
+    # fails the step. `shell: bash {0}` on a step, or `defaults: run: shell: bash {0}` on the workflow or
+    # a job, drops `-e`: a failing `--check` script followed by a passing command would leave `static`
+    # or `lint` green. Neither key may appear.
+    document = load(name)
+    assert not contains_key(document, "defaults"), name
+    for key, job in document["jobs"].items():
+        for step in job["steps"]:
+            assert "shell" not in step, (name, key, step.get("name") or step.get("run"))
+
+
 def test_ci_cancels_a_superseded_pull_request_run_and_never_a_push_run():
     concurrency = load("ci.yml")["concurrency"]
     assert concurrency == {
