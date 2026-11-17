@@ -12,6 +12,7 @@ import shutil
 import subprocess
 
 import pytest
+import release_support
 from nemar_runner import install
 from release_support import BOT_EMAIL, WORKFLOWS, load, run_steps, triggers
 from repo_paths import CI_WORKFLOW, IMAGE_WORKFLOW, ROOT
@@ -374,6 +375,62 @@ def test_the_sign_job_still_signs_after_the_pushed_digest_passed_its_smoke_test(
     ]
     assert len(smokes) == 2  # one per flavor, each behind its own `if`
     assert all(i < first_sign for i in smokes)
+
+
+# the build record check leaves who can publish and sign as it was (REL-4) ---------------------------------
+
+# The two steps the check adds, one in `test` and one in `sign`, take nothing from a trigger and add no
+# job: whether a job runs is decided by the `if` of `publish`, which `sign` and `release` need.
+
+
+def image_context(event: str, ref: str) -> dict[str, str]:
+    return {"github.event_name": event, "github.ref": ref}
+
+
+@pytest.mark.parametrize(
+    ("event", "ref"),
+    [
+        ("pull_request", "refs/pull/7/merge"),
+        ("workflow_dispatch", "refs/heads/feature/x"),
+        ("workflow_dispatch", "refs/heads/dev"),
+        ("push", "refs/tags/v1.2.3"),
+    ],
+)
+def test_a_pull_request_a_dispatch_off_main_and_a_plain_version_tag_publish_and_sign_nothing(
+    event, ref
+):
+    workflow = load(IMAGE_WORKFLOW.name)
+    assert not release_support.job_runs(workflow, "publish", image_context(event, ref))
+    # `sign` has no condition of its own and needs `publish`, so it cannot run when `publish` did not
+    assert "if" not in workflow["jobs"]["sign"]
+    assert workflow["jobs"]["sign"]["needs"] == "publish"
+
+
+@pytest.mark.parametrize(
+    ("event", "ref"),
+    [
+        ("workflow_dispatch", "refs/heads/main"),
+        ("push", "refs/tags/image-nemar-python-v1.2.3"),
+    ],
+)
+def test_a_dispatch_on_main_and_an_image_tag_still_publish(event, ref):
+    assert release_support.job_runs(load(IMAGE_WORKFLOW.name), "publish", image_context(event, ref))
+
+
+def test_the_build_record_check_adds_no_job_no_trigger_and_no_permission_to_the_image_workflow():
+    workflow = load(IMAGE_WORKFLOW.name)
+    assert list(workflow["jobs"]) == ["test", "publish", "sign", "release"]
+    assert set(triggers(workflow)) == {"pull_request", "push", "workflow_dispatch"}
+    for job, name in (
+        ("test", "Check the build record and labels against the dev build"),
+        ("sign", "Check the pushed digest's build record against the version step"),
+    ):
+        found = [s for s in image_steps(job) if s.get("name") == name]
+        assert len(found) == 1, (job, name)  # the loop below must not pass for want of the step
+        (step,) = found
+        assert set(step) <= {"name", "env", "run"}, name
+        assert "secrets." not in str(step)
+        assert "permissions" not in step
 
 
 # the runner release workflow (S4) ----------------------------------------------------------------------

@@ -13,7 +13,7 @@ The ICLabel weights check belongs to a later phase.
 
 | Package | Pin | Where it is decided |
 |---|---|---|
-| eegprep with the `mne`, `pybids`, `picard` and `torch` extras | `0.5.0` | `pyproject.toml`, group `runtime` |
+| eegprep with the `mne`, `pybids`, `picard`, `torch` and `pamica` extras | one commit of sccn/eegprep's `develop` branch, `edf694c8344b9c4c68672eac3acf9a819f1462a8` (the merge commit of sccn/eegprep#617; its version still reads `0.5.0`, so every record names the commit too: [recipes.md](recipes.md)) | `pyproject.toml`, group `runtime`; the next move is to the eegprep release that contains it |
 | MNE-Python | `1.13.2` | the same |
 | pamica | `0.4.0` | the same |
 | NumPy, SciPy | as resolved | `uv.lock` |
@@ -31,7 +31,7 @@ The environment in the `cpu` image is exactly `uv sync --frozen --no-dev --group
 The two extras are declared in conflict (`[tool.uv] conflicts`), so uv resolves them apart and the lock holds one torch for each.
 It also holds a third resolution, the one that selects neither extra, whose torch comes from PyPI (the wheels that carry the CUDA runtime); nothing builds an image or runs a test that way, and `tests/images/test_dependencies.py` fails if a Dockerfile, a workflow or a fixture runs `--group runtime` without `--extra cpu` or `--extra cuda`.
 
-Two locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only) and `eegprep-lean` (a Git source: the merge commit of sccn/eegprep#616 on `develop`).
+Three locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only), `eegprep` (a Git source: the commit above) and `eegprep-lean` (a Git source: the merge commit of sccn/eegprep#616 on `develop`).
 Their build requirements are not in `uv.lock`, so uv resolves them afresh at build time; `build-constraint-dependencies` in `pyproject.toml` pins the build backend (`setuptools`) to the version the lock holds, and `uv.lock` records the constraint.
 `tests/images/test_dependencies.py` reads the lock for every package built from source and fails until each is listed, with its backend, in `[tool.nemar-process.build-backends]` and the backend is pinned.
 The residual: a pin names a version, not a hash, so the build backend is still fetched from PyPI by name and version, and a changed file under the same version would not be noticed.
@@ -129,9 +129,9 @@ The controls that would stop that are the owner's and are not yet in place (see 
 
 | Job | Runs on | Does |
 |---|---|---|
-| `test` | pull request, tag, dispatch | builds the flavor's image without pushing, as a dev build, and runs `smoke.py` inside it (the `cuda` leg with no GPU visible, see "The two flavors"); the `cpu` leg also builds a SIF from the local image, runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`, and runs the launch end to end in it; the `cuda` leg frees disk space first and has no GitHub Actions cache |
+| `test` | pull request, tag, dispatch | builds the flavor's image without pushing, as a dev build, and runs `smoke.py` inside it (the `cuda` leg with no GPU visible, see "The two flavors"); checks the built image's build file and its version, revision and build labels against the dev build it named; the `cpu` leg also builds a SIF from the local image, runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`, and runs the launch end to end in it; the `cuda` leg frees disk space first and has no GitHub Actions cache |
 | `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails unless the version is the `pyproject.toml` version at the commit, a release, and the git tag `v<version>` points at the commit; fails unless the registry says `<version>-<flavor>` is absent (`scripts/check_tag_absent.py`, below); pushes `ghcr.io/nemarorg/nemar-python:<version>-<flavor>` and captures the digest, as the output `digest_<flavor>` |
-| `sign` | after `publish` | refuses an empty digest, smoke-tests the pushed digest, and only then signs it and verifies the signature; the `cpu` leg then builds the SIF from that digest, smoke-tests it, fails unless the registry says the SIF tag is absent (the same script), pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, and signs and verifies the artifact; each leg writes its digest file |
+| `sign` | after `publish` | refuses an empty digest, smoke-tests the pushed digest, refuses to sign unless the pushed digest's build file and labels equal the version step's version, the run's commit and `release`, and only then signs it and verifies the signature; the `cpu` leg then builds the SIF from that digest, smoke-tests it, fails unless the registry says the SIF tag is absent (the same script), pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, and signs and verifies the artifact; each leg writes its digest file |
 | `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json` to the release of the tag; an existing asset of either name is an error, never overwritten |
 
 A pull request runs `test` only: nothing on a pull request pushes, signs or releases, and it builds both flavors.
@@ -168,6 +168,19 @@ Outside an image there is no file and the run is a `source` run: the `pyproject.
 
 Every signalJourney record then carries `extensions.nemar.process` (`version`, `commit`, `build`) and `extensions.nemar.image` (`digest`, and `tag`, `<version>-<flavor>` for a release, `<version>-cpu` or `<version>-cuda` as the image's `/opt/nemar/flavor` says, and null otherwise), read from inside the image with no network call ([recipes.md](recipes.md)).
 
+**The check of the record.**
+`scripts/check_image_build.py` compares an image's build file and its `org.opencontainers.image.version`, `org.opencontainers.image.revision` and `io.nemar.build` labels with the build a step names, and the same script runs in two jobs.
+In `test` (each flavor, every pull request) the build is the dev build the job named: its version, the checked-out commit and `dev`.
+In `sign` (each flavor, before the first signature) the image is the pushed digest, read by that digest, and the build is the version step's version, the run's commit and `release`.
+The step in `sign` has no condition, no environment and no credential of its own, and it reads the file with `cat` in a container with no network and no mount.
+A leg that disagrees fails there, before anything is signed, so `release` attaches nothing; the other flavor's leg is independent.
+The step fails with one of three messages: `::error::build record disagrees with the version step:` (one line per place), `::error::the build file could not be read from the pushed image` (or `the built image` in `test`; the read failed, which is no file but also a pull or daemon error), and `::error::build record check:` (an expected value is malformed, exit status 2).
+The expected version and commit must themselves have the shape of that build, or the script stops with exit status 2 before it reads anything, so an empty `VERSION` is never matched by an empty record.
+It catches an image whose record is not the build the run named: a cached layer of a dev build, a Dockerfile that stopped passing an argument through, a digest output that names another run's image.
+It does not tell the flavors apart: the build file has no flavor and both flavors state the same version, commit and build, so another flavor's image is caught by the flavor check of the smoke step (`scripts/check_smoke_pins.py --flavor`, earlier in the same leg), not by this one.
+It does not catch an image built on purpose to lie: the build file is the image's own statement, and what binds a digest to this workflow is the guards and the signing identity (see "Verifying a signature").
+No other label is read there; the flavor and the lock are checked where they always were.
+
 ### When a run fails after the image was pushed
 
 `publish` pushes `<version>-<flavor>` before anything is signed, so a failure in `sign` or `release` leaves that tag published and unsigned.
@@ -178,6 +191,8 @@ Never use an unsigned tag: take only a digest that `cosign verify` accepted.
 - Use "Re-run failed jobs" on the run. It re-runs the failed `sign` leg alone, with the digest that its `publish` leg recorded (the other flavor's legs are not touched).
 - The CPU `sign` leg alone can be re-run until the SIF tag `sha256-<hex>` exists, because it refuses to move an existing SIF tag. If the failure came after the SIF was pushed (for example while signing it), a re-run stops there, and the way on is to publish a new version: a new tag and a new image. The CUDA leg has no SIF step, so it can always be re-run.
 - If a pushed digest failed its smoke test, that image is bad, and the way on is also a new version.
+- If `sign` refused the pushed digest's build record (the step "Check the pushed digest's build record against the version step"), the pushed image is not the version, the commit or the build the run named. A re-run fails the same way, because a digest's record cannot change; the tags stay published and unsigned, and the way on is a new version once the cause is fixed.
+  The other flavor's leg is independent and may already have signed its own digest for that version; the new version replaces both flavors.
 - If only `release` failed, re-run it; it fails rather than replace an existing asset.
 
 There is one digest file per flavor, `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json`, and each holds the image digest and reference, the SHA-256 of `uv.lock`, the Python, eegprep, pamica and torch versions, the native binary's SHA-256 (`amica15`) and the SHA-256 reading of the CPU fit (`cpu_fit_sha256`, see "The smoke test"), the source commit, the run's address, and `launch_image`, the `image` object of a launch specification for this release.
@@ -227,10 +242,13 @@ The fixture is synthetic and a smoke input only (see its README); the scientific
 
 The pull-request job's `cpu` leg also runs the launch end to end in the SIF it just built: `tests/e2e/test_floor_launch.py` runs the real launcher against a stand-in data plane that serves the scientific fixture, runs `nemar-recipe run nemar-floor` in the SIF as a job would, uploads to stand-in outputs routes, and compares the result with a direct run of the same fixture.
 It runs in the unprivileged `test` job only (the signing job holds the OpenID Connect (OIDC) token and runs no test from this repository).
+The same leg runs `tests/e2e/test_ica_launch.py` in the SIF: `nemar-ica` with pAMICA and with the image's `amica15` binary on the fixture at full length (it prints the informational `E1R` line, the comparison of the two engines, and asserts nothing about it), and the binary twice for 50 iterations each on the same recording, whose two weight files must differ because nothing seeds the binary.
+The `cuda` leg runs one tiny `nemar-ica` run in its image with no GPU visible, and checks that the record says the CPU ran (`device` `cpu`, `device_reason` `no_gpu`, `fallback` true, `image_flavor` `cuda`, torch `2.12.1+cu129`): the image and the path the registry uses.
 
 ## Published images
 
-None yet.
+No release image yet.
+The image `0.1.0-cpu` in the registry is a demonstration build, published from `main` before the version step existed: it is not a release, its records name `nemar-floor` `1.0.0` and carry no `process` block, and no recipe or common version counts it (the version rule of `docs/recipes.md`).
 The first images are published from `main` (a manual dispatch, or a version tag on a commit of `main`) once the epic branch has merged, which the maintainers decide; both flavors publish and sign in that one run, and their digests are recorded here when they exist.
 
 | Version | Flavor | Image digest | SIF artifact digest | Run |
@@ -243,6 +261,7 @@ The first images are published from `main` (a manual dispatch, or a version tag 
 - **A workstation's driver and GPU are not read here.** Whether a workstation's NVIDIA driver runs CUDA 12.9 wheels, and what the GPU path then does, is for the operator's preflight on that machine; the CUDA flavor is proven here on the CPU only.
 - **The hosted runner's disk.** The CUDA build frees disk space first and keeps no cache; if a run still runs out of disk, a larger runner is the owner's to provide.
 - **The git tag the version step needs does not exist yet.** At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0, so the `publish` job refuses every version until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
+- **The sign-time build record check has not run against a pushed image.** It runs only on a tag or a dispatch. Until the first release the same script, with the same two reads, runs in every pull request's `test` job against the image built there, and `tests/images/test_image_build_check.py` runs both steps against a stand-in `docker` that serves real files; that the registry's digest answers the same two reads with the labels and the file the pushed image carries is expected, not observed.
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
 - **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.
@@ -269,6 +288,7 @@ Also the owner's, before the first release:
 Edit `pyproject.toml`, run `uv lock`, and run the tests; never edit `uv.lock` by hand.
 The one exception is the project's own version, which only the release bot changes, and in both files at once (`docs/release.md`); a pull request never touches it.
 `uv lock` writes the project's version in the PEP 440 spelling (`0.1.1.dev3`) where the bot writes `0.1.1-dev3`; put the bot's spelling back before committing, or `bump-validator` sees a changed version line.
+To move eegprep, change the commit in `pyproject.toml` (never a branch, a tag or a short hash), run `uv lock`, and re-check the floor's golden decisions (`tests/recipes/test_golden_decisions.py`): the engine string changes with the commit, which is a new derivative key by design.
 The `cpu` and `cuda` extras pin one torch version, and a test requires them equal, so move both together.
 The tests that guard the declaration are in `tests/images/`:
 

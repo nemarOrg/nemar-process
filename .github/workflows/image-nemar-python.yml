@@ -34,6 +34,7 @@ on:
       - "tests/standin/**"
       - "tests/fixtures/eeg/**"
       - "scripts/check_smoke_pins.py"
+      - "scripts/check_image_build.py"
       - "scripts/check_tag_absent.py"
       - "scripts/make_image_digests.py"
       - "tests/fixtures/smoke/**"
@@ -154,6 +155,46 @@ jobs:
           docker run --rm --env NVIDIA_VISIBLE_DEVICES=void nemar-python:ci python /opt/smoke.py --no-gpu > smoke-container.json
           python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-container.json
 
+      # nemar-ica, from the image and by the path the registry uses (the CUDA flavor is the one it runs
+      # from): one tiny pAMICA run on the fixture with no GPU visible, as a job the runner kept off
+      # the GPU. The record must say the CPU ran, why, that it was a fallback, which flavor the image
+      # is and which torch it ran with (docs/recipes.md); the device is never in the engine stamp.
+      - name: Run nemar-ica on the fixture (cuda, no GPU visible)
+        if: matrix.flavor == 'cuda'
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/ica-cuda"
+          mkdir -p "$out"
+          chmod 0777 "$out"
+          docker run --rm --env NVIDIA_VISIBLE_DEVICES=void \
+            --volume "$PWD/tests/fixtures/eeg/dataset:/dataset:ro" \
+            --volume "$out:/out" \
+            nemar-python:ci nemar-recipe run nemar-ica \
+              --dataset-dir /dataset --out /out/product \
+              --dataset-id on007823 --dataset-version v1.0.0 --ica-max-iter 5
+          python3 - "$out/product" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          product = pathlib.Path(sys.argv[1])
+          (record,) = product.rglob("*_desc-nemarica_signalJourney.json")
+          nemar = json.loads(record.read_text(encoding="utf-8"))["extensions"]["nemar"]
+          expected = {
+              "engine": "pamica-torch",
+              "device_requested": "auto",
+              "device": "cpu",
+              "device_reason": "no_gpu",
+              "fallback": True,
+              "image_flavor": "cuda",
+              "torch_version": "2.12.1+cu129",
+          }
+          found = {key: nemar["ica"][key] for key in expected}
+          print("nemar-ica record:", found)
+          if found != expected or "device" in nemar["engine"]:
+              sys.exit("the record of a CUDA image with no GPU is not the CPU fallback it must be")
+          PY
+
       - name: Report the image size and the smoke readings
         env:
           FLAVOR: ${{ matrix.flavor }}
@@ -172,6 +213,22 @@ jobs:
           test "$(label io.nemar.lock-sha256)" = "$LOCK_SHA256"
           test "$(label org.opencontainers.image.revision)" = "$GITHUB_SHA"
           test "$(label io.nemar.flavor)" = "$FLAVOR"
+
+      # The image's own build record, read as the sign job reads a pushed digest's: the build file
+      # and the version, revision and build labels must say the dev build named above (its version,
+      # this commit, `dev`). Both flavors run it on every pull request, so a change that breaks the
+      # mirror fails a pull request, not a release (docs/images.md, "The build a record names").
+      - name: Check the build record and labels against the dev build
+        env:
+          VERSION: ${{ steps.devbuild.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! docker run --rm --network none --entrypoint cat nemar-python:ci /opt/nemar/build.json > image-build.json; then
+            echo "::error::the build file could not be read from the built image"
+            exit 1
+          fi
+          docker image inspect --format '{{json .Config.Labels}}' nemar-python:ci > image-labels.json
+          python3 scripts/check_image_build.py --build dev --version "$VERSION" --commit "$GITHUB_SHA" --labels image-labels.json --build-file image-build.json
 
       - name: Install Apptainer
         if: matrix.flavor == 'cpu'
@@ -206,8 +263,11 @@ jobs:
       # The launch end to end (docs/recipes.md): the real launcher stages the fixture from a stand-in
       # data plane, runs `nemar-recipe run nemar-floor` in this SIF as it runs a job, and uploads to
       # stand-in outputs routes. The test needs the runtime environment to compare the result with a
-      # direct run of the same fixture.
-      - name: Run the floor through the launcher, in the SIF
+      # direct run of the same fixture. The same step runs tests/e2e/test_ica_launch.py (every test
+      # of tests/e2e with the `apptainer` marker): nemar-ica in this SIF with pAMICA and with the
+      # image's AMICA binary on the fixture, which prints the informational E1R line and checks that
+      # two short runs of the unseeded binary are not byte identical.
+      - name: Run the floor through the launcher, and nemar-ica, in the SIF
         if: matrix.flavor == 'cpu'
         env:
           NEMAR_REQUIRE_APPTAINER: "1"
@@ -417,6 +477,25 @@ jobs:
           set -euo pipefail
           docker run --rm --env NVIDIA_VISIBLE_DEVICES=void "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" python /opt/smoke.py --no-gpu > smoke-container.json
           python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-container.json
+
+      # The pushed digest's own record must be the build the publish job was told to make: its build
+      # file and its version, revision and build labels say the version the version step read, this
+      # run's commit and `release`. A disagreement ends the leg here, before any signature, and a
+      # digest's record cannot change, so a re-run cannot pass: the way on is a new version. The
+      # reference is the digest, so the daemon holds exactly the content that was smoke tested and is
+      # signed below, and the file is read by `cat` in a container with no network, no host environment
+      # passed in and no mount. The step has no `if`, no `env` and no credential of its own
+      # (docs/images.md, "The build a record names"). It proves nothing about an image built on purpose
+      # to lie: the record is the image's own statement.
+      - name: Check the pushed digest's build record against the version step
+        run: |
+          set -euo pipefail
+          if ! docker run --rm --network none --entrypoint cat "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" /opt/nemar/build.json > image-build.json; then
+            echo "::error::the build file could not be read from the pushed image"
+            exit 1
+          fi
+          docker image inspect --format '{{json .Config.Labels}}' "ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}" > image-labels.json
+          python3 scripts/check_image_build.py --build release --version "$VERSION" --commit "$GITHUB_SHA" --labels image-labels.json --build-file image-build.json
 
       - name: Sign the image digest and verify the signature
         run: |

@@ -7,6 +7,7 @@ checks the syntax and the shell.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -350,6 +351,81 @@ def test_the_pull_request_paths_include_what_the_launch_test_runs_on():
         assert needed in paths, needed
 
 
+def test_a_change_to_the_build_record_check_runs_the_image_workflow_on_its_pull_request():
+    assert "scripts/check_image_build.py" in triggers(workflow())["pull_request"]["paths"]
+
+
+TEST_RECORD_STEP = "Check the build record and labels against the dev build"
+SIGN_RECORD_STEP = "Check the pushed digest's build record against the version step"
+LABEL_STEP = "Check the labels against the lock and the commit"
+
+
+def test_the_test_job_checks_the_build_record_after_the_build_and_the_label_step():
+    job = workflow()["jobs"]["test"]
+    names = [s.get("name", "") for s in job["steps"]]
+    assert names.count(TEST_RECORD_STEP) == 1
+    index = names.index(TEST_RECORD_STEP)
+    step = job["steps"][index]
+    # after the image is built and the existing label step, directly: nothing between them
+    build = next(
+        i for i, s in enumerate(job["steps"]) if "docker/build-push-action" in s.get("uses", "")
+    )
+    assert build < names.index(LABEL_STEP) < index
+    assert index == names.index(LABEL_STEP) + 1
+    # no `if`: both flavors run it; nothing switches it off or lets a failure pass
+    assert set(step) == {"name", "env", "run"}
+    assert step["env"] == {"VERSION": "${{ steps.devbuild.outputs.version }}"}
+    run = step["run"]
+    for needle in (
+        "scripts/check_image_build.py",
+        "--build dev",
+        '--version "$VERSION"',
+        '--commit "$GITHUB_SHA"',
+        "nemar-python:ci",
+        "--network none --entrypoint cat",
+        "the build file could not be read from the built image",
+    ):
+        assert needle in run, needle
+    assert "ghcr.io" not in run  # the pull request's own image, which nothing pushed
+
+
+def test_the_sign_job_checks_the_pushed_digests_build_record_before_anything_is_signed():
+    job = workflow()["jobs"]["sign"]
+    names = [s.get("name", "") for s in job["steps"]]
+    assert names.count(SIGN_RECORD_STEP) == 1
+    index = names.index(SIGN_RECORD_STEP)
+    step = job["steps"][index]
+    # nothing switches it off or lets a failure pass, and it takes nothing of its own: the job's
+    # VERSION and IMAGE_DIGEST, the run's GITHUB_SHA, the login and the checkout the job already has
+    assert set(step) == {"name", "run"}
+    assert "secrets." not in str(step)
+    # before the first call of cosign (the two signatures and the two verifications), and directly
+    # before the step that signs the image, after the pushed digest passed both its smoke tests
+    signing = [i for i, s in enumerate(job["steps"]) if "cosign" in s.get("run", "")]
+    assert len(signing) == 2
+    assert index < min(signing)
+    assert names[index + 1] == "Sign the image digest and verify the signature"
+    smokes = [
+        i for i, n in enumerate(names) if n.startswith("Smoke test the pushed image by digest")
+    ]
+    assert len(smokes) == 2
+    assert max(smokes) < index
+    run = step["run"]
+    for needle in (
+        "scripts/check_image_build.py",
+        "--build release",
+        '--version "$VERSION"',
+        '--commit "$GITHUB_SHA"',
+        "--network none --entrypoint cat",
+        "the build file could not be read from the pushed image",
+    ):
+        assert needle in run, needle
+    # both reads name the digest the smoke tests pulled, never a tag and never the pull request's image
+    assert run.count('"ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"') == 2
+    assert "nemar-python:" not in run
+    assert "cosign" not in run
+
+
 def test_only_the_unprivileged_test_job_runs_repository_test_code_against_the_sif():
     """The signing job holds the OIDC token and package write access: it runs no test from here."""
     jobs = workflow()["jobs"]
@@ -570,3 +646,37 @@ def test_the_docs_say_the_cuda_flavor_has_no_sif_and_runs_under_docker_not_appta
     text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
     assert "a GPU host builds" not in text
     assert "refuses one built by hand" in re.sub(r"\s*\n#\s*", " ", text)
+
+
+def test_the_cuda_leg_runs_nemar_ica_with_no_gpu_visible_and_checks_the_cpu_fallback_record():
+    """The image and path the registry runs nemar-ica from: the CUDA flavor, no GPU visible, one tiny pAMICA
+    run whose record must say CPU, no_gpu, a fallback, the cuda flavor and the CUDA torch."""
+    steps = workflow()["jobs"]["test"]["steps"]
+    (step,) = [s for s in steps if s.get("name", "").startswith("Run nemar-ica on the fixture")]
+    assert step["if"] == "matrix.flavor == 'cuda'"
+    run = step["run"]
+    assert "NVIDIA_VISIBLE_DEVICES=void" in run
+    assert "nemar-recipe run nemar-ica" in run
+    assert "--ica-device" not in run  # the default is what the registry dispatches
+    for fact in ('"device_reason": "no_gpu"', '"fallback": True', '"image_flavor": "cuda"'):
+        assert fact in run, fact
+    # the torch it names is the constant the recipe's version stands for
+    spec = importlib.util.spec_from_file_location(
+        "ica_steps", ROOT / "recipes/nemar_process/nemar_ica/steps.py"
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert '"torch_version": "{}"'.format(module.CUDA_TORCH_VERSION) in run
+
+
+def test_the_end_to_end_step_of_the_cpu_leg_also_runs_the_nemar_ica_tests():
+    steps = workflow()["jobs"]["test"]["steps"]
+    (step,) = [
+        s for s in steps if s.get("name", "").startswith("Run the floor through the launcher")
+    ]
+    assert "pytest tests/e2e -m apptainer" in step["run"]  # every test of the directory so marked
+    assert (ROOT / "tests/e2e/test_ica_launch.py").is_file()
+    marked = (ROOT / "tests/e2e/test_ica_launch.py").read_text(encoding="utf-8")
+    assert marked.count("@pytest.mark.apptainer") >= 3

@@ -2,9 +2,10 @@
 
 A recipe is a short, fixed sequence of eegprep calls that annotates every electroencephalography (EEG) recording of a dataset and writes what it decided as state files and a signalJourney record.
 The first recipe is `nemar-floor`, which reads a dataset directory (`--input bids`, the default) or NEMAR's Zarr serving copy (`--input zarr`): one recipe, one name, one version and one set of steps, with the input an argument.
+The second is `nemar-ica`, the decomposition of the floor's cleaned data into independent components (below); it takes its input the same way.
 The command that runs recipes is `nemar-recipe` (`python -m nemar_process` outside the image).
 
-Abbreviations used here: Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), Hypertext Transfer Protocol Secure (HTTPS), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), mebibyte (MiB, 1,048,576 bytes), megabyte (MB, 10^6 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
+Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), pAMICA (the Python implementation of AMICA, whose package is `pamica`), independent component analysis (ICA), adaptive mixture ICA (AMICA), artifact subspace reconstruction (ASR), central processing unit (CPU), graphics processing unit (GPU), Compute Unified Device Architecture (CUDA), Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), Hypertext Transfer Protocol Secure (HTTPS), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), mebibyte (MiB, 1,048,576 bytes), megabyte (MB, 10^6 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
 
 Two rules bind every recipe (see [`AGENTS.md`](../AGENTS.md)).
 A recipe holds no numerics: every signal-processing call is an eegprep function, and a step eegprep lacks is added to eegprep upstream, never written here.
@@ -139,9 +140,9 @@ Every discovered recording ends in exactly one row of the recordings table:
 | `failed` | `non_finite_samples` | the loaded data contain NaN or infinity |
 | `failed` | `all_channels_flat` | every channel has a flat portion longer than 5 s, so eegprep removes nothing and the recording cannot be annotated honestly (step `flatline`) |
 | `failed` | `all_channels_flagged` | the no-locations criterion flags every channel, so eegprep removes none and the recording cannot be annotated honestly (step `bad_channels`); on the RANSAC branch eegprep itself raises when more than 75 percent are flagged, which is `step_failed` |
-| `failed` | `step_failed` | an eegprep step raised; the `step` column names it; only the exception's class name is kept |
+| `failed` | `step_failed` | an eegprep step raised; the `step` column names it; only the exception's class name is kept (`nemar-ica`'s ASR step ends so with the detail `asr_maxmem` when its memory budget would depend on the machine, below) |
 | `failed` | `out_of_memory` | `MemoryError`, in the step it was raised in, the float64 cast of the load included (a SIGKILL by the kernel ends the job and the launcher records it); a CUDA out-of-memory error from torch is the same code in its step with the detail `cuda`, recognized by its class name so that torch is not imported where it is absent |
-| `skipped` | `ica_ineligible` | the decomposition recipe: the recording is too short for its rank (`insufficient_data`) or its rank is too low (`rank_too_low`); nothing is wrong with it |
+| `skipped` | `ica_ineligible` | the decomposition recipe: its rank is too low (detail `rank_too_low`: fewer than two components could be fitted); nothing is wrong with the recording. There is no minimum sample count, so `nemar-ica` never gives the detail `insufficient_data` that the code reserves for one (a short recording is fitted, and the record states how the fit ended) |
 | `skipped` | `time_budget` | the run's time budget left the recording out (above) |
 | `failed` | `ica_degenerate` | the decomposition recipe: the decomposition came out unusable (step `ica`) |
 | `failed` | `disk_error` | writing or moving the recording's files failed (reading an input that cannot be read is `load_failed`) |
@@ -153,7 +154,8 @@ Every discovered recording ends in exactly one row of the recordings table:
 Two things are decided from it.
 
 - **Files the header names.**
-  A BrainVision header names its data file and its marker file, and an EEGLAB set names its data file, and eegprep 0.5.0 follows what they say: an absolute path, a `..`, or a path into another directory (`pop_loadbv` for `DataFile` and `MarkerFile`; `pop_loadset` for `data`, or for `datfile` when `data` is `in set file`).
+  A BrainVision header names its data file and its marker file, and an EEGLAB set names its data file, and eegprep 0.5.0 followed what they say: an absolute path, a `..`, or a path into another directory (`pop_loadbv` for `DataFile` and `MarkerFile`; `pop_loadset` for `data`, or for `datfile` when `data` is `in set file`).
+  The commit of `develop` the images pin refuses such a name itself, with a `ValueError` that names the reference (and still follows a link), and the check below stays as the second line for both ([upstream.md](upstream.md)).
   The file would be read as samples and summarized in the product, and the record's inputs would list the companions and not the file that was read.
   A recording may name only its own companions as bare file names: `<stem>.eeg` (or `<stem>.dat`) and `<stem>.vmrk` for a header, `<stem>.fdt` for a set.
   Anything else fails as `load_failed` with the detail `external_reference`, including a bare name that is not the recording's own and a name in another case.
@@ -207,9 +209,9 @@ Two things are decided from it.
 It is one billion values, which is 8 GB for a float64 copy and about 24 GB at the peak of three copies; 64 channels at 500 Hz for eight hours fits, 256 channels at 1 kHz for two hours does not.
 It is the arithmetic of the peak and not a measurement, and the scale measurement that replaces it is listed in `docs/unverified.md`.
 
-## `nemar-floor` 1.0.1: the steps
+## `nemar-floor` 1.0.0-b1: the steps
 
-Every call is eegprep 0.5.0 (the lock pins it).
+Every call is eegprep at the commit the lock pins: eegprep 0.5.0 as the owner's `develop` branch says it, with every record naming the commit too (`0.5.0+<commit>`, below).
 The order is the plan's, which differs from the design's in one place (decision O1): flatline runs before the drift filter, on the unfiltered copy.
 With the drift filter first, planted flat segments of 6, 8, 12, 20 and 30 s were all missed, because the zero-phase filter spreads a step over about ten seconds and a filtered constant is no longer constant to within 20 machine epsilons; on the unfiltered copy all five were found.
 `tests/recipes/test_steps.py` plants a 6 s segment and shows both.
@@ -296,7 +298,7 @@ Every recording that succeeded has a `mask_grid`, whether or not a mask file was
 
 ### The per-recording record
 
-`pipelineInfo.name` is `nemar-floor` and `pipelineInfo.version` is `1.0.1`.
+`pipelineInfo.name` is `nemar-floor` and `pipelineInfo.version` is `1.0.0-b1`.
 `processingSteps` has one entry per executed step in order, each with `stepId`, `name` (the function's dotted path; a test imports every one), `software`, `parameters` (what is hashed), `inputSources`, `outputTargets` (an in-memory target and, on the step that produced it, a file target), `dependsOn`, `executionDateTime` and `qualityMetrics`.
 `extensions.nemar` holds what the schema has no field for: the `recipe`, the `dataset` identity, the `recording`, the `inputs` and `outputs` with their size and SHA-256 (the schema's output targets have no checksum field), the `engine` (versions, the thread pin, the pools threadpoolctl found, the thread variables seen, the common layer's version, and `torch` and `pamica` when they are installed), the `process` block, the `image` (`digest` and `tag`), the `seeds`, the `rules` that fired, the `skipped_steps` with reasons, the `plan_hash`, the `mask_grid` (above) and the `run_id`.
 
@@ -321,6 +323,12 @@ A dev build reads the file too (its tag stays null), so every pull request's ima
 `aggregate` runs no step, so it states the build of its inputs, which must agree, and not the build that merges them; a record that predates the block merges as a null `process`.
 Every input's `process` block and `image.tag` are checked by the rules the writer and the reader apply (a release is `X.Y.Z`, a dev build `X.Y.Z-devN`, the tag of a release is `<version>-cpu` or `<version>-cuda` and any other build has none, a source block has no commit and no tag), and an input that fails is refused by its position (`input 2 states a build that is not one`, exit 6) before anything is merged.
 `tests/recipes/test_provenance_contract.py` runs every registered recipe on the repository's fixtures and checks both documents.
+
+### eegprep's version text
+
+Every record, the engine stamp and `nemar-recipe version` give eegprep's version through one helper, `nemar_process.common.versions.distribution_version`: `<version>+<commit>` when the installed distribution was taken from a git commit (the 40 hexadecimal digits that `direct_url.json` of the distribution names under `vcs_info.commit_id`), and the bare version for an index install (no such file) or a file that is not what pip and uv write.
+The images pin eegprep to one commit of the owner's `develop` branch (the merge commit of sccn/eegprep#617, which holds #616 and #621), whose version still reads `0.5.0` like the PyPI release that has none of it, so the bare text would give two builds one engine string, one stamp tuple and one derivative key: the engine reads `eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8`, 54 characters, within the stamp's 64.
+The eegprep-lean reader's text follows the same rule (`reader`), and a later move to a release drops the suffix, which is a new engine string and so a new stamp tuple, as it should be.
 
 ### The resolved plan and `plan_hash`
 
@@ -364,7 +372,7 @@ A recording without a percentage is left out of the percent-good-channels histog
 
 `desc-nemarfloor_signalJourney.json` is a valid signalJourney record whose `processingSteps` are a constant list of the recipe's steps with the recipe-level parameters (never read from a recording), and whose `qualityMetrics` count the recordings that succeeded and the recordings that skipped each step for each reason.
 `summaryMetrics` has the counts and, for percent good channels, percent good samples and the line-noise excess before and after, `n`, `min`, `median`, `max` and a histogram with fixed edges (percentages every 10; dB at -10, -5, 0, 5, 10, 15, 20, 30, 40) where a value belongs to the bin `[edge_i, edge_i+1)`, the last bin is closed and values outside are counted as underflow and overflow.
-`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.1/eegprep==0.5.0/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always, and for a merged product the `time_budget` rows left in it), `resumed` (only in the record of an `aggregate --resume`: how many budget rows that merge replaced), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
+`extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.0-b1/eegprep==0.5.0+<commit>/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always, and for a merged product the `time_budget` rows left in it), `resumed` (only in the record of an `aggregate --resume`: how many budget rows that merge replaced), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
 The record is at most 256 KB (262,144 bytes): rows are added in path order while the serialized record stays at or under 200,000 bytes, and the rest are counted in `rows_truncated` and live only in the table file; the report's `records` is capped at 200 entries with `records_truncated`.
 Both caps are deterministic.
 At about 420 bytes a row as indented JSON, roughly 300 rows fit; a larger dataset reads the remaining rows from the table file, and the counts, the distributions and the plan variants cover every recording.
@@ -416,7 +424,7 @@ The window step removes about half of the samples at eegprep's defaults on this 
 
 `nemar-recipe run nemar-floor --input zarr --out DIR --dataset-id ID --dataset-version TAG --source-commit SHA --image-digest sha256:HEX --zarr-base https://zarr.nemar.org` runs the floor's steps, unchanged, on every EEG store of a dataset's Zarr serving copy, read whole over HTTPS, with nothing downloaded to disk.
 The input is the serving copy (EEG resampled to 250 Hz at most, 16-bit), not the archived recordings, and every record says so (`extensions.nemar.input.profile` is `serving`).
-It is the same recipe as the floor on a dataset directory: `pipelineInfo.name` is `nemar-floor`, the version is `1.0.1` for both inputs (the sample masks, the QC summary and the `mask_grid` were added to the directory input's records, which a published image wrote at 1.0.0: a patch bump, below), and the product label is `nemarfloor`.
+It is the same recipe as the floor on a dataset directory: `pipelineInfo.name` is `nemar-floor`, the version is `1.0.0-b1` for both inputs (one recipe, one version; the version rule is under 'For the next recipe'), and the product label is `nemarfloor`.
 `nemar-floor-zarr` was this input's name until the two converged: `nemar-recipe run nemar-floor-zarr ...` (and `aggregate`) now prints the one line `nemar-floor-zarr is now: nemar-floor --input zarr` and exits 2, and runs nothing.
 A published image that predates the change (`0.1.0-cpu`) still has the old name and not the argument.
 
@@ -427,7 +435,7 @@ A published image that predates the change (`0.1.0-cpu`) still has the old name 
   The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` and `_samplemask.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv`, `desc-nemarfloor_signalJourney.json` and `desc-nemarfloor_qcsummary.json` for the dataset.
   A store's `mask_grid` names the serving rate and the profile `serving`, so a mask index counts the serving copy's level-0 samples.
   Nothing is written outside `--out`, and there is no cache directory.
-  The serving copy carries no electrode coordinates and no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
+  The Zarr reader in eegprep-lean (`to_eeg`) builds label-only channel locations: the store carries the electrode positions, system and units in its root attributes, and the reader does not read them yet (sccn/eegprep issue 625; its fix is pull request 626); the serving copy carries no channel types, so every channel is a signal channel and the bad-channel step takes the no-locations branch; a store that declares `power_line_frequency` has it recorded as the declared line frequency.
   The unit is passed to eegprep-lean's `to_eeg` as the serving copy states it (`uV`, and the micro sign and the Greek mu that real indexes use, which eegprep-lean accepts from sccn/eegprep#616's commit 14ba46e8); a unit that is not a voltage makes the store `convert_failed`.
 - **Which stores.** Every store whose group is EEG, in index order, or exactly the stores `--recording` names (by source path or by store path; a name that is not an EEG store of the index is exit 2, before anything is created).
   Stores with no EEG group are counted in `ignored_datatypes` by modality.
@@ -449,7 +457,7 @@ A published image that predates the change (`0.1.0-cpu`) still has the old name 
   `input` is `{kind: "zarr", profile: "serving", zarr_base, zarr_pair, dataset_id, version, source_commit, tag_commit, commit_equivalence, commit_delta_paths, commit_check, index_sha256, zarr_engine_version, stores, bytes_read, hosts_contacted}`: `zarr_pair` is `production` or `staging`, the NEMAR environment whose pair of hosts the run was bound to, `zarr_engine_version` is the index's `engine_version`, `stores` is the store's source path in a store's record and every store in scope in the dataset record, `bytes_read` counts every byte the transport returned (the dataset total includes the index), and `hosts_contacted` is the sorted list of the hosts actually requested (for a store, while its read; for the dataset, the whole run).
   The input also names what was read, by content (below): a store's record adds `group` (the channel group that was read) and `content_sha256`, and the dataset record adds `stores_content`, `input_digest` and `stores_unread`.
   `reader` is `eegprep-lean@<version>+<commit>`, the commit read from how the package was installed.
-  The engine stays `eegprep@<installed version>` (the image reports `eegprep@0.5.0`), because the reader is a separate distribution recorded separately.
+  The engine stays `eegprep@<installed version>` (`eegprep@0.5.0+<commit>` for the commit the lock pins), because the reader is a separate distribution recorded separately.
 - **What was read, by content.** The index's digest names the index file, which changes whenever any one store of the dataset is converted again, so a derivative cannot be keyed on it.
   Each store read in full is named by the digest of what the recipe read instead (`nemar.store-content.v1`, the platform's definition, computed in `common/zarr_input.py` from the window eegprep-lean returned, never from the index): the SHA-256 of a header and then the physical values.
   The header is these lines, each ending in a line feed, as UTF-8: `nemar.store-content.v1`; `shape C S` (the channel and sample counts); `rate H`, the 16 lower-case hexadecimal digits of the window's rate (the serving rate; the rate the recording was acquired at, `original_rate`, is never read) as an IEEE-754 binary64, big-endian; `unit` and a space and the unit, or `unit` alone; one `label` line per channel, `label` and a space and the channel's label, or `label` alone; `data float64-le`.
@@ -491,6 +499,161 @@ The tests: `tests/recipes/test_floor_input_zarr_args.py` (arguments, the input o
 uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_input_zarr_network.py -m network -q
 ```
 
+## `nemar-ica` 1.0.0-b1: the decomposition
+
+`nemar-recipe run nemar-ica` decomposes every recording of a dataset into independent components, on the floor's cleaned data, and writes the decomposition, ASR's state and ICLabel's classification as files with a signalJourney record that names every setting, version, digest and fact that decides what the numbers are.
+It is one recipe with two inputs, as the floor is (`--input bids`, the default, or `--input zarr`; the Zarr input block of every record is written by the same common code as the floor's), and the product label is `nemarica`.
+
+**The decomposition is pAMICA's.**
+pamica computes it, through eegprep's `pop_runica(icatype='pamica')`: pamica 0.4.0, backend `AMICATorchNG`, pipeline `pamica.AMICA(backend='torch').fit`, float64, a fixed seed of 5489, component order by variance (`reorder` on).
+The record names all of that, in the words eegprep writes them, and makes no claim that the result equals EEGLAB's AMICA: the comparison with EEGLAB's binary is informational (below), and no sentence of this page or of a record says the two agree.
+Reproducibility is pAMICA's promise as eegprep states and tests it: the same seed, data, settings, pamica and torch versions, in float64 on the CPU with one thread, give identical files on one machine.
+
+### The steps
+
+The floor's chain comes first, with the floor's parameters, and its decisions are the first steps of the record (`load` to `qc`, the bad channels already removed from its working copy, which is what the next steps receive; the record also states the hash those first steps would have had as the floor's own plan, `floor_plan_hash`).
+Then, each an eegprep call:
+
+| # | Step id | eegprep function | Parameters (passed, then what eegprep applies) | Notes |
+|---|---|---|---|---|
+| 10 | `asr` | `eegprep.clean_asr` | `return_state=True`, `maxmem=1024`; applied `cutoff=5.0`, `window_len`, `step_size`, `max_dims=0.66`, `ref_maxbadchannels=0.075`, `ref_tolerances=(-3.5, 5.5)`, `ref_wndlen=1.0`, `use_gpu=False`, `useriemannian=None` | on the working copy with its `chanlocs`, so the state names its channels; the state is written as `_asr.json` |
+| 11 | `reref` | `eegprep.pop_reref` | `ref=[]` (the average reference) | |
+| 12 | `ica` | `eegprep.pop_runica` | pAMICA: `icatype='pamica'`, `reorder='on'`, `n_models=1`, `n_mix=3`, `max_iter`, `block_size=131072`, `seed=5489`, `device`, `threads`, `pcakeep`; the binary: `icatype='runamica15'`, `reorder='on'`, `num_models=1`, `num_mix_comps=3`, `max_iter`, `pcakeep`, `max_threads`, `amica_binary` | ICA fits the ASR-repaired, re-referenced copy; rank `pcakeep = min(N_good - 1, 64)`, where `N_good` is the channel count after the floor's removal (the average reference takes one dimension) |
+| 13 | `iclabel` | `eegprep.pop_iclabel` | `icversion='default'` | eegprep's one network, `netICL.mat` |
+
+ASR's memory budget is fixed and recorded because a smaller or missing one makes `asr_process` replace it with half of the machine's free memory, and the cleaned data then depend on the machine: 1024 MB covers 64 channels up to a lookahead of about 10,000 samples (channels times channels times lookahead samples times 24 bytes).
+eegprep warns when the budget is below that, and the recipe listens to the warning for the length of the call (the command silences warnings for the whole run) and fails the recording with the detail `asr_maxmem`, writing nothing for it: a state that cannot reproduce its data is never written.
+pAMICA's own settings that eegprep does not pass are eegprep's `runamica15` table (`_AMICA_DEFAULTS`, as sccn/eegprep#617 merged it), and the record states every value:
+
+| Setting | As applied | pAMICA's own default |
+|---|---|---|
+| `lrate` | 0.05 | 0.1 |
+| `minlrate` | 1e-8 | 1e-12 |
+| `maxdecs` (eegprep's `max_decs`) | 3 | 5 |
+| `use_min_dll` | false | true |
+| `use_grad_norm` | false | true |
+| `do_newton` | true | false |
+| `newt_start` | 50 | 20 |
+| `newtrate` | 1.0 | 0.5 |
+| `rholratefact` | 0.5 | 0.1 |
+| `invsigmin`, `invsigmax` | 1e-5, 100 | 1e-4, 1000 |
+| `rho0`, `do_mean`, `do_sphere` | 1.5, true, true | the same |
+| `block_size` | 131072 (the recipe's) | 8192 |
+| `seed` | 5489 (the recipe's) | none |
+
+Whether eegprep's table matches EEGLAB's `runamica15.m` or the binary pAMICA ships is the pAMICA parity workstream's question (sccn/eegprep#619), and this recipe sets and tunes no engine default.
+With `use_min_dll` and `use_grad_norm` off, a 2000-iteration fit always stops on `max_iter`, so `did_converge` is false by construction at these settings, and `stop_reason` is the field to read.
+`did_converge` is eegprep's (`stop_reason != 'max_iter'`) and never pAMICA's own `converged_`.
+
+### Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--ica-engine pamica\|amica15` | `pamica` | pAMICA's torch engine, or the native binary `/opt/amica/amica15` of the image (the CPU fallback; nothing seeds it, so it starts from the clock) |
+| `--ica-device auto\|cuda\|cpu` | `auto` | the device; `amica15` takes only `cpu`, and any other pair is exit 2 |
+| `--ica-threads N` | 1 | threads for the whole run, recorded; one is the reproducible setting |
+| `--ica-max-iter N` | 2000 | iterations, recorded, so that a short test product says so |
+| `--time-budget-s N` | none | as for every recipe |
+
+The registry's invocation is `pamica`, 2000 iterations, one thread, device `auto`; the options that change values (engine, iterations, threads) are for manual and test runs.
+A dispatch that passes one must first make it change the derivative key.
+
+### The device
+
+The CPU is the default path and a GPU a bonus: the lab workstations are shared and their GPU is often busy.
+`auto` resolves for each recording, from the option, the runner's two variables and torch's view of the GPU, none of which a run changes, so every recording of a run takes the same device (the preflight resolves it once more, before anything is written, only to refuse an explicit `cuda` with no GPU):
+
+- to the runner's decision when `NEMAR_DEVICE` is set (`cpu` or `cuda`; any other value is exit 2), with `NEMAR_DEVICE_REASON` as the reason (a word of lowercase letters, digits and `_`, such as `gpu_idle`, `gpu_busy`, `gpu_reserved`, `gpu_memory_short`; any other text is exit 2; none is `unspecified`);
+- otherwise to `cuda` when torch sees a GPU (reason `gpu_present`), else to `cpu` (reason `no_gpu`);
+- a GPU the runner named that the container cannot see becomes `cpu` with the reason `gpu_not_visible`.
+
+`--ica-device cpu` and `--ica-device cuda` are taken as asked (reason `requested`).
+A job never fails because a GPU is busy, and `auto` never exits for the lack of one.
+`common/device.py` is the only module under `recipes/` that imports torch, and it never computes with it: it asks whether a GPU is usable, its name and the versions torch states.
+The device never enters the engine stamp (the stamp gains `ica_engine`, `pamica-torch` or `amica15`, and nothing else), so a GPU run and a CPU run carry one engine stamp and match one registry tuple.
+
+### Preflight (exit 8, nothing written)
+
+- `--ica-device cuda` with no GPU visible: `engine_unavailable: no_gpu`;
+- pamica or torch not importable: `no_pamica`;
+- `--ica-engine amica15` with the binary missing, not executable, or with a SHA-256 other than the one the image wrote beside it (`/opt/amica/amica15.sha256`): `no_amica15`.
+
+No other engine is ever substituted.
+The device changes only under `auto`, by the rule above, and is always recorded.
+
+### What is written
+
+```text
+sub-<id>/[ses-<id>/]eeg/<entities>_desc-nemarica_
+  channels.tsv  badsegments.tsv  samplemask.tsv  filters.json  qc.json     the floor's files, under this label
+  asr.json         ASR's state, canonical JSON
+  unmixing.tsv     icaweights times icasphere, components by channels
+  weights.tsv      icaweights, components by principal components
+  sphere.tsv       icasphere, principal components by channels
+  mixing.tsv       icawinv, channels by components
+  components.tsv   component, variance_pct, the seven ICLabel probabilities
+  ica.json         what the run says (the record's `extensions.nemar.ica` block)
+  signalJourney.json
+```
+
+The floor's files are the decisions that define the good-channel set (`_channels.tsv`) and the floor's measurements; `_badsegments.tsv` and `_samplemask.tsv` are absent when the window step was skipped, and the record's `mask_grid` says what a sample index of the mask counts (the samples the floor read, before ASR and the decomposition).
+Every matrix is `format(x, ".17g")` text under a header of labels, so float64 values read back exactly: channel labels (or `Ch001` and so on when the labels cannot head columns) and `IC001` and `PC001` for components and principal components.
+The record's `outputs` entry of each matrix carries its `shape`, `dtype`, `rowLabels`, `columnLabels` and encoding, and the SHA-256 of the bytes on disk.
+`_asr.json` is `json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=True)` plus one newline, so its digest is stable.
+`variance_pct` is the percent of the data's variance each component accounts for on its own (eegprep's `eeg_pvaf`), and the probabilities are ICLabel's, to six decimals.
+`LLt`, the per-frame log-likelihood the binary writes, is never stored.
+The recordings table has the columns `path`, `datatype`, `status`, `code`, `step`, `detail`, `n_channels`, `n_good_channels`, `duration_s`, `srate_hz`, `plan_hash`, `engine`, `rank`, `iterations`, `stop_reason`, `did_converge`, `final_ll`, `device`, `device_reason`, `fallback` and `record_content_sha256`.
+
+### What the record says
+
+`extensions.nemar.ica` (and `_ica.json`, which is the same block under the recipe's name and version) holds:
+
+- `engine` (`pamica-torch` or `amica15`), `start` (`pamica_seed`, or `amica15_clock` for the binary), `reorder`, `reference` (`average`), the versions of eegprep (with its commit, below), pamica and torch;
+- for pAMICA, a `pamica` block that is `EEG['etc']['pamica']` copied whole, every key under eegprep's name and value (version, torch, device, dtype, seed, `n_models`, `n_mix`, `max_iter`, `block_size`, threads, `pcakeep`, `rank`, `backend`, `pipeline`, the mapped settings of the table above, `iterations`, `stop_reason`, `did_converge`, `final_ll`, `best_ll`, `best_iter`); the top-level `seed`, `n_models`, `n_mix`, `max_iter`, `block_size`, `pcakeep`, `rank`, `iterations`, `stop_reason`, `did_converge` and the log-likelihoods are copies of it;
+- for the binary, what eegprep reads of its output (`iterations`, `final_ll`, `best_ll`, `best_iter` from its log-likelihood file; `stop_reason` and `did_converge` are null, because nothing reads a stop reason from the binary) and the binary's SHA-256 under `amica15`;
+- `bit_reproducible`: true for pAMICA on the CPU with one thread (pAMICA's promise, above); null for pAMICA on a GPU or with more than one thread (eegprep does not state it, and pAMICA's statement for CUDA float64 is unmeasured); false for the binary, which starts from the clock because the recipe writes it no `seed`;
+- `dtype` (`float64`) and `engine_input_dtype`: the binary reads the 32-bit data file eegprep writes for it, so it sees the data rounded to float32 (about 1e-7 relative), which the float32-stored EEGLAB sample of the informational comparison does not show;
+- ASR's `maxmem_mb`, the digest of its state (of the `_asr.json` bytes), the window and step it applied and the channels it names;
+- the good-channel set and its count, ICLabel's version and the SHA-256 of its network file, and the input profile (`archive` for a dataset directory, `serving` for the Zarr serving copy);
+- the device facts: `device_requested`, `device` (the one that ran), `device_reason`, `fallback` (true exactly when `device_requested` is `auto` and the CPU ran), `gpu_name` (CUDA only), `torch_version`, `torch_cuda`, `threads` and `image_flavor` (from `/opt/nemar/flavor`, null outside an image).
+
+The dataset record adds `devices` (the recordings that wrote a product, per device) and `ica_run` (engine, device asked for, threads and iterations), because its steps hold only constants.
+A merge of product directories (`aggregate`) ran no recording and states neither; each row of its table still says its recording's device.
+
+### Failures and skips
+
+| Status | Code | Detail | When |
+|---|---|---|---|
+| `failed` | `step_failed` | `asr_maxmem` (step `asr`) | ASR's memory budget would depend on the machine (above) |
+| `failed` | `ica_degenerate` | `PamicaFitError` (step `ica`) | pAMICA stopped on a degenerate reason and set no field |
+| `skipped` | `ica_ineligible` | `rank_too_low` (step `ica`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
+| `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
+| `failed` | `step_failed` | the exception's class (step `iclabel`) | ICLabel raised after the fit |
+
+`asr_maxmem` and `ica_degenerate` are deterministic failures; the transient ones (`out_of_memory`, `internal_error`, `disk_error`, `time_budget`) name only transient failures.
+A recording that fails writes nothing.
+No minimum number of samples is enforced: a short recording is fitted, and `stop_reason` and the log-likelihoods say how the fit ended.
+
+### The comparison with EEGLAB's AMICA is informational
+
+The image workflow runs pAMICA and the image's `amica15` binary on the repository's EEG fixture at full length (one thread, CPU float64, 2000 iterations) and prints the line E1R (the informational reading of the comparison of the two engines, named for the equivalence check E1 it replaced as a gate): `E1R (informational) min=... median=... amari=... reference: min>=0.95 median>=0.99 amari<=0.05`: the Hungarian-matched absolute correlations of the sensor-space unmixing rows and the Amari distance.
+Nothing asserts on those numbers and nothing here turns them into a claim.
+The binary starts from the clock, so the comparison moves from run to run: on EEGLAB's 32-channel sample one head printed `min=0.9995 median=1.0000 amari=0.0218` and another `min=0.5262 median=0.9365 amari=1.6478`; two pAMICA seeds agree at a minimum of 0.526 and a median of 0.936 there with eegprep's defaults (the measurement of sccn/eegprep#617).
+A run with another seed gives a different decomposition beyond the strongest components.
+The same job runs the binary twice for 50 iterations each on the same recording and requires the two weight files to differ, as the unseeded binary implies.
+
+### Locations, and what the Zarr input cannot do yet
+
+ICLabel needs a scalp map of each component, and eegprep's `topoplot` raises when no channel has a finite theta and radius.
+The store of a Zarr input carries the electrode positions, system and units in its root attributes, and the Zarr reader in eegprep-lean does not read them yet (sccn/eegprep issue 625; its fix is pull request 626), so it builds label-only channel locations; every store of `nemar-ica --input zarr` today, and every recording of a dataset directory whose channels have no locations, ends `step_failed` at `iclabel` with the detail `iclabel_no_locations`.
+The recipe finds that right after the floor, before ASR and the fit, by calling `topoplot` on the working copy's channels as ICLabel calls it (one value per channel, so the rule is eegprep's own and cannot drift from it; the error is recognized by its class), and writes nothing for the recording: a fit of up to 2000 iterations is not run to be discarded.
+ICLabel is neither skipped nor removed; the owner decided that a recording it cannot classify fails.
+
+### What a change stands for
+
+The derivative key names eegprep alone (the engine stamp's `<package>@<version>`), so the recipe's version is what tells two products apart.
+A change of the pamica pin, of the CUDA flavor's torch (`2.12.1+cu129`) or of the `amica15` binary (`ada316d3...`) is a new `RECIPE_VERSION`; `tests/recipes/test_nemar_ica.py` fails when `uv.lock` or the Dockerfiles differ from the constants in `nemar_ica/steps.py`.
+
 ## Known limits
 
 - A recording in which every channel has a flat portion fails (`all_channels_flat`, step `flatline`), and the cost is that a pause every channel shares fails the whole recording.
@@ -530,13 +693,20 @@ The driver adopted the plan's recommendations pending the owner; each is reversi
 `nemar_floor.process` returns a `FloorResult` that carries the working copy, the sample mask, the signal channels' names and both keep vectors (so a later recipe can record the good-channel set without recomputing it) and the plan so far; it writes nothing.
 `COMMON_VERSION` in `common/__init__.py` is recorded under `extensions.nemar.engine.commonLayer`.
 A change under `common/` that alters a byte of the floor fixture's pinned outputs is a `nemar-floor` version bump; one that does not bumps only this version's patch.
-Until a layer is released, a change that alters no byte of a product does not bump it: the version names released code, and a record that says `1.0.0` is the same bytes either way.
-A bump is also skipped when a change only adds fields to a record shape that no released (recipe, version, input) ever wrote, because no record of that shape exists to be told apart from the new one.
+A bump is skipped when a change only adds fields to a record shape that no released (recipe, version, input) ever wrote, because no record of that shape exists to be told apart from the new one.
 That was the case for the change that made the Zarr input a variant of the floor: the records of `nemar-floor` with the Zarr input were new (the Zarr input was a recipe of its own, `nemar-floor-zarr`, and no released `nemar-floor` 1.0.0 wrote one), and the records of the directory input were byte-identical to what they had been, so `COMMON_VERSION` and `RECIPE_VERSION` stayed `1.0.0` then.
 The same reasoning applied to the image tag of a CUDA release image (the rule above is about added fields; that was a new tag value in a record no released image wrote for that flavor): the only new value is `<version>-cuda`, which only a record written in a CUDA release image can name, no tagged record exists (the one published image predates the build file and writes no tag), the Worker's stamps read only `extensions.nemar.recipe`, `.engine` and `.counts` and never the tag, and every record the CPU image writes, in a source run, a dev build and a release, was byte-identical to what it had been on the floor fixture (clock aside), so `COMMON_VERSION` and `RECIPE_VERSION` stayed `1.0.0` then.
 The hooks below were added to the unreleased `1.0.0` that way, and the floor fixture's whole product tree (records and engine stamp included, clock aside) was compared before and after.
-The sample masks, the QC summary and the `mask_grid` are not that case: they add files and fields to the directory input's records, which a released image wrote at 1.0.0, so a product with them and one without would both say 1.0.0 and nothing that names the recipe version could tell them apart.
-It is therefore the patch bump to `1.0.1` for both inputs (one recipe, one version; a patch, because nothing a 1.0.0 reader relies on changes), `COMMON_VERSION` stays `1.0.0` because nothing under `common/` changed, and the golden decisions moved only by the version and the plan hash, which covers the recipe's name and version: the channel table and the bad-segment table are byte-identical and `decisions.json` changes in `recipe.version` and `plan_hash` alone.
+Before a layer's first release its version is a pre-release, `1.0.0-b<N>`: every recipe's `RECIPE_VERSION` and `COMMON_VERSION` carry the suffix, and the nemar-process package version (the release bot's) and the image tags (a release's version) never do.
+N counts iterations.
+It starts at 1, and it moves to N+1 with the first change, merged after an image publication from a commit where that layer is `1.0.0-b<N>`, that the rules above would make a bump of a released layer, reading "released" as "published in an image"; a later change before the next such publication keeps N+1, and nothing else moves N.
+An image publication is an `image-nemar-python-v*` tag or a manual dispatch of the image workflow from `main`, the only ways an image is published (`docs/images.md`); the release bot's `v*` tag publishes nothing, though the image workflow refuses to publish a commit that has none.
+The first release is the owner's act that drops the suffix: its version is `1.0.0`, and the rules above apply as written from then on.
+Versions are only ever compared for equality (the aggregate, the Worker's pipeline stamps and the derivative key), so N names an iteration and never orders one.
+A move of N, and the first release, regenerate the golden decisions into the directory of the new version, and a move that changes no decision changes only `recipe.version` and `plan_hash` in `decisions.json`; at `1.0.0` the plan hash is again `sha256:ffa6a154580dd7099bb4f2a6a5bf7a9b3f1f2ffc6a99e9a2603124702ebe35fd`, the fixture's hash before the scheme, unless a decision changed.
+Every layer became `1.0.0-b1` on 2026-11-16, when nothing had been released and no image had carried a pre-release version: the one image in the registry, `0.1.0-cpu`, is a demonstration build that wrote `nemar-floor` `1.0.0` records before the sample masks, the QC summary and the `mask_grid` existed.
+`1.0.0-b1` names the floor with them, for both inputs (the patch bump first made for them is withdrawn), and its channel table and bad-segment table on the fixture are byte-identical to `1.0.0`'s.
+The device module, the version helper and four rows of a table of `nemar-ica` are a change the bump is skipped for, and nothing moves N: `device.py` adds fields only to `nemar-ica`'s records, which no released recipe wrote, and the helper changes no byte any released (recipe, version, input) wrote, because a released image installs eegprep from an index and its text keeps the bare version (the `+<commit>` text appears only in records no release wrote), so `COMMON_VERSION` and `nemar-floor` stay at `1.0.0-b1`; the four rows are the entries of `PARAMETER_TYPES` in `common/plan.py` for `eegprep.clean_asr`, `eegprep.pop_reref`, `eegprep.pop_runica` and `eegprep.pop_iclabel`, added because `plan.typed` refuses a function that is not in the table and `common/recipe.py` has no hook with which a recipe could register one, and they change no byte any floor record holds; the floor fixture's product tree was compared on eegprep 0.5.0 from PyPI with these changes and found byte-identical to the base's, clocks aside, and after the pin moved the only bytes that differ are the eegprep version texts, the hashes derived from them and the clocks.
 
 A second recipe that embeds the floor uses these, none of which the floor sets:
 
