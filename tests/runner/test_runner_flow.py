@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from runner_support import (
     job_id,
     lease_id,
     make_launcher,
+    retune,
     spec_text,
     wait_for,
 )
@@ -554,22 +556,40 @@ def test_docker_and_podman_report_partial_usage_and_log_it(tmp_path, runtime):
 
 
 def test_a_job_that_overruns_leaves_no_process_behind(tmp_path):
+    # The runner's deadline is the claim time in whole seconds plus the job's minute, so it falls 0
+    # to 1 s after this claim, and its SIGTERM can come before the stand-in has even started. So the
+    # stand-in starts with SIGTERM blocked (it inherits this thread's mask, set below) and unblocks
+    # it only once its child exists and the pid file is written; the SIGTERM then ends it at once.
+    pid_file = tmp_path / "grandchild.pid"
     body = (
+        "assert signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, [])\n"
         "import subprocess\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],\n"
+        "    preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM]))\n"
         "open({!r}, 'w').write(str(child.pid))\n"
+        "signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])\n"
         "time.sleep(600)\n"
-    ).format(str(tmp_path / "grandchild.pid"))
+    ).format(str(pid_file))
     rig = Rig(tmp_path, launcher=make_launcher(tmp_path / "launcher", body))
+    # the runner sends SIGKILL this long after its SIGTERM: the bound on the stand-in reaching its write
+    rig.tuning = retune(rig.tuning, kill_grace_seconds=10.0)
     try:
         rig.sif_root.mkdir()
         (rig.sif_root / SIF).write_bytes(b"sif")
         raw = claim_job(1, minutes=1)
-        _runner, state = run_job_directly(rig, raw, claimed_at=time.time() - 59.0)
-        pid = int((tmp_path / "grandchild.pid").read_text())
+        held = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
+        try:
+            _runner, state = run_job_directly(rig, raw, claimed_at=time.time() - 59.0)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, held)
+        [done] = rig.routes.bodies("complete")
+        assert pid_file.exists(), (
+            "the stand-in never wrote grandchild.pid (exit {}): 1 means it started without SIGTERM "
+            "blocked, 137 that the runner's SIGKILL came first".format(done["exit_number"])
+        )
+        pid = int(pid_file.read_text())
         wait_for(lambda: not alive(pid), 5, "the grandchild to be gone")
         assert state == "finished"
-        [done] = rig.routes.bodies("complete")
         assert done["exit_number"] == 143  # killed by SIGTERM, as a shell numbers it
     finally:
         rig.close()
