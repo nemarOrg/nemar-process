@@ -3,7 +3,8 @@ name: lint
 # The cheap quality checks, `lint` (ruff, ruff format, ty, and ty on the 3.9 floor) and `actionlint` over every
 # workflow. They run on a push to ANY branch, so a feature branch has them before it has a pull request, and
 # on EVERY pull request (any base), so a pull request from a fork has them without a maintainer pushing its
-# head commit anywhere. A fork's run uses the fork's read-only token, which these jobs need nothing more than.
+# head commit anywhere. A fork's run gets the read-only token GitHub gives a fork's pull request, and no secrets,
+# which is all these jobs need.
 # Whether a fork's workflow run waits for a maintainer's approval is a setting of the repository (Actions
 # settings, "Approval for running fork pull request workflows"), not something a workflow decides.
 #
