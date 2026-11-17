@@ -34,7 +34,7 @@ env:
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 # `lint` and `actionlint`, the other two required checks, are lint.yml: they run on every push to any branch
-# and are not repeated here.
+# and on every pull request, and are not repeated here.
 jobs:
   launcher:
     name: launcher (python ${{ matrix.python }})

@@ -913,14 +913,14 @@ def test_a_push_to_a_feature_branch_starts_lint_and_nothing_heavy():
         assert not any(matches(glob, branch) for glob in drift), branch
 
 
-def test_lint_starts_on_a_push_to_a_branch_and_on_nothing_else():
-    # A push run reports on the commit a pull request from this repository has as its head, so it
-    # satisfies the required names there. A `pull_request` trigger would run both jobs a second time,
-    # and a job `if` that skips this repository would list a skipped twin of each required name beside
-    # the real one: a skipped job counts as passing, so a failed push run could be hidden (read on a
-    # probe pull request: `lint` once failed and once skipped, both listed as required).
+def test_lint_starts_on_every_push_and_every_pull_request_and_runs_both_jobs_unconditionally():
+    # A push to any branch gives a feature branch its checks; a bare `pull_request` (any base, no path
+    # filter) gives a pull request from a fork its checks without a maintainer pushing anything. A same
+    # repository pull request thus shows each name from two real runs. There is no `if` anywhere: a job
+    # skipped by its `if` reports "skipped", which satisfies a required check, so a skipped run of a
+    # name beside a failed run of it would leave GitHub to resolve the name from two runs.
     document = load(LINT)
-    assert triggers(document) == {"push": {"branches": ["**"]}}
+    assert triggers(document) == {"push": {"branches": ["**"]}, "pull_request": None}
     assert document["permissions"] == {"contents": "read"}
     assert not contains_key(document, "continue-on-error")
     assert not contains_key(document, "if")
@@ -938,6 +938,11 @@ def test_lint_starts_on_a_push_to_a_branch_and_on_nothing_else():
         "uv run ty check --python-version 3.9 launcher observer\n",
     ):
         assert command in commands, command
+    # a fork's run needs nothing beyond the read-only token: no secret, no write, no other trigger
+    assert not re.findall(r"secrets\.[A-Za-z_]+", text(LINT))
+    assert not {"pull_request_target", "workflow_run", "workflow_dispatch"} & set(
+        triggers(document)
+    )
 
 
 def test_lint_pins_the_tools_ci_pins():
@@ -947,16 +952,25 @@ def test_lint_pins_the_tools_ci_pins():
         assert value == ci[key], key
 
 
-def test_a_superseded_push_to_a_feature_branch_is_canceled_and_one_to_main_or_dev_never_is():
+def test_a_superseded_pull_request_or_feature_push_run_is_canceled_and_a_main_or_dev_push_never():
     concurrency = load(LINT)["concurrency"]
-    assert concurrency["group"] == "lint-${{ github.ref }}"
-    cancel = concurrency["cancel-in-progress"]
-    assert render(concurrency["group"], {"github.ref": "refs/heads/feature/x"}) == (
-        "lint-refs/heads/feature/x"
-    )
-    assert render(cancel, {"github.ref": "refs/heads/main"}) == "false"
-    assert render(cancel, {"github.ref": "refs/heads/dev"}) == "false"
-    assert render(cancel, {"github.ref": "refs/heads/feature/x"}) == "true"
+    group, cancel = concurrency["group"], concurrency["cancel-in-progress"]
+    main = {"github.ref": "refs/heads/main", "github.sha": "aaa111"}
+    dev = {"github.ref": "refs/heads/dev", "github.sha": "bbb222"}
+    feature = {"github.ref": "refs/heads/feature/x", "github.sha": "ccc333"}
+    pull = {"github.ref": "refs/pull/7/merge", "github.sha": "ddd444"}
+    # a push to main or dev is its own group, so a newer push neither cancels nor replaces it
+    assert render(group, main) == "lint-aaa111"
+    assert render(group, dev) == "lint-bbb222"
+    assert render(cancel, main) == "false"
+    assert render(cancel, dev) == "false"
+    # a feature branch and a pull request share one group per branch or pull request, and a newer run wins
+    assert render(group, feature) == "lint-refs/heads/feature/x"
+    assert render(group, pull) == "lint-refs/pull/7/merge"
+    assert render(cancel, feature) == "true"
+    assert render(cancel, pull) == "true"
+    # the push run and the pull request run of one branch are different groups, so neither cancels the other
+    assert render(group, feature) != render(group, pull)
 
 
 def test_no_workflow_but_lint_has_a_job_named_lint_or_actionlint():
