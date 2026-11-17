@@ -1,0 +1,68 @@
+name: lint
+
+# The cheap quality checks, `lint` (ruff, ruff format, ty, and ty on the 3.9 floor) and `actionlint` over every
+# workflow, run on a push to ANY branch, so a feature branch has them before it has a pull request.
+#
+# This workflow starts on a push and on nothing else, on purpose. A push run reports on the commit that a
+# pull request from this repository has as its head, so it supplies the required checks `lint` and
+# `actionlint` there (the rulesets name the jobs, not the workflow), and they run once per commit.
+# A `pull_request` trigger would run them a second time. GitHub cannot filter that trigger by the head
+# repository; a job-level `if` can, but a job skipped by its `if` reports "skipped", which satisfies a
+# required check, and a skipped run of the name beside a failed push run of it (a pull request opened after
+# the push run, or a re-run) leaves GitHub to resolve the name from two runs. So no required name gets a
+# second entry that a condition can skip: no `pull_request`, no `if` here.
+#
+# The heavy jobs are `ci.yml`, which starts on a pull request and on a push to `main` or `dev` only.
+# A pull request from a fork has no push run here and shows neither check until a maintainer, having read the
+# diff, pushes its head commit to a branch of this repository (docs/release.md).
+
+on:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+# A superseded push to a feature branch is canceled; a push to `main` or `dev` never is.
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
+
+env:
+  UV_VERSION: "0.13.4"
+  # The workflow linter the image tests run (tests/images/test_workflow.py); bump version and hash together,
+  # and with `ci.yml` (tests/release/test_workflows.py compares them).
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check
+      # The launcher and the observer must stay on the Python 3.9 floor.
+      - run: uv run ty check --python-version 3.9 launcher observer
+
+  actionlint:
+    # Every workflow in the repository, including the release workflows (docs/release.md), which the
+    # `images` job's tests do not read.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+      - run: actionlint -color=false .github/workflows/*.yml

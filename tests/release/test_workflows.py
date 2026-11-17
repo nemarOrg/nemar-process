@@ -10,11 +10,12 @@ import os
 import re
 import shutil
 import subprocess
+from collections import Counter
 
 import pytest
 import release_support
 from nemar_runner import install
-from release_support import BOT_EMAIL, WORKFLOWS, load, run_steps, triggers
+from release_support import BOT_EMAIL, WORKFLOWS, load, render, run_steps, triggers
 from repo_paths import CI_WORKFLOW, IMAGE_WORKFLOW, ROOT
 from test_workflow_runs import World
 
@@ -38,6 +39,22 @@ TAG_OWNERS = {
     "nemar-runner-v0.1.0": RUNNER_WORKFLOW,
 }
 RELEASE_STEP = "Create the GitHub release if it does not exist"
+LINT = "lint.yml"
+DRIFT = "nemar-cli-drift.yml"
+# The checks the rulesets `release-dev` and `release-main` require (read on 2026-11-17). A name that
+# stops reporting leaves every pull request waiting for it, so each is reported by exactly one job.
+REQUIRED_ON_DEV = (
+    "lint",
+    "actionlint",
+    "launcher (python 3.9)",
+    "launcher (python 3.12)",
+    "images",
+    "recipes",
+    "deploy (tapis definitions and observer)",
+    "bump-validator",
+)
+REQUIRED_ON_MAIN = (*REQUIRED_ON_DEV, "release-gate")
+BRANCHES_WITHOUT_A_PULL_REQUEST_RUN = ("feature/x", "feature/issue-7-epic-y", "fix/z", "probe/q")
 GUARD = f"github.event.head_commit.author.email != '{BOT_EMAIL}'"
 
 
@@ -88,6 +105,33 @@ def matches(glob: str, name: str) -> bool:
     return glob_to_regex(glob).fullmatch(name) is not None
 
 
+def display_names(key: str, job: dict) -> list[str]:
+    """The names the checks list shows for one job: its `name` or its key, once per leg of a one-axis
+    matrix (a name with any other expression is returned as written)."""
+    template = job.get("name", key)
+    axes = set(re.findall(r"\$\{\{\s*matrix\.(\w+)\s*\}\}", template))
+    matrix = job.get("strategy", {}).get("matrix", {})
+    if len(axes) != 1 or not isinstance(matrix.get(next(iter(axes), ""), None), list):
+        return [template]
+    (axis,) = axes
+    return [
+        re.sub(r"\$\{\{\s*matrix\." + axis + r"\s*\}\}", str(value), template)
+        for value in matrix[axis]
+    ]
+
+
+def job_names(document: dict) -> list[str]:
+    return [n for key, job in document["jobs"].items() for n in display_names(key, job)]
+
+
+def contains_key(node, key: str) -> bool:
+    if isinstance(node, dict):
+        return key in node or any(contains_key(v, key) for v in node.values())
+    if isinstance(node, list):
+        return any(contains_key(v, key) for v in node)
+    return False
+
+
 # triggers and tag namespaces -------------------------------------------------------------------
 
 
@@ -114,10 +158,14 @@ def test_the_validator_starts_on_every_pull_request_and_the_gate_on_those_into_m
     }
 
 
-def test_ci_also_runs_on_dev_and_still_on_main_feature_branches_and_pull_requests():
+def test_ci_runs_on_pushes_to_main_and_dev_and_on_every_pull_request():
     on = triggers(load("ci.yml"))
-    assert on["push"]["branches"] == ["main", "dev", "feature/**"]
+    assert on["push"]["branches"] == ["main", "dev"]
+    # bare: a path or branch filter on a workflow with required checks leaves them waiting forever
     assert "pull_request" in on
+    assert on["pull_request"] is None
+    assert not {"paths", "paths-ignore"} & set(on["push"])
+    assert set(on) == {"push", "pull_request"}
 
 
 def test_no_new_workflow_runs_with_the_authority_of_the_base_branch_or_of_another_workflow():
@@ -842,11 +890,171 @@ def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_conta
 
 
 def test_ci_lints_every_workflow_with_the_pinned_actionlint():
-    job = load("ci.yml")["jobs"]["actionlint"]
+    job = load(LINT)["jobs"]["actionlint"]
     commands = "\n".join(s.get("run", "") for s in job["steps"])
     assert "actionlint -color=false .github/workflows/*.yml" in commands
     assert "sha256sum -c" in commands
     assert "${ACTIONLINT_VERSION}" in commands
+
+
+# the checks a pull request shows (CI-1): one run of each, and none of them hidden ------------------------
+
+
+def test_a_push_to_a_feature_branch_starts_lint_and_nothing_heavy():
+    lint = triggers(load(LINT))
+    ci = triggers(load("ci.yml"))["push"]["branches"]
+    drift = triggers(load(DRIFT))["push"]["branches"]
+    for branch in ("main", "dev", *BRANCHES_WITHOUT_A_PULL_REQUEST_RUN):
+        assert any(matches(glob, branch) for glob in lint["push"]["branches"]), branch
+    for branch in ("main", "dev"):
+        assert any(matches(glob, branch) for glob in ci), branch
+    for branch in BRANCHES_WITHOUT_A_PULL_REQUEST_RUN:
+        assert not any(matches(glob, branch) for glob in ci), branch
+        assert not any(matches(glob, branch) for glob in drift), branch
+
+
+def test_lint_starts_on_a_push_to_a_branch_and_on_nothing_else():
+    # A push run reports on the commit a pull request from this repository has as its head, so it
+    # satisfies the required names there. A `pull_request` trigger would run both jobs a second time,
+    # and a job `if` that skips this repository would list a skipped twin of each required name beside
+    # the real one: a skipped job counts as passing, so a failed push run could be hidden (read on a
+    # probe pull request: `lint` once failed and once skipped, both listed as required).
+    document = load(LINT)
+    assert triggers(document) == {"push": {"branches": ["**"]}}
+    assert document["permissions"] == {"contents": "read"}
+    assert not contains_key(document, "continue-on-error")
+    assert not contains_key(document, "if")
+    assert set(document["jobs"]) == {"lint", "actionlint"}
+    for name, job in document["jobs"].items():
+        assert "name" not in job, name  # the check is named by the job key the rulesets list
+        assert "if" not in job, name
+        assert "continue-on-error" not in job, name
+        assert "permissions" not in job, name
+    commands = "\n".join(s.get("run", "") for s in document["jobs"]["lint"]["steps"]) + "\n"
+    for command in (
+        "uv run ruff check .\n",
+        "uv run ruff format --check .\n",
+        "uv run ty check\n",
+        "uv run ty check --python-version 3.9 launcher observer\n",
+    ):
+        assert command in commands, command
+
+
+def test_lint_pins_the_tools_ci_pins():
+    ci, lint = load("ci.yml")["env"], load(LINT)["env"]
+    assert set(lint) == {"UV_VERSION", "ACTIONLINT_VERSION", "ACTIONLINT_SHA256"}
+    for key, value in lint.items():
+        assert value == ci[key], key
+
+
+def test_a_superseded_push_to_a_feature_branch_is_canceled_and_one_to_main_or_dev_never_is():
+    concurrency = load(LINT)["concurrency"]
+    assert concurrency["group"] == "lint-${{ github.ref }}"
+    cancel = concurrency["cancel-in-progress"]
+    assert render(concurrency["group"], {"github.ref": "refs/heads/feature/x"}) == (
+        "lint-refs/heads/feature/x"
+    )
+    assert render(cancel, {"github.ref": "refs/heads/main"}) == "false"
+    assert render(cancel, {"github.ref": "refs/heads/dev"}) == "false"
+    assert render(cancel, {"github.ref": "refs/heads/feature/x"}) == "true"
+
+
+def test_no_workflow_but_lint_has_a_job_named_lint_or_actionlint():
+    # a required name never gets a second job, whatever condition it carries
+    for name in EVERY:
+        if name == LINT:
+            continue
+        for key, job in load(name)["jobs"].items():
+            assert key not in {"lint", "actionlint"}, (name, key)
+            assert not {"lint", "actionlint"} & set(display_names(key, job)), (name, key)
+
+
+def test_no_job_id_or_display_name_is_shared_by_the_workflows_that_report_on_one_commit():
+    # the pull-request, branch-push and dev or main push workflows: a name on two of them would be a
+    # second entry of the same check on one commit
+    labels = Counter()
+    for name in ("ci.yml", LINT, DRIFT, "bump-validator.yml", "release-gate.yml"):
+        for key, job in load(name)["jobs"].items():
+            labels.update({key, *display_names(key, job)})
+    assert {label: n for label, n in labels.items() if n > 1} == {}
+
+
+def test_every_required_check_is_reported_by_exactly_one_job():
+    counts = Counter(name for workflow in EVERY for name in job_names(load(workflow)))
+    for name in REQUIRED_ON_MAIN:
+        assert counts[name] == 1, (name, counts[name])
+    assert set(job_names(load(LINT))) == {"lint", "actionlint"}
+    ci_names = set(job_names(load("ci.yml")))
+    assert set(REQUIRED_ON_DEV) - {"lint", "actionlint", "bump-validator"} <= ci_names
+
+
+def test_the_launcher_matrix_keeps_both_pythons_and_the_docker_job_follows_it():
+    jobs = load("ci.yml")["jobs"]
+    assert jobs["launcher"]["strategy"]["matrix"]["python"] == ["3.9", "3.12"]
+    keys = list(jobs)
+    assert keys[keys.index("launcher") + 1] == "docker"  # tests/runner slices the text between them
+
+
+def test_no_job_or_step_of_ci_can_hide_a_failure():
+    ci = load("ci.yml")
+    assert not contains_key(ci, "continue-on-error")
+    for name, job in ci["jobs"].items():
+        assert "if" not in job, name  # a skipped required job reports success
+    assert ci["permissions"] == {"contents": "read"}
+
+
+def test_ci_cancels_a_superseded_pull_request_run_and_never_a_push_run():
+    concurrency = load("ci.yml")["concurrency"]
+    assert concurrency == {
+        "group": "ci-${{ github.event.pull_request.number || github.sha }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+    pull = {"github.event_name": "pull_request", "github.event.pull_request.number": "7"}
+    push = {"github.event_name": "push", "github.sha": "abc123"}
+    assert render(concurrency["group"], {**pull, "github.sha": "abc123"}) == "ci-7"
+    assert render(concurrency["cancel-in-progress"], pull) == "true"
+    # a push run is its own group (pushes to dev and main never cancel each other) and is never canceled
+    assert render(concurrency["group"], push) == "ci-abc123"
+    assert render(concurrency["cancel-in-progress"], push) == "false"
+
+
+def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails():
+    document = load(DRIFT)
+    on = triggers(document)
+    # no pull_request_target, workflow_run or schedule: only these three
+    assert set(on) == {"pull_request", "push", "workflow_dispatch"}
+    paths = on["pull_request"]["paths"]
+    assert paths == [
+        ".github/workflows/nemar-cli-drift.yml",
+        "tests/contract/**",
+        "launcher/schema/**",
+        "observer/schema/**",
+        "tests/observer/fixtures/**",
+        "deploy/tapis/**",
+    ]
+    for pattern in paths:  # a path that matches no file would never start the workflow
+        files = ROOT.glob(pattern.removesuffix("/**") + "/**/*" if "**" in pattern else pattern)
+        assert any(p.is_file() for p in files), pattern
+    assert on["push"] == {"branches": ["dev"]}
+    assert document["permissions"] == {"contents": "read"}
+    assert document["name"] == "nemar-cli drift (advisory)"
+    assert set(document["jobs"]) == {
+        "nemar-cli-latest",
+        "nemar-cli-observation-latest",
+        "nemar-cli-tapis-latest",
+    }
+    for name, job in document["jobs"].items():
+        assert job["continue-on-error"] is True, name
+    assert not set(document["jobs"]) & set(load("ci.yml")["jobs"])
+
+
+@pytest.mark.parametrize("name", [LINT, DRIFT])
+def test_the_workflows_split_out_of_ci_use_only_pinned_actions_and_no_secret(name):
+    known = set(re.findall(r"uses:\s+(\S+@[0-9a-f]{40})", text("ci.yml")))
+    used = re.findall(r"uses:\s+(\S+@[0-9a-f]{40})", text(name))
+    assert used
+    assert set(used) <= known, name
+    assert not re.findall(r"secrets\.[A-Za-z_]+", text(name)), name
 
 
 # guards and what a bump may carry --------------------------------------------------------------
