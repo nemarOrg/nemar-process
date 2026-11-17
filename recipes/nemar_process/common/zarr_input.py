@@ -647,7 +647,12 @@ def _coordinates(entry: Any) -> tuple[float, float, float] | None:
     A number that is not finite as a binary64 has no position, and that is no refusal: a NaN, an
     infinity, and an integer too large for a binary64, on which ``math.isfinite`` and ``float`` raise
     ``OverflowError``, which is caught here for the same answer a JSON reader that reads it as an
-    infinity gives.
+    infinity gives. That is the platform's definition. Through the pinned reader such an integer
+    (any of at least 2**1024 - 2**970) never reaches this function: eegprep-lean's ``_position`` raises
+    the same ``OverflowError`` while it reads the store root, so the whole store fails (``read_failed``,
+    no row), and so does an ``electrode_positions`` that is not an object (``IndexError_``). The
+    follow-up is eegprep-lean's (read such an integer as no position); the catch here keeps this digest
+    equal to the definition for any caller.
     """
     if not isinstance(entry, (list, tuple)) or len(entry) != 3:
         return None
