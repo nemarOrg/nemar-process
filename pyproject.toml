@@ -47,14 +47,20 @@ signaljourney = [
 # SciPy are left to the lock. eegprep takes four extras and never `eeglab` (it installs the Octave
 # bridge `oct2py`) or `full` and `all` (they include it): there is no MATLAB path in the image.
 runtime = [
-    "eegprep[mne,pybids,picard,torch]==0.5.0",
+    # eegprep at the `develop` merge commit of sccn/eegprep#617 (pAMICA through `pop_runica`), which
+    # holds #621 (the ASR state) and #616 (eegprep-lean). No eegprep release holds them, and
+    # `develop` still says 0.5.0 like the PyPI release that has none, so every record, stamp and
+    # `nemar-recipe version` names the commit too (`eegprep@0.5.0+<commit>`, docs/recipes.md). The
+    # next move is to the eegprep release that contains them, by the card that pins that release.
+    # The `pamica` extra asks for the `pamica==0.4.0` pinned below.
+    "eegprep[mne,pybids,picard,torch,pamica] @ git+https://github.com/sccn/eegprep@edf694c8344b9c4c68672eac3acf9a819f1462a8",
     "mne==1.13.2",
     "pamica==0.4.0",
-    # The Zarr reader of the `nemar-floor-zarr` recipe (docs/recipes.md). A separate distribution
-    # from eegprep (eegprep stays 0.5.0, the engine the records name) installed from the merge
-    # commit of sccn/eegprep#616 on `develop`; the next move is to the eegprep release that
-    # contains it, by the card that pins that release, and `uv lock`. zarr is pinned to the version
-    # the reader's `zarr` extra was written against.
+    # The Zarr reader of the `nemar-floor` recipe's Zarr input (docs/recipes.md). A separate
+    # distribution from eegprep (the engine the records name) installed from the merge commit of
+    # sccn/eegprep#616 on `develop`; the next move is to the eegprep release that contains it, by
+    # the card that pins that release, and `uv lock`. zarr is pinned to the version the reader's
+    # `zarr` extra was written against.
     "zarr==3.4.0",
     "eegprep-lean[zarr] @ git+https://github.com/sccn/eegprep@af9145121ed8a69eab86bc2f5c425a6bdcced5cc#subdirectory=packages/eegprep-lean",
     "numpy",
@@ -157,4 +163,5 @@ import-not-found = "ignore"
 # `build-constraint-dependencies` above.
 [tool.nemar-process.build-backends]
 docopt = "setuptools"
+eegprep = "setuptools"
 eegprep-lean = "setuptools"

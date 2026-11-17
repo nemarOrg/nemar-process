@@ -67,9 +67,26 @@ def crafted(tmp_path):
 
 
 def eegprep_reads(path, value=42.0):
-    """The premise of a test: eegprep alone loads the file the crafted set leads it to."""
+    """The premise of a test: eegprep alone loads the file the crafted set leads it to.
+
+    This is what the pinned commit of `develop` does with a name it can resolve beside the set (the
+    one 0.5.0 followed wherever it led); the check refuses the set before eegprep is called anyway.
+    """
     loaded = np.asarray(pop_loadset(str(path))["data"])
     assert np.unique(loaded).tolist() == [value]
+
+
+def eegprep_refuses(path):
+    """The premise of a test: eegprep alone refuses the crafted set, naming the reference.
+
+    eegprep 0.5.0 loaded the file outside the dataset that such a set names; the pinned commit of
+    `develop` refuses a data file named outside the set's directory. A call site says which of the two
+    it pins, so that a change upstream (a refusal that stops, or a read that starts) fails that test and
+    shows. The check refuses the set before eegprep is called, and stays as the second line (a link out
+    of the dataset is still followed: test_headers.py).
+    """
+    with pytest.raises(ValueError, match="reference"):
+        pop_loadset(str(path))
 
 
 def refused_and_never_loaded(root, path, monkeypatch, expected=UNREADABLE):
@@ -106,7 +123,7 @@ def test_a_variable_saved_twice_is_refused_because_eegprep_keeps_the_last_and_lo
     path.write_bytes(joined(first, last))
     assert [n for n, _, _ in scipy.io.whosmat(str(path))].count(name) == 2
     with pytest.warns(MatReadWarning, match="replacing previous with new"):  # scipy says so too
-        eegprep_reads(path)
+        eegprep_refuses(path)
     refused_and_never_loaded(root, path, monkeypatch)
 
 
@@ -143,7 +160,7 @@ def test_an_eeg_that_is_a_matlab_object_is_refused_because_eegprep_unwraps_it_an
         },
     )
     assert [kind for name, _, kind in scipy.io.whosmat(str(path)) if name == "EEG"] == ["object"]
-    eegprep_reads(path)
+    eegprep_refuses(path)
     refused_and_never_loaded(root, path, monkeypatch)
 
 
@@ -221,7 +238,7 @@ def test_a_plain_eeg_variable_is_ignored_by_eegprep_and_by_the_check(tmp_path, m
     assert headers.read(path, LIMIT).references == (("data", STEM + ".fdt"),)
     headers.check(path, LIMIT, EVERYWHERE)
     write_raw_set(path, data=str(outside), extra={"EEG": eeg})
-    eegprep_reads(path)
+    eegprep_refuses(path)
     refused_and_never_loaded(root, path, monkeypatch, EXTERNAL)
 
 
@@ -244,7 +261,7 @@ def test_an_eeg_that_is_neither_one_structure_nor_a_plain_value_is_refused(
 ):
     root, path, outside = crafted(tmp_path)
     write_raw_set(path, data=str(outside), extra={"EEG": eeg})
-    eegprep_reads(path)
+    eegprep_refuses(path)
     refused_and_never_loaded(root, path, monkeypatch)
 
 
@@ -274,7 +291,7 @@ def test_a_data_that_is_text_but_not_one_row_is_refused_because_eegprep_joins_it
     if not struct:  # the premise: the name is not an array of one string, as loadmat holds it
         loaded = scipy.io.loadmat(str(path), variable_names=["data"], squeeze_me=False)["data"]
         assert loaded.shape == shape(len(str(outside)))
-    eegprep_reads(path)
+    eegprep_refuses(path)
     refused_and_never_loaded(root, path, monkeypatch)
 
 

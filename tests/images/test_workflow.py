@@ -7,6 +7,7 @@ checks the syntax and the shell.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -645,3 +646,37 @@ def test_the_docs_say_the_cuda_flavor_has_no_sif_and_runs_under_docker_not_appta
     text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
     assert "a GPU host builds" not in text
     assert "refuses one built by hand" in re.sub(r"\s*\n#\s*", " ", text)
+
+
+def test_the_cuda_leg_runs_nemar_ica_with_no_gpu_visible_and_checks_the_cpu_fallback_record():
+    """The image and path the registry runs nemar-ica from: the CUDA flavor, no GPU visible, one tiny pAMICA
+    run whose record must say CPU, no_gpu, a fallback, the cuda flavor and the CUDA torch."""
+    steps = workflow()["jobs"]["test"]["steps"]
+    (step,) = [s for s in steps if s.get("name", "").startswith("Run nemar-ica on the fixture")]
+    assert step["if"] == "matrix.flavor == 'cuda'"
+    run = step["run"]
+    assert "NVIDIA_VISIBLE_DEVICES=void" in run
+    assert "nemar-recipe run nemar-ica" in run
+    assert "--ica-device" not in run  # the default is what the registry dispatches
+    for fact in ('"device_reason": "no_gpu"', '"fallback": True', '"image_flavor": "cuda"'):
+        assert fact in run, fact
+    # the torch it names is the constant the recipe's version stands for
+    spec = importlib.util.spec_from_file_location(
+        "ica_steps", ROOT / "recipes/nemar_process/nemar_ica/steps.py"
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert '"torch_version": "{}"'.format(module.CUDA_TORCH_VERSION) in run
+
+
+def test_the_end_to_end_step_of_the_cpu_leg_also_runs_the_nemar_ica_tests():
+    steps = workflow()["jobs"]["test"]["steps"]
+    (step,) = [
+        s for s in steps if s.get("name", "").startswith("Run the floor through the launcher")
+    ]
+    assert "pytest tests/e2e -m apptainer" in step["run"]  # every test of the directory so marked
+    assert (ROOT / "tests/e2e/test_ica_launch.py").is_file()
+    marked = (ROOT / "tests/e2e/test_ica_launch.py").read_text(encoding="utf-8")
+    assert marked.count("@pytest.mark.apptainer") >= 3

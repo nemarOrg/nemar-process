@@ -61,7 +61,21 @@ Where a recipe works around a gap, the code names the issue beside the workaroun
 **[sccn/eegprep#533](https://github.com/sccn/eegprep/issues/533)**, "clean_flatlines fails with AttributeError on a dataset loaded with an empty etc" (filed 2026-11-04, found while building the smoke fixture).
 `clean_flatlines` of eegprep 0.5.0 raises `AttributeError: 'numpy.ndarray' object has no attribute 'get'` as soon as it removes a channel from a set that `pop_loadset` returned with an empty `etc`, because `update_clean_channel_mask` calls `.get` on `EEG["etc"]`.
 `pop_saveset` writes an empty `etc` as an empty matrix and `pop_loadset` reads it back as an array, so the failure follows a plain save and load; setting `EEG["etc"] = {}` after loading avoids it.
-The workaround stays until that is fixed upstream: `scripts/make_smoke_fixture.py` gives the fixture's `etc` a key, with a comment pointing here, and a recipe that loads sets it did not write should expect the same.
+The commit of `develop` the images pin (below) reads an empty `etc` back as a dictionary, so for a set the gap is closed there: the loader's repair (`common/io.py`) is a no-op for such a set and stays for 0.5.0 and for any other `etc` that is not a dictionary.
+The smoke fixture is still written with a key in its `etc` (`scripts/make_smoke_fixture.py`, with a comment pointing here) because it must also load under 0.5.0, and a recipe that loads sets it did not write should still expect the failure on that release.
+
+### The commit the images pin (`nemar-ica`, 2026-11-15)
+
+No eegprep release holds pAMICA's `pop_runica(icatype='pamica')` (sccn/eegprep#617), the ASR state (#621) or eegprep-lean (#616): PyPI's newest is 0.5.0 (2026-11-04), and `develop` still says `0.5.0`.
+The images therefore take eegprep from the merge commit of #617 on `develop`, `edf694c8344b9c4c68672eac3acf9a819f1462a8`, and every record, the engine stamp and `nemar-recipe version` name it (`0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8`).
+A release that contains it moves the pin to that release, which drops the suffix and gives a new engine string.
+Three behaviors of 0.5.0 that this repository's tests pinned have changed at that commit, and the tests were changed to say so:
+
+- `pop_loadbv` and `pop_loadset` refuse a data or marker file named outside the file's directory (an absolute path or a `..`), with a `ValueError` that names the reference; 0.5.0 followed it. A symbolic link that leaves the dataset is still followed, so the recipes' own check stays.
+- `pop_loadset` returns an empty `etc` as a dictionary (sccn/eegprep#533 is fixed for that case); the loader's repair of a non-dict `etc` stays, and its load step now records `etcNormalized` false for such a set where it recorded true.
+- A set with no sampling rate raises a `ValueError` at load; it used to load and fail the first check after it with a `TypeError`.
+
+One gap found by `nemar-ica`, filed upstream as sccn/eegprep issue 625 (it is not worked around): the Zarr reader in eegprep-lean (`to_eeg`) builds label-only channel locations, and does not read the electrode positions, system and units that a store carries in its root attributes (pull request 626 is the fix), so ICLabel cannot classify a recording read from a store. That `pop_iclabel` raises a `ValueError` from `topoplot` ("no channel has a finite theta and radius") on channels with no locations is correct behavior; the gap is the reader.
 
 ### Gaps found by the `nemar-floor` recipe (phase 3, 2026-11-04 and 2026-11-05)
 

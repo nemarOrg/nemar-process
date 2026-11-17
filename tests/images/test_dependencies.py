@@ -25,8 +25,8 @@ from packaging.tags import compatible_tags, cpython_tags, mac_platforms
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from repo_paths import LOCK, PYPROJECT, ROOT
 
-EXACT_PINS = {"eegprep": "0.5.0", "mne": "1.13.2", "pamica": "0.4.0"}
-EEGPREP_EXTRAS = {"mne", "pybids", "picard", "torch"}
+EXACT_PINS = {"mne": "1.13.2", "pamica": "0.4.0"}
+EEGPREP_EXTRAS = {"mne", "pybids", "picard", "torch", "pamica"}
 # eegprep's `eeglab` extra installs the Octave bridge `oct2py`; `full` and `all` include it.
 EEGPREP_FORBIDDEN_EXTRAS = {"eeglab", "full", "all"}
 
@@ -85,10 +85,23 @@ def test_the_runtime_group_pins_the_exact_versions():
         assert str(requirements[name].specifier) == "==" + version, name
 
 
-def test_eegprep_takes_the_four_extras_and_never_the_matlab_one():
+def test_eegprep_takes_the_five_extras_and_never_the_matlab_one():
     eegprep = next(r for r in runtime_requirements() if canonicalize_name(r.name) == "eegprep")
     assert set(eegprep.extras) == EEGPREP_EXTRAS
     assert not set(eegprep.extras) & EEGPREP_FORBIDDEN_EXTRAS
+
+
+def test_eegprep_is_one_full_commit_of_develop_and_not_a_branch_a_tag_or_a_release():
+    """No release holds pAMICA's `pop_runica` and the ASR state, and `develop` still says 0.5.0 like
+    the release that has neither, so records name the commit too (`common/versions.py`)."""
+    eegprep = next(r for r in runtime_requirements() if canonicalize_name(r.name) == "eegprep")
+    assert eegprep.url is not None
+    match = re.fullmatch(r"git\+https://github\.com/sccn/eegprep@([0-9a-f]{40})", eegprep.url)
+    assert match, eegprep.url
+    assert not eegprep.specifier  # no version pin beside it: the commit is the pin
+    locked = next(p for p in load_lock()["package"] if p["name"] == "eegprep")
+    assert locked["source"]["git"].endswith("#" + match.group(1))
+    assert locked["version"] == "0.5.0"
 
 
 def test_numpy_and_scipy_are_declared_and_left_to_the_lock():
@@ -111,9 +124,7 @@ def test_the_zarr_reader_is_pinned_to_a_full_commit_and_zarr_to_its_exact_versio
     assert match, reader.url
     locked = next(p for p in load_lock()["package"] if p["name"] == "eegprep-lean")
     assert locked["source"]["git"].endswith("#" + match.group(1))
-    # the engine the records name is unchanged by the reader: eegprep stays 0.5.0
-    engine = next(p for p in load_lock()["package"] if p["name"] == "eegprep")
-    assert engine["version"] == "0.5.0"
+    # the reader is a separate distribution of the same repository: eegprep's own commit is the engine's
 
 
 def test_the_signaljourney_group_is_the_pypi_release_and_nothing_else():

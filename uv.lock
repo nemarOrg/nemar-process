@@ -632,6 +632,15 @@ wheels = [
 ]
 
 [[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -674,7 +683,7 @@ wheels = [
 [[package]]
 name = "eegprep"
 version = "0.5.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/sccn/eegprep?rev=edf694c8344b9c4c68672eac3acf9a819f1462a8#edf694c8344b9c4c68672eac3acf9a819f1462a8" }
 dependencies = [
     { name = "colorama" },
     { name = "eeglabio" },
@@ -688,14 +697,14 @@ dependencies = [
     { name = "scipy" },
     { name = "threadpoolctl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/54/b7/0ceb000615127ca52cab6959ad5638a6c953998d18e66116c9a600290ee7/eegprep-0.5.0.tar.gz", hash = "sha256:cfc6e5dde41bfd1d3d91ff364eebd64c25f7cb62dcdc4f1f2a545ad22048d7d0", size = 16690636, upload-time = "2026-11-04T01:21:41.869Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/33/d5/8fe67ad8e9962b469e75d2bddc046f387514b2a35cd88c02bb04737a3c10/eegprep-0.5.0-py3-none-any.whl", hash = "sha256:854016ce8fbe4ecbd950c82c4345abff3c63a314619abc2957013e2dcaed7e9f", size = 16458815, upload-time = "2026-11-04T01:21:39.219Z" },
-]
 
 [package.optional-dependencies]
 mne = [
+    { name = "defusedxml" },
     { name = "mne" },
+]
+pamica = [
+    { name = "pamica" },
 ]
 picard = [
     { name = "python-picard" },
@@ -1426,7 +1435,7 @@ dev = [
     { name = "ty" },
 ]
 runtime = [
-    { name = "eegprep", extra = ["mne", "picard", "pybids", "torch"] },
+    { name = "eegprep", extra = ["mne", "pamica", "picard", "pybids", "torch"] },
     { name = "eegprep-lean", extra = ["zarr"] },
     { name = "mne" },
     { name = "numpy" },
@@ -1461,7 +1470,7 @@ dev = [
     { name = "ty", specifier = ">=0.0.89" },
 ]
 runtime = [
-    { name = "eegprep", extras = ["mne", "pybids", "picard", "torch"], specifier = "==0.5.0" },
+    { name = "eegprep", extras = ["mne", "pybids", "picard", "torch", "pamica"], git = "https://github.com/sccn/eegprep?rev=edf694c8344b9c4c68672eac3acf9a819f1462a8" },
     { name = "eegprep-lean", extras = ["zarr"], git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=af9145121ed8a69eab86bc2f5c425a6bdcced5cc" },
     { name = "mne", specifier = "==1.13.2" },
     { name = "numpy" },

@@ -658,7 +658,10 @@ def test_a_set_whose_eeg_is_not_one_structure_is_read_from_its_top_level_as_eegp
         data=str(outside),
         extra={"EEG": variable},
     )
-    assert float(pop_loadset(str(path))["data"].mean()) == pytest.approx(1.0)  # eegprep alone
+    # eegprep alone: the pinned develop commit refuses the file the top-level `data` names (0.5.0 read
+    # it), which is what shows it reads the top level when `EEG` is not one structure
+    with pytest.raises(ValueError, match="reference"):
+        pop_loadset(str(path))
     assert headers.read(path, LIMIT).references == (("data", str(outside)),)
     assert refusal(path) == ("failed", "load_failed", "load", "external_reference")
     monkeypatch.setattr(io, "pop_loadset", never_called)
@@ -1223,19 +1226,23 @@ def test_the_loader_refuses_a_set_that_names_a_file_outside_the_dataset(tmp_path
     )
 
 
-def test_eegprep_alone_reads_the_brainvision_file_a_header_names_wherever_it_is(tmp_path):
-    """The behavior the check exists for (docs/upstream.md), pinned so that a fix upstream shows."""
+def test_eegprep_alone_refuses_the_brainvision_file_a_header_names_outside_its_directory(tmp_path):
+    """What the check was written for (docs/upstream.md), pinned so that a change upstream shows:
+    eegprep 0.5.0 followed an absolute path or a `..`; the commit of `develop` the images pin
+    refuses both, naming the reference. A link it still follows (the test above), and the check
+    stays as the second line for both."""
     outside = write_brainvision(tmp_path / "elsewhere", "secret", fill=10)
     inside = tmp_path / "dataset" / "sub-01" / "eeg"
     absolute = write_brainvision(inside, "a", data=str(outside.with_suffix(".eeg")))
     parent = write_brainvision(inside, "b", data="../../../elsewhere/secret.eeg")
     own = write_brainvision(inside, "c", fill=0)
     assert float(pop_loadbv(str(own))["data"].mean()) == 0.0
-    assert float(pop_loadbv(str(absolute))["data"].mean()) == pytest.approx(1.0)
-    assert float(pop_loadbv(str(parent))["data"].mean()) == pytest.approx(1.0)
+    for header in (absolute, parent):
+        with pytest.raises(ValueError, match="reference"):
+            pop_loadbv(str(header))
 
 
-def test_eegprep_alone_reads_the_marker_file_a_header_names_wherever_it_is(tmp_path):
+def test_eegprep_alone_refuses_the_marker_file_a_header_names_outside_its_directory(tmp_path):
     outside = write_brainvision(tmp_path / "elsewhere", "secret")
     marker = outside.with_suffix(".vmrk")
     marker.write_text(
@@ -1243,12 +1250,14 @@ def test_eegprep_alone_reads_the_marker_file_a_header_names_wherever_it_is(tmp_p
         encoding="utf-8",
     )
     inside = write_brainvision(tmp_path / "dataset", "a", marker=str(marker))
-    assert len(pop_loadbv(str(inside))["event"]) == 3  # the two stimuli and the segment start
+    with pytest.raises(ValueError, match="reference"):  # eegprep 0.5.0 read the three markers
+        pop_loadbv(str(inside))
 
 
 @pytest.mark.parametrize("where", ["data", "datfile"])
-def test_eegprep_alone_reads_the_set_data_file_a_set_names_wherever_it_is(tmp_path, where):
+def test_eegprep_alone_refuses_the_set_data_file_a_set_names_outside_its_directory(tmp_path, where):
     outside = str(write_fdt(tmp_path / "secret.fdt", fill=1.0))
     data, datfile = (outside, "") if where == "data" else ("in set file", outside)
     path = write_raw_set(tmp_path / "dataset" / (STEM + ".set"), data=data, datfile=datfile)
-    assert float(pop_loadset(str(path))["data"].mean()) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="reference"):  # eegprep 0.5.0 read it
+        pop_loadset(str(path))

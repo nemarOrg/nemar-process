@@ -99,7 +99,10 @@ def test_a_set_saved_with_an_empty_etc_loads_with_a_dict_in_float64(tmp_path):
     assert loaded.function == "eegprep.pop_loadset"
     assert loaded.parameters == SET_PARAMETERS
     assert loaded.eeg["etc"] == {}
-    assert loaded.etc_normalized is True
+    # eegprep 0.5.0 read an empty etc back as an array and the loader repaired it (sccn/eegprep#533);
+    # the commit the images pin returns the dict itself, so nothing is repaired here (`normalize`
+    # still repairs an array: test_normalizing_casts_to_float64_and_replaces_a_non_dict_etc)
+    assert loaded.etc_normalized is False
     assert loaded.eeg["data"].dtype == np.float64
     assert loaded.location_source == "none"
     assert loaded.n_channels_with_locations == 0
@@ -207,7 +210,9 @@ def test_a_set_that_lacks_what_the_safety_checks_read_fails_to_load_and_is_not_a
         "load_failed",
         "load",
     )
-    assert caught.value.detail == "TypeError"
+    assert (
+        caught.value.detail == "ValueError"
+    )  # eegprep 0.5.0 loaded it, and a check raised TypeError
 
 
 class FailsToCast:
