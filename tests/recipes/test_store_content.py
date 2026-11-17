@@ -29,6 +29,7 @@ import re
 import struct
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -107,7 +108,7 @@ def window(
     *, unit: str | None = MICRO_SIGN, labels: tuple[str, ...] | None = LABELS, **fields
 ) -> Window:
     """A real eegprep-lean window: the group's rate is 250 Hz, and the recording came from 500 Hz."""
-    values = {
+    values: dict[str, Any] = {
         "data": physical(),
         "channels": (0, 1),
         "start_sample": 0,
@@ -729,7 +730,7 @@ def test_eegprep_lean_as_pinned_raises_on_that_integer_when_the_root_is_read_wit
 def test_the_digest_takes_only_numbers_that_are_three_finite_non_booleans():
     """What ``from_attributes`` already drops is dropped here too: the digest alone, on entries a
     parser could never have kept."""
-    entries = {
+    entries: dict[str, Any] = {
         "boolean": (True, 2.0, 3.0),
         "last boolean": (1.0, 2.0, False),
         "nan": (1.0, float("nan"), 3.0),
@@ -789,6 +790,8 @@ def test_the_converters_provenance_attributes_are_never_hashed():
             "electrode_coordsystem_file": "sub-01/eeg/sub-01_coordsystem.json",
         }
     )
+    assert first is not None
+    assert second is not None
     assert (first.source, second.source) == (None, "subject")  # the reader does carry them
     assert z.store_locations_sha256(["Fz"], first) == z.store_locations_sha256(["Fz"], second)
     third = ElectrodeAttributes.from_attributes(
@@ -899,7 +902,8 @@ def test_a_system_or_units_that_could_not_be_a_line_has_no_digest_but_dropped_te
 
 
 def test_a_system_that_is_not_text_is_the_empty_string_as_the_reader_reads_it():
-    for value in (None, 5, ["CapTrak"], b"CapTrak"):
+    not_text: tuple[Any, ...] = (None, 5, ["CapTrak"], b"CapTrak")
+    for value in not_text:
         electrodes = ElectrodeAttributes(
             positions={"Fz": (1.0, 2.0, 3.0)}, coordinate_system=value, coordinate_units="mm"
         )
