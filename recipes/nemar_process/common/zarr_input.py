@@ -38,6 +38,7 @@ the attestation) import without them.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
@@ -55,7 +56,7 @@ from urllib.parse import urljoin
 
 import numpy as np
 
-from nemar_process.common import io, naming, versions, zarr_hosts
+from nemar_process.common import io, naming, qc, versions, zarr_hosts
 from nemar_process.common.errors import (
     CONVERT_FAILED,
     OUT_OF_MEMORY,
@@ -510,10 +511,12 @@ class Undigestable(ValueError):
 
 
 class StoreContent(NamedTuple):
-    """What a store's digest names: the channel group that was read, and the SHA-256 of its content."""
+    """What a store's digests name: the channel group that was read, the SHA-256 of its content, and
+    the SHA-256 of the electrode positions it was handed (``nemar.store-locations.v1``)."""
 
     group: str
     sha256: str
+    locations: str
 
 
 def _utf8(name: str, text: Any) -> bytes:
@@ -746,13 +749,15 @@ def window_locations_sha256(window: Any) -> str:
 
 
 def content_rows(read: Mapping[str, Sequence[str]]) -> list[dict[str, str]]:
-    """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256"}`` for
-    each store read in full, sorted by path in code point order. ``read`` maps a path to its group
-    and its digest."""
+    """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256",
+    "locations"}`` for each store read in full, sorted by path in code point order. ``read`` maps a
+    path to its group, its content digest and its locations digest (a ``StoreContent``)."""
     rows = []
     for path in sorted(read):  # a str sorts by code point, which is the order of its UTF-8 bytes
-        group, digest = read[path]
-        rows.append({"path": path, "group": group, "content_sha256": digest})
+        group, digest, locations = read[path]
+        rows.append(
+            {"path": path, "group": group, "content_sha256": digest, "locations": locations}
+        )
     return rows
 
 
@@ -844,6 +849,14 @@ def input_digest_v2(rows: Iterable[Mapping[str, str]]) -> str:
 # ---- the source -------------------------------------------------------------------------------
 
 
+def location_source(located: int) -> str:
+    """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
+    BIDS route's words (``io._location_source``). The converter embeds the positions of the
+    dataset's own electrodes file, and ``embedded`` cannot occur, because the serving copy keeps no
+    position from inside a data file."""
+    return "electrodes.tsv" if located > 0 else "none"
+
+
 def reader_string() -> str:
     """``eegprep-lean@<version>+<commit>``, the commit read from how pip or uv installed it.
 
@@ -887,8 +900,13 @@ class ZarrSource:
         self.index: Any = None
         self.store_bytes: dict[str, int] = {}
         self.store_hosts: dict[str, list[str]] = {}
-        # what each store read in full was, by content (a store with none is in ``stores_unread``)
+        # what each store read in full was, by content and by the positions it was handed (a store
+        # with none is in ``stores_unread``)
         self.contents: dict[str, StoreContent] = {}
+        # what eegprep-lean says it did with each store's positions (``etc["nemar"]["locations"]``,
+        # copied as written), or None for a store that declares none, for each recording it turned
+        # into a dictionary
+        self.reader_locations: dict[str, dict[str, Any] | None] = {}
         self.scope: list[str] = []  # the source paths of the stores the run covers (``select``)
 
     # -- the index
@@ -1039,6 +1057,12 @@ class ZarrSource:
         was read into a dictionary (the unit, ``eeg_checkset``, the checks of the loader) is
         ``convert_failed``, each with a class name or a fixed word; running out of memory in either
         is ``out_of_memory``. The unit is passed through as the serving copy states it.
+
+        The positions a store declares reach eegprep through ``to_eeg`` (eegprep-lean fills ``chanlocs``
+        from them, or refuses them with a reason it records); no template is ever applied. The load
+        reports ``electrodes.tsv`` as the location source when at least one channel of the dictionary
+        has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
+        from inside a data file), and the count is the BIDS route's (``qc.count_located``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -1074,8 +1098,10 @@ class ZarrSource:
         try:
             # what was read, named before anything is made of it: a store whose metadata cannot be
             # digested is not used (its content could not be named), and one the floor then fails is
-            # still a store that was read in full
-            content = StoreContent(window.group_name, window_content_sha256(window))
+            # still a store that was read in full; the positions it was handed are named with it
+            content = StoreContent(
+                window.group_name, window_content_sha256(window), window_locations_sha256(window)
+            )
         except Undigestable as error:
             raise RecordingError(CONVERT_FAILED, "load", "undigestable_metadata") from error
         except MemoryError as error:
@@ -1084,8 +1110,11 @@ class ZarrSource:
         try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
+            # the reader's own record of what it did with the store's positions, as it wrote it
+            reader_locations = copy.deepcopy(eeg["etc"]["nemar"].get("locations"))
             eeg = eeg_checkset(eeg)
             eeg, notes = io.normalize(eeg)
+            located = qc.count_located(eeg["chanlocs"])
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
         except RecordingError as error:
@@ -1093,14 +1122,15 @@ class ZarrSource:
             raise RecordingError(CONVERT_FAILED, "load", error.code) from error
         except Exception as error:
             raise RecordingError(CONVERT_FAILED, "load", type(error).__name__) from error
+        self.reader_locations[path] = reader_locations
         return io.Loaded(
             eeg=eeg,
             function=LOAD_FUNCTION,
             parameters=load_parameters(self.max_bytes),
             etc_normalized=notes.etc_normalized,
             etc_keys_dropped=notes.keys_dropped,
-            location_source="none",
-            n_channels_with_locations=0,
+            location_source=location_source(located),
+            n_channels_with_locations=located,
             power_line_hz_declared=self.declared_power_line(path),
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
         )
@@ -1152,33 +1182,44 @@ class ZarrSource:
         }
 
     def recording_extras(self, path: str) -> dict[str, Any]:
-        """What a recording's record adds to ``extensions.nemar``: its input and the reader.
+        """What a recording's record adds to ``extensions.nemar``: its input, the reader, and what
+        the reader did with the store's positions.
 
-        The input names the channel group that was read and the content digest of the store (when
-        this source read it: a recording handed in by a test was not read by it).
+        The input names the channel group that was read, the content digest of the store and its
+        locations digest (when this source read it: a recording handed in by a test was not read by
+        it). ``reader_locations`` is eegprep-lean's record of the positions (``etc["nemar"]["locations"]``:
+        its key names and values, never renamed or recomputed: what the store stated, how many
+        channels were located and, when none was, why), or null when the store declares no positions.
         """
         fields = self.input_fields(
             [path], self.store_bytes.get(path, 0), self.store_hosts.get(path, [])
         )
+        extras: dict[str, Any] = {"input": fields, "reader": reader_string()}
         if path in self.contents:
-            group, digest = self.contents[path]
-            fields["group"] = group
-            fields["content_sha256"] = digest
-        return {"input": fields, "reader": reader_string()}
+            content = self.contents[path]
+            fields["group"] = content.group
+            fields["content_sha256"] = content.sha256
+            fields["locations"] = content.locations
+        if path in self.reader_locations:
+            extras["reader_locations"] = copy.deepcopy(self.reader_locations[path])
+        return extras
 
     def dataset_extras(self) -> dict[str, Any]:
         """What the dataset record adds: every store in scope and every byte read (the index's too),
         and what was read by content.
 
         ``stores_content`` has a row for every store in scope whose group was read in full (sorted
-        by path), ``input_digest`` is the input digest of exactly those rows, and ``stores_unread``
-        lists the stores in scope that have no digest (never read, or not digestable), so that a
-        record that names its whole input says so with an empty list.
+        by path), each of four fields (``path``, ``group``, ``content_sha256`` and ``locations``, the
+        locations digest of the positions the store handed eegprep: no row says ``none``, because
+        both Zarr recipes hand positions through ``to_eeg``), ``input_digest`` is
+        ``nemar.input-digest.v2`` of exactly those rows (the field keeps its name), and
+        ``stores_unread`` lists the stores in scope that have no digest (never read, or not
+        digestable), so that a record that names its whole input says so with an empty list.
         """
         fields = self.input_fields(self.scope, self.transport.bytes_read, self.transport.contacted)
         rows = content_rows(self.contents)
         fields["stores_content"] = rows
-        fields["input_digest"] = input_digest(rows)
+        fields["input_digest"] = input_digest_v2(rows)
         fields["stores_unread"] = sorted(path for path in self.scope if path not in self.contents)
         return {"input": fields, "reader": reader_string()}
 

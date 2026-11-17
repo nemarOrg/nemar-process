@@ -17,6 +17,7 @@ import http.client
 import json
 import sys
 import threading
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
@@ -114,6 +115,38 @@ def reference_content_sha256(
     ]
     header = "".join(line + "\n" for line in lines)
     return hashlib.sha256(header.encode() + values.astype("<f8").tobytes(order="C")).hexdigest()
+
+
+def reference_locations_sha256(
+    positions: Mapping[str, tuple[float, ...]] | None = None,
+    system: str = "",
+    units: str = "",
+    labels: tuple[str, ...] = LABELS,
+) -> str:
+    """The locations digest of a stand-in store's group, written out from the definition
+    (``nemar.store-locations.v1``) and apart from the recipe's own function: the header lines, then a
+    ``position`` line per channel, with the 16 hexadecimal digits of each coordinate as a big-endian
+    binary64 (a zero as positive zero) when the store gives that channel's label a position, else
+    ``position`` alone. ``positions`` None is a store with no ``electrode_positions`` attribute: the
+    system and the units are then written bare, whatever the store states."""
+    import struct
+
+    def hexadecimal(value: float) -> str:
+        return struct.pack(">d", 0.0 if value == 0 else float(value)).hex()
+
+    lines = [
+        "nemar.store-locations.v1",
+        "system " + system if positions is not None and system else "system",
+        "units " + units if positions is not None and units else "units",
+    ]
+    for label in labels:
+        point = (positions or {}).get(label)
+        lines.append(
+            "position " + " ".join(hexadecimal(axis) for axis in point)
+            if point is not None
+            else "position"
+        )
+    return hashlib.sha256("".join(line + "\n" for line in lines).encode()).hexdigest()
 
 
 def write_group(
@@ -285,11 +318,49 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def _store(base: Path, path: str, groups: dict[str, tuple[Any, ...]]) -> None:
+def root_attributes(
+    positions: Mapping[str, tuple[float, ...]],
+    system: str,
+    units: str,
+    *,
+    source: str | None = None,
+    file: str | None = None,
+    coordsystem_file: str | None = None,
+) -> dict[str, Any]:
+    """The attributes of a store's root as NEMAR's converter writes them when the recording's dataset
+    has an electrodes file: ``electrode_positions`` (label to ``[x, y, z]``, as the file states them),
+    ``electrode_coordinate_system`` and ``electrode_coordinate_units`` (the coordsystem file's, each
+    an empty string when there is none), and, when the converter that wrote the store says so, the
+    provenance (``electrode_positions_source``, ``electrode_positions_file`` and
+    ``electrode_coordsystem_file``). A store given none of this has no root attributes at all, as
+    every store of a dataset without an electrodes file has none."""
+    attributes: dict[str, Any] = {
+        "electrode_positions": {label: list(point) for label, point in positions.items()},
+        "electrode_coordinate_system": system,
+        "electrode_coordinate_units": units,
+    }
+    for key, value in (
+        ("electrode_positions_source", source),
+        ("electrode_positions_file", file),
+        ("electrode_coordsystem_file", coordsystem_file),
+    ):
+        if value is not None:
+            attributes[key] = value
+    return attributes
+
+
+def _store(
+    base: Path,
+    path: str,
+    groups: dict[str, tuple[Any, ...]],
+    attributes: Mapping[str, Any] | None = None,
+) -> None:
     import zarr
     from zarr.storage import LocalStore
 
     store = zarr.create_group(store=LocalStore(base / zarr_name(path)), overwrite=True)
+    if attributes:
+        store.attrs.update(dict(attributes))
     for name, (modality, unit, data, *scale) in groups.items():
         write_group(store, name, modality=modality, unit=unit, data=data, scale=(scale or [0.5])[0])
 
@@ -298,7 +369,9 @@ class Served:
     """A running stand-in for NEMAR's Zarr hosts: real stores, the index, the requests seen.
 
     ``policy(host, path)`` says what each host does with a path (``default_policy``); a test
-    assigns another to make a host redirect somewhere else.
+    assigns another to make a host redirect somewhere else. ``attributes`` maps the path of one of
+    the three stores a floor run processes (``EEG_ONE``, ``EEG_TWO``, ``EEG_MU``) to the root
+    attributes its store carries (``root_attributes``); a store not named has none.
     """
 
     def __init__(
@@ -307,6 +380,7 @@ class Served:
         source_commit: str = SOURCE_COMMIT,
         zarr_host: str = ZARR_HOST,
         data_host: str = DATA_HOST,
+        attributes: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         import numpy as np
 
@@ -314,9 +388,10 @@ class Served:
         base = root / DATASET / "zarr"
         base.mkdir(parents=True)
         eeg = "eeg_250hz"
-        _store(base, EEG_ONE, {eeg: ("EEG", "uV", _signal(1))})
-        _store(base, EEG_TWO, {eeg: ("EEG", MICRO_SIGN, _signal(2))})
-        _store(base, EEG_MU, {eeg: ("EEG", GREEK_MU, _signal(3))})
+        given = attributes or {}
+        _store(base, EEG_ONE, {eeg: ("EEG", "uV", _signal(1))}, given.get(EEG_ONE))
+        _store(base, EEG_TWO, {eeg: ("EEG", MICRO_SIGN, _signal(2))}, given.get(EEG_TWO))
+        _store(base, EEG_MU, {eeg: ("EEG", GREEK_MU, _signal(3))}, given.get(EEG_MU))
         _store(base, EMG, {"emg_250hz": ("EMG", "uV", np.zeros((2, 500), dtype=int))})
         _store(base, BAD_UNIT, {eeg: ("EEG", "kV", _signal(4))})
         _store(base, FLAT, {eeg: ("EEG", "uV", np.zeros((N_CHANNELS, N_SAMPLES), dtype=int))})
@@ -339,6 +414,38 @@ class Served:
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+
+
+def add_store(
+    served: Served,
+    path: str,
+    data,
+    *,
+    labels: tuple[str, ...] | None = None,
+    unit: str = "uV",
+    attributes: Mapping[str, Any] | None = None,
+) -> None:
+    """One more EEG store under a running stand-in's root, listed in its index (rewritten, so the
+    index's digest changes): one channel group of ``data``'s channels and samples, with the labels given
+    (``LABELS`` for eight channels, else ``C1``, ``C2``, ...) and the root attributes given
+    (``root_attributes``; none by default)."""
+    import zarr
+    from zarr.storage import LocalStore
+
+    base = served.root / DATASET / "zarr"
+    root = zarr.create_group(store=LocalStore(base / zarr_name(path)), overwrite=True)
+    if attributes:
+        root.attrs.update(dict(attributes))
+    write_group(root, "eeg_250hz", modality="EEG", unit=unit, data=data, labels=labels)
+    document = json.loads(served.index_bytes)
+    channels, samples = data.shape
+    group = group_entry("eeg_250hz", "EEG", RATE, channels, samples)
+    document["stores"].append({"path": path, "zarr": zarr_name(path), "groups": [group]})
+    document["store_count"] = len(document["stores"])
+    body = index_bytes(document)
+    (base / "index.json").write_bytes(body)
+    served.index_bytes = body
+    served.index_sha256 = hashlib.sha256(body).hexdigest()
 
 
 class StandIn:

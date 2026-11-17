@@ -579,9 +579,9 @@ def test_a_row_that_is_not_one_of_the_input_digests_is_refused(rows):
 
 def test_the_rows_of_a_record_are_in_path_order_whatever_order_the_stores_were_read_in():
     read = {
-        "sub-10/eeg/sub-10_task-rest_eeg.edf": ("eeg", "c" * 64),
-        "sub-02/eeg/sub-02_task-rest_eeg.edf": ("eeg", "b" * 64),
-        "sub-01/eeg/sub-01_task-rest_eeg.edf": ("eeg_250hz", "a" * 64),
+        "sub-10/eeg/sub-10_task-rest_eeg.edf": z.StoreContent("eeg", "c" * 64, "3" * 64),
+        "sub-02/eeg/sub-02_task-rest_eeg.edf": z.StoreContent("eeg", "b" * 64, "2" * 64),
+        "sub-01/eeg/sub-01_task-rest_eeg.edf": z.StoreContent("eeg_250hz", "a" * 64, "1" * 64),
     }
     rows = z.content_rows(read)
     assert [r["path"] for r in rows] == sorted(read)
@@ -589,16 +589,18 @@ def test_the_rows_of_a_record_are_in_path_order_whatever_order_the_stores_were_r
         "path": "sub-01/eeg/sub-01_task-rest_eeg.edf",
         "group": "eeg_250hz",
         "content_sha256": "a" * 64,
+        "locations": "1" * 64,
     }
-    assert list(rows[0]) == ["path", "group", "content_sha256"]
+    assert list(rows[0]) == ["path", "group", "content_sha256", "locations"]
     assert z.content_rows({}) == []
 
 
 def test_the_rows_of_a_record_sort_by_code_point_too():
-    read = dict.fromkeys(reversed(CODE_POINT_PATHS), ("eeg", WITH_METADATA))
+    read = dict.fromkeys(reversed(CODE_POINT_PATHS), z.StoreContent("eeg", WITH_METADATA, "1" * 64))
     rows = z.content_rows(read)
     assert [r["path"] for r in rows] == list(CODE_POINT_PATHS)
-    assert z.input_digest(rows) == CODE_POINT_DIGEST
+    assert z.input_digest_v2(rows) == z.input_digest_v2(list(reversed(rows)))
+    assert z.input_digest(rows) == CODE_POINT_DIGEST  # version 1 reads three of the four fields
 
 
 # ---- the locations digest: nemar.store-locations.v1 -------------------------------------------

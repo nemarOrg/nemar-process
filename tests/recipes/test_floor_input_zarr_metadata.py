@@ -32,7 +32,7 @@ GROUP = "eeg"  # the name the vectors of the platform's definition use
 PARTLY_LABELED = "sub-13/eeg/sub-13_task-rest_eeg.edf"  # one channel has no label
 MIXED_UNITS = "sub-14/eeg/sub-14_task-rest_eeg.edf"  # one channel is in another unit than the rest
 EMPTY_UNIT = "sub-15/eeg/sub-15_task-rest_eeg.edf"  # every channel states an empty unit
-EMPTY_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
+EMPTY_DIGEST = "sha256:" + hashlib.sha256(b"nemar.input-digest.v2\n").hexdigest()
 ARGS = [
     "--zarr-base",
     z.ORIGIN,
@@ -149,7 +149,7 @@ def test_the_stores_that_can_be_digested_still_are_beside_one_that_cannot(extend
     # a store the floor could not use is still a store that was read in full
     assert [row["path"] for row in nemar["stores_content"]] == [z.EEG_ONE, z.BAD_UNIT]
     assert nemar["stores_unread"] == [LINE_FEED]
-    assert nemar["input_digest"] == zarr_input.input_digest(nemar["stores_content"])
+    assert nemar["input_digest"] == zarr_input.input_digest_v2(nemar["stores_content"])
     assert nemar["input_digest"] != EMPTY_DIGEST
 
 
@@ -160,20 +160,27 @@ def test_a_record_names_the_group_that_was_read_whatever_it_is_called(extended, 
     assert (table[OTHER_GROUP]["status"], table[z.EEG_ONE]["status"]) == ("succeeded", "succeeded")
     content = {row["path"]: row for row in nemar["stores_content"]}
     digest = z.reference_content_sha256(12, "uV")
-    assert content[OTHER_GROUP] == {"path": OTHER_GROUP, "group": GROUP, "content_sha256": digest}
+    assert content[OTHER_GROUP] == {
+        "path": OTHER_GROUP,
+        "group": GROUP,
+        "content_sha256": digest,
+        "locations": z.reference_locations_sha256(),
+    }
     assert content[z.EEG_ONE]["group"] == "eeg_250hz"  # and a store beside it keeps its own name
     # the group is a field of the input digest's line, so it is part of what a derivative is keyed on
-    rows = "".join(
-        "{}\t{}\t{}\n".format(path, row["group"], row["content_sha256"])
+    bare = z.reference_locations_sha256()
+    rows = "nemar.input-digest.v2\n" + "".join(
+        "{}\t{}\t{}\t{}\n".format(path, row["group"], row["content_sha256"], row["locations"])
         for path, row in sorted(content.items())
     )
     assert nemar["input_digest"] == "sha256:" + hashlib.sha256(rows.encode()).hexdigest()
-    assert "{}\t{}\t{}\n".format(OTHER_GROUP, GROUP, digest) in rows
+    assert "{}\t{}\t{}\t{}\n".format(OTHER_GROUP, GROUP, digest, bare) in rows
     record = json.loads(
         (out / "sub-12/eeg/sub-12_task-rest_desc-nemarfloor_signalJourney.json").read_text()
     )
     mine = record["extensions"]["nemar"]["input"]
     assert (mine["group"], mine["content_sha256"]) == (GROUP, digest)
+    assert mine["locations"] == z.reference_locations_sha256()
 
 
 def test_a_store_that_states_labels_or_units_for_some_channels_only_is_digested_by_the_two_rules(
