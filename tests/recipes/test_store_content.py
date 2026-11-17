@@ -14,7 +14,7 @@ paths sort by code point. Each vector is also computed here from the definition 
 The last two sections are the platform's amendment of 2026-11-16 (ADR 0123): the per-store locations
 digest, ``nemar.store-locations.v1``, and the input digest of version 2, ``nemar.input-digest.v2``,
 over rows of four fields. Their vectors are the platform's file at its merge commit
-(``tests/fixtures/derivatives-vectors.json``, byte for byte; ``V2_MERGE`` names the commit), read
+(``tests/fixtures/derivatives-vectors.json``, byte for byte; ``VECTORS_COMMIT`` names the commit), read
 with ``json.loads(..., parse_int=float)`` as the file's note says, never edited here: a vector that
 does not match is a finding. Every locations vector goes through eegprep-lean's own parser
 (``ElectrodeAttributes.from_attributes``) and then through ``store_locations_sha256``, the path a
@@ -608,7 +608,7 @@ def test_the_rows_of_a_record_sort_by_code_point_too():
 # ---- the locations digest: nemar.store-locations.v1 -------------------------------------------
 
 # the commit of nemar-cli `dev` whose `shared/contract/derivatives-vectors.json` is the fixture below
-V2_MERGE = "ed9cfefa756213ce92146aadaa4c5b7507dc23cb"
+VECTORS_COMMIT = "ed9cfefa756213ce92146aadaa4c5b7507dc23cb"
 VECTORS = Path(__file__).resolve().parent.parent / "fixtures" / "derivatives-vectors.json"
 VECTORS_SHA256 = "f1c98048efecc998bdb79439040f9a47eaa108f7297fc7065648c83252d1f25d"
 HUGE = "an integer too large for binary64"
@@ -653,10 +653,10 @@ def production_locations(labels, attributes) -> tuple[str, str]:
 
 
 def test_the_vectors_are_the_platforms_file_at_its_merge_commit_and_were_never_edited():
-    # `git hash-object` of the file in nemar-cli at V2_MERGE is 0783ae69ec9a590cd849382cc02c5fdd31e0f72b
+    # `git hash-object` of the file in nemar-cli at VECTORS_COMMIT is 0783ae69ec9a590cd849382cc02c5fdd31e0f72b
     assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == VECTORS_SHA256
     assert vectors()["format"] == "nemar.derivative-vectors.v1"
-    assert len(V2_MERGE) == 40
+    assert len(VECTORS_COMMIT) == 40
 
 
 @pytest.mark.parametrize("vector", locations_cases())
@@ -717,10 +717,11 @@ def test_an_integer_too_large_for_binary64_gives_a_group_with_no_position_for_th
 
 
 def test_eegprep_lean_as_pinned_raises_on_that_integer_when_the_root_is_read_without_parse_int():
-    """The follow-up for eegprep-lean's owner (U1): its ``_position`` calls ``math.isfinite`` on a Python
-    ``int``, which raises ``OverflowError`` for an integer past binary64's range, where the platform's
-    definition gives that channel no position. A store the converter writes holds floats, so no store
-    is affected; when eegprep-lean reads such an integer as no position this test is the one to drop."""
+    """The follow-up for the owner of eegprep-lean's reader (sccn/eegprep pull request 626): its
+    ``_position`` calls ``math.isfinite`` on a Python ``int``, which raises ``OverflowError`` for an
+    integer past binary64's range, where the platform's definition gives that channel no position. A
+    store the converter writes holds floats, so no store is affected; when eegprep-lean reads such an
+    integer as no position this test is the one to drop."""
     raw = json.loads(VECTORS.read_text(encoding="utf-8"))
     vector = next(v for v in raw["store_locations"] if v["name"] == HUGE)
     assert isinstance(vector["attributes"]["electrode_positions"]["Fz"][2], int)
@@ -737,7 +738,7 @@ def test_eegprep_lean_as_pinned_raises_on_that_integer_when_the_root_is_read_wit
 
 
 # computed with Bun from nemar-cli's shared/contract/derivatives.ts (`storeLocationsText` and
-# `storeLocationsSha256` as on `dev`, whose version of both is the one of V2_MERGE): the labels Cz, Cz and
+# `storeLocationsSha256` as on `dev`, whose version of both is the one of VECTORS_COMMIT): the labels Cz, Cz and
 # Fz over the attributes of the platform's vector `declared`
 REPEATED_TEXT = (
     "nemar.store-locations.v1\nsystem CapTrak\nunits mm\n"
