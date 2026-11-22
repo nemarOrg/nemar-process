@@ -30,7 +30,9 @@ The standard checkpoints, in order:
 
 A recipe maps each of its steps to one checkpoint in code beside its step order, and `nemar-recipe version` prints the map, so the backend's entry for a recipe version names the checkpoints the image runs.
 A recipe version that changes the map changes that entry.
-A checkpoint is per recording: a recording passes it, fails it or is skipped there, and a dataset's count for a checkpoint is the recordings that passed, failed, were skipped and remain.
+A checkpoint is per recording: a recording passes it, fails it or is skipped there.
+A recording that failed or was skipped at an earlier checkpoint counts as skipped at every later one, keeping its first code, so each checkpoint's counts add up to the same total.
+A dataset's cell for a checkpoint is `passed/total`, where the total is the number of recordings the run discovered, beside the counts that failed, were skipped and remain.
 
 ### `nemar-floor`
 
@@ -59,7 +61,10 @@ all of them count as `preprocess`, so `quality` follows the decomposition.
 ## Live progress
 
 The launcher, not the recipe, reports progress.
-It counts from the recordings table the recipe already writes row by row (`desc-<label>_recordings.tsv`, [recipes.md](recipes.md)), so a recipe adds no network code and its no-network fence is unchanged.
+The recordings table (`desc-<label>_recordings.tsv`, [recipes.md](recipes.md)) gets a row only when a recording ends, so it cannot give the total or the step a running recording has reached.
+The shared recipe layer therefore also writes a small local progress file: the recordings it discovered, written when discovery ends (which fixes the total), and each running recording's current step, written as it starts that step.
+This is one change in the shared layer, not one per recipe.
+The launcher reads that file and the recordings table, so a recipe adds no network code and its no-network fence is unchanged.
 
 The report is one closed object, declared once in nemar-cli's `shared/contract/` and pinned here as the launch specification is ([contracts.md](contracts.md)).
 It names the current checkpoint and, per checkpoint, the counts of recordings passed, failed, skipped and total, with the most recent failures (relative path, failure code, step), capped in number.
