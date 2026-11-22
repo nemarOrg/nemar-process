@@ -5,12 +5,12 @@ This page describes the checkpoints and the live progress that nemar-cli ADR 013
 Today no recipe declares checkpoints, `nemar-recipe version` prints no checkpoint map, and the runner heartbeat carries only a phase (`started` or `uploading`, [runner.md](runner.md)).
 Where this page and the implementation disagree once it lands, the implementation and its tests win and this page is corrected.
 
-Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), artifact subspace reconstruction (ASR).
+Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), artifact subspace reconstruction (ASR), quality control (QC).
 
 Checkpoints and progress belong to a general job platform, not only to NEMAR's own pipeline.
 A job that follows the platform's contract runs in a nemar-process image or one built from it, under the launcher ([launcher.md](launcher.md)), declares its checkpoints, and writes signalJourney records and a recordings table.
 Such a job gets the same progress and results reports wherever it runs.
-The contract's interfaces are public and versioned: the launch specification, the plugin manifest ([plugins.md](plugins.md)) and the progress object below.
+The contract's interfaces are public and versioned: the launch specification, the plugin manifest ([plugins.md](plugins.md)), the progress object below and the neuroschema extensions ([Where each schema lives](#where-each-schema-lives)).
 A job that does not follow it still runs, with the job-level states only.
 
 ## Checkpoints
@@ -81,6 +81,23 @@ a running job with no report for three cadences shows as stalled, distinct from 
 Live progress is a view for operators, not a record.
 When a job completes, the recordings table and the signalJourney records are authoritative and replace whatever the live counts said;
 the backend reconciles its counts from the uploaded table and records any disagreement, so a broken reporter is visible.
+
+## Where each schema lives
+
+**Planned.**
+Nothing here enters neuroschema's core: the metadata goes into neuroschema extension namespaces, which neuroschema versions on its own.
+
+| What | Home |
+|---|---|
+| Quality results per recording (typed metrics; figures with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
+| The dataset QC summary (counts, distributions, bounds, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level; in a later version it replaces `schemas/qc-summary.v1.json` and drops that schema's fixed `recipe: nemar-floor` |
+| Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | a new neuroschema namespace, `processing` |
+| Links to the signalJourney records | neuroschema `signalJourney` |
+| The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |
+| The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
+| NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
+
+nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, and this repository validates against that bundle through its existing nemar-cli pin, so no third pin is added.
 
 ## Run your own job on the platform
 

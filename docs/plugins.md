@@ -4,7 +4,7 @@
 This page describes the plugin interface that nemar-cli ADR 0134 decides on.
 The interface is one part of a general job platform that anyone can follow, not something private to NEMAR's pipeline:
 a job that runs in a nemar-process image (or one built from it) under the launcher, declares its checkpoints and writes signalJourney records and a recordings table gets the same progress and results reports wherever it runs ([progress.md](progress.md)).
-The plugin manifest is one of the platform's three public, versioned interfaces, beside the launch specification ([launcher.md](launcher.md)) and the progress object.
+The plugin manifest is one of the platform's public, versioned interfaces, beside the launch specification ([launcher.md](launcher.md)), the progress object and the neuroschema extensions ([Where each schema lives](#where-each-schema-lives)).
 No plugin code, manifest loader or plugin test exists in this repository yet;
 until it does, the recipes' own `qc` step ([recipes.md](recipes.md)) is the only quality measurement a run makes.
 Where this page and the implementation disagree once it lands, the implementation and its tests win and this page is corrected.
@@ -82,6 +82,23 @@ Figures, from `nemar_plugins/`:
 | Raw segment | `nemar_plugin_midraw.m` | two seconds of clean data from the middle of the recording (PNG or WebP) |
 
 The component figures read the decomposition, so they run after `nemar-ica`.
+
+## Where each schema lives
+
+**Planned.**
+Nothing here enters neuroschema's core: the metadata goes into neuroschema extension namespaces, which neuroschema versions on its own.
+
+| What | Home |
+|---|---|
+| Quality results per recording (typed metrics; figures with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
+| The dataset QC summary (counts, distributions, bounds, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level; in a later version it replaces `schemas/qc-summary.v1.json` and drops that schema's fixed `recipe: nemar-floor` |
+| Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | a new neuroschema namespace, `processing` |
+| Links to the signalJourney records | neuroschema `signalJourney` |
+| The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |
+| The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
+| NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
+
+nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, and this repository validates against that bundle through its existing nemar-cli pin, so no third pin is added.
 
 ## Next candidates
 
