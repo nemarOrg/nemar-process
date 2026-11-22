@@ -99,6 +99,8 @@ def test_the_dataset_record_still_says_what_was_read_and_what_was_asked_for(ran)
     assert [row["path"] for row in nemar["input"]["stores_content"]] == [z.EEG_ONE]
     assert nemar["input"]["input_digest"].startswith("sha256:")
     assert nemar["reader"].startswith("eegprep-lean@")
+    # the store wrote no record of its own: the dataset record keeps the reader's (no positions)
+    assert nemar["reader_locations"] == {z.EEG_ONE: None}
     assert nemar["devices"] == {}
     assert nemar["ica_run"]["engine"] == "pamica-torch"
     assert nemar["ica_run"]["max_iter"] == 5

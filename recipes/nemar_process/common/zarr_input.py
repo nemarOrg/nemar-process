@@ -1211,7 +1211,7 @@ class ZarrSource:
 
     def dataset_extras(self) -> dict[str, Any]:
         """What the dataset record adds: every store in scope and every byte read (the index's too),
-        and what was read by content.
+        what was read by content, and what the reader did with each store's positions.
 
         ``stores_content`` has a row for every store in scope whose group was read in full (sorted
         by path), each of four fields (``path``, ``group``, ``content_sha256`` and ``locations``, the
@@ -1220,13 +1220,23 @@ class ZarrSource:
         ``nemar.input-digest.v2`` of exactly those rows (the field keeps its name), and
         ``stores_unread`` lists the stores in scope that have no digest (never read, or not
         digestable), so that a record that names its whole input says so with an empty list.
+
+        ``reader_locations`` maps the path of every store this source turned into a dictionary (read,
+        and ``to_eeg``, ``eeg_checkset`` and the loader's checks all returned) to eegprep-lean's record of its positions,
+        exactly as a recording's record carries it (null when the store declares none), with the paths
+        in code point order. It is the one place that keeps the reader's ``reason`` for a recording that
+        writes no record of its own (nemar-ica's ``iclabel_no_locations`` fails before it writes one).
         """
         fields = self.input_fields(self.scope, self.transport.bytes_read, self.transport.contacted)
         rows = content_rows(self.contents)
         fields["stores_content"] = rows
         fields["input_digest"] = input_digest_v2(rows)
         fields["stores_unread"] = sorted(path for path in self.scope if path not in self.contents)
-        return {"input": fields, "reader": reader_string()}
+        locations = {
+            path: copy.deepcopy(self.reader_locations[path])
+            for path in sorted(self.reader_locations)
+        }
+        return {"input": fields, "reader": reader_string(), "reader_locations": locations}
 
 
 LOAD_FUNCTION = "eegprep_lean.load_recording"

@@ -33,7 +33,8 @@ import pytest
 import zarr_support as z
 from eegprep_lean import ElectrodePositionsNotAnObject, IndexError_
 from nemar_process import cli as command
-from nemar_process.common import qc, zarr_hosts, zarr_input
+from nemar_process import sj
+from nemar_process.common import qc, records, zarr_hosts, zarr_input
 from nemar_process.common.errors import RecordingError
 from recipe_support import DATASET, loaded_fixture
 
@@ -514,6 +515,56 @@ def test_nemar_ica_passes_its_precondition_on_a_located_store_and_records_iclabe
     )
 
 
+@pytest.fixture(scope="module")
+def ica_refused_run(located, tmp_path_factory):
+    """nemar-ica on the stores whose positions the reader refuses, and one that declares none: each
+    ends ``iclabel_no_locations`` before the fit and writes no record of its own."""
+    out = tmp_path_factory.mktemp("ica-refused")
+    extra = ["--ica-max-iter", "5", *recordings(BAD_UNITS, BAD_SYSTEM, NO_MATCH, STANDARD)]
+    code, line = run(located, "nemar-ica", out, *extra)
+    return code, line, out
+
+
+def test_the_dataset_record_keeps_the_readers_reason_for_a_store_that_fails_iclabel(
+    ica_refused_run,
+):
+    """A recording that ends ``iclabel_no_locations`` writes no record, so the reader's reason (units,
+    coordinate system, labels) is kept by the dataset record, under the store's path."""
+    code, line, out = ica_refused_run
+    assert code == 4
+    assert line["counts"] == {"discovered": 4, "failed": 4, "skipped": 0, "succeeded": 0}
+    rows = ica_rows(out)
+    for path in (BAD_UNITS, BAD_SYSTEM, NO_MATCH, STANDARD):
+        assert (rows[path]["step"], rows[path]["detail"]) == ("iclabel", "iclabel_no_locations")
+    assert not [p for p in out.rglob("sub-*") if p.is_file()]
+    record = dataset_record(out, "ica")
+    nemar = record["extensions"]["nemar"]
+    assert nemar["reader_locations"] == {
+        BAD_UNITS: {
+            "coordinate_system": CAPTRAK,
+            "coordinate_units": "furlongs",
+            "located": 0,
+            "reason": "units_unknown",
+        },
+        BAD_SYSTEM: {
+            "coordinate_system": "Other",
+            "coordinate_units": "mm",
+            "located": 0,
+            "reason": "coordinate_system_unknown",
+        },
+        NO_MATCH: {
+            "coordinate_system": CAPTRAK,
+            "coordinate_units": "mm",
+            "located": 0,
+            "reason": "no_matching_labels",
+        },
+        STANDARD: None,
+    }
+    # in code point order of the paths, and the record is still a valid signalJourney
+    assert list(nemar["reader_locations"]) == sorted(nemar["reader_locations"])
+    assert records.check(record, sj.validator()) == []
+
+
 def test_nemar_ica_still_fails_a_store_without_positions_at_iclabel_before_the_fit(ica_run):
     _, _, out = ica_run
     row = ica_rows(out)[z.EEG_TWO]
@@ -629,6 +680,24 @@ def test_stores_that_differ_only_in_the_converters_provenance_have_the_same_keys
     second = stated(variants["provenance"], z.EEG_ONE)
     assert (first["source"], second["source"]) == ("subject", "dataset")
     assert first["file"] != second["file"]
+
+
+def test_the_dataset_record_maps_every_store_turned_into_a_dictionary_to_the_readers_record(
+    floor_run,
+):
+    """The dataset record's ``reader_locations`` is each recording's own, keyed by its path."""
+    _, _, out = floor_run
+    nemar = dataset_record(out, "floor")["extensions"]["nemar"]
+    assert list(nemar["reader_locations"]) == [z.EEG_ONE, z.EEG_TWO]
+    for path, record in nemar["reader_locations"].items():
+        assert record == record_of(out, path, "floor")["extensions"]["nemar"]["reader_locations"]
+
+
+def test_a_store_that_failed_its_read_is_not_in_the_dataset_records_reader_locations(located):
+    source = opened(located, NOT_OBJECT)
+    with pytest.raises(RecordingError):
+        source.load(NOT_OBJECT)
+    assert source.dataset_extras()["reader_locations"] == {}
 
 
 def test_a_recording_the_source_did_not_read_has_no_reader_record(located):
