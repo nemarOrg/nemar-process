@@ -48,16 +48,13 @@ From `STEP_ORDER` in `recipes/nemar_process/nemar_floor/steps.py`:
 
 | Step | Checkpoint |
 |---|---|
-| the floor's `load` to `bad_windows` | as for the floor |
-| the floor's `qc` | `quality` (draft, see below) |
-| `asr`, `reref` | `preprocess` |
+| the floor's `load`, `signal_channels` | `import` |
+| the floor's `flatline` to `qc`, then `asr`, `reref` | `preprocess` |
 | `ica` | `ica` |
 | `iclabel` | `iclabel` |
 
-Two points are drafts for the implementation to settle.
-ASR and the average reference are cleaning before the decomposition, so they count as `preprocess`, which the ADR's list for that checkpoint does not name.
-The floor's `qc` runs before `asr` in this recipe, so mapping it to `quality` puts a `quality` step before `ica`;
-counting it under `preprocess` here would keep the checkpoints in their order.
+The floor's steps that `nemar-ica` re-runs, its `qc` included, are preparation for the decomposition here, and so are ASR and the average reference;
+all of them count as `preprocess`, so `quality` follows the decomposition.
 
 ## Live progress
 
@@ -70,7 +67,8 @@ It carries no samples, no free text and no personal data.
 
 Where the job runs decides where the object goes:
 
-- **On a person's own machine**, the launcher writes the progress and results reports locally from the same files, with no NEMAR service involved.
+- **On a person's own machine**, a standalone mode of the launcher writes the progress and results reports locally from the same files, with no NEMAR service involved.
+  That mode is new: today the launcher always needs a NEMAR launch specification and job token.
 - **On a workstation runner**, the heartbeat gains an optional `progress` object beside its phase.
 - **Through Tapis**, the job posts the same object to a route authenticated by its job token (the `X-Compute-Job-Token` header), accepted only while the job runs.
 
