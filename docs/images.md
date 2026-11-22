@@ -31,7 +31,7 @@ The environment in the `cpu` image is exactly `uv sync --frozen --no-dev --group
 The two extras are declared in conflict (`[tool.uv] conflicts`), so uv resolves them apart and the lock holds one torch for each.
 It also holds a third resolution, the one that selects neither extra, whose torch comes from PyPI (the wheels that carry the CUDA runtime); nothing builds an image or runs a test that way, and `tests/images/test_dependencies.py` fails if a Dockerfile, a workflow or a fixture runs `--group runtime` without `--extra cpu` or `--extra cuda`.
 
-Three locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only), `eegprep` (a Git source: the commit above) and `eegprep-lean` (a Git source: the merge commit of sccn/eegprep#616 on `develop`).
+Three locked packages have no wheel and are built while the image is built: `docopt` (a source distribution only), `eegprep` (a Git source: the commit above) and `eegprep-lean` (a Git source: the `develop` merge commit of sccn/eegprep#627, which holds #626 and #616 and the reader of a store's electrode positions).
 Their build requirements are not in `uv.lock`, so uv resolves them afresh at build time; `build-constraint-dependencies` in `pyproject.toml` pins the build backend (`setuptools`) to the version the lock holds, and `uv.lock` records the constraint.
 `tests/images/test_dependencies.py` reads the lock for every package built from source and fails until each is listed, with its backend, in `[tool.nemar-process.build-backends]` and the backend is pinned.
 The residual: a pin names a version, not a hash, so the build backend is still fetched from PyPI by name and version, and a changed file under the same version would not be noticed.

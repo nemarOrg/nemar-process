@@ -722,7 +722,7 @@ torch = [
 [[package]]
 name = "eegprep-lean"
 version = "0.5.0"
-source = { git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=af9145121ed8a69eab86bc2f5c425a6bdcced5cc#af9145121ed8a69eab86bc2f5c425a6bdcced5cc" }
+source = { git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=2736f99265f278ea9b9184a8b639a2e384f7859b#2736f99265f278ea9b9184a8b639a2e384f7859b" }
 
 [package.optional-dependencies]
 zarr = [
@@ -1471,7 +1471,7 @@ dev = [
 ]
 runtime = [
     { name = "eegprep", extras = ["mne", "pybids", "picard", "torch", "pamica"], git = "https://github.com/sccn/eegprep?rev=edf694c8344b9c4c68672eac3acf9a819f1462a8" },
-    { name = "eegprep-lean", extras = ["zarr"], git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=af9145121ed8a69eab86bc2f5c425a6bdcced5cc" },
+    { name = "eegprep-lean", extras = ["zarr"], git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=2736f99265f278ea9b9184a8b639a2e384f7859b" },
     { name = "mne", specifier = "==1.13.2" },
     { name = "numpy" },
     { name = "pamica", specifier = "==0.4.0" },

@@ -1,15 +1,15 @@
-"""``nemar-ica --input zarr`` against the local stand-in for NEMAR's Zarr hosts.
+"""``nemar-ica --input zarr`` against the local stand-in for NEMAR's Zarr hosts, on stores that declare no
+electrode positions.
 
-What is pinned here is a finding, not a feature: a store carries the electrode positions, system and
-units in its root attributes, and the Zarr reader in eegprep-lean (``to_eeg``) does not read them yet
-(sccn/eegprep issue 625), so it builds label-only channel locations, and ICLabel needs a scalp map.
-eegprep's ``topoplot`` raises on every channel, and every store ends ``step_failed`` at ``iclabel``
-with the detail ``iclabel_no_locations``, found right after the floor and before ASR and the fit,
-with nothing written. The stand-in's stores carry no positions, and the reader would not read them if
-they did. The Zarr input itself works:
-the index is checked, the store is read in full and named by its content, and the dataset record
-states what was read and what was asked for. The first of these tests is the one to
-change when it is decided what a recording without locations should come to.
+A store whose dataset has no electrodes file carries no positions, so eegprep-lean's ``to_eeg`` builds
+label-only channel locations and ICLabel has no scalp map: eegprep's ``topoplot`` raises on every channel,
+and the recording ends ``step_failed`` at ``iclabel`` with the detail ``iclabel_no_locations``, found right
+after the floor and before ASR and the fit, with nothing written (the owner decided that eegprep's own
+rule stays: one located channel passes, none fails). The stand-in's stores here carry no root attributes;
+the same run on stores that declare positions, where ICLabel's probabilities are written, is in
+``test_zarr_locations.py``. The Zarr input itself works: the index is checked, the store is read in full
+and named by its content and its locations, and the dataset record states what was read and what was asked
+for.
 """
 
 from __future__ import annotations
@@ -99,6 +99,8 @@ def test_the_dataset_record_still_says_what_was_read_and_what_was_asked_for(ran)
     assert [row["path"] for row in nemar["input"]["stores_content"]] == [z.EEG_ONE]
     assert nemar["input"]["input_digest"].startswith("sha256:")
     assert nemar["reader"].startswith("eegprep-lean@")
+    # the store wrote no record of its own: the dataset record keeps the reader's (no positions)
+    assert nemar["reader_locations"] == {z.EEG_ONE: None}
     assert nemar["devices"] == {}
     assert nemar["ica_run"]["engine"] == "pamica-torch"
     assert nemar["ica_run"]["max_iter"] == 5

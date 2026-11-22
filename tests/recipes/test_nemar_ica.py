@@ -497,9 +497,9 @@ def unlocated_fixture():
 def test_a_recording_without_electrode_locations_fails_at_iclabel_with_a_word_and_writes_nothing(
     tmp_path,
 ):
-    """ICLabel needs a scalp map, and eegprep's ``topoplot`` raises on channels with no location (the
-    Zarr reader in eegprep-lean builds label-only locations and does not read the store's electrode
-    attributes yet, sccn/eegprep issue 625). The recording ends ``step_failed`` at ``iclabel`` with the
+    """ICLabel needs a scalp map, and eegprep's ``topoplot`` raises on channels with no location (a
+    Zarr store that declares no electrode positions gives the label-only locations eegprep-lean's
+    ``to_eeg`` builds for it). The recording ends ``step_failed`` at ``iclabel`` with the
     detail ``iclabel_no_locations`` and nothing is written; ICLabel is neither skipped nor removed."""
     (recording,) = io.discover(DATASET)
     with pytest.raises(RecordingError) as raised, determinism.pinned_threads():

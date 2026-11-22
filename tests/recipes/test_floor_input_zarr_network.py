@@ -158,6 +158,13 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     assert nemar["input"]["zarr_pair"] == zarr_hosts.pair_name(zarr_host) == "production"
     assert nemar["input"]["hosts_contacted"] == sorted(pair)
     assert nemar["reader"].startswith("eegprep-lean@")
+    # the reader that handed the store's positions to eegprep is the one the lock pins
+    pin = re.search(
+        r"eegprep-lean\[zarr\] @ git\+https://github.com/sccn/eegprep@([0-9a-f]{40})#",
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+    )
+    assert pin
+    assert nemar["reader"].endswith("+" + pin.group(1))
     assert nemar["engine"]["package"] == "eegprep"
 
     # what was read, by content: one digest per store, and the dataset's input digest over them
@@ -168,6 +175,7 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
     for row in rows:
         assert re.fullmatch(r"[0-9a-f]{64}", row["content_sha256"]), row
         assert row["content_sha256"] != live  # the index file is not what was read
+        assert re.fullmatch(r"[0-9a-f]{64}", row["locations"]), row  # never `none`
         mine = json.loads(
             (
                 out
@@ -175,9 +183,22 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
                     row["path"].removesuffix("_eeg.edf")
                 )
             ).read_text()
-        )["extensions"]["nemar"]["input"]
-        assert (mine["group"], mine["content_sha256"]) == (row["group"], row["content_sha256"])
-    text = "".join("{path}\t{group}\t{content_sha256}\n".format(**row) for row in rows)
+        )["extensions"]["nemar"]
+        assert (mine["input"]["group"], mine["input"]["content_sha256"]) == (
+            row["group"],
+            row["content_sha256"],
+        )
+        assert mine["input"]["locations"] == row["locations"]
+        # what eegprep-lean says it did with the positions the store declares, or null when it declares none
+        assert "reader_locations" in mine
+        locations = mine["reader_locations"]
+        assert locations is None or (
+            isinstance(locations["located"], int) and locations["located"] >= 0
+        )
+        print("{} reader_locations {}".format(row["path"], locations))
+    text = "nemar.input-digest.v2\n" + "".join(
+        "{path}\t{group}\t{content_sha256}\t{locations}\n".format(**row) for row in rows
+    )
     assert nemar["input"]["input_digest"] == "sha256:" + hashlib.sha256(text.encode()).hexdigest()
     print("input digest {}".format(nemar["input"]["input_digest"]))
     print(
