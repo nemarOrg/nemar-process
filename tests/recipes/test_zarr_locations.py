@@ -51,6 +51,7 @@ OVERFLOW = "sub-19/eeg/sub-19_task-rest_eeg.edf"  # an integer coordinate no bin
 NOT_OBJECT = "sub-20/eeg/sub-20_task-rest_eeg.edf"  # electrode_positions that is a list
 ATTRIBUTES_LIST = "sub-21/eeg/sub-21_task-rest_eeg.edf"  # a root whose `attributes` is a list
 ATTRIBUTES_NULL = "sub-22/eeg/sub-22_task-rest_eeg.edf"  # and one whose `attributes` is null
+ATTRIBUTES_FULL_LIST = "sub-28/eeg/sub-28_task-rest_eeg.edf"  # and one whose `attributes` is [..]
 LONG_LITERAL = "sub-23/eeg/sub-23_task-rest_eeg.edf"  # an integer literal of more than 4300 digits
 # one store for each spelling of a zero x coordinate of E8, the electrode whose zero has a negative y
 # beside it, which is where the sign of a zero reaches the sign of Y and theta
@@ -153,6 +154,7 @@ def located(tmp_path_factory, bids):
         (NOT_OBJECT, {**attributes(), "electrode_positions": [[1.0, 2.0, 3.0]]}),
         (ATTRIBUTES_LIST, None),
         (ATTRIBUTES_NULL, None),
+        (ATTRIBUTES_FULL_LIST, None),
         *(
             (path, attributes({**POSITIONS, "E8": (SPELLED, -40.0, 85.0)}))
             for path in ZEROS.values()
@@ -161,6 +163,7 @@ def located(tmp_path_factory, bids):
         z.add_store(stand_in, path, signal, attributes=given)
     set_root_attributes(stand_in, ATTRIBUTES_LIST, [])
     set_root_attributes(stand_in, ATTRIBUTES_NULL, None)
+    set_root_attributes(stand_in, ATTRIBUTES_FULL_LIST, [{"electrode_positions": {}}])
     spell_number(stand_in, LONG_LITERAL, LONG_DIGITS)
     for spelling, path in ZEROS.items():
         spell_number(stand_in, path, spelling)
@@ -346,18 +349,39 @@ def test_positions_the_reader_refuses_are_a_reason_in_the_record_and_no_location
     assert row["locations"] != z.reference_locations_sha256()
 
 
-@pytest.mark.parametrize("path", [ATTRIBUTES_LIST, ATTRIBUTES_NULL], ids=["a list", "null"])
-def test_a_root_whose_attributes_are_a_list_or_null_is_a_store_that_declares_no_positions(
+@pytest.mark.parametrize("path", [ATTRIBUTES_LIST, ATTRIBUTES_NULL], ids=["empty list", "null"])
+def test_a_root_whose_attributes_are_an_empty_list_or_null_is_a_store_that_declares_no_positions(
     located, path
 ):
-    """The reader reduces such a root to no attributes (``document.get("attributes") or {}``), so the
-    store has the digest of a store without positions and no reader record; the platform's refused vector
-    of an attributes value that is an array never reaches the digest."""
+    """The reader reduces such a root to no attributes (``document.get("attributes") or {}``, so only
+    a value Python counts as false), and the store has the digest of a store without positions and no
+    reader record. This diverges on purpose from nemar-cli's ``storeLocationsText``, which refuses any
+    ``attributes`` that is not an object (null and an empty array included): the recipe digests what the
+    pinned reader handed eegprep, which is no positions."""
     source = opened(located, path)
     loaded = source.load(path)
     assert source.reader_locations[path] is None
     assert source.contents[path].locations == z.reference_locations_sha256()
     assert (loaded.location_source, loaded.n_channels_with_locations) == ("none", 0)
+
+
+def test_a_root_whose_attributes_are_a_non_empty_list_is_a_failed_read(located):
+    """A non-empty list is not reduced: the reader calls ``.get`` on it and raises ``AttributeError``,
+    which the source records by its class name as ``read_failed``. The store is not digested, has no
+    row and no reader record, and is listed in ``stores_unread``."""
+    source = opened(located, ATTRIBUTES_FULL_LIST)
+    with pytest.raises(RecordingError) as raised:
+        source.load(ATTRIBUTES_FULL_LIST)
+    assert (raised.value.code, raised.value.step, raised.value.detail) == (
+        "read_failed",
+        "load",
+        "AttributeError",
+    )
+    assert ATTRIBUTES_FULL_LIST not in source.contents
+    extras = source.dataset_extras()
+    assert extras["input"]["stores_content"] == []
+    assert extras["input"]["stores_unread"] == [ATTRIBUTES_FULL_LIST]
+    assert extras["reader_locations"] == {}
 
 
 def only_unread_is(source, path):
