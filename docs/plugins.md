@@ -99,7 +99,7 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 | The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
 | NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
 
-nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, and this repository validates against that bundle through its existing nemar-cli pin, so no third pin is added.
+nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted today at the dataset document; its vendor script gains a record root (or validates extension objects by their `$id`), and this repository will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 
 ## Next candidates
 

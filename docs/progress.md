@@ -73,7 +73,7 @@ It carries no samples, no free text and no personal data.
 Where the job runs decides where the object goes:
 
 - **On a person's own machine**, a standalone mode of the launcher writes the progress and results reports locally from the same files, with no NEMAR service involved.
-  That mode is new: today the launcher always needs a NEMAR launch specification and job token.
+  That mode is new: today the launcher always needs a NEMAR launch specification and job token, and the standalone mode takes a local launch specification without a job token instead.
 - **On a workstation runner**, the heartbeat gains an optional `progress` object beside its phase.
 - **Through Tapis**, the job posts the same object to a route authenticated by its job token (the `X-Compute-Job-Token` header), accepted only while the job runs.
 
@@ -102,7 +102,7 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 | The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
 | NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
 
-nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, and this repository validates against that bundle through its existing nemar-cli pin, so no third pin is added.
+nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted today at the dataset document; its vendor script gains a record root (or validates extension objects by their `$id`), and this repository will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 
 ## Run your own job on the platform
 
@@ -110,7 +110,7 @@ nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, a
 A researcher or a partner site runs a job on the platform by following the same contract NEMAR's recipes follow:
 
 1. Build on a nemar-process image, or an image built from one ([images.md](images.md)).
-2. Run it under the launcher with a launch specification ([launcher.md](launcher.md)).
+2. Run it under the launcher with a launch specification ([launcher.md](launcher.md)), or on a person's own machine with a local launch specification without a job token in the standalone mode (planned).
 3. Declare the job's checkpoints, mapping each step to one, and write a recordings table and signalJourney records as the recipes do ([recipes.md](recipes.md)).
 4. Add metrics and figures as plugins against the manifest ([plugins.md](plugins.md)).
 
