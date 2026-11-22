@@ -1222,7 +1222,7 @@ class ZarrSource:
         digestable), so that a record that names its whole input says so with an empty list.
 
         ``reader_locations`` maps the path of every store this source turned into a dictionary (read,
-        and ``to_eeg``, ``eeg_checkset`` and the loader's checks all returned) to eegprep-lean's record of its positions,
+        and every later step of the load returned) to eegprep-lean's record of its positions,
         exactly as a recording's record carries it (null when the store declares none), with the paths
         in code point order. It is the one place that keeps the reader's ``reason`` for a recording that
         writes no record of its own (nemar-ica's ``iclabel_no_locations`` fails before it writes one).
