@@ -39,8 +39,8 @@ SVG is for maps, histograms and charts of computed values.
 A plugin never writes samples, as no recipe does: no arrays, no matrices of signal values, no NumPy files.
 
 Two of this repository's guards change for plugins, and by exactly this much:
-the product-tree test, which today fails on any file that is not TSV or JSON, accepts the declared figure formats under the plugins' output directory,
-and the upstream-first scan (`tests/recipes/test_upstream_first.py`) allows the image's plotting library inside plugin figure code only.
+the product-tree assertions in `tests/recipes/test_cli.py` and `tests/recipes/test_floor_input_zarr.py`, which today fail on any file that is not TSV or JSON, accept the declared figure formats under the plugins' output directory;
+and the upstream-first scan (`tests/recipes/test_upstream_first.py`), which today bans no plotting library, extends to the plugins directory and gains a ban on plotting libraries everywhere except plugin figure code.
 
 ## Who writes one, and what NEMAR runs
 
@@ -68,7 +68,8 @@ Metrics, from `eeg_nemar_dataqual.m` (the last two are new to this pipeline):
 | Share of brain components | components ICLabel labels brain, out of all components |
 | MIR | the mutual information reduction of the decomposition |
 
-The floor's `qc` step already measures the first three (`pct_good_samples`, `pct_good_channels`, `line_db_before`, `line_db_after`), and a plugin reports a value the floor measures from the floor's output rather than computing it again.
+The floor already measures the first three: its `qc` step's `qualityMetrics` hold `percentGoodSamples` and `percentGoodChannels`, and its `line_noise_measure` step measures the line-noise excess (the recordings table carries them as `pct_good_samples`, `pct_good_channels`, `line_db_before` and `line_db_after`).
+A plugin reports a value the floor measures from the floor's output rather than computing it again.
 The dataset summary adds the legacy per-dataset bounds (lowest and highest good channels, good data and brain components), which today's QC summary does not hold.
 
 Figures, from `nemar_plugins/`:
