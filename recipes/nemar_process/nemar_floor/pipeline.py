@@ -261,8 +261,9 @@ def process(
             "removedHz": removed_hz,
         }
 
-    # the robust amplitude of every channel that passed the flatline step, before bad channels go
-    with guarded("qc"):
+    # the robust amplitude of every channel that passed the flatline step, before bad channels go; its
+    # own step id (steps.PRE_CHECKS, counted at `preprocess`), because the qc step runs last
+    with guarded("qc_amplitude"):
         robust = qc.robust_amplitude(work["data"])
         robust_names = names_where(signal_names, kept_after_flatline)
 

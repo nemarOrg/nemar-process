@@ -34,12 +34,24 @@ def test_every_value_of_a_recipe_reports_the_pinned_map(name):
         assert variant.checkpoints == recipe.checkpoints
 
 
-def test_the_floors_map_is_its_step_order():
-    assert flatten(floor_steps.CHECKPOINTS) == floor_steps.STEP_ORDER
+def without_pre_checks(checkpoints, pre_checks) -> tuple:
+    return tuple(step for step in flatten(checkpoints) if step not in pre_checks)
+
+
+def test_the_floors_map_is_its_step_order_and_its_pre_check():
+    assert (
+        without_pre_checks(floor_steps.CHECKPOINTS, floor_steps.PRE_CHECKS)
+        == floor_steps.STEP_ORDER
+    )
+    assert set(floor_steps.PRE_CHECKS) <= set(dict(floor_steps.CHECKPOINTS)["preprocess"])
 
 
 def test_the_ica_map_is_the_floors_steps_then_its_own():
-    assert flatten(ica_steps.CHECKPOINTS) == floor_steps.STEP_ORDER + ica_steps.STEP_ORDER
+    assert (
+        without_pre_checks(ica_steps.CHECKPOINTS, ica_steps.PRE_CHECKS)
+        == floor_steps.STEP_ORDER + ica_steps.STEP_ORDER
+    )
+    assert set(ica_steps.PRE_CHECKS) <= set(dict(ica_steps.CHECKPOINTS)["preprocess"])
     preprocess = dict(ica_steps.CHECKPOINTS)["preprocess"]
     assert "qc" in preprocess  # the floor's qc, re-run as preparation, is not ica's quality
     assert dict(floor_steps.CHECKPOINTS)["quality"] == ("qc",)

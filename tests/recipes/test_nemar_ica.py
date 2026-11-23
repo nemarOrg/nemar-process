@@ -482,7 +482,7 @@ def test_a_recording_with_too_few_channels_for_a_decomposition_is_skipped_not_fa
     assert raised.value.status == "skipped"
     assert (raised.value.code, raised.value.step, raised.value.detail) == (
         "ica_ineligible",
-        "ica",
+        "ica_eligibility",
         "rank_too_low",
     )
 
@@ -508,7 +508,7 @@ def test_a_recording_without_electrode_locations_fails_at_iclabel_with_a_word_an
         )
     assert (raised.value.code, raised.value.step, raised.value.detail) == (
         "step_failed",
-        "iclabel",
+        "iclabel_locations",
         "iclabel_no_locations",
     )
     assert not list(tmp_path.rglob("*"))

@@ -36,12 +36,12 @@ A dataset's cell for a checkpoint is `passed/total`, where the total is the numb
 
 ### `nemar-floor`
 
-From `STEP_ORDER` in `recipes/nemar_process/nemar_floor/steps.py`:
+From `STEP_ORDER` and `PRE_CHECKS` in `recipes/nemar_process/nemar_floor/steps.py`:
 
 | Step | Checkpoint |
 |---|---|
 | `load`, `signal_channels` | `import` |
-| `flatline`, `drift`, `line_noise_measure`, `line_noise_50`, `line_noise_60`, `bad_channels`, `bad_windows` | `preprocess` |
+| `flatline`, `drift`, `line_noise_measure`, `line_noise_50`, `line_noise_60`, `qc_amplitude`, `bad_channels`, `bad_windows` | `preprocess` |
 | `qc` | `quality` |
 
 ### `nemar-ica`
@@ -51,12 +51,15 @@ From `STEP_ORDER` in `recipes/nemar_process/nemar_floor/steps.py`:
 | Step | Checkpoint |
 |---|---|
 | the floor's `load`, `signal_channels` | `import` |
-| the floor's `flatline` to `qc`, then `asr`, `reref` | `preprocess` |
+| the floor's `flatline` to `qc`, then `ica_eligibility`, `iclabel_locations`, `asr`, `reref` | `preprocess` |
 | `ica` | `ica` |
 | `iclabel` | `iclabel` |
 
 The floor's steps that `nemar-ica` re-runs, its `qc` included, are preparation for the decomposition here, and so are ASR and the average reference;
-all of them count as `preprocess`, so `quality` follows the decomposition.
+all of them count as `preprocess`, so `nemar-ica` has no `quality` checkpoint (the quality metrics of the decomposition are not built yet; [plugins.md](plugins.md)).
+
+A pre-check is a check or a measurement made early, under its own step id, so a recording it refuses is counted where it stopped: the floor's `qc_amplitude` (the robust amplitude, measured before bad channels go) and nemar-ica's `ica_eligibility` (the rank) and `iclabel_locations` (a scalp map is possible), both before ASR.
+Each counts at `preprocess`, and none is a step of the record: they are `PRE_CHECKS` beside `STEP_ORDER` in the recipe's `steps.py`, not part of it, so a recording that ends at one never counts as having passed `quality`, `ica` or `iclabel`.
 
 ## Live progress
 

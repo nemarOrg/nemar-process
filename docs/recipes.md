@@ -691,8 +691,8 @@ A merge of product directories (`aggregate`) ran no recording and states none of
 | `failed` | `step_failed` | `asr_maxmem` (step `asr`) | ASR's memory budget would depend on the machine (above) |
 | `failed` | `ica_degenerate` | `PamicaFitError` (step `ica`) | pAMICA stopped on a degenerate reason and set no field |
 | `failed` | `out_of_memory` | `cuda` (step `ica`) | the fit ran out of the GPU's memory under an explicit `--ica-device cuda` (under `auto` it is fitted again on the CPU instead, above) |
-| `skipped` | `ica_ineligible` | `rank_too_low` (step `ica`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
-| `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
+| `skipped` | `ica_ineligible` | `rank_too_low` (step `ica_eligibility`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
+| `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel_locations`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
 | `failed` | `step_failed` | the exception's class (step `iclabel`) | ICLabel raised after the fit |
 
 `asr_maxmem` and `ica_degenerate` are deterministic failures; the transient ones (`out_of_memory`, `internal_error`, `disk_error`, `time_budget`) name only transient failures.

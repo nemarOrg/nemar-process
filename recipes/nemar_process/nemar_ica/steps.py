@@ -37,9 +37,12 @@ CHECKPOINTS = (
             "line_noise_measure",
             "line_noise_50",
             "line_noise_60",
+            "qc_amplitude",
             "bad_channels",
             "bad_windows",
             "qc",
+            "ica_eligibility",
+            "iclabel_locations",
             "asr",
             "reref",
         ),
@@ -47,6 +50,10 @@ CHECKPOINTS = (
     ("ica", ("ica",)),
     ("iclabel", ("iclabel",)),
 )
+
+# Step ids that are not steps of the record but name where a recording can end (the floor's, and the two
+# checks nemar-ica makes before ASR): counted at `preprocess`, in CHECKPOINTS and not in STEP_ORDER.
+PRE_CHECKS = ("qc_amplitude", "ica_eligibility", "iclabel_locations")
 
 DESCRIPTIONS = {
     "asr": "Repair bursts with artifact subspace reconstruction, keeping its calibration state",

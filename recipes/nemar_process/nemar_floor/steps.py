@@ -50,12 +50,18 @@ CHECKPOINTS = (
             "line_noise_measure",
             "line_noise_50",
             "line_noise_60",
+            "qc_amplitude",
             "bad_channels",
             "bad_windows",
         ),
     ),
     ("quality", ("qc",)),
 )
+
+# Step ids that are not steps of the record but name where a recording can end: a measurement or a check
+# made early, under its own id so a recording it refuses is counted where it stopped (ADR 0134). They are
+# in CHECKPOINTS and not in STEP_ORDER (the record's processing steps are unchanged).
+PRE_CHECKS = ("qc_amplitude",)
 
 DESCRIPTIONS = {
     "load": "Load recording",

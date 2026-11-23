@@ -152,7 +152,9 @@ def check_locations(eeg: dict[str, Any]) -> None:
     try:
         topoplot(np.ones(int(eeg["nbchan"])), eeg["chanlocs"], noplot="on", gridscale=32)
     except ValueError as error:
-        raise RecordingError(STEP_FAILED, "iclabel", steps.ICLABEL_NO_LOCATIONS) from error
+        raise RecordingError(
+            STEP_FAILED, "iclabel_locations", steps.ICLABEL_NO_LOCATIONS
+        ) from error
 
 
 def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -308,15 +310,17 @@ def process(
         {key: value for key, value in result.work.items() if key != "data"},
     )
 
-    with guarded("ica"):
+    # Pre-checks, each under its own step id (steps.PRE_CHECKS, counted at `preprocess`): they run before
+    # ASR, so a recording they refuse never reached the decomposition, and its counts must not say so.
+    with guarded("ica_eligibility"):
         good = io.channel_labels(eeg)
         rank = steps.rank_of(len(good))
         if rank < steps.MIN_RANK:
             # one component (or none) is not a decomposition: nothing is wrong with the recording
-            raise RecordingSkipped(ICA_INELIGIBLE, "ica", RANK_TOO_LOW)
+            raise RecordingSkipped(ICA_INELIGIBLE, "ica_eligibility", RANK_TOO_LOW)
 
     # ICLabel needs a scalp map: a recording that cannot have one fails now, not after the fit
-    with guarded("iclabel"):
+    with guarded("iclabel_locations"):
         check_locations(eeg)
 
     # ASR, keeping the state that reproduces it

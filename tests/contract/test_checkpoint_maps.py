@@ -54,14 +54,27 @@ def test_each_map_and_version_is_the_pinned_registrys(recipe):
     assert as_contract(literal(path, "CHECKPOINTS")) == pinned["checkpoints"], BUMP
 
 
+def mapped(path: Path) -> list:
+    """The map's steps without its pre-checks, which are step ids of the table and not of the record."""
+    pre = set(literal(path, "PRE_CHECKS"))
+    return [s for _name, group in literal(path, "CHECKPOINTS") for s in group if s not in pre]
+
+
 def test_the_floors_map_covers_its_step_order_in_order():
     path = RECIPES["nemar-floor"]
-    steps = [s for _name, group in literal(path, "CHECKPOINTS") for s in group]
-    assert steps == list(literal(path, "STEP_ORDER"))
+    assert mapped(path) == list(literal(path, "STEP_ORDER"))
 
 
 def test_the_ica_map_covers_the_floors_steps_then_its_own_in_order():
     floor = literal(RECIPES["nemar-floor"], "STEP_ORDER")
     own = literal(RECIPES["nemar-ica"], "STEP_ORDER")
-    steps = [s for _name, group in literal(RECIPES["nemar-ica"], "CHECKPOINTS") for s in group]
-    assert steps == list(floor) + list(own)
+    assert mapped(RECIPES["nemar-ica"]) == list(floor) + list(own)
+
+
+@pytest.mark.parametrize("recipe", sorted(RECIPES))
+def test_every_pre_check_counts_at_preprocess_and_is_not_a_record_step(recipe):
+    path = RECIPES[recipe]
+    preprocess = dict(literal(path, "CHECKPOINTS"))["preprocess"]
+    for step in literal(path, "PRE_CHECKS"):
+        assert step in preprocess
+        assert step not in literal(path, "STEP_ORDER")
