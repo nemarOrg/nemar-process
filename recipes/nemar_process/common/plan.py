@@ -258,6 +258,9 @@ class Plan:
     # Quality plugin identity ({"name", "version", "tree_sha256"}) by step id, steps and skips alike;
     # hashed as the ``plugin`` field of that step's resolved entry.
     plugins: dict[str, dict[str, str]] = field(default_factory=dict, compare=False)
+    # Each plugin's entry for the record's ``extensions.nemar.plugins`` (``plugins.PluginOutcome``), in
+    # run order; the record writer takes it from here, never from a caller.
+    plugin_outcomes: list[dict[str, Any]] = field(default_factory=list, compare=False)
     # ("step" or "skip", step id) in the order each happened; kept for ``hash_as``, never written.
     _events: list[tuple[str, str]] = field(
         default_factory=list, init=False, repr=False, compare=False
@@ -298,6 +301,15 @@ class Plan:
         self._events.append(("skip", step_id))
         if plugin is not None:
             self.plugins[step_id] = dict(plugin)
+
+    def add_plugin_outcome(self, entry: Mapping[str, Any]) -> None:
+        """Record a plugin's outcome; its identity must be the one its step or skip was hashed with."""
+        identity = self.plugins.get(entry["name"])
+        if identity is None or {key: entry[key] for key in PLUGIN_IDENTITY} != identity:
+            raise ValueError(
+                "plugin {} has no step or skip with this identity".format(entry["name"])
+            )
+        self.plugin_outcomes.append(dict(entry))
 
     def add_rule(self, name: str) -> None:
         if name not in self.rules:
@@ -390,6 +402,20 @@ def plan_hash(resolved: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(resolved).encode("utf-8")).hexdigest()
 
 
+def _plugins_problem(entries: Any) -> str | None:
+    """Why ``extensions.nemar.plugins`` cannot be read back into the plan, or None."""
+    if not isinstance(entries, list):
+        return "extensions.nemar.plugins is not a list"
+    for number, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not all(
+            isinstance(entry.get(key), str) for key in PLUGIN_IDENTITY
+        ):
+            return "extensions.nemar.plugins[{}] lacks its identity ({})".format(
+                number, ", ".join(PLUGIN_IDENTITY)
+            )
+    return None
+
+
 def verify(record: dict[str, Any]) -> list[str]:
     """What is wrong with a record's plan hash: empty when it matches the steps the record holds."""
     nemar = record.get("extensions", {}).get("nemar")
@@ -398,6 +424,9 @@ def verify(record: dict[str, Any]) -> list[str]:
     stored = nemar.get("plan_hash")
     if not stored:
         return ["extensions.nemar.plan_hash is missing"]
+    problem = _plugins_problem(nemar.get("plugins", []))
+    if problem is not None:
+        return [problem]
     recomputed = plan_hash(resolved_plan(record))
     if recomputed != stored:
         return [

@@ -158,8 +158,12 @@ def build_recording_record(
     """The per-recording record: the plan as executed, its hash, and what was read and written.
 
     ``nemar_extra`` are keys a recipe adds to ``extensions.nemar`` (where a remote input came from);
-    one the record already has is refused.
+    one the record already has is refused, and so is ``plugins``: the plugins' entries come from the
+    plan (``Plan.plugin_outcomes``), the same place as the identities its hash holds, and are written
+    only when a plugin ran or was skipped.
     """
+    if "plugins" in (nemar_extra or {}):
+        raise ValueError("plugins is written from the plan, never given")
     identity = context.identity
     process, tag = provenance()
     record = {
@@ -202,6 +206,8 @@ def build_recording_record(
             }
         },
     }
+    if plan.plugin_outcomes:
+        record["extensions"]["nemar"]["plugins"] = [dict(e) for e in plan.plugin_outcomes]
     add_extras(record["extensions"]["nemar"], nemar_extra)
     return record
 
