@@ -285,7 +285,7 @@ def _do_work(
         started = time.monotonic()
         try:
             staged = steps.data(scratch)
-            state.staging = [item.record for item in staged]
+            state.staging = [item.record for item in staged if item.record]
         finally:
             state.phase("staging", started)
         if terminator.stop.is_set():

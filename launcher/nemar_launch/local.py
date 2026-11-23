@@ -1,0 +1,419 @@
+"""The launcher's standalone entry (ADR 0134 decision 8): run one job on a person's own Linux machine from a
+local launch specification file and local directories, with no NEMAR service involved.
+
+    nemar-launch-local --spec FILE --out DIR [--data NAME=DIR ...] [--code BUNDLE.tar.gz]
+        [--engine apptainer|docker] [--sif-root DIR] [--cpus N] [--memory-mb N] [--scratch DIR]
+        [--time-limit-s N] [--allow-registry HOST ...]
+
+It never reads a NEMAR launch specification (``NEMAR_LAUNCH_SPEC``), a lease or a job token, and calls no
+NEMAR route: host paths come from the command line only, and the launcher's environment is built from an
+allowlist (``run.HOST_PASSTHROUGH``) plus the ``NEMAR_*`` values derived from the command line, which pass
+through ``settings.read_settings`` exactly as a runner's do. ``NEMAR_LAUNCH_SPEC``, ``NEMAR_LEASE_ID``,
+``_tapis*``, ``SLURM_*``, ``NEMAR_LOCAL_DATASETS_ROOT`` and the device variables of the person's shell are
+never read. The container phase is the service's own (``__main__._do_work``, ``run``, ``runtime``,
+``finalize_outputs``, the live progress reporter with no poster), so the isolation is identical; the
+differences are the inputs (``Steps``): the code from ``--code`` (``bundle.from_file``), each dataset bound
+read-only, whole, at ``/data/<name>``, an image that is never pulled (Docker runs with ``--pull=never``; a
+random ``rnr_<24 hex>`` runner label per run), SIGINT and SIGHUP stopping the job as SIGTERM does, and
+the fence (``fence.py``) closed for the whole run.
+
+Everything goes into ``<out>/launcher/``: ``result.json``, ``provenance.json``, ``manifest.json`` and
+``launcher.log`` as on the service path, ``progress.json`` (``nemar.progress.v1``, built once more after the
+container exited) and ``results-report.json`` (``nemar.results-report.v1``, ``report.py``). Nothing is
+uploaded. The exit number is ``result.json``'s (0, or 10 to 16); 2 is a command line that cannot be used,
+and then nothing is created.
+
+Standard library only, Python 3.9.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import itertools
+import os
+import re
+import signal
+import sys
+import time
+import uuid
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from . import __main__ as service
+from . import bundle, fence, progress, report, run, runtime, spec, stage
+from .codes import (
+    ENV_ALLOWED_REGISTRIES,
+    ENV_CONTAINER_RUNTIME,
+    ENV_CPUS,
+    ENV_ENFORCE_LIMITS,
+    ENV_MEMORY_MB,
+    ENV_RUNNER_END_TIME,
+    ENV_RUNNER_LABEL,
+    ENV_RUNNER_OUTPUT_DIR,
+    ENV_RUNNER_SCRATCH_DIR,
+    ENV_SIF_ROOT,
+    Env,
+    Failure,
+    Stopped,
+    exit_number,
+)
+from .provenance import Documents, Log
+from .settings import read_settings
+
+PROGRAM = "nemar-launch-local"
+ENGINES = ("apptainer", "docker")
+SIGNALS = (int(signal.SIGTERM), int(signal.SIGINT), int(signal.SIGHUP))
+FIRST_SECONDS = 0.1  # until the recipe's progress file is first read
+REPORT_SECONDS = 10.0  # then: progress.json is a local file, a person watches it
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_REGISTRY_HOST = re.compile(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?")
+
+
+class Usage(Exception):
+    """A command line that cannot be used: exit 2, nothing created."""
+
+
+def _positive(text: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]{0,8}", text):
+        raise argparse.ArgumentTypeError("a whole number above zero")
+    return int(text)
+
+
+def parser() -> argparse.ArgumentParser:
+    made = argparse.ArgumentParser(
+        prog=PROGRAM,
+        description="Run one job on this machine from a local launch specification (no NEMAR service).",
+    )
+    made.add_argument("--spec", required=True, help="the local launch specification file")
+    made.add_argument(
+        "--out", required=True, help="the output directory (work/ and launcher/ go in it)"
+    )
+    made.add_argument(
+        "--data",
+        action="append",
+        default=[],
+        metavar="NAME=DIR",
+        help="a dataset the specification names, bound read-only at /data/NAME (repeat)",
+    )
+    made.add_argument("--code", help="the code archive (.tar.gz) the specification's bundle names")
+    made.add_argument("--engine", choices=ENGINES, default="apptainer")
+    made.add_argument("--sif-root", help="the directory holding <hex>.sif (Apptainer)")
+    made.add_argument("--cpus", type=_positive, help="whole cores (required with docker)")
+    made.add_argument("--memory-mb", type=_positive, help="megabytes (required with docker)")
+    made.add_argument("--scratch", help="where code and temporary files go (default: TMPDIR)")
+    made.add_argument("--time-limit-s", type=_positive, help="stop the job after this many seconds")
+    made.add_argument(
+        "--allow-registry",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="a registry a Docker image may come from (default ghcr.io; repeat)",
+    )
+    return made
+
+
+class Options:
+    """The command line, checked."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.spec: str = args.spec
+        self.out: str = os.path.abspath(args.out)
+        self.code: str | None = args.code
+        self.engine: str = args.engine
+        self.sif_root: str | None = args.sif_root
+        self.cpus: int | None = args.cpus
+        self.memory_mb: int | None = args.memory_mb
+        self.scratch: str | None = None if args.scratch is None else os.path.abspath(args.scratch)
+        self.time_limit_s: int | None = args.time_limit_s
+        self.registries: list[str] = list(args.allow_registry)
+        self.data: dict[str, str] = {}
+        for item in args.data:
+            name, sep, directory = item.partition("=")
+            if not sep or not directory or _NAME.fullmatch(name) is None:
+                raise Usage("--data takes NAME=DIR, NAME a dataset name of the specification")
+            if name in self.data:
+                raise Usage("--data names {} twice".format(name))
+            self.data[name] = directory
+        if self.code is not None and not self.code.endswith(".tar.gz"):
+            raise Usage("--code takes a .tar.gz archive")
+        if self.engine == "docker" and (self.cpus is None or self.memory_mb is None):
+            raise Usage("--engine docker needs --cpus and --memory-mb")
+        if self.engine == "apptainer" and self.sif_root is None:
+            raise Usage("--engine apptainer needs --sif-root")
+        if self.engine == "apptainer" and self.memory_mb is not None and self.cpus is None:
+            raise Usage("--memory-mb needs --cpus")
+        if self.registries and self.engine != "docker":
+            raise Usage("--allow-registry is for --engine docker")
+        if any(_REGISTRY_HOST.fullmatch(r) is None for r in self.registries):
+            raise Usage("--allow-registry takes a registry host")
+
+
+def environment(options: Options, environ: Mapping[bytes, bytes]) -> Env:
+    """The launcher's environment: the allowlisted host variables and the ``NEMAR_*`` values derived
+    from the command line, nothing else (no specification, lease, scheduler or device variable)."""
+    mapping: dict[bytes, bytes] = {
+        name.encode(): environ[name.encode()]
+        for name in run.HOST_PASSTHROUGH
+        if name.encode() in environ
+    }
+
+    def put(name: str, value: str) -> None:
+        mapping[name.encode()] = os.fsencode(value)
+
+    put(ENV_RUNNER_OUTPUT_DIR, options.out)
+    if options.scratch is not None:
+        put(ENV_RUNNER_SCRATCH_DIR, options.scratch)
+    if options.sif_root is not None:
+        put(ENV_SIF_ROOT, os.path.abspath(options.sif_root))
+    if options.engine == "docker":
+        put(ENV_CONTAINER_RUNTIME, "docker")
+        put(ENV_RUNNER_LABEL, "rnr_" + uuid.uuid4().hex[:24])
+        if options.registries:
+            put(ENV_ALLOWED_REGISTRIES, ",".join(options.registries))
+    elif options.cpus is not None:
+        put(ENV_ENFORCE_LIMITS, "1")
+    if options.cpus is not None:
+        put(ENV_CPUS, str(options.cpus))
+    if options.memory_mb is not None:
+        put(ENV_MEMORY_MB, str(options.memory_mb))
+    if options.time_limit_s is not None:
+        put(ENV_RUNNER_END_TIME, str(int(time.time()) + options.time_limit_s))
+    return Env(mapping)
+
+
+# ---- the inputs -------------------------------------------------------------------------------------------
+
+
+def read_spec(path: str) -> bytes:
+    """The specification file's bytes (at most one byte more than a specification may hold)."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(spec.MAX_SPEC_BYTES + 1)
+    except OSError:
+        raise Failure(
+            "runtime_error", "invalid_spec", "the specification file cannot be read"
+        ) from None
+
+
+def _overlaps(a: str, b: str) -> bool:
+    a, b = os.path.realpath(a), os.path.realpath(b)
+    return os.path.commonpath([a, b]) in (a, b)
+
+
+def bind_data(job: spec.Job, options: Options, scratch_base: str) -> list[tuple[str, stage.Staged]]:
+    """Each dataset's directory, real and whole, in the specification's order: the names on the command
+    line are exactly the specification's (``invalid_spec``), each a directory (``dataset_not_found``),
+    none overlapping the output directory or the scratch (``bind_source_unsafe``)."""
+    if sorted(options.data) != sorted(job.data_names):
+        raise Failure("runtime_error", "invalid_spec", "--data names are not the specification's")
+    bound = []
+    for name in job.data_names:
+        real = os.path.realpath(options.data[name])
+        if not os.path.isdir(real):
+            raise Failure(
+                "dataset_fetch_failed", "dataset_not_found", "a dataset directory is missing"
+            )
+        if _overlaps(real, options.out) or _overlaps(real, scratch_base):
+            raise Failure("runtime_error", "bind_source_unsafe", "a dataset overlaps the output")
+        bound.append((name, stage.Staged({}, real)))
+    return bound
+
+
+def count_input(directory: str) -> dict[str, int]:
+    """The regular files under a dataset directory and their bytes (links are not followed)."""
+    files = 0
+    size = 0
+    for root, _dirs, names in os.walk(directory):
+        for name in names:
+            try:
+                info = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            if not os.path.islink(os.path.join(root, name)) and os.path.isfile(
+                os.path.join(root, name)
+            ):
+                files += 1
+                size += info.st_size
+    return {"files": files, "bytes": size}
+
+
+class LocalImage(service.Image):
+    """The standalone entry's image: never pulled. Apptainer runs ``<sif-root>/<hex>.sif``; under
+    Docker an absent image is ``image_missing`` (``ensure_image(pull=False)``)."""
+
+    def __init__(self) -> None:
+        self.verification: dict[str, Any] | None = None
+
+    def acquire(
+        self,
+        engine: str,
+        runtime_path: str,
+        job: spec.Job,
+        reference: str,
+        sif: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> str:
+        if engine != runtime.APPTAINER:
+            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
+        return sif
+
+
+# ---- one run ----------------------------------------------------------------------------------------------
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    environ: Mapping[bytes, bytes] | None = None,
+    *,
+    fenced: fence.Fence = fence.FENCE,
+) -> int:
+    """Run one standalone job; return the exit number."""
+    try:
+        options = Options(parser().parse_args(argv))
+    except Usage as problem:
+        sys.stderr.write("{}: {}\n".format(PROGRAM, problem))
+        return 2
+    except SystemExit as stop:  # argparse has said what is wrong
+        return 2 if stop.code else 0
+    os.umask(0o077)
+    env = environment(options, os.environb if environ is None else environ)
+    settings = read_settings(env)
+    started = time.time()
+    refused: Failure | None = None
+    layout: run.Layout | None = None
+    try:
+        os.makedirs(options.out, exist_ok=True)
+        layout = run.prepare_layout(options.out)
+    except Failure as failure:
+        refused = failure
+    except OSError:
+        refused = Failure(
+            "runtime_error", "output_dir_not_empty", "the output directory is unusable"
+        )
+    log = Log(layout.log_path if layout is not None else None)
+    docs = Documents(layout.launcher if layout is not None else None, log)
+    state = service.Run(options.out, layout, log, docs)
+    terminator = run.Terminator()
+    terminator.install(SIGNALS)
+    image = LocalImage()
+    inputs: list[dict[str, Any]] = []
+    try:
+        with fenced.run():
+            log.info("standalone: engine {}, fence closed".format(options.engine))
+            job = _start(state, options, env, settings, terminator, refused, image, inputs)
+            service._finalize(state, env, terminator)
+            if layout is not None:
+                _final_progress(state, layout, log)
+                _results_report(state, layout, job, image, inputs, started)
+            log.info("fence: refusals {}".format(fenced.words()))
+    finally:
+        terminator.restore()
+        log.close()
+    return exit_number(state.failure.code if state.failure else None)
+
+
+def _start(
+    state: service.Run,
+    options: Options,
+    env: Env,
+    settings: Any,
+    terminator: run.Terminator,
+    refused: Failure | None,
+    image: LocalImage,
+    inputs: list[dict[str, Any]],
+) -> spec.LocalSpec | None:
+    """Read the specification and run the job; every failure is recorded on ``state``."""
+    log = state.log
+    if refused is not None:
+        state.fail(refused)
+        state.outputs_blocked = True
+        return None
+    if settings.problem is not None:
+        state.fail(settings.problem)
+        return None
+    job: spec.LocalSpec | None = None
+    try:
+        text = read_spec(options.spec)
+        state.digest = spec.digest_of(text)
+        job = spec.parse_local_text(text)
+        state.image = {"uri": job.image["uri"], "digest": job.image["digest"]}
+        log.info("standalone job: runtime {}".format(job.runtime))
+        bound = bind_data(job, options, settings.scratch_base)
+        inputs.extend({"name": name, **count_input(held.source)} for name, held in bound)
+        steps = service.Steps(
+            code=lambda scratch: bundle.from_file(
+                options.code, job, scratch, log=log, stop=terminator.stop
+            ),
+            data=lambda _scratch: [held for _name, held in bound],
+            image=image,
+            post=None,
+            first_seconds=FIRST_SECONDS,
+            report_seconds=REPORT_SECONDS,
+            engine_pull="never",
+        )
+        service._do_work(state, job, env, settings, terminator, steps)
+    except spec.SpecError as problem:
+        state.fail(Failure("runtime_error", problem.detail, "the specification was refused"))
+    except Failure as failure:
+        state.fail(failure)
+    except Stopped:
+        state.fail(run.terminated_failure(terminator, env))
+    except Exception as error:  # noqa: BLE001 - a launcher bug must still leave a record
+        state.fail(service._unexpected("runtime_error", error, log))
+    return job
+
+
+def _final_progress(state: service.Run, layout: run.Layout, log: Log) -> None:
+    """``launcher/progress.json`` once more, after the container exited: nothing running."""
+    source = state.progress_source
+    if source is None:
+        return
+    try:
+        document = source.build(finished=True)
+        progress.write_report(layout.launcher, document, itertools.count())
+    except progress.Unusable as problem:
+        log.info("progress: no final report {}".format(problem.word))
+    except OSError as error:
+        log.warning("progress: final report not written {}".format(type(error).__name__))
+
+
+def _results_report(
+    state: service.Run,
+    layout: run.Layout,
+    job: spec.LocalSpec | None,
+    image: LocalImage,
+    inputs: list[dict[str, Any]],
+    started: float,
+) -> None:
+    log = state.log
+    try:
+        built, word = report.build(
+            run_id=uuid.uuid4().hex,
+            started=started,
+            finished=max(time.time(), started),
+            spec_digest=state.digest or hashlib.sha256(b"").hexdigest(),
+            image=state.image or {"uri": "unknown", "digest": "sha256:" + "0" * 64},
+            verification=image.verification,
+            bundle_sha256=state.bundle_digest,
+            inputs=inputs,
+            documents=state.docs.data,
+            launcher_dir=layout.launcher,
+            work=layout.work,
+            files=state.files,
+            recipe_state=None if state.progress_source is None else state.progress_source.state,
+        )
+        if built is None:
+            log.error("results report not written ({})".format(word))
+            return
+        report.write(layout.launcher, built)
+        log.info("results report written ({})".format(built["checkpoints_reason"] or "with counts"))
+    except Exception as error:  # noqa: BLE001 - a report never changes the job's exit
+        log.error("results report not written ({})".format(type(error).__name__))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
