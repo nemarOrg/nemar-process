@@ -244,3 +244,19 @@ def test_docker_never_pulls_an_absent_image(tmp_path):
         assert lrig.calls() == []
     finally:
         lrig.close()
+
+
+def test_ctrl_c_near_the_time_limit_is_terminated_not_time_limit(lrig):
+    """A person's signal is never the time limit, however close to the end time it comes: only the
+    launcher's own stop at the end time is (with --time-limit-s 60, the whole run is within the
+    service path's 120 s margin)."""
+    lrig.write_spec(lrig.script_spec("sleep 30"))
+    timer = threading.Timer(1.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    launch = lrig.run(lrig.argv(None, "--time-limit-s", "60"))
+    timer.join()
+    assert (launch.exit, launch.result["failure_code"], launch.result["detail"]) == (
+        13,
+        "runtime_error",
+        "terminated",
+    )

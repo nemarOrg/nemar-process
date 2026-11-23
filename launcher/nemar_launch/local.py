@@ -440,7 +440,7 @@ def main(
     log = Log(layout.log_path if layout is not None else None)
     docs = Documents(layout.launcher if layout is not None else None, log)
     state = service.Run(options.out, layout, log, docs)
-    terminator = run.Terminator()
+    terminator = run.Terminator(own_deadline_only=True)
     terminator.install(SIGNALS)
     image = LocalImage(options.pull, options.cosign, fenced)
     inputs: list[dict[str, Any]] = []

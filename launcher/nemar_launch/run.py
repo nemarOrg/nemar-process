@@ -573,21 +573,28 @@ def end_group(child: subprocess.Popen[bytes]) -> int:
 class Terminator:
     """Records a SIGTERM, passes it to the container, and asks running phases to stop."""
 
-    def __init__(self) -> None:
+    def __init__(self, own_deadline_only: bool = False) -> None:
+        """``own_deadline_only`` (the standalone entry): only the launcher's own stop at the job's end
+        time is ``time_limit``, and a signal is ``terminated`` whenever it comes (a person's Ctrl-C is
+        never a time limit). The service default reads a SIGTERM near the end time as the scheduler's
+        time limit."""
         self.stop = threading.Event()
         self.received: float | None = None
+        self.by_deadline = False
+        self.own_deadline_only = own_deadline_only
         self.child: subprocess.Popen[bytes] | None = None
         self._previous: dict[int, Any] = {}
 
     def _handle(self, _signum: int, _frame: Any) -> None:
         self.terminate(time.time())
 
-    def terminate(self, now: float) -> None:
+    def terminate(self, now: float, deadline: bool = False) -> None:
         """What a SIGTERM is, taken at ``now`` (and what the job's end time is, when the launcher
-        reaches it itself): the first moment is the one recorded, the stop event is set, and the
-        signal goes to the container."""
+        reaches it itself, ``deadline``): the first moment is the one recorded, the stop event is set,
+        and the signal goes to the container."""
         if self.received is None:
             self.received = now
+            self.by_deadline = deadline
         self.stop.set()
         self._forward()
 
@@ -628,7 +635,13 @@ def end_time(env: Env) -> float | None:
 
 
 def terminated_failure(terminator: Terminator, env: Env) -> Failure:
-    """The failure a SIGTERM is: ``time_limit`` within 120 s of the job's end, else a cancellation."""
+    """The failure a SIGTERM is: ``time_limit`` within 120 s of the job's end, else a cancellation. For a
+    terminator that counts only its own deadline (standalone), ``time_limit`` exactly when the launcher
+    itself stopped the job at its end time."""
+    if terminator.own_deadline_only:
+        if terminator.by_deadline:
+            return Failure("time_limit", None, "stopped at the job's time limit")
+        return Failure("runtime_error", "terminated", "terminated by a signal")
     ends = end_time(env)
     if (
         ends is not None
@@ -818,7 +831,7 @@ def run_container(
                 # stops the container, exactly as the SIGTERM the scheduler or the runner would send
                 # (the same record, the same grace), so the end time does not depend on either.
                 log.warning("deadline reached; stopping the container")
-                terminator.terminate(now)
+                terminator.terminate(now, deadline=True)
             received = terminator.received
             if received is not None and not killed and time.time() - received >= TERM_GRACE_SECONDS:
                 killed = True
