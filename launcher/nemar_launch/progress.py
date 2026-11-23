@@ -440,8 +440,15 @@ class Reporter(threading.Thread):
         directory: str | None,
         post: Callable[[dict[str, Any]], None] | None,
         log: Any,
+        *,
+        first_seconds: float | None = None,
+        report_seconds: float | None = None,
     ) -> None:
+        """``first_seconds`` is how long to wait between tries until the first object is built, and
+        ``report_seconds`` the cadence after it: None is the module's constant, read at each tick
+        (``FIRST_RETRY_SECONDS`` and ``REPORT_SECONDS``). The standalone entry asks for its own."""
         super().__init__(name="progress-reporter", daemon=True)
+        self._first_seconds, self._report_seconds = first_seconds, report_seconds
         self._source, self._directory, self._post, self._log = source, directory, post, log
         self._halt = threading.Event()
         self._counter = itertools.count()
@@ -460,15 +467,23 @@ class Reporter(threading.Thread):
             self._said.add(word)
             self._log.info("progress: {}".format(word))
 
+    def _cadence(self) -> float:
+        return REPORT_SECONDS if self._report_seconds is None else self._report_seconds
+
+    def _first_retry(self) -> float:
+        return FIRST_RETRY_SECONDS if self._first_seconds is None else self._first_seconds
+
     def tick(self) -> float:
         """One report; the seconds to wait before the next."""
         from . import net
+
+        report = self._cadence()
 
         try:
             document = self._source.build()
         except Unusable as problem:
             self._say("no_report " + problem.word)
-            return REPORT_SECONDS if self.reports else min(FIRST_RETRY_SECONDS, REPORT_SECONDS)
+            return report if self.reports else min(self._first_retry(), report)
         self.reports += 1
         if self._directory is not None:
             try:
@@ -476,9 +491,9 @@ class Reporter(threading.Thread):
             except OSError as error:
                 self._say("not_written " + type(error).__name__)
         if not self._posting or self._post is None:
-            return REPORT_SECONDS
+            return report
         if self._halt.is_set():  # stopped while building: the container has exited, post nothing
-            return REPORT_SECONDS
+            return report
         try:
             self._post(document)
         except net.HttpFailure as failure:
@@ -488,14 +503,14 @@ class Reporter(threading.Thread):
                 return float(max(RETRY_AFTER_MIN, min(RETRY_AFTER_MAX, asked)))
             if failure.retryable:
                 self._say("post_failed " + failure.word)
-                return REPORT_SECONDS
+                return report
             self._posting = False
             self._say("posts_stopped " + net.describe(failure))
-            return REPORT_SECONDS
+            return report
         self.posted += 1
         if self.posted == 1:
             self._say("first_report_accepted")
-        return REPORT_SECONDS
+        return report
 
     def run(self) -> None:
         while not self._halt.is_set():
@@ -503,5 +518,5 @@ class Reporter(threading.Thread):
                 wait = self.tick()
             except Exception as error:  # noqa: BLE001 - a report never fails the job
                 self._say("report_error " + type(error).__name__)
-                wait = REPORT_SECONDS
+                wait = self._cadence()
             self._halt.wait(wait)

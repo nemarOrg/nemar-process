@@ -334,7 +334,12 @@ def _do_work(
         # It never touches the container and never fails the job.
         state.progress_source = progress.Source(state.layout.work)
         reporter: progress.Reporter | None = progress.Reporter(
-            state.progress_source, state.layout.launcher, steps.post, log
+            state.progress_source,
+            state.layout.launcher,
+            steps.post,
+            log,
+            first_seconds=steps.first_seconds,
+            report_seconds=steps.report_seconds,
         )
         started = time.monotonic()
         try:

@@ -393,3 +393,21 @@ def test_a_report_built_after_stop_is_never_posted(tmp_path, routes, fast):
     reporter.tick()
     assert callbacks.progress_requests == []
     assert (launcher / "progress.json").exists()  # the file is still written for a runner
+
+
+def test_a_reporter_keeps_the_cadence_it_was_given(tmp_path):
+    """The standalone entry asks for its own cadence (a first read every 0.1 s, then every 10 s); a
+    reporter given none keeps the module's constants."""
+    outputs = tmp_path / "outputs"
+    launcher = tmp_path / "launcher"
+    outputs.mkdir()
+    launcher.mkdir()
+    source = progress.Source(str(outputs.parent))
+    reporter = progress.Reporter(
+        source, str(launcher), None, Lines(), first_seconds=0.1, report_seconds=10.0
+    )
+    assert reporter.tick() == 0.1
+    write_run(outputs)
+    assert reporter.tick() == 10.0
+    plain = progress.Reporter(source, str(launcher), None, Lines())
+    assert plain.tick() == progress.REPORT_SECONDS
