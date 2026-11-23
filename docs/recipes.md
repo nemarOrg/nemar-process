@@ -613,6 +613,7 @@ A job on the GPU protects the people who share it, after the resolution as well:
 - **Contention.** Right after the job first initializes CUDA it reads how much of the GPU's memory is neither free nor reserved by its own allocator (what other processes hold, plus its own CUDA context: `total - free - torch.cuda.memory_reserved(0)` from `torch.cuda.mem_get_info(0)`).
   Before each later fit on the GPU it reads the same quantity again; growth of more than 256 MiB (a constant, which the dataset record states as `gpu_contention_mib`) moves that recording and every later one of the job to the CPU.
   A fit already running is never interrupted.
+  The quantity also counts what the job itself holds outside torch's allocator besides its context (kernels and library workspaces CUDA loads on first use), so part of a growth after the first fit can be the job's own; how large that part is on a GPU is not yet measured.
 
 A move is for the rest of the job, and nothing returns a job to the GPU.
 A recording moved by an earlier one, or moving itself, states the move's event as its `device_reason` (`cuda_oom` or `gpu_contended`) and `fallback` true, and the dataset record lists each move in `fallbacks` as the event, the recording's position among those the run started (from 0) and its path, at the moment it is made, so a move made in a recording that then fails is still listed.
