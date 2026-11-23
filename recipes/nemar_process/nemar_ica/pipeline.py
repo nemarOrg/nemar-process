@@ -4,10 +4,18 @@ and ICLabel. Every numerical step is an eegprep call, and no file is read or wri
 The chain (docs/recipes.md): the floor's own chain with its parameters (its decisions are this
 record's first steps; the bad channels it found are already removed from its working copy);
 ``clean_asr`` with its state kept; ``pop_reref`` to the average; ``pop_runica`` with the engine
-asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``. A step that raises ends the
-recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
-and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
-ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-device auto``, that runs
+asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``.
+
+On the Zarr serving copy (a loaded recording that kept the store's counts, ``Loaded.serving``) the
+floor decides and nothing else: the decomposition's input is rebuilt from the store's level-0 counts
+of the floor's good channels, in store row order (``serving_input``: the values the store holds, in
+microvolts, which no filter of the floor touched), ASR is a skip with the reason ``serving_input``,
+and the average reference, the fit and ICLabel are the same calls. The record states which input was
+fitted (``decomposition_input``).
+
+A step that raises ends the recording with that step named; a decomposition that comes out
+degenerate ends it ``ica_degenerate`` and one whose ASR state could not reproduce its data ends it
+``asr_maxmem``, and a recording that ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-device auto``, that runs
 out of the GPU's memory: it is fitted again on the CPU with every setting the same (``decompose``;
 the run's state decides, ``tally``).
 
@@ -23,7 +31,7 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -46,6 +54,10 @@ from nemar_process.nemar_floor import steps as floor_steps
 from nemar_process.nemar_ica import engines, steps, tally
 from nemar_process.nemar_ica.options import Settings
 
+if TYPE_CHECKING:
+    from nemar_process.common.plan import Plan
+    from nemar_process.common.zarr_input import ServingRows
+
 # eegprep's ICLabel network, the file the classification reads (hashed into the record).
 ICLABEL_WEIGHTS = "netICL.mat"
 
@@ -53,8 +65,8 @@ ICLABEL_WEIGHTS = "netICL.mat"
 @dataclass
 class Decomposition:
     """What the recording came to, in memory: the floor's result with the plan extended, the final
-    EEG dictionary (ASR-repaired, average-referenced, decomposed, classified) and what the record
-    states about the fit.
+    EEG dictionary (ASR-repaired, or the serving copy's rows, then average-referenced, decomposed,
+    classified: its ``data`` is what the fit was given) and what the record states about the fit.
 
     ``fit`` is the engine's own account of the run: for pAMICA ``EEG['etc']['pamica']`` whole, as
     eegprep wrote it; for the binary what eegprep read of its output (``stop_reason`` and
@@ -68,13 +80,17 @@ class Decomposition:
     resolution: device.Resolution
     good_channels: list[str]
     rank: int
-    asr_text: str
-    asr_sha256: str
-    asr: dict[str, Any]
+    # ASR's state as canonical text, its digest and what the record says of it; None on the serving
+    # copy, where ASR does not run
+    asr_text: str | None
+    asr_sha256: str | None
+    asr: dict[str, Any] | None
     fit: dict[str, Any]
     classes: list[str]
     probabilities: np.ndarray
     variance_pct: list[float]
+    # what the fit was given (``archive_input`` or ``serving_input``)
+    decomposition_input: dict[str, Any]
     iclabel: dict[str, Any] = field(default_factory=dict)
 
 
@@ -177,6 +193,66 @@ def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
     ):
         raise RecordingError(STEP_FAILED, "asr", steps.ASR_MAXMEM_DETAIL)
     return repaired, canonical_text(state_to_json(state))
+
+
+def archive_input(plan: Plan) -> dict[str, Any]:
+    """What the fit was given on a dataset directory: the floor's working copy, ASR-repaired.
+
+    ``filters`` names each filter of the floor that ran on that copy, in the order it ran (the drift
+    high-pass and every line-noise band-stop the plan holds as a step); their parameters are those
+    steps'.
+    """
+    filtering = (floor_steps.DRIFT_FUNCTION, floor_steps.BAND_STOP_FUNCTION)
+    return {
+        "source": steps.ARCHIVE_SOURCE,
+        "asr": True,
+        "filters": [
+            {"step": step.step_id, "function": step.function}
+            for step in plan.steps
+            if step.function in filtering
+        ],
+    }
+
+
+def serving_input(
+    eeg: dict[str, Any], serving: ServingRows, result: floor.FloorResult, good: list[str]
+) -> dict[str, Any]:
+    """Put the serving copy's values of the floor's good channels in ``eeg['data']``; what the record
+    says of them.
+
+    The rows are the floor's good channels in store row order: the signal channels the floor kept,
+    each at its row of the store (the loaded recording has the store's rows in order, and the floor
+    removes channels without moving the others). Their labels must be the working copy's channels,
+    else the recording fails (``internal_error``, ``serving_rows_mismatch``). The floor's filtered
+    samples are dropped before the rows are built (one float64 copy at a time), and the rows are the
+    store's values as ``nemar.store-content.v1`` defines them, in microvolts
+    (``ServingRows.microvolts``): no filter, no ASR, every sample.
+    """
+    rows = [
+        row
+        for row, kept in zip(result.signal_indices, result.kept_final, strict=True)
+        if bool(kept)
+    ]
+    if [serving.labels[row] for row in rows] != good:
+        raise RecordingError(INTERNAL_ERROR, "reref", steps.SERVING_ROWS_MISMATCH)
+    eeg["data"] = None
+    data = serving.microvolts(rows)
+    if data.shape != (len(good), int(eeg["pnts"])):
+        raise RecordingError(INTERNAL_ERROR, "reref", steps.SERVING_ROWS_MISMATCH)
+    eeg["data"] = data
+    return {
+        "source": steps.SERVING_SOURCE,
+        "store": {
+            "path": serving.path,
+            "group": serving.group,
+            "content_sha256": serving.content_sha256,
+        },
+        "channels": steps.SERVING_CHANNELS,
+        "reference": steps.REREF_REFERENCE,
+        "unit": steps.SERVING_UNIT,
+        "asr": False,
+        "filters": [],
+    }
 
 
 def amica15_account(eeg: dict[str, Any]) -> dict[str, Any]:
@@ -291,7 +367,11 @@ def process(
     resolution: device.Resolution,
     path: str | None = None,
 ) -> Decomposition:
-    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``.
+    """Run the recipe on a loaded recording. Consumes ``loaded.eeg`` and ``loaded.serving``.
+
+    A loaded recording with kept counts (``loaded.serving``, the Zarr serving copy) is decomposed
+    from them (``serving_input``) and skips ASR; any other is decomposed from the floor's working
+    copy after ASR.
 
     ``resolution`` is the device the recording starts on (``device.resolve``, then ``tally.begin``).
     With the recording's ``path`` in the run, the run decides right before the fit where it runs
@@ -299,6 +379,7 @@ def process(
     fitted again on the CPU (``decompose``); the call, the record and the count state the device that
     ran it (``Decomposition.resolution``).
     """
+    serving = loaded.take_serving()  # the store's counts on the serving copy; None on the archive
     result = floor.process(loaded, recipe_id=steps.RECIPE_ID, recipe_version=steps.RECIPE_VERSION)
     plan = result.plan
     # the floor's decisions have the hash they would have had as the floor's own plan
@@ -323,37 +404,48 @@ def process(
     with guarded("iclabel_locations"):
         check_locations(eeg)
 
-    # ASR, keeping the state that reproduces it
-    with guarded("asr"):
-        eeg, asr_text = asr_repair(eeg)
-        asr_sha256 = hashlib.sha256(asr_text.encode("utf-8")).hexdigest()
-        state = json.loads(asr_text)
-        asr = {
-            "maxmem_mb": steps.ASR_MAXMEM_MB,
-            "state_sha256": asr_sha256,
-            "window_len_s": state["window_len"],
-            "step_size": state["step_size"],
-            "cutoff": state["cutoff"],
-            "max_dims": state["max_dims"],
-            "channels": state["channels"],
-        }
-        plan.add_step(
-            "asr",
-            steps.ASR_FUNCTION,
-            asr_parameters(),
-            description=steps.DESCRIPTIONS["asr"],
-            quality={
-                "stateSha256": asr_sha256,
-                "windowLenS": state["window_len"],
-                "stepSize": state["step_size"],
-                "channelsNamed": state["channels"] is not None,
-            },
-        )
+    # ASR, keeping the state that reproduces it; on the serving copy, a skip
+    asr_text: str | None = None
+    asr_sha256: str | None = None
+    asr: dict[str, Any] | None = None
+    if serving is not None:
+        plan.add_skip("asr", steps.ASR_FUNCTION, steps.ASR_SKIP_SERVING)
+    else:
+        with guarded("asr"):
+            eeg, asr_text = asr_repair(eeg)
+            asr_sha256 = hashlib.sha256(asr_text.encode("utf-8")).hexdigest()
+            state = json.loads(asr_text)
+            asr = {
+                "maxmem_mb": steps.ASR_MAXMEM_MB,
+                "state_sha256": asr_sha256,
+                "window_len_s": state["window_len"],
+                "step_size": state["step_size"],
+                "cutoff": state["cutoff"],
+                "max_dims": state["max_dims"],
+                "channels": state["channels"],
+            }
+            plan.add_step(
+                "asr",
+                steps.ASR_FUNCTION,
+                asr_parameters(),
+                description=steps.DESCRIPTIONS["asr"],
+                quality={
+                    "stateSha256": asr_sha256,
+                    "windowLenS": state["window_len"],
+                    "stepSize": state["step_size"],
+                    "channelsNamed": state["channels"] is not None,
+                },
+            )
 
-    # the average reference
+    # the average reference, of the serving copy's rows when they were kept
     with guarded("reref"):
         from eegprep import pop_reref
 
+        if serving is not None:
+            decomposition_input = serving_input(eeg, serving, result, good)
+            del serving  # the counts are not needed after the rows are built
+        else:
+            decomposition_input = archive_input(plan)
         eeg = pop_reref(eeg, [])
         if eeg.get("ref") != steps.REREF_REFERENCE:
             raise RecordingError(INTERNAL_ERROR, "reref", "not_average")
@@ -371,11 +463,12 @@ def process(
             resolution = tally.before_fit(path, resolution)
         eeg, fit, resolution, call = decompose(eeg, settings, resolution, rank, path)
         variance = component_variance(eeg, rank)
+        on_serving = decomposition_input["source"] == steps.SERVING_SOURCE
         plan.add_step(
             "ica",
             steps.ICA_FUNCTION,
             call,
-            description=steps.DESCRIPTIONS["ica"],
+            description=(steps.SERVING_DESCRIPTIONS if on_serving else steps.DESCRIPTIONS)["ica"],
             quality={
                 "engine": settings.engine,
                 "rank": rank,
@@ -413,5 +506,6 @@ def process(
         classes=classes,
         probabilities=probabilities,
         variance_pct=variance,
+        decomposition_input=decomposition_input,
         iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
     )

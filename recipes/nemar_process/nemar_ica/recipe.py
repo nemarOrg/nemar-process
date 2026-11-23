@@ -5,6 +5,11 @@
 are: one name, one version, one label, one set of steps, the input an argument. The Zarr input block
 (``stores``, ``stores_content``, ``stores_unread``, ``input_digest``) is written by the same common
 code as the floor's (``common/zarr_input.py``), never a copy of it.
+
+The two inputs differ in what the decomposition is given (``steps.py``, ``pipeline.py``): the Zarr
+input keeps the store's level-0 counts when it reads a recording and decomposes the floor's good
+channels as stored, with no ASR and no filter, and its descriptions say so (``outputs.SERVING_INFO``,
+``steps.SERVING_DESCRIPTIONS``).
 """
 
 from __future__ import annotations
@@ -63,30 +68,28 @@ DISTRIBUTIONS = (
 
 
 def dataset_steps_with_load(
-    load_function: str, load_parameters: dict[str, Any]
+    load_function: str,
+    load_parameters: dict[str, Any],
+    descriptions: Mapping[str, str] = steps.DESCRIPTIONS,
 ) -> list[DatasetStep]:
     """The recipe's steps with their recipe-level parameters: a constant, never read from a recording.
 
-    The floor's steps (with the input's load step) and the four of this recipe. The decomposition's
+    The floor's steps (with the input's load step) and the four of this recipe, described by
+    ``descriptions`` (the serving copy's say that ASR does not run there). The decomposition's
     settings that a run chooses (the engine, the device, the threads and the iterations) are not
     constants and are stated in the record's ``ica_run``, never here.
     """
+    described = {**steps.DESCRIPTIONS, **descriptions}
     return [
         *floor.steps_with_load(load_function, load_parameters),
-        DatasetStep(
-            "asr", steps.ASR_FUNCTION, pipeline.asr_parameters(), steps.DESCRIPTIONS["asr"]
-        ),
-        DatasetStep(
-            "reref", steps.REREF_FUNCTION, pipeline.reref_parameters(), steps.DESCRIPTIONS["reref"]
-        ),
-        DatasetStep(
-            "ica", steps.ICA_FUNCTION, {"reorder": steps.REORDER}, steps.DESCRIPTIONS["ica"]
-        ),
+        DatasetStep("asr", steps.ASR_FUNCTION, pipeline.asr_parameters(), described["asr"]),
+        DatasetStep("reref", steps.REREF_FUNCTION, pipeline.reref_parameters(), described["reref"]),
+        DatasetStep("ica", steps.ICA_FUNCTION, {"reorder": steps.REORDER}, described["ica"]),
         DatasetStep(
             "iclabel",
             steps.ICLABEL_FUNCTION,
             pipeline.iclabel_parameters(),
-            steps.DESCRIPTIONS["iclabel"],
+            described["iclabel"],
         ),
     ]
 
@@ -99,7 +102,9 @@ def dataset_steps() -> list[DatasetStep]:
 def zarr_dataset_steps() -> list[DatasetStep]:
     """The recipe's steps on the Zarr serving copy (eegprep-lean's whole-recording read loads it)."""
     return dataset_steps_with_load(
-        zarr_input.LOAD_FUNCTION, zarr_input.load_parameters(zarr_input.DEFAULT_MAX_BYTES)
+        zarr_input.LOAD_FUNCTION,
+        zarr_input.load_parameters(zarr_input.DEFAULT_MAX_BYTES),
+        steps.SERVING_DESCRIPTIONS,
     )
 
 
@@ -135,9 +140,10 @@ def zarr_run_recording(
     *,
     loaded: io.Loaded | None = None,
 ) -> RecordingProduct:
-    """Read the store whole (unless a loaded recording is handed in, as tests do), process, write."""
+    """Read the store whole, keeping its level-0 counts for the decomposition's input (unless a loaded
+    recording is handed in, as tests do), process, write."""
     source = context.source
-    loaded = loaded if loaded is not None else source.load(recording.path)
+    loaded = loaded if loaded is not None else source.load(recording.path, keep_counts=True)
     return outputs.produce(
         recording,
         context,
@@ -199,6 +205,7 @@ BIDS_RECIPE = Recipe(
 
 ZARR_RECIPE = replace(
     BIDS_RECIPE,
+    info=outputs.SERVING_INFO,
     dataset_steps=zarr_dataset_steps,
     run_recording=zarr_run_recording,
     options=(*options.OPTIONS, *zarr_recipe.OPTIONS),
@@ -206,4 +213,5 @@ ZARR_RECIPE = replace(
     dataset_extras=zarr_dataset_extras,
 )
 """``nemar-ica --input zarr``: every EEG store of a dataset's Zarr serving copy (EEG resampled to
-250 Hz at most, 16 bit), not the archived recordings, and the records say so."""
+250 Hz at most, 16 bit), not the archived recordings, decomposed as stored (the floor's good
+channels, no ASR, no filter), and the records say so."""

@@ -119,6 +119,30 @@ ASR_MAXMEM_DETAIL = "asr_maxmem"
 ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 
+# What the decomposition is fitted on (docs/recipes.md, "The decomposition input"), stated in the
+# record's `extensions.nemar.ica.decomposition_input`. On a dataset directory (`archive`): the floor's
+# working copy (its filters applied, its bad channels removed), repaired by ASR. On the Zarr serving
+# copy (`serving_copy`): the store's level-0 values of the floor's good channels, in store row order,
+# in microvolts, with no ASR, no filter and no repair of bad windows; ASR is a skip with the reason
+# `serving_input` (a skip, so the plan hash says which input was fitted), and the average reference
+# and every later step are the same. The fit uses every sample on both.
+ARCHIVE_SOURCE = "archive"
+SERVING_SOURCE = "serving_copy"
+SERVING_CHANNELS = "floor_good_channels"
+SERVING_UNIT = "uV"  # eegprep's unit, which eegprep-lean's to_eeg converts the store's to
+ASR_SKIP_SERVING = "serving_input"
+# A recording whose kept counts are not the rows of the floor's good channels (a fault in the recipe).
+SERVING_ROWS_MISMATCH = "serving_rows_mismatch"
+SOURCES = {ARCHIVE_SOURCE: INPUT_PROFILES["bids"], SERVING_SOURCE: INPUT_PROFILES["zarr"]}
+# The descriptions the serving copy's records give instead of DESCRIPTIONS' (no ASR repaired its data).
+SERVING_DESCRIPTIONS = {
+    "asr": "Not run on the serving copy: each recording records it as skipped (serving_input)",
+    "ica": (
+        "Decompose the floor's good channels of the serving copy, average-referenced, "
+        "with no ASR and no filter, into independent components"
+    ),
+}
+
 
 def rank_of(n_good: int) -> int:
     """The rank of the decomposition: one less than the good channels (the average reference takes
