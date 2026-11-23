@@ -55,13 +55,13 @@ A pushed tag is never moved: to correct a release, raise the version and tag aga
 
 - Feature work goes through pull requests into `dev` and never touches a version.
 - To release, open a pull request from `dev` into `main` and merge it with a merge commit once `bump-validator`, `release-gate` and `ci` are green.
-- To cut a new minor or major version, an administrator runs `uv run python scripts/bump_version.py minor` (or `major`) on a clean checkout of `dev` and pushes the commit directly, using the bypass that the bot also has.
+- To cut a new minor or major version, the `release-bot` team's member runs `uv run python scripts/bump_version.py minor` (or `major`) on a clean checkout of `dev` and pushes the commit directly, using the `release-bot` team's bypass.
   The commit starts with `chore: bump version to`, which `auto-bump-dev.yml` skips.
   This is the only manual bump; run it before the release pull request, never as part of it.
 - To push to `dev` without a bump, put `[skip-bump]` in the head commit's message.
 - A hotfix cannot be released through a pull request into `main`, and this is deliberate, a difference from nemar-cli: no pull request except `dev` into `main` may change the version, so a branch off `main` cannot carry the bump that releases it.
   Put the fix on `dev` and release `dev` (the normal path).
-  When that cannot wait, merge the fix into `main` by pull request (it releases nothing, and reaches `dev` at the next sync), then an administrator runs `uv run python scripts/bump_version.py X.Y.Z` on `main` with the next patch version and pushes it directly with the bypass: `auto-tag.yml` tags a version without a suffix as it is.
+  When that cannot wait, merge the fix into `main` by pull request (it releases nothing, and reaches `dev` at the next sync), then the `release-bot` team's member runs `uv run python scripts/bump_version.py X.Y.Z` on `main` with the next patch version and pushes it directly with the `release-bot` team's bypass: `auto-tag.yml` tags a version without a suffix as it is.
   Merge `main` into `dev` afterwards if `dev` has not yet passed that version.
 
 ```bash
@@ -87,7 +87,7 @@ Asking for the version already in place prints `already at <version>` and makes 
   Pushing the merge as a person means `auto-bump-dev.yml` will add a bump after it, which is harmless.
 - **A release that did not happen.** `auto-tag.yml` fails in its `bot-head` job, naming a `-devN` version on `main`: the release pull request was merged by rebase.
   Nothing was tagged.
-  An administrator runs `uv run python scripts/bump_version.py X.Y.Z` on `main` (the version without its suffix) and pushes it directly with the bypass; the workflow then tags it as it is.
+  The `release-bot` team's member runs `uv run python scripts/bump_version.py X.Y.Z` on `main` (the version without its suffix) and pushes it directly with the `release-bot` team's bypass; the workflow then tags it as it is.
 - **`auto-bump-dev.yml` warns that its push was rejected.** A person pushed first; that push started the workflow again.
 - **A re-run of any of these** is safe: each step checks what already exists, and none moves or reuses a tag.
 
@@ -106,9 +106,9 @@ So the protection below is load-bearing, not tidiness: branch protection on `dev
 - An environment named `release` that **holds the secret** (not the repository), with deployment branches and tags limited to `main`, `dev` and `v*` tags.
   The three bot jobs declare `environment: release`; a repository secret would be readable by any workflow on any branch a writer pushes, and a pushed `v*` tag runs that tag's own copy of `sync-dev.yml`.
 - `main`: a pull request required, with the checks `lint` (from `lint.yml`), `static`, `launcher (python 3.9)`, `launcher (python 3.12)`, `recipes` (from `ci.yml`), `bump-validator` and `release-gate` required; **merge commits only** (no squash, no rebase); code owner review required.
-- `dev`: a pull request required, with the checks `lint` (from `lint.yml`), `static`, `launcher (python 3.9)`, `launcher (python 3.12)`, `recipes` (from `ci.yml`) and `bump-validator` required; the `release-bot` team may bypass for the bump commits. `docker backend (end to end)` runs but is not required.
+- `dev`: a pull request required, with the checks `lint` (from `lint.yml`), `static`, `launcher (python 3.9)`, `launcher (python 3.12)`, `recipes` (from `ci.yml`) and `bump-validator` required; the `release-bot` team may bypass for the bump commits. `docker backend (end to end)` runs but is not required; code owner review required.
 - A tag rule on `v*` that only the `release-bot` team may create, update or delete.
-- A tag rule on `nemar-runner-v*` that only the owners may create, update or delete, and code owner review on `scripts/build_runner_bundle.py`, `deploy/runner/` and `runner/nemar_runner/install.py`: a workstation trusts a bundle that this workflow signed for such a tag, so who can push the tag and who can change what it builds are who can change what runs on a workstation.
+- A tag rule on `nemar-runner-v*` that only the owners may create, update or delete (not set yet; an owner item on nemarOrg/nemar-process#9), and code owner review on `scripts/build_runner_bundle.py`, `deploy/runner/` and `runner/nemar_runner/install.py`: a workstation trusts a bundle that this workflow signed for such a tag, so who can push the tag and who can change what it builds are who can change what runs on a workstation.
   Whether releases are immutable, and the tag rulesets that go with them, are part of the owner items recorded on nemarOrg/nemar-process#9.
 
 Merging the pull request that introduced this automation does not tag anything, because it does not change `pyproject.toml`.
