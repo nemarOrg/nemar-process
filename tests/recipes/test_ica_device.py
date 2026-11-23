@@ -394,9 +394,8 @@ def test_a_recording_that_fails_is_in_no_device_count(cli, tmp_path, no_runner):
         ("failed", "iclabel_no_locations"),
     ]
     nemar = dataset_record_of(out)
-    assert nemar["devices"] == {
-        "cpu": 1
-    }  # the failed recording ran on the CPU too, and wrote nothing
+    # the failed recording started on the CPU too, and wrote nothing, so it is in no count
+    assert nemar["devices"] == {"cpu": 1}
     assert nemar["counts"]["succeeded"] == 1
     assert nemar["counts"]["failed"] == 1
 
