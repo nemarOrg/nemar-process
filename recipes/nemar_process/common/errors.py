@@ -11,6 +11,8 @@ import contextlib
 import re
 from typing import Final, Literal
 
+from nemar_process.common import progress
+
 Status = Literal["failed", "skipped"]
 Code = Literal[
     "load_failed",
@@ -138,6 +140,7 @@ def guarded(step_id: str):
     CUDA out-of-memory error, or an error whose chain holds one, is ``out_of_memory`` with the detail
     ``cuda``, so that a record tells a full GPU from a full host.
     """
+    progress.step_started(step_id)  # the run's local progress file says which step runs
     try:
         yield
     except RecordingError:

@@ -14,6 +14,7 @@ Abbreviations: continuous integration (CI), JavaScript Object Notation (JSON), S
 | The observation document `nemar.observation.v1` the observer posts to NEMAR: a JSON Schema (draft 2020-12, every object closed) derived from `observer/observe.py`, and the two documents the observer wrote (a `quick` and a `daily` one) | `shared/contract/compute-observation.schema.json`, `test/fixtures/compute-observation/{quick,daily}.v1.json` | `observer/schema/observation-v1.schema.json`, byte for byte; `tests/observer/fixtures/observation-{quick,daily}.v1.json`, byte for byte |
 | The table of wire cases: about five hundred values of `NEMAR_LAUNCH_SPEC`, each with the answer the contract gives (every rule, every edge, the order of the rules) | nemar-cli's `decodeLaunchSpecEnv`, written out by `scripts/gen_wire_cases.ts` | `tests/launcher/fixtures/wire_cases.json`, replayed by `tests/launcher/test_wire_cases.py` |
 | The golden vectors: the JSON text and its digest, and the environment value (1022 and 842 characters, the second holding `-` and `_`) and its digest | nemar-cli's `test/compute-contract.unit.test.ts` | `tests/launcher/test_golden.py` |
+| The live progress object `nemar.progress.v1` (ADR 0134): a JSON Schema (draft 2020-12, every object closed), and the counting vectors (input rows, the outcomes and counts nemar-cli's rules give for them, and each recipe version's checkpoint map) | `shared/contract/compute-progress.schema.json`, `shared/contract/compute-progress-vectors.json` | `launcher/schema/compute-progress.v1.json`, byte for byte; `tests/contract/compute-progress-vectors.json`, byte for byte |
 
 Never edit the schema copy here.
 Change it in nemar-cli, then bump the pin.
@@ -107,3 +108,41 @@ NEMAR_CLI_OBSERVATION_DIR="$NEMAR_CLI" NEMAR_REQUIRE_OBSERVATION_DRIFT=1 uv run 
 If the observer's output changed, regenerate the fixtures with `NEMAR_WRITE_OBSERVATION_FIXTURES=1 uv run pytest tests/observer/test_observation_schema.py`, change the schema in nemar-cli, and copy all three back.
 The observer's own file, `observer/observe.py`, is inside the digest recorded in the application (`notes.observer_sha256`), so a change to what it emits is a new observer version.
 The pinned commit must stay reachable from a branch or tag of nemar-cli; when the change lands on the compute epic branch or `dev`, bump the pin to the commit there that holds the same files.
+
+## The live progress contract
+
+A NEMAR pipeline job reports its progress while it runs (ADR 0134): the launcher builds the closed `nemar.progress.v1` object from the recipe's local progress file and its recordings table, and sends it to `POST /compute/jobs/<id>/progress` on Tapis, or leaves it for the runner, which carries it on its heartbeat ([progress.md](progress.md)).
+The schema and the counting vectors are written in nemar-cli and copied here; the launcher's counting rules are a port of nemar-cli's `shared/compute-checkpoints.ts` and replay the vectors.
+
+It has its own pin, `tests/contract/nemar-cli-progress-pin.json`, apart from the launch specification's.
+It records the nemar-cli commit, and the SHA-256 and size of the schema and of the vectors.
+The commit is on nemar-cli's pipeline progress epic branch (`feature/issue-2324-epic-pipeline-progress`): it stays reachable once that epic is merged into `dev` with a merge commit, and the pin then moves to the `dev` commit that holds the same bytes (only `ref` changes).
+
+- `test_each_copy_is_the_pinned_bytes` needs no checkout and always runs.
+- `test_each_copy_matches_nemar_cli_at_the_pinned_ref` and the constant tests compare with nemar-cli's own files at the pinned commit through `git show`, using a checkout named by `NEMAR_CLI_PROGRESS_DIR` or a `nemar-cli` directory beside this checkout.
+  Without one they skip with a message that says the check did not run.
+  In CI the `launcher` job checks out exactly the pinned commit (sparse, `shared/` and the job-token callbacks) and sets `NEMAR_REQUIRE_PROGRESS_DRIFT=1`, which turns that skip into a failure.
+- An advisory CI job, `nemar-cli-progress-latest` (in `nemar-cli-drift.yml`), warns without failing when nemar-cli's epic branch has changed the schema, the vectors, the counting rules, the recipe checkpoint maps or the runner schema since the pinned commit (or when the comparison cannot be made).
+
+### Bumping the progress pin
+
+The progress pin and the runner pin move together: the runner schema refers to the progress schema by its `$id`, and `test_the_runner_pin_names_the_same_commit` fails when their `ref`s differ.
+So a bump copies the runner schema too, even when only the progress contract changed:
+
+```bash
+NEMAR_CLI=/path/to/nemar-cli          # a checkout that contains the new commit
+REF=<the new nemar-cli commit, 40 hex digits>
+git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress.schema.json" > launcher/schema/compute-progress.v1.json
+git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress-vectors.json" > tests/contract/compute-progress-vectors.json
+git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-runner.schema.json" > runner/schema/compute-runner.v1.json
+shasum -a 256 launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json
+wc -c launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json
+# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of the schema and the vectors
+# edit tests/contract/nemar-cli-runner-pin.json: the same ref, and the sha256 and bytes of the runner schema
+NEMAR_CLI_PROGRESS_DIR="$NEMAR_CLI" NEMAR_REQUIRE_PROGRESS_DRIFT=1 \
+NEMAR_CLI_RUNNER_DIR="$NEMAR_CLI" NEMAR_REQUIRE_RUNNER_DRIFT=1 \
+  uv run pytest tests/contract
+```
+
+Use `${REF}` with braces: in zsh, `"$REF:shared"` reads `:s` as a history modifier.
+A recipe whose version or checkpoint map changes needs nemar-cli's registry and vectors to change with it, and this pin to move: the Worker refuses a report whose checkpoints differ from the recipe version's (`checkpoints_differ`).

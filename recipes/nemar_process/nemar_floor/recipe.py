@@ -89,4 +89,5 @@ BIDS_RECIPE = Recipe(
     dataset_steps=dataset_steps,
     run_recording=outputs.run_recording,
     options=(INPUT_OPTION,),
+    checkpoints=steps.CHECKPOINTS,
 )

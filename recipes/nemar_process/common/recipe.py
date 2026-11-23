@@ -12,6 +12,7 @@ list of steps the dataset record states, and the function that processes one rec
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,50 @@ KINDS: tuple[Kind, ...] = get_args(Kind)
 # What a recipe can read: a dataset directory (``bids``) or NEMAR's Zarr serving copy (``zarr``).
 Input = Literal["bids", "zarr"]
 INPUTS: tuple[Input, ...] = get_args(Input)
+
+
+# The checkpoints a recipe may declare, in the order it declares the ones it has (ADR 0134 decision 2);
+# `stored` follows them and only the backend sets it, so a recipe never declares it. The names and the
+# limits are the progress contract's (launcher/schema/compute-progress.v1.json).
+STANDARD_CHECKPOINTS = ("import", "preprocess", "ica", "iclabel", "quality", "figures")
+STORED_CHECKPOINT = "stored"
+MAX_CHECKPOINTS = 8
+CHECKPOINT_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+STEP_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+Checkpoints = tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def check_checkpoints(checkpoints: Checkpoints) -> None:
+    """Refuse a checkpoint map the progress contract cannot carry: none or more than eight checkpoints,
+    a name that is not a standard one or out of the standard order, `stored`, a name or step the
+    contract's patterns refuse, an empty checkpoint, or a step in more than one checkpoint."""
+    if not 1 <= len(checkpoints) <= MAX_CHECKPOINTS:
+        raise ValueError("a recipe declares between 1 and 8 checkpoints")
+    names = [name for name, _steps in checkpoints]
+    if STORED_CHECKPOINT in names:
+        raise ValueError("stored is set by NEMAR's backend, never declared by a recipe")
+    for name in names:
+        if not CHECKPOINT_RE.fullmatch(name) or name not in STANDARD_CHECKPOINTS:
+            raise ValueError("checkpoint {!r} is not a standard checkpoint".format(name))
+    order = [STANDARD_CHECKPOINTS.index(name) for name in names]
+    if order != sorted(order) or len(set(order)) != len(order):
+        raise ValueError("checkpoints are declared once each, in the standard order")
+    seen: set[str] = set()
+    for name, steps in checkpoints:
+        if not steps:
+            raise ValueError("checkpoint {!r} has no step".format(name))
+        for step in steps:
+            if not STEP_RE.fullmatch(step):
+                raise ValueError("step {!r} is not a step word".format(step))
+            if step in seen:
+                raise ValueError("step {!r} is in more than one checkpoint".format(step))
+            seen.add(step)
+
+
+def flatten(checkpoints: Checkpoints) -> tuple[str, ...]:
+    """The steps of a checkpoint map, in its order."""
+    return tuple(step for _name, steps in checkpoints for step in steps)
 
 
 @dataclass(frozen=True)
@@ -229,6 +274,9 @@ class Recipe:
       and its variants (``reading``). A variant has none of its own.
     * ``dataset_extras``: keys added to ``extensions.nemar`` of the dataset record, read after the
       last recording (what a recipe that reads a remote source says about it).
+    * ``checkpoints``: the coarse stages the recipe reports live progress at (ADR 0134 decision 2),
+      each with the steps that belong to it (``check_checkpoints``). Empty: the recipe writes no
+      progress file and its jobs report job-level states only. A variant carries the same map.
     """
 
     info: RecipeInfo
@@ -244,8 +292,11 @@ class Recipe:
     input: Input = "bids"
     dataset_extras: Callable[[RunContext], dict[str, Any]] = _no_record_extras
     variants: tuple[Recipe, ...] = ()
+    checkpoints: Checkpoints = ()
 
     def __post_init__(self) -> None:
+        if self.checkpoints:
+            check_checkpoints(self.checkpoints)
         identity = (self.info.id, self.info.version, self.info.label)
         kinds = [self.input]
         for variant in self.variants:
@@ -255,6 +306,8 @@ class Recipe:
                 )
             if variant.variants:
                 raise ValueError("a variant has no variants of its own")
+            if variant.checkpoints != self.checkpoints:
+                raise ValueError("a variant reports progress at the same checkpoints")
             kinds.append(variant.input)
         if len(set(kinds)) != len(kinds):
             raise ValueError(

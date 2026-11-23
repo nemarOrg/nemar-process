@@ -130,6 +130,7 @@ ZARR_RECIPE = Recipe(
     options=OPTIONS,
     input="zarr",
     dataset_extras=dataset_extras,
+    checkpoints=steps.CHECKPOINTS,
 )
 """The floor on the Zarr input: every EEG store of a dataset's serving copy (EEG resampled to 250 Hz,
 16 bit), not the archived recordings, and the records say so. Nothing is downloaded to disk."""

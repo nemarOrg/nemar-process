@@ -58,6 +58,8 @@ What the operator supplies and does is in [`docs/operator.md`](docs/operator.md)
 The launch specification schema `launcher/schema/launch-spec.v1.json` is copied byte for byte from nemar-cli's `shared/contract/compute-launch.schema.json`.
 Never edit it here: change it in nemar-cli, then bump the pin described in `docs/contracts.md`.
 The seven failure codes and exit numbers 10 to 16 in `launcher/nemar_launch/codes.py` are nemar-cli's list in nemar-cli's order.
+The live progress schema `launcher/schema/compute-progress.v1.json` and the counting vectors `tests/contract/compute-progress-vectors.json` are copied byte for byte from nemar-cli too (ADR 0134), pinned by `tests/contract/nemar-cli-progress-pin.json`; the runner schema is pinned at the same commit, and the launcher's counting rules (`launcher/nemar_launch/checkpoints.py`) are a port of nemar-cli's that replays its vectors.
+A recipe's `CHECKPOINTS` beside `STEP_ORDER` is nemar-cli's registry map for the same recipe version: changing either is a change on both sides and a bump of that pin.
 The environment value `NEMAR_LAUNCH_SPEC` is the base64url encoding of the document's JSON text, decoded strictly by `launcher/nemar_launch/spec.py` (`docs/launcher.md`); a digest is over the text, never over the value, and a refusal is `invalid_spec`, never a new code.
 
 ### Never hand-bump a version, never set a secret, never touch production

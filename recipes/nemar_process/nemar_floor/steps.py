@@ -36,6 +36,33 @@ STEP_ORDER = (
     "qc",
 )
 
+# The checkpoints the floor reports progress at (ADR 0134 decision 2): each step belongs to exactly one,
+# in STEP_ORDER's order. A literal, like STEP_ORDER: nemar-cli's registry holds the same map for this
+# recipe version (shared/compute-recipes.ts), and tests/contract/test_checkpoint_maps.py compares this
+# text with the pinned vectors. A change of either is a new recipe version on both sides.
+CHECKPOINTS = (
+    ("import", ("load", "signal_channels")),
+    (
+        "preprocess",
+        (
+            "flatline",
+            "drift",
+            "line_noise_measure",
+            "line_noise_50",
+            "line_noise_60",
+            "qc_amplitude",
+            "bad_channels",
+            "bad_windows",
+        ),
+    ),
+    ("quality", ("qc",)),
+)
+
+# Step ids that are not steps of the record but name where a recording can end: a measurement or a check
+# made early, under its own id so a recording it refuses is counted where it stopped (ADR 0134). They are
+# in CHECKPOINTS and not in STEP_ORDER (the record's processing steps are unchanged).
+PRE_CHECKS = ("qc_amplitude",)
+
 DESCRIPTIONS = {
     "load": "Load recording",
     "signal_channels": "Select the channels typed EEG",

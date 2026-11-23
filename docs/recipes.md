@@ -415,6 +415,15 @@ Equality across hosts is claimed only as far as it was observed.
 The fixture's decisions (masks, channel statuses, segment rows, applied filters, the plan hash) were generated on macOS arm64 and reproduced by continuous integration on a hosted Linux x86-64 runner (`tests/recipes/test_golden_decisions.py`).
 Floats were not compared across hosts, and no other architecture was run.
 
+### The local progress file
+
+A recipe that declares checkpoints (ADR 0134; `CHECKPOINTS` beside `STEP_ORDER` in its `steps.py`, printed by `nemar-recipe version`) writes one small file while it runs, when `NEMAR_OUT` is set and `--out` is inside it but is not `NEMAR_OUT` itself (the file is never written into the product tree): `$NEMAR_OUT/.nemar-progress/progress.json` (`common/progress.py`).
+It is outside the product tree, so it never reaches a derivative, and it is removed when the run ends, after the dataset record is written.
+It holds the format word `nemar.recipe-progress.v1`, the recipe's id and version, its checkpoint map, the recordings table's path relative to `NEMAR_OUT`, the number of recordings the run found (each of them gets exactly one row), and the running recording with the step it is in (`errors.guarded` notes each step as it starts).
+It is written to a temporary file and moved into place, so a reader never sees half of one; a write that fails turns it off for the rest of the run with one line on standard error (`progress_file_disabled`), and no recording ever fails because of it.
+The recipe opens no connection for it: the launcher reads it from outside the container and reports from it ([progress.md](progress.md)).
+A run killed before its end leaves the directory in the outputs, where it is uploaded like any other output file and never stored as a derivative.
+
 ## The fixture
 
 `tests/fixtures/eeg/` holds one real recording and its sidecars (see its README for the source, the license and the checksums).
@@ -682,8 +691,8 @@ A merge of product directories (`aggregate`) ran no recording and states none of
 | `failed` | `step_failed` | `asr_maxmem` (step `asr`) | ASR's memory budget would depend on the machine (above) |
 | `failed` | `ica_degenerate` | `PamicaFitError` (step `ica`) | pAMICA stopped on a degenerate reason and set no field |
 | `failed` | `out_of_memory` | `cuda` (step `ica`) | the fit ran out of the GPU's memory under an explicit `--ica-device cuda` (under `auto` it is fitted again on the CPU instead, above) |
-| `skipped` | `ica_ineligible` | `rank_too_low` (step `ica`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
-| `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
+| `skipped` | `ica_ineligible` | `rank_too_low` (step `ica_eligibility`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
+| `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel_locations`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
 | `failed` | `step_failed` | the exception's class (step `iclabel`) | ICLabel raised after the fit |
 
 `asr_maxmem` and `ica_degenerate` are deterministic failures; the transient ones (`out_of_memory`, `internal_error`, `disk_error`, `time_budget`) name only transient failures.
@@ -704,7 +713,7 @@ Neither length runs `nemar-ica` through `nemar-launch`: these runs are `apptaine
 
 ICLabel needs a scalp map of each component, and eegprep's `topoplot` raises when no channel has a finite theta and radius.
 On the Zarr input eegprep-lean fills each recording's channel locations from the positions its store declares (see the Zarr section of the floor above), so ICLabel maps the components of every recording with at least one located channel.
-A recording with none (a store that declares no positions, one whose unit or coordinate system eegprep-lean refuses, or a dataset directory whose channels have no locations) ends `step_failed` at `iclabel` with the detail `iclabel_no_locations`; on the Zarr input the dataset record says why, in `reader_locations` under the store's path (the reader's `reason`, or null for a store that declares no positions), because the recording itself writes no record.
+A recording with none (a store that declares no positions, one whose unit or coordinate system eegprep-lean refuses, or a dataset directory whose channels have no locations) ends `step_failed` at the pre-check `iclabel_locations` (counted at `preprocess`) with the detail `iclabel_no_locations`; on the Zarr input the dataset record says why, in `reader_locations` under the store's path (the reader's `reason`, or null for a store that declares no positions), because the recording itself writes no record.
 The precondition is eegprep's own rule, which the owner decided to keep: any one located channel passes, and the floor's `locations-usable` guard (at least half of the channels and at least four, with rank 3) decides only its RANSAC branch and is not applied to ICLabel.
 The recipe finds a recording with none right after the floor, before ASR and the fit, by calling `topoplot` on the working copy's channels as ICLabel calls it (one value per channel, so the rule is eegprep's own and cannot drift from it; the error is recognized by its class), and writes nothing for the recording: a fit of up to 2000 iterations is not run to be discarded.
 ICLabel is neither skipped nor removed; the owner decided that a recording it cannot classify fails.

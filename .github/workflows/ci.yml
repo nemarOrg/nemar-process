@@ -55,6 +55,14 @@ jobs:
       NEMAR_REQUIRE_SYSTEMD: "1"
       NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
       NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
+      # The live progress contract (ADR 0134): the schema and vectors copies and the constants are
+      # compared with nemar-cli at the progress pin; a missing checkout fails, never skips.
+      NEMAR_REQUIRE_PROGRESS_DRIFT: "1"
+      NEMAR_CLI_PROGRESS_DIR: ${{ github.workspace }}/.nemar-cli-progress
+      # The runner protocol schema is pinned at the same commit (it refers to the progress schema), so
+      # the same checkout serves its drift test, which is required here too.
+      NEMAR_REQUIRE_RUNNER_DRIFT: "1"
+      NEMAR_CLI_RUNNER_DIR: ${{ github.workspace }}/.nemar-cli-progress
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -81,6 +89,22 @@ jobs:
             /test/compute-contract.unit.test.ts
             /package.json
             /bun.lock
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Read the nemar-cli pin of the progress contract
+        id: progress-pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-progress-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the progress and runner contracts are compared with its own)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.progress-pin.outputs.ref }}
+          path: .nemar-cli-progress
+          sparse-checkout: |
+            /shared/
+            /backend/src/routes/callbacks/compute-job-callbacks.ts
           sparse-checkout-cone-mode: false
           fetch-depth: 1
 

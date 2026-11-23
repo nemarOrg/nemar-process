@@ -22,6 +22,39 @@ RECIPE_VERSION = "1.0.0-b1"
 
 STEP_ORDER = ("asr", "reref", "ica", "iclabel")
 
+# The checkpoints nemar-ica reports progress at (ADR 0134 decision 2), over the whole run: the floor's
+# steps it re-runs first, then its own. The floor's `qc`, re-run here as preparation for the
+# decomposition, is `preprocess`; so are ASR and the re-reference. A literal, like the floor's:
+# nemar-cli's registry holds the same map, and tests/contract/test_checkpoint_maps.py compares this text
+# with the pinned vectors.
+CHECKPOINTS = (
+    ("import", ("load", "signal_channels")),
+    (
+        "preprocess",
+        (
+            "flatline",
+            "drift",
+            "line_noise_measure",
+            "line_noise_50",
+            "line_noise_60",
+            "qc_amplitude",
+            "bad_channels",
+            "bad_windows",
+            "qc",
+            "ica_eligibility",
+            "iclabel_locations",
+            "asr",
+            "reref",
+        ),
+    ),
+    ("ica", ("ica",)),
+    ("iclabel", ("iclabel",)),
+)
+
+# Step ids that are not steps of the record but name where a recording can end (the floor's, and the two
+# checks nemar-ica makes before ASR): counted at `preprocess`, in CHECKPOINTS and not in STEP_ORDER.
+PRE_CHECKS = ("qc_amplitude", "ica_eligibility", "iclabel_locations")
+
 DESCRIPTIONS = {
     "asr": "Repair bursts with artifact subspace reconstruction, keeping its calibration state",
     "reref": "Re-reference to the average of the good channels",
@@ -81,7 +114,8 @@ AMICA15_SHA256 = "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b
 # Why a recording ends here, in the table's `detail` (the dataset record's `reason`).
 ASR_MAXMEM_DETAIL = "asr_maxmem"
 # A recording whose channels have no location cannot be classified (ICLabel maps each component on
-# the scalp), and it ends here, at the step `iclabel`, before ASR and the fit.
+# the scalp), and it ends here, at the pre-check `iclabel_locations` (counted at `preprocess`), before
+# ASR and the fit.
 ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 

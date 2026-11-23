@@ -31,6 +31,10 @@ from recipe_support import (
 from repo_paths import LOCK, PYPROJECT, RECIPES, ROOT, SMOKE
 
 IMAGE_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "PYTHONHASHSEED": "0"}
+PROGRESS_VECTORS = json.loads(
+    (ROOT / "tests" / "contract" / "compute-progress-vectors.json").read_text(encoding="utf-8")
+)
+PINNED_FLOOR_CHECKPOINTS = PROGRESS_VECTORS["maps"]["nemar-floor"]["checkpoints"]
 
 
 CPUFIT = "ab" * 32  # a SHA-256 reading, never a gate
@@ -58,6 +62,7 @@ def expected_document(flavor: str = "cpu", no_gpu: bool = False) -> dict:
             "version": {
                 "recipes": {"nemar-floor": PINNED_RECIPE_VERSION},
                 "inputs": {"nemar-floor": ["bids", "zarr"]},
+                "checkpoints": {"nemar-floor": PINNED_FLOOR_CHECKPOINTS},
                 "common": PINNED_COMMON_VERSION,
                 "eegprep": PINNED_EEGPREP_TEXT,
                 "python": "3.12.16",
@@ -956,3 +961,18 @@ def test_a_failing_ldd_fails_the_smoke(runtime_python, tmp_path):
     )
     assert done.returncode != 0
     assert "ldd" in done.stderr
+
+
+def test_the_recipe_command_must_print_the_pinned_checkpoint_maps():
+    """A recipe the image registers with another version or checkpoint map than nemar-cli's (the progress
+    pin's vectors) reports progress the Worker refuses: the image check fails on it (ADR 0134)."""
+    assert pins.check(expected_document(), PYPROJECT, LOCK) == []
+    missing = copy.deepcopy(expected_document())
+    del missing["recipe_command"]["version"]["checkpoints"]
+    assert any("checkpoint maps" in p for p in pins.check(missing, PYPROJECT, LOCK))
+    moved = copy.deepcopy(expected_document())
+    moved["recipe_command"]["version"]["checkpoints"]["nemar-floor"][0]["steps"].append("drift")
+    assert any("checkpoint map of nemar-floor" in p for p in pins.check(moved, PYPROJECT, LOCK))
+    bumped = copy.deepcopy(expected_document())
+    bumped["recipe_command"]["version"]["recipes"]["nemar-floor"] = "1.0.0-b2"
+    assert any("bump the progress pin" in p for p in pins.check(bumped, PYPROJECT, LOCK))

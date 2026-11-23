@@ -39,7 +39,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from . import bundle, net, provenance, run, runtime, spec, stage, upload
+from . import bundle, net, progress, provenance, run, runtime, spec, stage, upload
 from .codes import (
     ENV_SLURM_JOB_ID,
     ENV_SPEC,
@@ -255,12 +255,30 @@ def _do_work(
             if container is None
             else functools.partial(runtime.oom_killed, runtime_path, container, env)
         )
+        # live progress (ADR 0134) beside the container: written to launcher/progress.json, where a
+        # runner reads it for its heartbeat, and on Tapis (no lease) posted to the job-token route.
+        # It never touches the container and never fails the job.
+        reporter: progress.Reporter | None = progress.Reporter(
+            progress.Source(state.layout.work),
+            state.layout.launcher,
+            None
+            if state.lease is not None
+            else progress.poster(job.api_base, job.job_id, job.job_token),
+            log,
+        )
         started = time.monotonic()
+        try:
+            reporter.start()
+        except RuntimeError:  # no thread to be had: the job runs, without live progress
+            log.warning("progress_reporter_not_started")
+            reporter = None
         try:
             outcome = run.run_container(
                 argv, env, state.layout.work, terminator, log, oom_check=oom_check
             )
         finally:
+            if reporter is not None:
+                reporter.stop()
             state.phase("run", started)
             if container is not None:
                 runtime.remove_container(runtime_path, container, env)

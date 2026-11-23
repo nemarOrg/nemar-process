@@ -81,7 +81,7 @@ def test_a_store_without_electrode_locations_fails_before_the_fit_and_leaves_no_
     assert (row["status"], row["code"], row["step"], row["detail"]) == (
         "failed",
         "step_failed",
-        "iclabel",
+        "iclabel_locations",
         "iclabel_no_locations",
     )
     assert not [p for p in out.rglob("*") if p.is_file() and p.name.startswith("sub-")]

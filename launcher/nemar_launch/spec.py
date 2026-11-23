@@ -93,6 +93,7 @@ _LEAF = {
     "minItems",
     "maxItems",
     "maxProperties",
+    "minProperties",
     "required",
 }
 _SUBSCHEMA = {
@@ -106,7 +107,7 @@ _SUBSCHEMA = {
     "additionalProperties",
 }
 _SCHEMA_MAPS = {"properties", "$defs"}
-_SCHEMA_LISTS = {"allOf", "oneOf"}
+_SCHEMA_LISTS = {"allOf", "oneOf", "anyOf"}
 
 
 def check_schema_keywords(schema: Any, where: str = "#") -> None:
@@ -214,6 +215,8 @@ def _walk(schema: Any, value: Any, path: str, errors: list[str]) -> None:
     if isinstance(value, dict):
         if "maxProperties" in schema and len(value) > schema["maxProperties"]:
             errors.append("{}: maxProperties".format(here))
+        if "minProperties" in schema and len(value) < schema["minProperties"]:
+            errors.append("{}: minProperties".format(here))
         for name in schema.get("required", []):
             if name not in value:
                 errors.append("{}: required {}".format(here, name))
@@ -238,6 +241,8 @@ def _walk(schema: Any, value: Any, path: str, errors: list[str]) -> None:
     if "allOf" in schema:
         for sub in schema["allOf"]:
             _walk(sub, value, path, errors)
+    if "anyOf" in schema and not any(_valid(sub, value) for sub in schema["anyOf"]):
+        errors.append("{}: anyOf".format(here))
     if "oneOf" in schema:
         matching = sum(1 for sub in schema["oneOf"] if _valid(sub, value))
         if matching != 1:
@@ -254,6 +259,30 @@ def _valid(schema: Any, value: Any) -> bool:
     found: list[str] = []
     _walk(schema, value, "", found)
     return not found
+
+
+def inline_refs(schema: Any, root: Any, depth: int = 0) -> Any:
+    """``schema`` with every ``{"$ref": "#/$defs/<name>"}`` replaced by that definition of ``root``, so
+    the validator, which implements no reference, can read a schema written with ``$defs`` (the live
+    progress schema). A reference to anything else, a ``$ref`` beside other keywords, or nesting deeper
+    than 32 levels is refused with ``SchemaError``."""
+    if depth > 32:
+        raise SchemaError("references nest too deep")
+    if isinstance(schema, list):
+        return [inline_refs(item, root, depth + 1) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if len(schema) != 1 or not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+            raise SchemaError("only a lone local #/$defs reference is supported")
+        name = ref[len("#/$defs/") :]
+        if "/" in name or name not in root.get("$defs", {}):
+            raise SchemaError("an unknown definition is referenced")
+        return inline_refs(root["$defs"][name], root, depth + 1)
+    return {
+        key: inline_refs(value, root, depth + 1) for key, value in schema.items() if key != "$defs"
+    }
 
 
 def validate(instance: Any, schema: Any) -> list[str]:

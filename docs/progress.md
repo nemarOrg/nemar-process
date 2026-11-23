@@ -1,9 +1,9 @@
 # Checkpoints and progress
 
-**Planned, not built.**
-This page describes the checkpoints and the live progress that nemar-cli ADR 0134 decides on.
-Today no recipe declares checkpoints, `nemar-recipe version` prints no checkpoint map, and the runner heartbeat carries only a phase (`started` or `uploading`, [runner.md](runner.md)).
-Where this page and the implementation disagree once it lands, the implementation and its tests win and this page is corrected.
+**Built** (epic nemarOrg/nemar-cli#2324, Phase 3): each recipe declares its checkpoint map beside `STEP_ORDER` and `nemar-recipe version` prints it; the recipe layer writes a local progress file ([recipes.md](recipes.md), "The local progress file"); the launcher builds the live progress object and reports it ([launcher.md](launcher.md), "Live progress"); the runner carries it on its heartbeat ([runner.md](runner.md)).
+The contract is pinned at nemar-cli's Phase 2 commit ([contracts.md](contracts.md), "The live progress contract").
+The standalone mode of the launcher (decision 8, a person's own machine with no NEMAR service) is still planned (nemarOrg/nemar-process#67).
+Where this page and the implementation disagree, the implementation and its tests win and this page is corrected.
 
 Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), artifact subspace reconstruction (ASR), quality control (QC).
 
@@ -36,12 +36,12 @@ A dataset's cell for a checkpoint is `passed/total`, where the total is the numb
 
 ### `nemar-floor`
 
-From `STEP_ORDER` in `recipes/nemar_process/nemar_floor/steps.py`:
+From `STEP_ORDER` and `PRE_CHECKS` in `recipes/nemar_process/nemar_floor/steps.py`:
 
 | Step | Checkpoint |
 |---|---|
 | `load`, `signal_channels` | `import` |
-| `flatline`, `drift`, `line_noise_measure`, `line_noise_50`, `line_noise_60`, `bad_channels`, `bad_windows` | `preprocess` |
+| `flatline`, `drift`, `line_noise_measure`, `line_noise_50`, `line_noise_60`, `qc_amplitude`, `bad_channels`, `bad_windows` | `preprocess` |
 | `qc` | `quality` |
 
 ### `nemar-ica`
@@ -51,12 +51,15 @@ From `STEP_ORDER` in `recipes/nemar_process/nemar_floor/steps.py`:
 | Step | Checkpoint |
 |---|---|
 | the floor's `load`, `signal_channels` | `import` |
-| the floor's `flatline` to `qc`, then `asr`, `reref` | `preprocess` |
+| the floor's `flatline` to `qc`, then `ica_eligibility`, `iclabel_locations`, `asr`, `reref` | `preprocess` |
 | `ica` | `ica` |
 | `iclabel` | `iclabel` |
 
 The floor's steps that `nemar-ica` re-runs, its `qc` included, are preparation for the decomposition here, and so are ASR and the average reference;
-all of them count as `preprocess`, so `quality` follows the decomposition.
+all of them count as `preprocess`, so `nemar-ica` has no `quality` checkpoint (the quality metrics of the decomposition are not built yet; [plugins.md](plugins.md)).
+
+A pre-check is a check or a measurement made early, under its own step id, so a recording it refuses is counted where it stopped: the floor's `qc_amplitude` (the robust amplitude, measured before bad channels go) and nemar-ica's `ica_eligibility` (the rank) and `iclabel_locations` (a scalp map is possible), both before ASR.
+Each counts at `preprocess`, and none is a step of the record: they are `PRE_CHECKS` beside `STEP_ORDER` in the recipe's `steps.py`, not part of it, so a recording that ends at one never counts as having passed `quality`, `ica` or `iclabel`.
 
 ## Live progress
 
