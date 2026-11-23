@@ -465,6 +465,25 @@ A regular expression, or a glob that backs up to an earlier `*`, can take expone
 A manifest path that could leave the dataset directory is refused before anything is downloaded.
 A SIGTERM during staging stops it: the entry does not run and the staging record does not claim files were staged.
 
+## Live progress
+
+While the entry runs, the launcher reports the job's live progress (ADR 0134 decision 3), the closed `nemar.progress.v1` object of the pinned contract ([contracts.md](contracts.md)): which checkpoint the run is at, and, per checkpoint, how many recordings passed, failed and were skipped of all the run found, with the ten most recent failures (path, code, step, checkpoint).
+It is built from two files the recipe writes under `NEMAR_OUT` (the host's `work/outputs`): the recipe's progress file, `.nemar-progress/progress.json` ([recipes.md](recipes.md)), and its recordings table.
+The counts follow nemar-cli's counting rules, ported in `nemar_launch/checkpoints.py` and replayed against nemar-cli's vectors, over the recordings that have ended; the total is every recording the run found.
+
+Both files are written by the container, so neither is trusted: each is opened one path component at a time without following a link, the last one without blocking (a FIFO is refused, never waited on), it must be a regular file under its cap (64 KiB for the progress file, 64 MiB for the table), its JSON is read strictly, and only the table's complete lines are read.
+Nothing read from them is logged; a recording path the contract cannot carry is left out of the failures and still counted; and before anything is written or sent the object must pass the schema copy and the rules no schema can state.
+When there is no progress file (an entry that is not a recipe that declares checkpoints), there is no report and the job's states are as before (ADR 0134 decision 8).
+
+A thread beside the container builds the object once a minute (the first as soon as it can be built) and writes it to `launcher/progress.json`, replacing the file in one step.
+On Tapis (no lease), it also posts it to `POST <api_base>/compute/jobs/<job_id>/progress` with the job token, never following a redirect, with a 15-second timeout.
+A 429 waits what its `Retry-After` asks (between 1 and 600 seconds, 60 when it says nothing); a 5xx, a timeout or a network fault tries again at the next report; any other refusal stops the posts for the rest of the job.
+Under a runner (a lease) nothing is posted: the runner reads `launcher/progress.json` and carries it on its heartbeat ([runner.md](runner.md)).
+A report never fails the job: every fault is caught and logged once, as a fixed word.
+`launcher/progress.json` is not one of the four launcher files and is never uploaded.
+
+Deploy order: the Worker that accepts the route and the heartbeat's `progress` field (nemar-cli's Phase 2 of epic nemarOrg/nemar-cli#2324) goes out before a launcher or runner that sends them; an older Worker refuses the route (the posts stop) and the heartbeat field (the runner then sends plain heartbeats).
+
 ## After the entry exits
 
 The launcher reads `work` back with the container gone.

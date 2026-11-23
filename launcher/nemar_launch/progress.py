@@ -35,7 +35,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import checkpoints as rules
@@ -321,3 +322,114 @@ def write_report(directory: str, document: Mapping[str, Any], counter: itertools
         with contextlib.suppress(OSError):
             os.unlink(temporary)
         raise
+
+
+# ---- reporting while the container runs ---------------------------------------------------------------
+
+# The cadence (seconds), the contract's: one report a minute. Tests make them short.
+REPORT_SECONDS: float = rules.PROGRESS_REPORT_SECONDS
+FIRST_RETRY_SECONDS: float = (
+    5.0  # until the first object can be built (the recipe is still starting)
+)
+POST_TIMEOUT_SECONDS = 15.0
+RETRY_AFTER_MIN, RETRY_AFTER_MAX = 1, 600
+ROUTE = "{}/compute/jobs/{}/progress"
+
+
+def route_url(api_base: str, job_id: str) -> str:
+    return ROUTE.format(api_base.rstrip("/"), job_id)
+
+
+def poster(api_base: str, job_id: str, token: str) -> Callable[[dict[str, Any]], None]:
+    """Post one report to the job-token route (a Tapis job: no lease, no redirect, a short timeout)."""
+    from . import net
+
+    url = route_url(api_base, job_id)
+
+    def post(document: dict[str, Any]) -> None:
+        net.post_json(url, document, token, timeout=POST_TIMEOUT_SECONDS)
+
+    return post
+
+
+class Reporter(threading.Thread):
+    """Builds and reports the live progress object while the container runs.
+
+    Each tick builds the object (``Source.build``), writes ``launcher/progress.json`` (a runner carries
+    it on its heartbeat) and, when ``post`` is given (a Tapis job), posts it. The next tick is a cadence
+    later; a 429 waits what its ``Retry-After`` asks (1 to 600 seconds, 60 when it says nothing); a 5xx,
+    a timeout or a network fault tries again at the next tick; any other refusal (the route refused the
+    job, the body, or its state) stops the posts for the rest of the job. Nothing a tick does can fail
+    the job: every fault is caught and logged once per word, with no value read from a file, no address
+    and no token.
+    """
+
+    def __init__(
+        self,
+        source: Source,
+        directory: str | None,
+        post: Callable[[dict[str, Any]], None] | None,
+        log: Any,
+    ) -> None:
+        super().__init__(name="progress-reporter", daemon=True)
+        self._source, self._directory, self._post, self._log = source, directory, post, log
+        self._halt = threading.Event()
+        self._counter = itertools.count()
+        self._said: set[str] = set()
+        self._posting = post is not None
+        self.reports = 0  # objects built and written
+        self.posted = 0  # posts the route accepted
+
+    def stop(self) -> None:
+        self._halt.set()
+        if self.is_alive():
+            self.join(2.0)
+
+    def _say(self, word: str) -> None:
+        if word not in self._said:
+            self._said.add(word)
+            self._log.info("progress: {}".format(word))
+
+    def tick(self) -> float:
+        """One report; the seconds to wait before the next."""
+        from . import net
+
+        try:
+            document = self._source.build()
+        except Unusable as problem:
+            self._say("no_report " + problem.word)
+            return REPORT_SECONDS if self.reports else min(FIRST_RETRY_SECONDS, REPORT_SECONDS)
+        self.reports += 1
+        if self._directory is not None:
+            try:
+                write_report(self._directory, document, self._counter)
+            except OSError as error:
+                self._say("not_written " + type(error).__name__)
+        if not self._posting or self._post is None:
+            return REPORT_SECONDS
+        try:
+            self._post(document)
+        except net.HttpFailure as failure:
+            if failure.status == 429:
+                self._say("report_too_soon")
+                asked = failure.retry_after if failure.retry_after is not None else 60
+                return float(max(RETRY_AFTER_MIN, min(RETRY_AFTER_MAX, asked)))
+            if failure.retryable:
+                self._say("post_failed " + failure.word)
+                return REPORT_SECONDS
+            self._posting = False
+            self._say("posts_stopped " + net.describe(failure))
+            return REPORT_SECONDS
+        self.posted += 1
+        if self.posted == 1:
+            self._say("first_report_accepted")
+        return REPORT_SECONDS
+
+    def run(self) -> None:
+        while not self._halt.is_set():
+            try:
+                wait = self.tick()
+            except Exception as error:  # noqa: BLE001 - a report never fails the job
+                self._say("report_error " + type(error).__name__)
+                wait = REPORT_SECONDS
+            self._halt.wait(wait)
