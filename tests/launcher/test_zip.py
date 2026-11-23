@@ -56,6 +56,7 @@ def test_the_script_is_at_the_root_and_executable_and_the_member_list_is_the_lau
             "lib/nemar_launch/spec.py",
             "lib/nemar_launch/stage.py",
             "lib/nemar_launch/upload.py",
+            "lib/nemar_launch/verify.py",
             "lib/schema/compute-local-launch.v1.json",
             "lib/schema/compute-progress.v1.json",
             "lib/schema/compute-recipe-progress.v1.json",
