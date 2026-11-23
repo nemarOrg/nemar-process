@@ -222,3 +222,42 @@ def test_the_semver_pattern_is_nemar_clis():
     found = re.search(r"export const RUNNER_SEMVER_RE =\s*/\^(.*)\$/;", source)
     assert found
     assert found.group(1).replace("\\.", r"\.") == contract.SEMVER_PATTERN
+
+
+# ---- the heartbeat carries the live progress object (ADR 0134) -----------------------------------------
+
+
+def test_the_heartbeat_progress_is_the_progress_schemas_object_by_its_id():
+    progress_pin = json.loads(
+        (ROOT / "tests" / "contract" / "nemar-cli-progress-pin.json").read_text()
+    )
+    progress = json.loads((ROOT / progress_pin["schema"]["copy"]).read_text(encoding="utf-8"))
+    field = DEFS["RunnerHeartbeatRequest"]["properties"]["progress"]
+    assert field == {"$ref": progress["$id"] + "#/$defs/Progress"}
+    assert "progress" not in DEFS["RunnerHeartbeatRequest"]["required"]
+    # one nemar-cli commit wrote both: the runner schema names the progress schema the pin copies
+    assert progress_pin["ref"] == PIN["ref"]
+
+
+def test_the_test_validator_resolves_the_progress_reference():
+    """``runner_support.violations`` follows the ``$id`` reference into the progress copy, so a stand-in
+    that checks heartbeats refuses a closed object with an extra key, as the Worker does."""
+    import runner_support as rs
+
+    base = {"job_id": "job_" + "a" * 24, "lease_id": "b" * 32, "phase": "started"}
+    good = {
+        "format": "nemar.progress.v1",
+        "checkpoint": "import",
+        "counts": {"import": {"passed": 1, "failed": 0, "skipped": 0, "total": 2}},
+        "failures": [],
+    }
+    assert rs.check_def("RunnerHeartbeatRequest", base) == []
+    assert rs.check_def("RunnerHeartbeatRequest", dict(base, progress=good)) == []
+    bad = dict(good, extra=1)
+    assert rs.check_def("RunnerHeartbeatRequest", dict(base, progress=bad))
+    wrong_name = dict(good, counts={"Import": good["counts"]["import"]})
+    assert rs.check_def("RunnerHeartbeatRequest", dict(base, progress=wrong_name))
+    open_counts = dict(good, counts={"import": dict(good["counts"]["import"], x=1)})
+    assert rs.check_def("RunnerHeartbeatRequest", dict(base, progress=open_counts))
+    empty = dict(good, counts={})
+    assert rs.check_def("RunnerHeartbeatRequest", dict(base, progress=empty))

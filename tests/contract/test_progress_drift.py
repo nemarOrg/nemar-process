@@ -122,3 +122,9 @@ def test_each_copy_matches_nemar_cli_at_the_pinned_ref(part):
     theirs = at_ref(PIN[part]["source"])
     assert sha256(theirs) == PIN[part]["sha256"]
     assert (ROOT / PIN[part]["copy"]).read_bytes() == theirs
+
+
+def test_the_runner_pin_names_the_same_commit():
+    """The runner schema ``$ref``s the progress schema's ``$id``: both copies come from one commit."""
+    runner = json.loads((ROOT / "tests" / "contract" / "nemar-cli-runner-pin.json").read_text())
+    assert runner["ref"] == PIN["ref"]

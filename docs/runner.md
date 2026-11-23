@@ -646,3 +646,4 @@ The variable keeps the name of the Apptainer gate of the other tests but gates e
 The runner is given a private launch PATH holding `python3` and an `apptainer` wrapper that executes the real binary: the runner's trust check vets the wrapper, not the real Apptainer binary or its directory, and the default launch PATH is not exercised by this test.
 The other jobs deselect the marker.
 The drift test needs a nemar-cli checkout that has the pinned commit (`NEMAR_CLI_RUNNER_DIR`, or a `nemar-cli` directory beside this checkout), and fails instead of skipping when `NEMAR_REQUIRE_RUNNER_DRIFT=1`.
+The `launcher` CI job sets it, with the sparse checkout it makes for the progress pin: the runner schema's heartbeat refers to the live progress schema by its `$id` (ADR 0134), so the two pins name the same nemar-cli commit (`tests/contract/test_progress_drift.py` holds them equal).
