@@ -239,8 +239,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - name: Docker version
         run: docker version
-      - name: Launch end to end (real Docker)
-        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
+      - name: Launch end to end, service and standalone (real Docker)
+        run: uv run --frozen pytest tests/e2e/test_docker_launch.py tests/e2e/test_docker_local.py -m docker -v
 
   static:
     # The former `images` and `deploy` jobs as one required check, in this order: the images group (the
