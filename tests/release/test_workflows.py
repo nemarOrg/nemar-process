@@ -892,6 +892,35 @@ def test_the_tools_a_release_gate_runs_are_the_versions_ci_runs():
         assert gate[key] == ci[key], key
 
 
+SUITES_WITHOUT_THE_RUNNER_STACK = ("tests/release", "tests/images", "tests/recipes")
+
+
+def gate_line_leaves_out_the_runner_stack(line: str) -> bool:
+    """A pytest line of the gate either cannot collect `runner_stack` or deselects it.
+
+    It cannot collect it when every path it names is one of the suites without it, or a single test
+    file that is not the runner stack's; with no path, or a directory that holds tests/e2e, it must carry
+    `not runner_stack`.
+    """
+    if "pytest" not in line:
+        return True
+    if "not runner_stack" in line:
+        return True
+    words = line.split("pytest", 1)[1].split()
+    paths = [w for w in words if w.startswith("tests")]
+    if not paths:
+        return False
+    for path in paths:
+        if path in SUITES_WITHOUT_THE_RUNNER_STACK or path.startswith(
+            tuple(p + "/" for p in SUITES_WITHOUT_THE_RUNNER_STACK)
+        ):
+            continue
+        if path.endswith(".py") and not path.endswith("test_runner_stack.py"):
+            continue
+        return False
+    return True
+
+
 def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_container_tests():
     job = load("release-gate.yml")["jobs"]["release-gate"]
     commands = "\n".join(s.get("run", "") for s in job["steps"]) + "\n"
@@ -907,17 +936,29 @@ def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_conta
         "uv run --frozen --group runtime --extra cpu pytest -q tests/recipes",
         "uv run --frozen --group runtime --extra cpu pytest -q tests/e2e "
         '-m "not apptainer and not docker and not runner_stack"\n',
+        # the docker tests run in no required check of ci.yml (its docker job is not required), so the
+        # gate runs them in a step of their own, where a missing daemon fails instead of skipping
+        "uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker\n",
     ):
         assert needed in commands, needed
+    (docker,) = [s for s in job["steps"] if "test_docker_launch.py" in s.get("run", "")]
+    assert docker["env"] == {"NEMAR_REQUIRE_DOCKER": "1"}
+    assert "continue-on-error" not in docker
+    assert "if" not in docker
     ci = (
         "\n".join(s.get("run", "") for job in load("ci.yml")["jobs"].values() for s in job["steps"])
         + "\n"
     )
     assert '--ignore=tests/images -m "not docker and not runner_stack"\n' in ci
     assert 'tests/e2e -m "not apptainer and not docker and not runner_stack"\n' in ci
-    for line in commands.splitlines():  # no suite of the gate collects tests/e2e without the marker
-        if "pytest" in line and ("tests/e2e" in line or "--ignore=tests/images" in line):
-            assert "not runner_stack" in line, line
+    for line in commands.splitlines():
+        assert gate_line_leaves_out_the_runner_stack(line), line
+    for unsafe in (
+        "uv run pytest -q tests",
+        "uv run pytest -q",
+        "uv run pytest tests/e2e -m docker",
+    ):
+        assert not gate_line_leaves_out_the_runner_stack(unsafe), unsafe
     assert not re.search(r"uv run pytest -q\s*$", commands, re.M)  # the unsplit run that fails
     recipes = next(s for s in job["steps"] if "tests/recipes" in s.get("run", ""))
     assert recipes["env"]["NEMAR_REQUIRE_RUNTIME"] == "1"
