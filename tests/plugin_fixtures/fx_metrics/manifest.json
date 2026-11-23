@@ -1,0 +1,35 @@
+{
+  "format": "nemar.plugin-manifest.v1",
+  "name": "fx-metrics",
+  "version": "0.1.0",
+  "entry": "plugin_fixtures.fx_metrics",
+  "checkpoint": "quality",
+  "reads": {
+    "dataset": false,
+    "recipes": [
+      "nemar-floor"
+    ]
+  },
+  "parameters": {
+    "scale": 2.0,
+    "label": "x"
+  },
+  "outputs": {
+    "metrics": {
+      "fxShare": {
+        "unit": "%",
+        "description": "Share of the fixture kept.",
+        "bounds": {
+          "min": 0,
+          "max": 100
+        },
+        "headline": true
+      },
+      "fxLevel": {
+        "unit": "dB",
+        "description": "Level of the fixture."
+      }
+    },
+    "figures": {}
+  }
+}
