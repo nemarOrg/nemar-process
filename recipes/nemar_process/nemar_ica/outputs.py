@@ -341,11 +341,9 @@ def produce(
     counted on that device only once its product is written.
     """
     settings = Settings.from_options(context.options)
-    slot, resolution = tally.begin(
-        recording.path, device.resolve("cpu" if settings.native else settings.device)
-    )
+    resolution = tally.begin(device.resolve("cpu" if settings.native else settings.device))
     inputs = loaded.inputs
-    fit = pipeline.process(loaded, settings, resolution, slot)
+    fit = pipeline.process(loaded, settings, resolution, recording.path)
     product = write_product(
         recording, context, directory, fit, inputs, profile=profile, nemar_extra=nemar_extra
     )

@@ -235,7 +235,7 @@ def decompose(
     settings: Settings,
     resolution: device.Resolution,
     rank: int,
-    slot: tally.Slot | None,
+    path: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any], device.Resolution, dict[str, Any]]:
     """The fit on ``resolution``'s device: the decomposed EEG, the engine's account, the device that
     ran it and the call it ran with.
@@ -244,15 +244,15 @@ def decompose(
     (``tally.after_failure``: torch's CUDA out-of-memory error, under ``auto``), the GPU memory torch
     cached is handed back and the same data are fitted again with that call on the CPU, only
     ``device`` replaced (``moved_call``). Every other error ends the recording as it would have.
-    ``pop_runica`` fits a copy, so the data of the second fit are those of the first. Without a
-    ``slot`` (a caller outside a run) nothing is moved.
+    ``pop_runica`` fits a copy, so the data of the second fit are those of the first. Without the
+    recording's ``path`` (a caller outside a run) nothing is moved.
     """
     call = decomposition_call(settings, resolution, rank)
     try:
         fitted, fit = run_decomposition(eeg, settings, call)
         return fitted, fit, resolution, call
     except Exception as error:
-        refit = None if slot is None else tally.after_failure(slot, resolution, error)
+        refit = None if path is None else tally.after_failure(path, resolution, error)
         if refit is None:
             raise
     # after the handler, so that nothing still holds the failed fit's memory on the GPU
@@ -287,12 +287,12 @@ def process(
     loaded: Loaded,
     settings: Settings,
     resolution: device.Resolution,
-    slot: tally.Slot | None = None,
+    path: str | None = None,
 ) -> Decomposition:
     """Run the recipe on a loaded recording. Consumes ``loaded.eeg``.
 
     ``resolution`` is the device the recording starts on (``device.resolve``, then ``tally.begin``).
-    With the recording's ``slot`` in the run, the run decides right before the fit where it runs
+    With the recording's ``path`` in the run, the run decides right before the fit where it runs
     (``tally.before_fit``: the cap on the job's GPU memory, contention) and whether a failed fit is
     fitted again on the CPU (``decompose``); the call, the record and the count state the device that
     ran it (``Decomposition.resolution``).
@@ -363,9 +363,9 @@ def process(
 
     # the decomposition, on the device the run holds right before it
     with guarded("ica"):
-        if slot is not None:
-            resolution = tally.before_fit(slot, resolution)
-        eeg, fit, resolution, call = decompose(eeg, settings, resolution, rank, slot)
+        if path is not None:
+            resolution = tally.before_fit(path, resolution)
+        eeg, fit, resolution, call = decompose(eeg, settings, resolution, rank, path)
         variance = component_variance(eeg, rank)
         plan.add_step(
             "ica",

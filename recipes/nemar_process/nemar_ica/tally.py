@@ -3,19 +3,21 @@
 The dataset record states ``devices`` (the recordings that wrote a product, per device) and
 ``fallbacks`` (every move of the job to the CPU), and the command gives a recipe's ``dataset_extras``
 hook the run's context and nothing else, so both are kept here. ``preflight`` starts the run's state
-(the command calls it once, before any recording); each recording takes its place with ``begin``,
-and adds itself to ``devices`` only after it wrote its product (``note``), so a recording that failed
-is in no count, whatever device it started on. A process that merges product directories
-(``aggregate``) runs no recording and has neither: its record states none (``dataset_extras``).
+(the command calls it once, before any recording); each recording starts on the device ``begin``
+gives it, and adds itself to ``devices`` only after it wrote its product (``note``), so a recording
+that failed in the recipe is in no count, whatever device it started on. A process that merges
+product directories (``aggregate``) runs no recording and has neither: its record states none
+(``dataset_extras``).
 
 The moves (docs/recipes.md, ``nemar-ica``): under ``--ica-device auto``, a job on the GPU moves to
 the CPU for the rest of the job when a fit runs out of the GPU's memory (``after_failure``: that
 recording is fitted again on the CPU, with every setting the same) or when other processes took
 memory on the GPU since the job first initialized CUDA (``before_fit``: that recording and every
-later one). The rule is ``device.next_device``; the move is the run's state because every recording
-resolves its device alike (``device.resolve``), and it overrides the resolution of every later one.
-A move is listed when it is made, so a recording that then fails keeps it in ``fallbacks``. An
-explicit ``--ica-device cuda`` is never answered with another device, and the CPU never moves.
+later one). The rule is ``device.next_device``; the move is
+the run's state because every recording resolves its device alike (``device.resolve``), and it
+overrides the resolution of every later one. A move is listed when it is made, so a recording that
+then fails keeps it in ``fallbacks``. An explicit ``--ica-device cuda`` is never answered with
+another device (the device changes only under ``auto``), and the CPU never moves.
 """
 
 from __future__ import annotations
@@ -28,22 +30,12 @@ from nemar_process.common import device
 from nemar_process.common.device import Resolution
 
 
-@dataclass(frozen=True)
-class Slot:
-    """A recording's place in the run: its position among the recordings the run started, from 0,
-    and its path, which a move names."""
-
-    index: int
-    path: str
-
-
 @dataclass
 class _Run:
     devices: Counter[str] = field(default_factory=Counter)
     fallbacks: list[dict[str, Any]] = field(default_factory=list)
     moved: str | None = None  # the event that moved the job to the CPU, if one did
     gpu: device.GpuStart | None = None  # set when the job first initialized CUDA
-    started: int = 0
 
 
 _RUN = _Run()
@@ -55,30 +47,29 @@ def reset() -> None:
     _RUN = _Run()
 
 
-def begin(path: str, resolution: Resolution) -> tuple[Slot, Resolution]:
-    """Give a recording its place, and the device it starts on: its own resolution, unless the job
-    has moved to the CPU, in which case a recording that resolved to the GPU runs on the CPU with the
-    move's event as its reason."""
-    slot = Slot(_RUN.started, path)
-    _RUN.started += 1
+def begin(resolution: Resolution) -> Resolution:
+    """The device a recording starts on: its own resolution, unless the job has moved to the CPU, in
+    which case a recording that resolved to the GPU runs on the CPU with the move's event as its
+    reason."""
     if _RUN.moved is not None and resolution.device == "cuda":
-        resolution = Resolution(resolution.requested, "cpu", _RUN.moved)
-    return slot, resolution
+        return Resolution(resolution.requested, "cpu", _RUN.moved)
+    return resolution
 
 
-def _move(slot: Slot, resolution: Resolution, event: str) -> Resolution | None:
-    """Move the job by ``event`` when the rule says so, and list the move; None when it stays."""
+def _move(path: str, resolution: Resolution, event: str) -> Resolution | None:
+    """Move the job by ``event`` when the rule says so, and list the move; None when it stays (an
+    explicit device, or the CPU)."""
     if resolution.requested != "auto":
         return None
     target = device.next_device(resolution.device, event)
     if target == resolution.device:
         return None
     _RUN.moved = event
-    _RUN.fallbacks.append({"event": event, "index": slot.index, "path": slot.path})
+    _RUN.fallbacks.append({"event": event, "path": path})
     return Resolution(resolution.requested, target, event)
 
 
-def before_fit(slot: Slot, resolution: Resolution) -> Resolution:
+def before_fit(path: str, resolution: Resolution) -> Resolution:
     """The device the recording's fit runs on, decided right before it.
 
     On the GPU, the job's first fit there initializes CUDA, caps the job's memory at the launcher's
@@ -95,24 +86,23 @@ def before_fit(slot: Slot, resolution: Resolution) -> Resolution:
     if resolution.requested == "auto" and device.contended(
         _RUN.gpu.baseline, device.others_bytes()
     ):
-        moved = _move(slot, resolution, device.GPU_CONTENDED)
+        moved = _move(path, resolution, device.GPU_CONTENDED)
         if moved is not None:
             return moved
     return resolution
 
 
-def after_failure(slot: Slot, resolution: Resolution, error: BaseException) -> Resolution | None:
+def after_failure(path: str, resolution: Resolution, error: BaseException) -> Resolution | None:
     """The device to fit the recording again on after its fit raised ``error``, or None to let the
     error fail the recording as it would have.
 
     Only torch's CUDA out-of-memory error, found by its class in the error's chain, under ``auto``
     on the GPU, moves the job (``_move`` and the rule): the recording is fitted again on the CPU,
-    with every setting the same, and so is every later one. Any other error, an explicit device or a
-    fit on the CPU gives None.
+    with every setting the same, and so is every later one. Any other error, an explicit device or a fit on the CPU gives None.
     """
     if not device.holds_cuda_out_of_memory(error):
         return None
-    return _move(slot, resolution, device.CUDA_OOM)
+    return _move(path, resolution, device.CUDA_OOM)
 
 
 def note(ran_on: str) -> None:

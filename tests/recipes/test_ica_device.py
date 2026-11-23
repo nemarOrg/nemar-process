@@ -205,9 +205,10 @@ def test_a_cap_that_is_not_a_whole_number_of_mebibytes_is_a_usage_error_that_ech
 def test_an_out_of_memory_under_auto_moves_that_recording_and_the_rest_of_the_job_to_the_cpu(
     fresh_tally,
 ):
-    slot, resolution = tally.begin("sub-01/eeg/sub-01_task-rest_eeg.set", GPU_IDLE)
-    assert (slot.index, resolution) == (0, GPU_IDLE)  # nothing has moved the job yet
-    refit = tally.after_failure(slot, resolution, wrapped(out_of_memory()))
+    first = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    resolution = tally.begin(GPU_IDLE)
+    assert resolution == GPU_IDLE  # nothing has moved the job yet
+    refit = tally.after_failure(first, resolution, wrapped(out_of_memory()))
     assert refit is not None
     assert (refit.requested, refit.device, refit.reason, refit.fallback) == (
         "auto",
@@ -215,12 +216,10 @@ def test_an_out_of_memory_under_auto_moves_that_recording_and_the_rest_of_the_jo
         "cuda_oom",
         True,
     )
-    assert tally.fallbacks() == [
-        {"event": "cuda_oom", "index": 0, "path": "sub-01/eeg/sub-01_task-rest_eeg.set"}
-    ]
+    assert tally.fallbacks() == [{"event": "cuda_oom", "path": first}]
     # a later recording that resolves to the GPU runs on the CPU, with the move's event as its reason
-    later_slot, later = tally.begin("sub-02/eeg/sub-02_task-rest_eeg.set", GPU_IDLE)
-    assert later_slot.index == 1
+    second = "sub-02/eeg/sub-02_task-rest_eeg.set"
+    later = tally.begin(GPU_IDLE)
     assert (later.requested, later.device, later.reason, later.fallback) == (
         "auto",
         "cpu",
@@ -228,8 +227,8 @@ def test_an_out_of_memory_under_auto_moves_that_recording_and_the_rest_of_the_jo
         True,
     )
     # the CPU never moves: no second move, no contention reading, no GPU touched
-    assert tally.after_failure(later_slot, later, out_of_memory()) is None
-    assert tally.before_fit(later_slot, later) == later
+    assert tally.after_failure(second, later, out_of_memory()) is None
+    assert tally.before_fit(second, later) == later
     assert len(tally.fallbacks()) == 1
     assert tally.gpu_memory_cap_mb() is None  # this job never initialized CUDA
 
@@ -244,31 +243,26 @@ def test_nothing_but_torchs_error_under_auto_on_the_gpu_moves_a_job(fresh_tally)
         (explicit, out_of_memory()),  # an explicit device is never answered with another one
         (on_cpu, out_of_memory()),
     ):
-        slot, begun = tally.begin("sub-01/eeg/sub-01_task-rest_eeg.set", resolution)
-        assert tally.after_failure(slot, begun, error) is None
+        begun = tally.begin(resolution)
+        assert tally.after_failure("sub-01/eeg/sub-01_task-rest_eeg.set", begun, error) is None
     assert tally.fallbacks() == []
     # and a later recording keeps its own resolution
-    assert tally.begin("sub-02/eeg/sub-02_task-rest_eeg.set", GPU_IDLE)[1] == GPU_IDLE
+    assert tally.begin(GPU_IDLE) == GPU_IDLE
 
 
 def test_the_dataset_record_lists_every_move_and_states_the_contention_threshold(fresh_tally):
     context = dataclasses.replace(make_context(), options=RECIPE.option_values({}))
     assert ica_recipe.run_facts(context)["fallbacks"] == []
-    slot, resolution = tally.begin("sub-03/eeg/sub-03_task-rest_eeg.set", GPU_IDLE)
-    tally.after_failure(slot, resolution, out_of_memory())
+    path = "sub-03/eeg/sub-03_task-rest_eeg.set"
+    tally.after_failure(path, tally.begin(GPU_IDLE), out_of_memory())
     facts = ica_recipe.run_facts(context)
     # recorded when the move is made, so a recording that then fails keeps it in the list
-    assert facts["fallbacks"] == [
-        {"event": "cuda_oom", "index": 0, "path": "sub-03/eeg/sub-03_task-rest_eeg.set"}
-    ]
+    assert facts["fallbacks"] == [{"event": "cuda_oom", "path": path}]
     assert facts["devices"] == {}  # nothing wrote a product yet
     assert facts["gpu_contention_mib"] == 256
     tally.reset()
     assert tally.fallbacks() == []
-    assert tally.begin("sub-04/eeg/sub-04_task-rest_eeg.set", GPU_IDLE) == (
-        tally.Slot(0, "sub-04/eeg/sub-04_task-rest_eeg.set"),
-        GPU_IDLE,
-    )
+    assert tally.begin(GPU_IDLE) == GPU_IDLE
 
 
 def test_the_refit_on_the_cpu_passes_every_setting_the_fit_on_the_gpu_passed():
