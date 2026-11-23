@@ -94,6 +94,16 @@ N_MODELS = 1
 N_MIX = 3
 BLOCK_SIZE = 131072
 SEED = 5489
+# AMICA's in-algorithm rejection of improbable samples, on, at AMICA's own defaults (runamica15.m and
+# the Fortran program, as eegprep's runamica table states them): a sample whose log-likelihood is
+# below the mean by more than `rejsig` standard deviations is dropped from the fit, first at
+# iteration `rejstart`, then every `rejint` iterations, `numrej` times in all. pAMICA names the count
+# `maxrej` (its own default is 1, AMICA's is 3); legacy NEMAR never reached its AMICA call.
+REJECT = True
+REJSIG = 3.0
+REJSTART = 2
+REJINT = 3
+NUMREJ = 3
 RANK_CAP = 64
 MIN_RANK = 2
 DEFAULT_MAX_ITER = 2000
@@ -133,7 +143,8 @@ def pamica_call(max_iter: int, device: str, threads: int, rank: int) -> dict[str
     (eegprep applies its ``runamica15`` table to the rest, and the record states every value).
 
     No ``fix_init``: pAMICA 0.4.0's torch backend does not take it; the start is its draw from the
-    fixed seed.
+    fixed seed. The rejection settings are pAMICA's names (``maxrej`` for AMICA's ``numrej``), which
+    ``pop_runica`` hands on unchanged to pAMICA's backend.
     """
     return {
         "n_models": N_MODELS,
@@ -144,6 +155,11 @@ def pamica_call(max_iter: int, device: str, threads: int, rank: int) -> dict[str
         "device": device,
         "threads": threads,
         "pcakeep": rank,
+        "do_reject": REJECT,
+        "rejsig": REJSIG,
+        "rejstart": REJSTART,
+        "rejint": REJINT,
+        "maxrej": NUMREJ,
     }
 
 
@@ -153,7 +169,8 @@ def amica15_call(
     """The keywords ``pop_runica`` gets for the AMICA binary: these and no other.
 
     Never ``seed`` or ``fix_init``: eegprep would write either into the binary's parameter file,
-    and this recipe seeds nothing the binary reads, so a run starts from the clock.
+    and this recipe seeds nothing the binary reads, so a run starts from the clock. The rejection
+    settings are the binary's own names, which eegprep writes into that file (``do_reject`` as 1).
     """
     return {
         "num_models": N_MODELS,
@@ -162,4 +179,9 @@ def amica15_call(
         "pcakeep": rank,
         "max_threads": threads,
         "amica_binary": binary,
+        "do_reject": int(REJECT),
+        "rejsig": REJSIG,
+        "rejstart": REJSTART,
+        "rejint": REJINT,
+        "numrej": NUMREJ,
     }

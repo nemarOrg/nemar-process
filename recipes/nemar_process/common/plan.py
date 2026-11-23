@@ -163,6 +163,13 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "num_mix_comps": "int",
         "max_threads": "int",
         "amica_binary": "str",
+        # AMICA's sample rejection: pAMICA's names (`maxrej`) or the binary's (`numrej`)
+        "do_reject": "bool",
+        "rejsig": "float",
+        "rejstart": "int",
+        "rejint": "int",
+        "maxrej": "int",
+        "numrej": "int",
     },
     "eegprep.pop_iclabel": {"icversion": "str"},
 }

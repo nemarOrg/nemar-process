@@ -935,6 +935,12 @@ PAMICA_KEYS = {
     "device": "cpu",
     "threads": 3,
     "pcakeep": 6,
+    # AMICA's sample rejection at AMICA's defaults, under pAMICA's names
+    "do_reject": True,
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rejint": 3,
+    "maxrej": 3,
 }
 AMICA15_KEYS = {
     "icatype": "runamica15",
@@ -945,6 +951,12 @@ AMICA15_KEYS = {
     "pcakeep": 6,
     "max_threads": 3,
     "amica_binary": "/opt/amica/amica15",
+    # the same rejection under the binary's names
+    "do_reject": 1,
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rejint": 3,
+    "numrej": 3,
 }
 
 
@@ -994,6 +1006,14 @@ def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_fil
     assert seen["max_iter"].strip() == "7"
     assert seen["num_models"].strip() == "1"
     assert seen["pcakeep"].strip() == "6"
+    # AMICA's sample rejection reaches the binary's parameter file at AMICA's defaults
+    assert {key: seen[key].strip() for key in ("do_reject", "numrej", "rejstart", "rejint")} == {
+        "do_reject": "1",
+        "numrej": "3",
+        "rejstart": "2",
+        "rejint": "3",
+    }
+    assert float(seen["rejsig"]) == 3.0
     assert "seed" not in seen  # nothing seeds the binary: it starts from the clock
     assert seen["fix_init"].strip() == "0"  # eegprep's own default, not a setting of the recipe
 
