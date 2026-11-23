@@ -1,9 +1,9 @@
 # Checkpoints and progress
 
-**Planned, not built.**
-This page describes the checkpoints and the live progress that nemar-cli ADR 0134 decides on.
-Today no recipe declares checkpoints, `nemar-recipe version` prints no checkpoint map, and the runner heartbeat carries only a phase (`started` or `uploading`, [runner.md](runner.md)).
-Where this page and the implementation disagree once it lands, the implementation and its tests win and this page is corrected.
+**Built** (epic nemarOrg/nemar-cli#2324, Phase 3): each recipe declares its checkpoint map beside `STEP_ORDER` and `nemar-recipe version` prints it; the recipe layer writes a local progress file ([recipes.md](recipes.md), "The local progress file"); the launcher builds the live progress object and reports it ([launcher.md](launcher.md), "Live progress"); the runner carries it on its heartbeat ([runner.md](runner.md)).
+The contract is pinned at nemar-cli's Phase 2 commit ([contracts.md](contracts.md), "The live progress contract").
+The standalone mode of the launcher (decision 8, a person's own machine with no NEMAR service) is still planned (nemarOrg/nemar-process#67).
+Where this page and the implementation disagree, the implementation and its tests win and this page is corrected.
 
 Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), artifact subspace reconstruction (ASR), quality control (QC).
 
