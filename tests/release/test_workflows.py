@@ -1492,6 +1492,17 @@ def test_the_scripts_and_workflows_the_bot_runs_have_code_owners():
         assert re.search(rf"^{re.escape(path)}\s+@\S+", owners, re.M), path
 
 
+def test_what_a_runner_bundle_builds_and_installs_has_code_owners():
+    owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    for path in (
+        "/scripts/build_runner_bundle.py",
+        "/deploy/runner/",
+        "/runner/nemar_runner/install.py",
+    ):
+        assert (ROOT / path.lstrip("/")).exists(), path
+        assert re.search(rf"^{re.escape(path)}\s+@nemarOrg/admins\s*$", owners, re.M), path
+
+
 def test_the_dev_bump_checks_out_the_pushed_commit_and_pushes_it_to_dev():
     checkout = steps("auto-bump-dev.yml", "bump")[0]
     assert checkout["with"]["ref"] == "${{ github.sha }}"
