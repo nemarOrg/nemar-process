@@ -551,7 +551,7 @@ def _final_progress(state: service.Run, layout: run.Layout, log: Log) -> None:
         progress.write_report(layout.launcher, document, itertools.count())
     except progress.Unusable as problem:
         log.info("progress: no final report {}".format(problem.word))
-    except OSError as error:
+    except Exception as error:  # noqa: BLE001 - a report never changes the job's exit
         log.warning("progress: final report not written {}".format(type(error).__name__))
 
 

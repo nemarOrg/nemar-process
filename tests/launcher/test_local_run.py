@@ -401,3 +401,30 @@ def test_a_signal_ignored_at_start_stays_ignored(lrig):
         assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
     finally:
         signal.signal(signal.SIGHUP, previous)
+
+
+def test_a_fault_in_the_final_progress_build_is_one_line_and_never_the_exit(lrig):
+    """A recordings table that becomes a directory after the reporter's last read (a fault no reader
+    expects, here an IsADirectoryError-like refusal path) costs the final progress.json only."""
+    from nemar_launch import local, progress, run
+    from nemar_launch.provenance import Log
+
+    class Faulty(progress.Source):
+        def build(self, finished: bool = False):
+            raise ValueError("a launcher bug with a /host/path in its message")
+
+    out = lrig.tmp / "fault"
+    out.mkdir()
+    layout = run.prepare_layout(str(out))
+    log = Log(layout.log_path)
+
+    from nemar_launch import __main__ as service
+    from nemar_launch.provenance import Documents
+
+    state = service.Run(str(out), layout, log, Documents(layout.launcher, log))
+    state.progress_source = Faulty(layout.work)
+    local._final_progress(state, layout, log)  # never raises
+    log.close()
+    text = (out / "launcher" / "launcher.log").read_text()
+    assert "progress: final report not written ValueError" in text
+    assert "/host/path" not in text
