@@ -1,5 +1,5 @@
 {
-  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors. Both are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
+  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and the vendored neuroschema bundle the recipes validate plugin outputs against. Both are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
   "ref": "1b6453609c32b4d7250810ae62c8da212773e590",
   "schema": {
@@ -13,6 +13,18 @@
     "copy": "tests/contract/compute-progress-vectors.json",
     "sha256": "c6a527a38e14ceee3ef7b64e31ee8d03021e3c1471a4114cbbb30f06ef9552c2",
     "bytes": 18306
+  },
+  "plugin_manifest": {
+    "source": "shared/contract/plugin-manifest.schema.json",
+    "copy": "recipes/nemar_process/common/contract/plugin-manifest.v1.json",
+    "sha256": "12704196fee6f4c5ae73a4f1afd30dabf8d72c5dddf50662419dec3028ab3c1b",
+    "bytes": 5591
+  },
+  "neuroschema_bundle": {
+    "source": "shared/contract/neuroschema/dataset.bundle.json",
+    "copy": "recipes/nemar_process/common/contract/neuroschema.bundle.json",
+    "sha256": "9ae8cc66f3a86506d9c5b32c2f3d95bf297a6afa83202b1b0f8c55befc3fc5be",
+    "bytes": 106325
   },
   "words": {
     "progress_contract": "shared/contract/compute-progress.ts",

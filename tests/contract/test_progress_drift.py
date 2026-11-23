@@ -100,6 +100,10 @@ def ts_words(source: str, name: str) -> tuple:
 
 # ---- the copies and the pin ---------------------------------------------------------------------------
 
+# Every file this repository copies from nemar-cli at this pin: the progress schema and vectors (the
+# launcher's), the plugin manifest schema and the neuroschema bundle (the recipes', ADR 0134 Phase 5).
+COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle")
+
 
 def test_the_pin_names_a_full_commit_and_both_files():
     assert re.fullmatch(r"[0-9a-f]{40}", PIN["ref"])
@@ -108,16 +112,26 @@ def test_the_pin_names_a_full_commit_and_both_files():
     assert PIN["schema"]["source"] == "shared/contract/compute-progress.schema.json"
     assert PIN["vectors"]["copy"] == "tests/contract/compute-progress-vectors.json"
     assert PIN["vectors"]["source"] == "shared/contract/compute-progress-vectors.json"
+    assert (
+        PIN["plugin_manifest"]["copy"]
+        == "recipes/nemar_process/common/contract/plugin-manifest.v1.json"
+    )
+    assert PIN["plugin_manifest"]["source"] == "shared/contract/plugin-manifest.schema.json"
+    assert (
+        PIN["neuroschema_bundle"]["copy"]
+        == "recipes/nemar_process/common/contract/neuroschema.bundle.json"
+    )
+    assert PIN["neuroschema_bundle"]["source"] == "shared/contract/neuroschema/dataset.bundle.json"
 
 
-@pytest.mark.parametrize("part", ["schema", "vectors"])
+@pytest.mark.parametrize("part", COPIES)
 def test_each_copy_is_the_pinned_bytes(part):
     data = (ROOT / PIN[part]["copy"]).read_bytes()
     assert len(data) == PIN[part]["bytes"]
     assert sha256(data) == PIN[part]["sha256"]
 
 
-@pytest.mark.parametrize("part", ["schema", "vectors"])
+@pytest.mark.parametrize("part", COPIES)
 def test_each_copy_matches_nemar_cli_at_the_pinned_ref(part):
     theirs = at_ref(PIN[part]["source"])
     assert sha256(theirs) == PIN[part]["sha256"]
