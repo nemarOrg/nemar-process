@@ -55,9 +55,12 @@ def test_each_map_and_version_is_the_pinned_registrys(recipe):
 
 
 def mapped(path: Path) -> list:
-    """The map's steps without its pre-checks, which are step ids of the table and not of the record."""
-    pre = set(literal(path, "PRE_CHECKS"))
-    return [s for _name, group in literal(path, "CHECKPOINTS") for s in group if s not in pre]
+    """The map's steps without its pre-checks, which are step ids of the table and not of the record, and
+    without its plugin steps (nemar-cli's ``RECIPE_PLUGIN_STEPS``), which ``STEP_ORDER`` does not list."""
+    from nemar_launch.checkpoints import RECIPE_PLUGIN_STEPS
+
+    left_out = set(literal(path, "PRE_CHECKS")) | set(RECIPE_PLUGIN_STEPS)
+    return [s for _name, group in literal(path, "CHECKPOINTS") for s in group if s not in left_out]
 
 
 def test_the_floors_map_covers_its_step_order_in_order():

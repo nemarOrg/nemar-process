@@ -46,6 +46,7 @@ import time
 
 VALUELESS = {
     "--pull=missing",
+    "--pull=never",
     "--network=bridge",
     "--read-only",
     "--no-healthcheck",
@@ -108,7 +109,7 @@ def default_info(name: str) -> dict:
     }
 
 
-def _log(path: str, suffix: str, entry: dict) -> None:
+def _log(path: str, suffix: str, entry: dict | list) -> None:
     with open(path + suffix, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
 
@@ -210,6 +211,7 @@ def _bad_run_option(name: str, option: str, value: str, ncpu: int) -> str | None
 
 def main(argv: list[str], record_path: str, name: str = "docker") -> int:
     _log(record_path, ".calls", {"argv": argv})  # every call, whatever it is
+    _log(record_path, ".order", ["docker", *argv[:2]])
     if argv[:1] == ["--version"]:
         print("{} version 0.0.0-standin".format(name.capitalize()))
         return 0

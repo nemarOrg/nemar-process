@@ -1,0 +1,50 @@
+#!/bin/sh
+# nemar-launch-local: the launcher's standalone entry (ADR 0134 decision 8). It runs one job on this
+# machine from a local launch specification file and local directories, with no NEMAR service involved:
+#
+#   nemar-launch-local --spec FILE --out DIR [--data NAME=DIR ...] [--code BUNDLE.tar.gz]
+#       [--engine apptainer|docker] [--sif-root DIR] [--cpus N] [--memory-mb N] [--scratch DIR]
+#       [--time-limit-s N] [--allow-registry HOST ...] [--pull [--cosign PATH]]
+#
+# Its exit status is the launcher's: 0 ok; 10 to 16 the job's failure code (result.json); 2 a command
+# line that cannot be used. Unlike tapisjob_app.sh it writes no tapisjob.exitcode and starts the
+# launcher in its place (exec), so a Ctrl-C, a closed terminal or a SIGTERM reaches it directly.
+#
+# POSIX sh and shell builtins only. NEMAR_HOST_PYTHON overrides the interpreter (3.9 or newer).
+# Python runs with -I (no PYTHON* variables, no working directory or script directory on the path, no
+# user site) and -S (no site), and ONLY lib/ beside this script is put on the path. Files are made
+# owner-only (umask 077).
+umask 077
+
+here=${0%/*}
+[ "$here" = "$0" ] && here=.
+here=$(cd "$here" && pwd -P)
+
+usable() {
+  "$1" -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+}
+
+py=
+if [ -n "${NEMAR_HOST_PYTHON:-}" ]; then
+  if usable "$NEMAR_HOST_PYTHON"; then
+    py=$NEMAR_HOST_PYTHON
+  fi
+else
+  for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
+    found=$(command -v "$candidate" 2>/dev/null) || continue
+    if usable "$found"; then
+      py=$found
+      break
+    fi
+  done
+fi
+
+if [ -z "$py" ]; then
+  echo "nemar-launch-local: no Python 3.9 or newer found (set NEMAR_HOST_PYTHON to one)" >&2
+  exit 13
+fi
+
+# lib/ is named explicitly (in isolated mode Python ignores PYTHONPATH and the working directory) and
+# then taken out of argv, so the launcher sees exactly the arguments given to this script.
+boot='import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("nemar_launch.local", run_name="__main__", alter_sys=True)'
+exec "$py" -I -S -c "$boot" "$here/lib" "$@"

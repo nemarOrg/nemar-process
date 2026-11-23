@@ -96,3 +96,27 @@ def test_a_sigterm_that_came_first_keeps_its_moment_and_the_deadline_adds_nothin
     terminator.terminate(2000.0)
     assert terminator.received == 1000.0
     assert terminator.stop.is_set()
+
+
+def test_the_terminator_takes_the_signals_it_is_given_and_only_those():
+    """SIGTERM only by default (the service); the standalone entry adds SIGINT and SIGHUP, each of which
+    then stops the job as a SIGTERM does, and restore puts the previous handlers back."""
+    import signal as signals
+
+    before = {n: signals.getsignal(n) for n in (signals.SIGINT, signals.SIGHUP, signals.SIGTERM)}
+    plain = run.Terminator()
+    plain.install()
+    try:
+        assert signals.getsignal(signals.SIGINT) == before[signals.SIGINT]
+        assert signals.getsignal(signals.SIGHUP) == before[signals.SIGHUP]
+    finally:
+        plain.restore()
+    wide = run.Terminator()
+    wide.install((int(signals.SIGTERM), int(signals.SIGINT), int(signals.SIGHUP)))
+    try:
+        signals.raise_signal(signals.SIGINT)
+        assert wide.stop.is_set()
+        assert wide.received is not None
+    finally:
+        wide.restore()
+    assert {n: signals.getsignal(n) for n in before} == before

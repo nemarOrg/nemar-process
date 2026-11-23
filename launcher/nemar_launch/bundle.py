@@ -14,13 +14,15 @@ setgid, sticky and group/world-write bits removed.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import os
 import posixpath
+import stat
 import tarfile
 import threading
 
 from . import net, spec
-from .codes import Failure
+from .codes import Failure, Stopped
 from .provenance import Log
 
 MAX_EXTRACT_BYTES = 4 * 1024**3
@@ -260,6 +262,75 @@ def fetch(
             detail = failure.word
         raise Failure("code_fetch_failed", detail, "bundle download failed") from None
     log.info("bundle: {} bytes, sha256 verified".format(job.bundle["size"]))
+    extracted = extract_archive(archive, code_dir)
+    log.info("bundle: extracted {} bytes".format(extracted))
+    os.unlink(archive)
+    return code_dir, job.bundle["sha256"]
+
+
+def from_file(
+    path: str | None,
+    job: spec.Job,
+    scratch: str,
+    *,
+    log: Log,
+    stop: threading.Event | None = None,
+) -> tuple[str | None, str | None]:
+    """The standalone entry's code (``--code FILE``): the archive the person names, never fetched.
+
+    The file is copied into ``scratch`` while it is hashed, so the bytes extracted are the bytes
+    checked; it must hold exactly ``bundle.size`` bytes (``size_mismatch``) whose SHA-256 is
+    ``bundle.sha256`` (``digest_mismatch``), and a file that cannot be opened or is not a regular file
+    is ``content_missing``, each ``code_fetch_failed``. It is then extracted by ``extract_archive``, with
+    every rule of a fetched bundle. A specification with no bundle and no file has no code (None,
+    None); a file for a specification that names no bundle is refused (``invalid_spec``), never run.
+    """
+    if job.bundle is None:
+        if path is not None:
+            raise Failure(
+                "runtime_error", "invalid_spec", "the specification names no bundle for the code"
+            )
+        return None, None
+    if path is None:
+        raise Failure("code_fetch_failed", "content_missing", "no code archive was given")
+    expected_size = job.bundle["size"]
+    archive = os.path.join(scratch, ARCHIVE_NAME)
+    code_dir = os.path.join(scratch, "code")
+    try:
+        source = open(path, "rb")  # noqa: SIM115 - closed below
+    except OSError:
+        raise Failure(
+            "code_fetch_failed", "content_missing", "the code archive cannot be read"
+        ) from None
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise Failure("code_fetch_failed", "content_missing", "the code archive is not a file")
+        fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                if stop is not None and stop.is_set():
+                    raise Stopped
+                chunk = source.read(net.CHUNK)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > expected_size:
+                    break
+                digest.update(chunk)
+                out.write(chunk)
+    except OSError:
+        raise Failure(
+            "code_fetch_failed", "disk_error", "the code archive could not be copied"
+        ) from None
+    finally:
+        source.close()
+    if copied != expected_size:
+        raise Failure("code_fetch_failed", "size_mismatch", "the code archive's size differs")
+    if digest.hexdigest() != job.bundle["sha256"]:
+        raise Failure("code_fetch_failed", "digest_mismatch", "the code archive's digest differs")
+    log.info("bundle: {} bytes from the local file, sha256 verified".format(expected_size))
     extracted = extract_archive(archive, code_dir)
     log.info("bundle: extracted {} bytes".format(extracted))
     os.unlink(archive)

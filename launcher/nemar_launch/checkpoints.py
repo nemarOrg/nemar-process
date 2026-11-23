@@ -47,6 +47,11 @@ NOT_RUN_CODE = "not_run"
 
 RECORDING_STATUSES = ("succeeded", "failed", "skipped")
 RECORDINGS_TABLE_COLUMNS = ("path", "status", "code", "step")
+# The optional column naming the steps a succeeded recording skipped, and why (`step:reason` pairs joined
+# by commas, empty or `n/a` when none). Only pairs whose step is one of `RECIPE_PLUGIN_STEPS` are read:
+# a plugin that failed is absorbed and counted as skipped at its checkpoint.
+SKIPPED_STEPS_COLUMN = "skipped_steps"
+RECIPE_PLUGIN_STEPS = ("nemar-quality",)
 
 PROGRESS_PROBLEMS = (
     "checkpoints_differ",
@@ -59,7 +64,8 @@ PROGRESS_PROBLEMS = (
 
 # A checkpoint map: each checkpoint with its steps, in the recipe's order (without `stored`).
 Checkpoints = Sequence[tuple[str, Sequence[str]]]
-Row = Mapping[str, Optional[str]]  # path, status, code, step: `n/a` is None
+# path, status, code, step (`n/a` is None) and, on a succeeded row that skipped a plugin, skipped_steps
+Row = Mapping[str, Any]
 Outcome = dict[str, Optional[str]]  # status, code, step
 Counts = dict[str, int]  # passed, failed, skipped, total
 
@@ -78,13 +84,34 @@ def _na_to_none(value: str) -> str | None:
     return None if value in (NA, "") else value
 
 
+def parse_skipped_steps(cell: str) -> list[dict[str, str]] | None:
+    """The plugin pairs of a ``skipped_steps`` cell, or None when one is malformed (nemar-cli's
+    ``parseSkippedSteps``): a pair whose step is one of ``RECIPE_PLUGIN_STEPS`` must carry a reason the
+    failure-code pattern accepts, and no plugin is named twice. Pairs of other steps are left alone; an
+    empty or ``n/a`` cell is []. Each step and reason is read with surrounding spaces trimmed."""
+    if cell in ("", NA):
+        return []
+    found: list[dict[str, str]] = []
+    for item in cell.split(","):
+        step, colon, reason = item.partition(":")
+        step = step.strip()
+        if step not in RECIPE_PLUGIN_STEPS:
+            continue
+        code = reason.strip() if colon else ""
+        if not FAILURE_CODE_RE.search(code) or any(s["step"] == step for s in found):
+            return None
+        found.append({"step": step, "code": code})
+    return found
+
+
 def parse_recordings_lines(lines: Iterable[str]) -> list[Row]:
     """Read a recordings table given as lines (tab-separated, a header first, ``n/a`` for an empty cell,
     no line ending). Refused, as nemar-cli refuses it: no header (``empty_table``), a missing column
     (``missing_column``), more rows than ``PROGRESS_MAX_RECORDINGS`` (``too_many_rows``), a row of the
     wrong width (``row_width``), a status that is not one of the three (``bad_status``), and a failed or
-    skipped row with no code (``missing_code``). Only the four columns the rules read are kept, and the
-    lines are consumed one at a time, so a caller can stream a large table."""
+    skipped row with no code (``missing_code``), and a malformed plugin pair in the optional
+    ``skipped_steps`` column of a succeeded row (``bad_skipped_steps``). Only the columns the rules read are
+    kept, and the lines are consumed one at a time, so a caller can stream a large table."""
     iterator = iter(lines)
     header_line = next(iterator, None)
     if header_line is None or header_line == "":
@@ -95,6 +122,7 @@ def parse_recordings_lines(lines: Iterable[str]) -> list[Row]:
         if column not in header:
             raise TableUnreadable("missing_column")
         index[column] = header.index(column)
+    skipped_at = header.index(SKIPPED_STEPS_COLUMN) if SKIPPED_STEPS_COLUMN in header else -1
     rows: list[Row] = []
     for line in iterator:
         if len(rows) >= PROGRESS_MAX_RECORDINGS:
@@ -108,16 +136,24 @@ def parse_recordings_lines(lines: Iterable[str]) -> list[Row]:
         code = _na_to_none(cells[index["code"]])
         if status != "succeeded" and code is None:
             raise TableUnreadable("missing_code")
-        rows.append(
-            {
-                # a path the contract cannot carry is not kept (the row still counts): memory stays
-                # bounded by the row cap, whatever the table holds
-                "path": _carried_path(cells[index["path"]]),
-                "status": status,
-                "code": None if status == "succeeded" else code,
-                "step": _na_to_none(cells[index["step"]]),
-            }
+        skipped = (
+            []
+            if skipped_at < 0 or status != "succeeded"
+            else parse_skipped_steps(cells[skipped_at])
         )
+        if skipped is None:
+            raise TableUnreadable("bad_skipped_steps")
+        row: dict[str, Any] = {
+            # a path the contract cannot carry is not kept (the row still counts): memory stays
+            # bounded by the row cap, whatever the table holds
+            "path": _carried_path(cells[index["path"]]),
+            "status": status,
+            "code": None if status == "succeeded" else code,
+            "step": _na_to_none(cells[index["step"]]),
+        }
+        if skipped:
+            row["skipped_steps"] = skipped
+        rows.append(row)
     return rows
 
 
@@ -141,7 +177,9 @@ def _fit(value: str | None, pattern: re.Pattern) -> str | None:
 def recording_outcomes(row: Row, checkpoints: Checkpoints) -> list[Outcome]:
     """A recording's outcome at each declared checkpoint, in order (nemar-cli's ``recordingOutcomes``).
 
-    succeeded: passed everywhere. failed at a mapped step: passed before its checkpoint, failed at it,
+    succeeded: passed everywhere, except a checkpoint one of whose steps the row lists in
+    ``skipped_steps`` (a plugin that failed and was absorbed): skipped there, with the first such step in
+    the checkpoint's order and its code; a later checkpoint is not affected. failed at a mapped step: passed before its checkpoint, failed at it,
     skipped after it with the same code and step. failed with no step or an unknown one: failed at the
     first checkpoint. skipped with no step or an unknown one: skipped everywhere. skipped at a mapped step:
     passed before its checkpoint, skipped from it on. The step ``record`` counts against the last
@@ -149,7 +187,24 @@ def recording_outcomes(row: Row, checkpoints: Checkpoints) -> list[Outcome]:
     """
     passed: Outcome = {"status": "passed", "code": None, "step": None}
     if row["status"] == "succeeded":
-        return [dict(passed) for _ in checkpoints]
+        skipped = row.get("skipped_steps") or []
+        outcomes_ok: list[Outcome] = []
+        for _name, steps in checkpoints:
+            hit = next(
+                (s for step in steps for s in skipped if s["step"] == step),
+                None,
+            )
+            if hit is None:
+                outcomes_ok.append(dict(passed))
+            else:
+                outcomes_ok.append(
+                    {
+                        "status": "skipped",
+                        "code": _fit(hit["code"], FAILURE_CODE_RE),
+                        "step": _fit(hit["step"], STEP_RE),
+                    }
+                )
+        return outcomes_ok
     step = row["step"]
     if step is None:
         at = -1
@@ -231,23 +286,43 @@ def first_failure(row: Row, checkpoints: Checkpoints) -> dict[str, Any] | None:
     return None
 
 
+def row_failures(row: Row, checkpoints: Checkpoints) -> list[dict[str, Any]]:
+    """The failure entries of one row: a failed or skipped row's ``first_failure`` (if any), or for a
+    succeeded row that skipped plugins one entry at each checkpoint it was skipped at, with that
+    checkpoint's first skipped step and its code. A path the contract cannot carry gives none."""
+    if row["status"] != "succeeded":
+        entry = first_failure(row, checkpoints)
+        return [] if entry is None else [entry]
+    path = row["path"]
+    if path is None or not PATH_RE.search(path):
+        return []
+    found = []
+    for (name, _steps), outcome in zip(checkpoints, recording_outcomes(row, checkpoints)):
+        if outcome["status"] == "skipped" and outcome["code"] is not None:
+            found.append(
+                {"path": path, "code": outcome["code"], "step": outcome["step"], "checkpoint": name}
+            )
+    return found
+
+
 def failures_by_checkpoint(
     rows: Sequence[Row], checkpoints: Checkpoints
 ) -> dict[str, list[dict[str, Any]]]:
     """The first ``PROGRESS_MAX_FAILURES`` failed or skipped recordings of each checkpoint, in table
-    order (nemar-cli's ``failuresByCheckpoint``, used to reconcile)."""
+    order (nemar-cli's ``failuresByCheckpoint``, used to reconcile); a succeeded recording that skipped
+    plugins is listed at each checkpoint it was skipped at (``row_failures``)."""
     found: dict[str, list[dict[str, Any]]] = {name: [] for name, _steps in checkpoints}
     for row in rows:
-        entry = first_failure(row, checkpoints)
-        if entry is not None and len(found[entry["checkpoint"]]) < PROGRESS_MAX_FAILURES:
-            found[entry["checkpoint"]].append(entry)
+        for entry in row_failures(row, checkpoints):
+            if len(found[entry["checkpoint"]]) < PROGRESS_MAX_FAILURES:
+                found[entry["checkpoint"]].append(entry)
     return found
 
 
 def recent_failures(rows: Sequence[Row], checkpoints: Checkpoints) -> list[dict[str, Any]]:
-    """The live report's failures: the ``PROGRESS_MAX_FAILURES`` most recent failed or skipped
-    recordings across checkpoints, in table order, each against the checkpoint it first did not pass."""
-    entries = [e for e in (first_failure(row, checkpoints) for row in rows) if e is not None]
+    """The live report's failures: the ``PROGRESS_MAX_FAILURES`` most recent failure entries across
+    checkpoints, in table order (``row_failures``)."""
+    entries = [e for row in rows for e in row_failures(row, checkpoints)]
     return entries[-PROGRESS_MAX_FAILURES:]
 
 

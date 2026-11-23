@@ -250,3 +250,77 @@ def test_a_reference_the_validator_does_not_implement_is_refused():
         spec.inline_refs({"$ref": "#/$defs/Missing"}, {"$defs": {}})
     with pytest.raises(spec.SchemaError):
         spec.inline_refs({"$ref": "#/$defs/A", "type": "string"}, {"$defs": {"A": {}}})
+
+
+# ---- a plugin a succeeded recording skipped (nemar-cli's parseSkippedSteps) ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("cell", "pairs"),
+    [
+        ("", []),
+        ("n/a", []),
+        ("bad_windows:too_short", []),
+        ("nemar-quality:plugin_failed", [{"step": "nemar-quality", "code": "plugin_failed"}]),
+        (
+            "bad_windows:too_short, nemar-quality :plugin_failed",
+            [{"step": "nemar-quality", "code": "plugin_failed"}],
+        ),
+        ("bad_windows", []),
+    ],
+)
+def test_a_skipped_steps_cell_gives_its_plugin_pairs(cell, pairs):
+    assert rules.parse_skipped_steps(cell) == pairs
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "nemar-quality",
+        "nemar-quality:",
+        "nemar-quality:Plugin_failed",
+        "nemar-quality:plugin_failed,nemar-quality:other",
+    ],
+)
+def test_a_malformed_plugin_pair_is_refused(cell):
+    assert rules.parse_skipped_steps(cell) is None
+    table = "path\tstatus\tcode\tstep\tskipped_steps\na.set\tsucceeded\tn/a\tn/a\t{}".format(cell)
+    with pytest.raises(rules.TableUnreadable, match="bad_skipped_steps"):
+        rules.parse_recordings_table(table)
+
+
+def test_the_column_is_read_only_on_a_succeeded_row():
+    table = (
+        "path\tstatus\tcode\tstep\tskipped_steps\n"
+        "a.set\tsucceeded\tn/a\tn/a\tnemar-quality:plugin_failed\n"
+        "b.set\tfailed\tstep_failed\tica\tnemar-quality\n"
+    )
+    rows = rules.parse_recordings_table(table)
+    assert rows[0]["skipped_steps"] == [{"step": "nemar-quality", "code": "plugin_failed"}]
+    assert "skipped_steps" not in rows[1]
+
+
+def test_a_skipped_plugin_is_skipped_at_its_checkpoint_only_and_listed_there():
+    checkpoints = [("import", ("load",)), ("quality", ("nemar-quality",)), ("figures", ("fig",))]
+    row = {
+        "path": "a.set",
+        "status": "succeeded",
+        "code": None,
+        "step": None,
+        "skipped_steps": [{"step": "nemar-quality", "code": "plugin_failed"}],
+    }
+    outcomes = rules.recording_outcomes(row, checkpoints)
+    assert [o["status"] for o in outcomes] == ["passed", "skipped", "passed"]
+    assert outcomes[1] == {"status": "skipped", "code": "plugin_failed", "step": "nemar-quality"}
+    entry = {
+        "path": "a.set",
+        "code": "plugin_failed",
+        "step": "nemar-quality",
+        "checkpoint": "quality",
+    }
+    assert rules.failures_by_checkpoint([row], checkpoints) == {
+        "import": [],
+        "quality": [entry],
+        "figures": [],
+    }
+    assert rules.recent_failures([row], checkpoints) == [entry]

@@ -16,9 +16,12 @@ Cloudflare R2 object storage is called R2.
 
 ```text
 tapisjob_app.sh                  # the entry point Tapis runs
+nemar-launch-local               # the standalone entry: a job on a person's own machine (standalone.md)
 lib/nemar_launch/*.py            # standard library only, Python 3.9 or newer
-lib/schema/launch-spec.v1.json   # the launch specification schema (see contracts.md)
+lib/schema/*.json                # the launch specification schema and the other copied contracts (contracts.md)
 ```
+
+The standalone entry runs the same container phase from a local launch specification file, with no NEMAR service involved; [standalone.md](standalone.md) is its page.
 
 ```bash
 uv run python scripts/build_launcher_zip.py            # write dist/nemar-launch.zip and print its sha256
