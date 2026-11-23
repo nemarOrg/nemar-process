@@ -30,6 +30,7 @@ Standard library only, Python 3.9.
 from __future__ import annotations
 
 import contextlib
+import functools
 import itertools
 import json
 import os
@@ -264,8 +265,10 @@ def check_recipe_progress(document: Any) -> dict[str, Any]:
     }
 
 
+@functools.lru_cache(maxsize=1)
 def progress_schema() -> dict[str, Any]:
-    """The ``Progress`` member of the byte copy of nemar-cli's schema, its references inlined."""
+    """The ``Progress`` member of the byte copy of nemar-cli's schema, its references inlined. Read once
+    per process (the copy never changes while a launcher runs); callers only read it."""
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, os.pardir, "schema", SCHEMA_FILE)
     with open(path, "rb") as handle:

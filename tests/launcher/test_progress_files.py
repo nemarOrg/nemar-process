@@ -399,3 +399,10 @@ def test_trailing_empty_lines_are_not_rows(outputs):
     with pytest.raises(progress.Unusable) as caught:
         progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "table_row_width"
+
+
+def test_the_schema_is_read_once_per_process():
+    progress.progress_schema.cache_clear()
+    first = progress.progress_schema()
+    assert progress.progress_schema() is first
+    assert progress.progress_schema.cache_info().hits >= 1
