@@ -59,9 +59,12 @@ CHECKPOINTS = (
 PRE_CHECKS = ("qc_amplitude", "ica_eligibility", "iclabel_locations")
 
 DESCRIPTIONS = {
-    "asr": "Repair bursts with artifact subspace reconstruction, keeping its calibration state",
+    "asr": (
+        "Find bursts with artifact subspace reconstruction, keeping its calibration state, and cut "
+        "the samples it would repair"
+    ),
     "reref": "Re-reference to the average of the good channels",
-    "ica": "Decompose the repaired, re-referenced data into independent components",
+    "ica": "Decompose the cleaned, re-referenced data into independent components",
     "iclabel": "Classify the components with ICLabel",
 }
 
@@ -174,6 +177,33 @@ SERVING_ROWS_MISMATCH = "serving_rows_mismatch"
 SERVING_UNMIXING = "servingunmixing"
 BROWSER_APPLIES_TO = "serving_copy channels listed, physical unit"
 BROWSER_NOTE = "no preprocessing; activations approximate the decomposition input"
+# On a dataset directory the store was not read: the matrix's columns are matched to the serving copy's
+# channels by label, it applies to microvolts (the view converts by the store's unit field and refuses
+# a unit it does not know), and the view says the match was not checked against the fit's input.
+BROWSER_APPLIES_TO_LABELS = (
+    "serving_copy channels matched by label, in microvolts: the view converts by the store's unit "
+    "field and refuses an unknown unit or any channel it cannot match"
+)
+BROWSER_CAPTION_UNCHECKED = "not checked against the decomposition input"
+# The burst spans cut from the fit's input are shaded by the view over the whole recording; they are
+# rows of the floor's _badsegments.tsv and _samplemask.tsv with this label and reason.
+BURST_LABEL = "burst"
+BURST_REASON = "asr_burst_rejection"
+
+# The floor's two values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
+# settings, 2026-11-23): a 0.5 Hz FIR high-pass (pop_eegfiltnew, legacy's call) in place of
+# clean_drifts, and RANSAC's correlation threshold of 0.85 in place of 0.8.
+HIGHPASS_HZ = 0.5
+CORR_THRESHOLD = 0.85
+
+# ASR's bursts are cut, as legacy NEMAR's clean_rawdata did with BurstRejection on: eegprep's
+# clean_artifacts with every stage but ASR off, the same ASR settings as the state's call, and burst
+# rejection on (the samples ASR would change are removed, and retained runs shorter than 5 samples with
+# them, by eegprep's own rule).
+BURST_FUNCTION = "eegprep.clean_artifacts"
+# eegprep's mask of the samples kept does not fit the recording it was made from (a fault upstream or
+# here, never of the data).
+BURST_MASK_INCONSISTENT = "burst_mask_inconsistent"
 
 
 def rank_of(n_good: int) -> int:

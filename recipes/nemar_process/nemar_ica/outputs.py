@@ -6,17 +6,18 @@ window step ran, ``_filters.json``, ``_qc.json``, the decisions this record's fi
 the recipe's: ``_asr.json`` (ASR's state as canonical JSON), ``_unmixing.tsv`` (``icaweights``
 times ``icasphere``, components by channels), ``_weights.tsv``, ``_sphere.tsv``, ``_mixing.tsv``
 (``icawinv``), ``_components.tsv`` (variance and ICLabel's probabilities), ``_ica.json`` (what the
-record says of the run, below), on the Zarr serving copy ``_servingunmixing.tsv`` (the browser's
-matrix, ``serving_unmixing``) and the signalJourney record. Every matrix is ``format(x, ".17g")`` text, so a
-float64 reads back exactly; ``LLt`` is never stored. Everything is TSV and JSON: nothing that
+record says of the run, below), ``_servingunmixing.tsv`` (the browser's matrix,
+``serving_unmixing``) and the signalJourney record; the floor's ``_badsegments.tsv`` and
+``_samplemask.tsv`` also list the burst spans cut from the fit's input. Every matrix is
+``format(x, ".17g")`` text, so a float64 reads back exactly; ``LLt`` is never stored. Everything is TSV and JSON: nothing that
 carries samples is written.
 
 What the record says is one block, ``extensions.nemar.ica``, and ``_ica.json`` is the same block
 under the recipe's name and version (``facts``): the engine, pAMICA's own account of the run copied
 whole under its names, the settings, the start, whether the run repeats bit for bit, the device facts,
 ASR's state digest, the good channels, ICLabel's version and the digest of its network, the
-input profile, what the fit was given (``decomposition_input``) and, on the serving copy, the
-browser's matrix (``browser_transform``; null on a dataset directory). Nothing in it says the
+input profile, what the fit was given (``decomposition_input``), the burst spans cut from it
+(``burst_rejection``) and the browser's matrix (``browser_transform``). Nothing in it says the
 decomposition agrees with EEGLAB's AMICA: it is pAMICA's.
 """
 
@@ -106,15 +107,35 @@ def serving_unmixing(unmixing: np.ndarray, unit: str | None) -> np.ndarray:
     return referenced * microvolts_per(unit)
 
 
-def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict[str, Any] | None:
-    """What the record says of the browser's matrix: its file, what it applies to and the caveat;
-    None on a dataset directory, whose store was not read."""
-    if fit.serving is None:
-        return None
+def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict[str, Any]:
+    """What the record says of the browser's matrix: its file, what it applies to, how its columns
+    map to the serving copy's channels, the unit it takes, the caption a view shows, and where the
+    spans cut from the fit's input are (the view shades them over the whole recording).
+
+    On the serving copy the columns are the store's rows (``rows``), in the store's own unit, and the
+    match was checked (the fit read that store). On a dataset directory the store was not read: the
+    columns are matched by label, the matrix takes microvolts (the view converts by the store's unit
+    field and refuses an unknown unit or a channel it cannot match), and the caption says the match
+    was not checked against the decomposition's input.
+    """
+
+    def place(suffix: str) -> str:
+        return naming.product_path(recording.path, LABEL, suffix, "tsv")
+
+    on_serving = fit.serving is not None
     return {
-        "matrix": naming.product_path(recording.path, LABEL, steps.SERVING_UNMIXING, "tsv"),
-        "applies_to": steps.BROWSER_APPLIES_TO,
+        "matrix": place(steps.SERVING_UNMIXING),
+        "applies_to": steps.BROWSER_APPLIES_TO if on_serving else steps.BROWSER_APPLIES_TO_LABELS,
         "note": steps.BROWSER_NOTE,
+        "match": "store_row" if on_serving else "label",
+        "rows": fit.store_rows,
+        "columns": channel_labels(fit.good_channels),
+        "unit": fit.serving.unit if fit.serving is not None else steps.INPUT_UNIT,
+        "caption": None if on_serving else steps.BROWSER_CAPTION_UNCHECKED,
+        "shaded": {
+            "label": steps.BURST_LABEL,
+            "files": [place("badsegments"), place("samplemask")],
+        },
     }
 
 
@@ -182,7 +203,8 @@ def facts(
         "iclabel": fit.iclabel,
         "input_profile": profile,
         "decomposition_input": copy.deepcopy(fit.decomposition_input),
-        "browser_transform": None if browser is None else dict(browser),
+        "burst_rejection": copy.deepcopy(fit.bursts),
+        "browser_transform": None if browser is None else copy.deepcopy(dict(browser)),
         **device.facts(
             resolution,
             threads=settings.threads,
@@ -295,18 +317,17 @@ def products(fit: pipeline.Decomposition, block: Mapping[str, Any]) -> list[floo
 def serving_products(
     fit: pipeline.Decomposition, unmixing: np.ndarray, components: list[str], channels: list[str]
 ) -> list[floor_outputs.Product]:
-    """On the serving copy, the browser's matrix (``serving_unmixing``); nothing on a dataset
-    directory."""
-    if fit.serving is None:
-        return []
-    weights = serving_unmixing(unmixing, fit.serving.unit)
+    """The browser's matrix (``serving_unmixing``): on the serving copy in the store's own unit, on a
+    dataset directory in microvolts (``browser_transform`` says how its columns are matched)."""
+    unit = fit.serving.unit if fit.serving is not None else steps.INPUT_UNIT
+    weights = serving_unmixing(unmixing, unit)
     return [
         floor_outputs.Product(
             steps.SERVING_UNMIXING,
             "tsv",
             "ica",
-            "Unmixing for the serving copy: components by the kept channels in store row order, "
-            "from the store's physical unit, with the average reference folded in",
+            "Unmixing for the serving copy: components by the kept channels, with the average "
+            "reference folded in, from the store's physical unit (or microvolts, matched by label)",
             lambda path: write_matrix(path, weights, components, channels),
         )
     ]
@@ -381,6 +402,11 @@ def write_product(
         inputs,
         info=INFO,
         extra_products=products(fit, block),
+        extra_segments=[
+            (start, stop, steps.BURST_LABEL, steps.BURST_REASON)
+            for start, stop in fit.bursts["spans"]
+        ],
+        extra_segments_step="asr",
         summary_extra=summary,
         nemar_extra={
             **(nemar_extra or {}),

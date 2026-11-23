@@ -67,12 +67,13 @@ def dataset_steps_with_load(
 ) -> list[DatasetStep]:
     """The recipe's steps with their recipe-level parameters: a constant, never read from a recording.
 
-    The floor's steps (with the input's load step) and the four of this recipe. The decomposition's
+    The floor's steps (with the input's load step and nemar-ica's high-pass and threshold) and the
+    four of this recipe. The decomposition's
     settings that a run chooses (the engine, the device, the threads and the iterations) are not
     constants and are stated in the record's ``ica_run``, never here.
     """
     return [
-        *floor.steps_with_load(load_function, load_parameters),
+        *floor.steps_with_load(load_function, load_parameters, pipeline.FLOOR_EMBEDDING),
         DatasetStep(
             "asr", steps.ASR_FUNCTION, pipeline.asr_parameters(), steps.DESCRIPTIONS["asr"]
         ),
