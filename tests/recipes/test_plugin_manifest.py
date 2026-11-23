@@ -201,6 +201,28 @@ def test_a_plugin_whose_import_raises_is_refused(plugin_dir):
     refused("import_failed", lambda: load_one("boom"))
 
 
+def test_a_missing_sibling_whose_name_prefixes_the_entry_is_a_failing_import(plugin_dir):
+    package = write_plugin(plugin_dir, "needy2", manifest_for("needy2"))
+    (package / "__init__.py").write_text(
+        "import tmp_plugins.need\n"
+    )  # a prefix of tmp_plugins.needy2
+    refused("import_failed", lambda: load_one("needy2"))
+
+
+def test_a_missing_plugin_package_is_not_importable(plugin_dir):
+    refused(
+        "not_importable",
+        lambda: plugins.load(
+            [("x", "1.0.0")],
+            checkpoints={"x": "quality"},
+            provides=["nemar-floor"],
+            steps=(),
+            reserved=(),
+            package="no_such_plugin_package",
+        ),
+    )
+
+
 def test_a_plugin_whose_dependency_is_missing_is_refused_as_failing_import(plugin_dir):
     package = write_plugin(plugin_dir, "needy", manifest_for("needy"))
     (package / "__init__.py").write_text("import no_such_module_anywhere\n")
@@ -433,6 +455,13 @@ def test_the_tree_digest_covers_every_file_but_pycache(tmp_path):
     (tree / "__pycache__").mkdir()
     (tree / "__pycache__" / "x.pyc").write_bytes(b"cache")
     assert plugins.tree_sha256(tree) == with_data
+    (tree / ".DS_Store").write_bytes(b"finder")
+    (tree / "sub").mkdir()
+    (tree / "sub" / ".DS_Store").write_bytes(b"finder")
+    sub_digest = plugins.tree_sha256(tree)
+    (tree / "sub" / ".DS_Store").unlink()
+    (tree / ".DS_Store").unlink()
+    assert sub_digest == plugins.tree_sha256(tree) == with_data
 
 
 @pytest.mark.parametrize("kind", ["file", "directory"])

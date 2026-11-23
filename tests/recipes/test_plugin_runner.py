@@ -10,7 +10,7 @@ that carries one is refused. The plugins here are real modules (``tests/plugin_f
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pytest
@@ -147,9 +147,18 @@ def test_a_missing_input_skips_the_plugin(loaded, capsys):
     assert_skipped(plan, result, loaded["fx-metrics"], "KeyError", capsys)
 
 
-@pytest.mark.parametrize("target", ["mapping", "nested", "array", "list"])
-def test_a_plugin_cannot_change_its_inputs(loaded, capsys, target):
-    floor = {"meta": {"n": 1}, "data": np.arange(3.0), "items": [1, 2]}
+@pytest.mark.parametrize(
+    ("target", "detail"),
+    [
+        ("mapping", "TypeError"),
+        ("nested", "TypeError"),
+        ("array", "ValueError"),
+        ("list", "AttributeError"),
+        ("set", "AttributeError"),
+    ],
+)
+def test_a_plugin_cannot_change_its_inputs(loaded, capsys, target, detail):
+    floor = {"meta": {"n": 1}, "data": np.arange(3.0), "items": [1, 2], "tags": {"a"}}
 
     def run(inputs, parameters):
         view = inputs["nemar-floor"]
@@ -159,18 +168,50 @@ def test_a_plugin_cannot_change_its_inputs(loaded, capsys, target):
             view["meta"]["n"] = 2
         elif target == "array":
             view["data"][0] = 9.0
-        else:
+        elif target == "list":
             view["items"].append(3)
+        else:
+            view["tags"].add("b")
         return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
 
     plugin = replace(loaded["fx-metrics"], run=run)
     plan, result = run_one(plugin, floor)
-    detail = {"mapping": "TypeError", "nested": "TypeError", "array": "ValueError"}
-    assert_skipped(plan, result, plugin, detail.get(target, "AttributeError"), capsys)
+    assert_skipped(plan, result, plugin, detail, capsys)
     assert floor["meta"] == {"n": 1}
     assert floor["data"].tolist() == [0.0, 1.0, 2.0]
     assert floor["data"].flags.writeable
     assert floor["items"] == [1, 2]
+    assert floor["tags"] == {"a"}
+
+
+@dataclass
+class Mutable:
+    n: int = 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [Mutable(), np.array([{"a": 1}], dtype=object), bytearray(b"x"), object()],
+    ids=["dataclass", "object_array", "bytearray", "object"],
+)
+def test_an_input_that_cannot_be_made_read_only_skips_the_plugin(loaded, capsys, value):
+    ran = []
+
+    def run(inputs, parameters):
+        ran.append(True)
+        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+
+    plugin = replace(loaded["fx-metrics"], run=run)
+    plan, result = run_one(plugin, {"value": value})
+    assert_skipped(plan, result, plugin, "InputRefused", capsys)
+    assert ran == []
+
+
+def test_read_only_keeps_scalars_and_freezes_sets():
+    assert plugins.read_only({1, 2}) == frozenset({1, 2})
+    assert isinstance(plugins.read_only({1}), frozenset)
+    for scalar in (None, True, 3, 2.5, 1j, "s", b"b", np.float32(1.5)):
+        assert plugins.read_only(scalar) is scalar
 
 
 def test_a_plugin_can_read_its_inputs(loaded):
@@ -186,8 +227,9 @@ def test_a_plugin_can_read_its_inputs(loaded):
     assert seen == {"total": 3.0, "n": 1, "first": 4}
 
 
-def echo(returns):
-    return {"returns": returns}
+def echo(plugin, returns):
+    """The fixture plugin with a ``run`` that returns what ``returns`` gives."""
+    return replace(plugin, run=lambda inputs, parameters: returns())
 
 
 @pytest.mark.parametrize(
@@ -223,14 +265,13 @@ def echo(returns):
     ],
 )
 def test_an_output_that_breaks_the_manifest_skips_the_plugin(loaded, capsys, returned, word):
-    plan, result = run_one(loaded["fx-echo"], echo(returned))
-    assert_skipped(plan, result, loaded["fx-echo"], word, capsys)
+    plugin = echo(loaded["fx-echo"], returned)
+    plan, result = run_one(plugin, {})
+    assert_skipped(plan, result, plugin, word, capsys)
 
 
 def test_a_passing_echo_is_published(loaded):
-    plan, result = run_one(
-        loaded["fx-echo"], echo(lambda: plugins.PluginResult(metrics={"fxEcho": 1}))
-    )
+    plan, result = run_one(loaded["fx-echo"], {"value": 1})
     assert plan.steps[0].quality["fxEcho"]["value"] == 1.0
     assert result.outcomes[0].status == "ran"
 
@@ -289,6 +330,14 @@ def test_two_plugin_versions_with_equal_parameters_hash_differently(loaded):
     assert other_tree.hash() != one.hash()
 
 
+def test_two_skipped_plugin_versions_hash_differently(loaded):
+    first = loaded["fx-raises"]
+    one, _ = run_one(first, {})
+    two, _ = run_one(replace(first, version="0.1.1"), {})
+    assert one.skipped == two.skipped
+    assert one.hash() != two.hash()
+
+
 def test_the_display_software_is_not_hashed(loaded):
     plan, _ = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
     before = plan.hash()
@@ -338,7 +387,6 @@ def test_plugin_steps_are_recorded_with_their_software_and_metrics(
         recipe_io.load(recording).inputs,
         info=ICA_INFO,
         summary_extra=quality.summary_metrics,
-        nemar_extra={"plugins": [o.entry() for o in quality.outcomes]},
     )
     record = product.record
     steps = {step["stepId"]: step for step in record["processingSteps"]}
@@ -358,11 +406,48 @@ def test_plugin_steps_are_recorded_with_their_software_and_metrics(
     assert record["summaryMetrics"]["fxShare"] == 40.0
     assert plans.verify(record) == []
     assert record["extensions"]["nemar"]["plan_hash"] == made.hash()
+    assert record["extensions"]["nemar"]["plugins"] == [o.entry() for o in quality.outcomes]
     tampered = copy.deepcopy(dict(record))
     tampered["extensions"]["nemar"]["plugins"][0]["version"] = "9.9.9"
     assert plans.verify(tampered) != []
+    for broken in ({"name": "fx-metrics"}, "fx-metrics"):
+        malformed = copy.deepcopy(dict(record))
+        malformed["extensions"]["nemar"]["plugins"][0] = broken
+        (problem,) = plans.verify(malformed)
+        assert "plugins[0]" in problem
+    malformed["extensions"]["nemar"]["plugins"] = {"fx-metrics": {}}
+    assert plans.verify(malformed) == ["extensions.nemar.plugins is not a list"]
+    without = copy.deepcopy(dict(record))
+    del without["extensions"]["nemar"]["plugins"]
+    assert (
+        plans.verify(without) != []
+    )  # an omitted plugins list cannot pass for a plan without them
     assert [p["status"] for p in record["extensions"]["nemar"]["plugins"]] == ["ran", "skipped"]
     # the recordings table's skipped_steps cell, built from the plan's skips as for any step
     cell = product.row["skipped_steps"].split(",")
     assert cell[-1] == "fx-raises:plugin_failed"
     assert all(":" in pair for pair in cell)
+
+
+def test_a_caller_cannot_give_the_plugins_entries(loaded, fixture_result, recording, tmp_path):
+    from nemar_process.common import io as recipe_io
+
+    with pytest.raises(ValueError, match="plugins is written from the plan"):
+        outputs.write_product(
+            recording,
+            make_context(),
+            tmp_path,
+            fixture_result,
+            recipe_io.load(recording).inputs,
+            info=ICA_INFO,
+            nemar_extra={"plugins": []},
+        )
+
+
+def test_an_outcome_must_match_the_identity_its_step_was_hashed_with(loaded):
+    plan, result = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
+    entry = {**result.outcomes[0].entry(), "version": "9.9.9"}
+    with pytest.raises(ValueError):
+        plan.add_plugin_outcome(entry)
+    with pytest.raises(ValueError):
+        fresh_plan().add_plugin_outcome(result.outcomes[0].entry())

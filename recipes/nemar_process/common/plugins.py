@@ -163,7 +163,8 @@ def symlinks(directory: Path) -> list[str]:
 
 
 def tree_sha256(directory: Path) -> str:
-    """The SHA-256 of a plugin's source tree: every regular file but ``__pycache__``, by relative path.
+    """The SHA-256 of a plugin's source tree: every regular file, by relative path, but those under
+    ``__pycache__`` and dotfiles (``.DS_Store`` and the like, also kept out of the image).
 
     A tree that holds a symbolic link is refused: what it points to is not part of the reviewed tree.
     """
@@ -171,7 +172,12 @@ def tree_sha256(directory: Path) -> str:
         raise ValueError("a plugin tree holds a symbolic link")
     digest = hashlib.sha256()
     for path in sorted(directory.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.relative_to(directory).parts:
+        parts = path.relative_to(directory).parts
+        if (
+            path.is_file()
+            and "__pycache__" not in parts
+            and not any(p.startswith(".") for p in parts)
+        ):
             relative = path.relative_to(directory).as_posix().encode("utf-8")
             digest.update(relative + b"\0" + hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
@@ -190,7 +196,8 @@ def _load_one(
     try:
         module = importlib.import_module(entry)
     except ModuleNotFoundError as error:
-        if error.name is not None and entry.startswith(error.name):
+        missing = error.name
+        if missing is not None and (entry == missing or entry.startswith(missing + ".")):
             raise PluginLoadError(name, "not_importable") from error
         raise PluginLoadError(name, "import_failed") from error
     except Exception as error:
@@ -329,18 +336,40 @@ def _quality_metrics(plugin: Plugin, values: Mapping[str, Any]) -> dict[str, dic
     return out
 
 
+# The scalars a plugin may be handed as they are: none of them can be changed in place.
+_SCALARS = (type(None), bool, int, float, complex, str, bytes, np.generic)
+
+
+class InputRefused(TypeError):
+    """An input ``read_only`` cannot hand over unchangeable; raised inside the run, so the plugin is
+    skipped (its detail is this class's name)."""
+
+
 def read_only(value: Any) -> Any:
-    """A view of ``value`` a plugin cannot change: mappings become ``MappingProxyType``, lists and
-    tuples tuples, arrays read-only views, all the way down. Anything else is passed as it is."""
+    """``value`` as a plugin may see it, all the way down: mappings become ``MappingProxyType``, lists
+    and tuples tuples, sets frozensets, numeric arrays read-only views, and the scalars in ``_SCALARS``
+    stay as they are. Anything else (an object array, a dataclass, any other object) is refused, so a
+    plugin is never handed something mutable.
+
+    An array view is read-only so that an accidental write raises; it shares the host's memory (a copy
+    of a recording's signals would double it), so a plugin that deliberately turns the flag back on
+    could still write. That is for review to refuse, not for this view to prevent.
+    """
     if isinstance(value, Mapping):
         return types.MappingProxyType({key: read_only(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(read_only(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(read_only(item) for item in value)
     if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise InputRefused("an object array is not an input")
         view = value.view()
         view.setflags(write=False)
         return view
-    return value
+    if isinstance(value, _SCALARS):
+        return value
+    raise InputRefused("not an input type: {}".format(type(value).__name__))
 
 
 def _exception_detail(error: Exception) -> str:
@@ -395,6 +424,7 @@ def run_checkpoint(
             outcome.status, outcome.code, outcome.detail = "skipped", PLUGIN_FAILED, detail
             plan.add_skip(plugin.name, plugin.function, PLUGIN_FAILED, plugin=plugin.identity())
             _log_skip(plugin, detail)
+            plan.add_plugin_outcome(outcome.entry())
             result.outcomes.append(outcome)
             continue
         plan.add_step(
@@ -412,5 +442,6 @@ def run_checkpoint(
         for name, metric in quality.items():
             if declared[name].get("headline"):
                 result.summary_metrics[name] = metric["value"]
+        plan.add_plugin_outcome(outcome.entry())
         result.outcomes.append(outcome)
     return result
