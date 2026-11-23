@@ -394,13 +394,6 @@ def _remove(path: str) -> None:
         os.unlink(path)
 
 
-def checked_sif(path: str, proof: SifProof, stop: threading.Event) -> str:
-    """``path`` if it hashes to the proof's layer, else ``Unverified("layer_mismatch")``."""
-    if file_sha256(path, stop) != proof.layer:
-        raise Unverified("layer_mismatch", "present")
-    return path
-
-
 def pull_sif(
     apptainer: str,
     sif_root: str,

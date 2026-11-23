@@ -357,15 +357,3 @@ def test_a_pull_that_is_not_the_layer_or_fails_leaves_nothing(tmp_path, case):
         assert isinstance(caught.value, verify.Unverified)
         assert caught.value.reason == "layer_mismatch"
     assert list(sif_root.iterdir()) == []
-
-
-def test_a_present_file_counts_only_if_it_hashes_to_the_layer(tmp_path):
-    _body, manifest, layers = sif_manifest(b"the signed image file")
-    good, bad = tmp_path / "good.sif", tmp_path / "bad.sif"
-    good.write_bytes(b"the signed image file")
-    bad.write_bytes(b"another")
-    proof = verify.SifProof(manifest, layers[0])
-    assert verify.checked_sif(str(good), proof, STOP) == str(good)
-    with pytest.raises(verify.Unverified) as caught:
-        verify.checked_sif(str(bad), proof, STOP)
-    assert caught.value.reason == "layer_mismatch"
