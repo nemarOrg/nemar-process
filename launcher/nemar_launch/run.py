@@ -607,11 +607,15 @@ class Terminator:
     def detach(self) -> None:
         self.child = None
 
-    def install(self) -> None:
+    def install(self, signals: tuple[int, ...] = (int(signal.SIGTERM),)) -> None:
+        """Handle each of ``signals`` as a SIGTERM: the service's launcher takes SIGTERM only (Slurm's
+        and the runner's); the standalone entry also takes SIGINT and SIGHUP (a person's Ctrl-C, a
+        closed terminal), which stop the job the same way."""
         try:
-            self._previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, self._handle)
+            for number in signals:
+                self._previous[number] = signal.signal(number, self._handle)
         except ValueError:  # not the main thread: nothing to install
-            self._previous.clear()
+            self.restore()
 
     def restore(self) -> None:
         for number, handler in self._previous.items():
