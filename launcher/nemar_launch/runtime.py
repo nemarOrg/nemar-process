@@ -157,7 +157,7 @@ def refuse_unsupported(engine: str, log: Log | None = None) -> None:
         raise _refused("runtime_unusable", "this engine is not supported yet")
 
 
-def image_reference(job: spec.Spec) -> str:
+def image_reference(job: spec.Job) -> str:
     """``image.uri`` as the engines take it: the same digest-pinned reference without ``docker://``."""
     uri = job.image["uri"]
     return uri[len(_SCHEME) :] if uri.startswith(_SCHEME) else uri
@@ -209,7 +209,7 @@ def mount_argument(bind: Bind) -> str:
 def build_argv(
     engine: str,
     engine_path: str,
-    job: spec.Spec,
+    job: spec.Job,
     reference: str,
     name: str,
     binds: list[Bind],

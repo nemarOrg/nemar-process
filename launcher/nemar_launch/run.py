@@ -124,7 +124,7 @@ def find_runtime(env: Env, names: tuple[str, ...] = RUNTIME_BINARIES) -> tuple[s
     )
 
 
-def resolve_sif(job: spec.Spec, env: Env) -> str:
+def resolve_sif(job: spec.Job, env: Env) -> str:
     """The image file: ``image.sif`` (the digest-named basename) under ``NEMAR_SIF_ROOT``.
 
     There is no fallback: an unset or empty root is ``image_missing``, a working directory is never
@@ -178,7 +178,7 @@ def runtime_environment(env: Env) -> dict[bytes, bytes]:
 # ---- the command line -----------------------------------------------------------------------------
 
 
-def entry_argv(job: spec.Spec) -> list[str]:
+def entry_argv(job: spec.Job) -> list[str]:
     """What runs inside the container, as the runtime receives it."""
     if job.command is not None:
         return list(job.command) + list(job.args)
@@ -210,7 +210,7 @@ class Bind(NamedTuple):
 
 
 def build_binds(
-    job: spec.Spec,
+    job: spec.Job,
     work: str,
     tmp_dir: str,
     code_dir: str | None,
@@ -222,8 +222,8 @@ def build_binds(
     binds = [Bind(work, CONTAINER_WORK, False), Bind(tmp_dir, "/tmp", False)]  # noqa: S108
     if code_dir is not None:
         binds.append(Bind(code_dir, CONTAINER_CODE, True))
-    for dataset, held in zip(job.datasets, staged):
-        binds.append(Bind(held.source, "{}/{}".format(CONTAINER_DATA, dataset["id"]), True))
+    for name, held in zip(job.data_names, staged):
+        binds.append(Bind(held.source, "{}/{}".format(CONTAINER_DATA, name), True))
     return binds
 
 
@@ -257,7 +257,7 @@ ISOLATION_FLAGS = ("--containall", "--cleanenv", "--no-home", "--no-mount", "bin
 
 def build_argv(
     runtime: str,
-    job: spec.Spec,
+    job: spec.Job,
     sif: str,
     binds: list[Bind],
     cuda: str | None = None,
@@ -422,7 +422,7 @@ def own_pid_namespace() -> str | None:
 def require_pid_namespace(
     runtime_path: str,
     sif: str,
-    job: spec.Spec,
+    job: spec.Job,
     layout: Layout,
     tmp_dir: str,
     env: Env,
@@ -761,7 +761,7 @@ def start_container(argv: list[str], env: Env, work: str, log: Log) -> subproces
         raise _runtime_not_started() from None
 
 
-def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
+def cuda_visible_devices(job: spec.Job, env: Env) -> str | None:
     """``CUDA_VISIBLE_DEVICES`` for the container: the scheduler's own value, only for a GPU job and
     only when it is plain (digits, letters, comma, colon, dash, dot, underscore: ids, UUIDs,
     MIG names); anything else is dropped rather than passed on."""

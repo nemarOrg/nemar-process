@@ -414,32 +414,46 @@ def recover_job_id(text: bytes) -> str:
     return PLACEHOLDER_JOB_ID
 
 
-class Spec:
-    """A validated launch specification. The token is never in its representation."""
+class Job:
+    """What the container phase needs of a job, and nothing else: the runtime, the entry or command,
+    the bundle's digest and size, the image, the environment, the GPUs and the names the datasets are
+    mounted under (``/data/<name>``). ``run`` and ``runtime`` take a ``Job``; only a ``Spec`` (a launch
+    from NEMAR's service) carries an API address, a job token and limits, and the functions that need
+    them (``bundle.fetch``, ``stage.stage_all``, ``upload``, ``progress.poster``) take a ``Spec``, so
+    the type checker proves a job that is not one cannot reach them."""
 
-    def __init__(self, document: dict[str, Any], digest: str) -> None:
-        self.job_id: str = document["job_id"]
+    def __init__(self, document: dict[str, Any], digest: str, job_id: str) -> None:
+        self.job_id: str = job_id
         self.runtime: str = document["runtime"]
         self.entry: str | None = document.get("entry")
         self.command: list[str] | None = document.get("command")
         self.args: list[str] = list(document["args"])
         self.bundle: dict[str, Any] | None = document.get("bundle")
-        self.datasets: list[dict[str, Any]] = list(document["datasets"])
-        self.api_base: str = document["api_base"]
         self.image: dict[str, str] = document["image"]
         self.env: dict[str, str] = dict(document["env"])
         self.gpus: int = document["resources"]["gpus"]
-        self.max_files: int = document["limits"]["max_files"]
-        self.max_total_bytes: int = document["limits"]["max_total_bytes"]
-        self.job_token: str = document["job_token"]
+        self.data_names: list[str] = []
         self.digest: str = digest
 
     def __repr__(self) -> str:
-        return "Spec(job_id={!r}, runtime={!r}, digest={}...)".format(
-            self.job_id, self.runtime, self.digest[:12]
+        return "{}(job_id={!r}, runtime={!r}, digest={}...)".format(
+            type(self).__name__, self.job_id, self.runtime, self.digest[:12]
         )
 
     __str__ = __repr__
+
+
+class Spec(Job):
+    """A validated launch specification. The token is never in its representation."""
+
+    def __init__(self, document: dict[str, Any], digest: str) -> None:
+        super().__init__(document, digest, document["job_id"])
+        self.datasets: list[dict[str, Any]] = list(document["datasets"])
+        self.data_names = [dataset["id"] for dataset in self.datasets]
+        self.api_base: str = document["api_base"]
+        self.max_files: int = document["limits"]["max_files"]
+        self.max_total_bytes: int = document["limits"]["max_total_bytes"]
+        self.job_token: str = document["job_token"]
 
 
 def decode(text: bytes) -> dict[str, Any]:
