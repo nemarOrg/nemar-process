@@ -297,11 +297,38 @@ def test_a_shell_is_refused(fenced):
         ["apptainer", "exec", "docker://alpine:latest", "true"],
         ["apptainer", "exec", "oras://ghcr.io/x/y:latest", "true"],
         ["singularity", "exec", "library://alpine", "true"],
-        ["apptainer", "exec", "image.sif", "curl", "https://example.org"],
+        ["apptainer", "exec", "--bind", "docker://x:/data", "image.sif", "true"],
+        ["apptainer", "exec", "--env", "A=oras://x", "image.sif", "true"],
+        ["apptainer", "exec", "--unknown-option", "image.sif", "true"],
+        ["apptainer", "exec", "other.sif", "true"],  # not the pinned image
+        ["apptainer", "pull", "x.sif", "image.sif"],
+        ["apptainer", "buildcfg", "extra"],
     ],
 )
-def test_an_apptainer_uri_is_refused_while_closed(argv):
-    assert not fence.runtime_verb_allowed(argv)
+def test_an_apptainer_uri_option_or_another_image_is_refused_while_closed(argv):
+    assert not fence.runtime_verb_allowed(argv, "image.sif")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "apptainer",
+            "exec",
+            "--containall",
+            "--env",
+            "A=b",
+            "image.sif",
+            "curl",
+            "https://doi.org/x",
+        ],
+        ["apptainer", "exec", "--bind", "/a:/data/x:ro", "--nv", "image.sif", "python", "-c", "x"],
+        ["apptainer", "--version"],
+    ],
+)
+def test_the_jobs_own_arguments_are_free_text(argv):
+    assert fence.runtime_verb_allowed(argv, "image.sif")
+    assert fence.runtime_verb_allowed(argv)  # no image pinned: any path, never a URI
 
 
 def test_the_window_still_allows_the_exact_pull_with_its_uri(fenced, tmp_path):
@@ -391,3 +418,54 @@ def test_posix_spawn_is_judged_like_popen(fenced, tmp_path, monkeypatch):
             os.posix_spawn(docker, [other, "--version"], dict(os.environ))  # path is not argv[0]
         pid = os.posix_spawn(docker, [docker, "--version"], dict(os.environ))
         os.waitpid(pid, 0)
+
+
+def test_only_the_runtime_resolved_at_start_may_run(fenced, tmp_path):
+    """A program named like the runtime somewhere else (``/tmp/anything/docker run --pull=never
+    --privileged``) is refused: the run knows the runtime's real path."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "anything").mkdir()
+    real = program(tmp_path / "real", "docker")
+    other = program(tmp_path / "anything", "docker")
+    (tmp_path / "links").mkdir()
+    link = tmp_path / "links" / "docker"
+    link.symlink_to(real)
+    with fenced.run(runtimes=[real]):
+        assert starts([real, "run", "--pull=never", "img"])
+        assert starts([str(link), "--version"])  # the same file by real path
+        assert not starts([other, "run", "--pull=never", "--privileged", "img"])
+    with fenced.run(runtimes=[]):  # no runtime found: none may start
+        assert not starts([real, "--version"])
+
+
+def test_a_direct_connection_needs_a_sanctioned_request(fenced):
+    """Inside the window http.client to the registry, with no urllib request the fence allowed, is
+    refused at the socket; a sanctioned request gets exactly one connection."""
+    import http.client
+
+    server = StandinServer(Registry()).start()
+    try:
+        registry = fence.Registry(server.base_url)
+        host, port = server.base_url.rsplit("/", 1)[1].split(":")
+        with fenced.run(), fenced.window([], registry):
+            connection = http.client.HTTPConnection(host, int(port), timeout=5)
+            with pytest.raises(fence.Refused):
+                connection.request("GET", "/v2/anything/not/allowlisted")
+            token = server.base_url + "/token?service=ghcr.io"
+            fenced.allow_url(token)
+            with urllib.request.urlopen(token, timeout=5) as answer:
+                assert answer.status == 200
+            again = http.client.HTTPConnection(host, int(port), timeout=5)
+            with pytest.raises(fence.Refused):
+                again.request("GET", "/v2/other")
+        assert [r.path for r in server.requests] == ["/token"]
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::7f00:1", "64:ff9b:1::7f00:1", "2002:7f00:1::1"])
+def test_translated_addresses_are_not_public(address):
+    named = fence.Registry("https://ghcr.io")
+    run = fence._Run()
+    run.looked_up = True
+    assert not fence.Fence._connect_allowed(named, run, (address, 443, 0, 0))

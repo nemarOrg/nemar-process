@@ -140,3 +140,44 @@ def test_the_service_image_checks_nothing():
     from nemar_launch import __main__ as service
 
     service.Image().before_exec("/anything")  # never raises
+
+
+def test_the_fence_is_told_the_pinned_image(lrig, tmp_path):
+    """Once pinned, an ``apptainer exec`` of any other image file is refused by the fence."""
+    import subprocess
+
+    from nemar_launch import fence
+
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    fenced = fence.Fence()
+    apptainer = str(lrig.bin_dir / "apptainer")
+    with fenced.run(runtimes=[apptainer]):
+        image = local.LocalImage(fenced=fenced)
+        document = {
+            "runtime": "image",
+            "command": ["true"],
+            "args": [],
+            "image": {"uri": "x", "digest": "sha256:" + IMAGE_HEX, "sif": SIF_NAME},
+            "env": {},
+            "resources": {"gpus": 0},
+            "datasets": [],
+        }
+        job = spec.LocalSpec(document, "0" * 64)
+        env = Env({b"NEMAR_SIF_ROOT": str(lrig.sif_root).encode()})
+        path = image.acquire(
+            runtime.APPTAINER,
+            apptainer,
+            job,
+            "x",
+            image.locate(job, env),
+            env,
+            str(scratch),
+            run.Terminator(),
+            Log(None),
+        )
+        other = str(lrig.sif_root / SIF_NAME)
+        assert other != path
+        with pytest.raises(fence.Refused):
+            subprocess.run([apptainer, "exec", other, "true"], check=False)
+        assert fence.runtime_verb_allowed([apptainer, "exec", path, "true"], path)

@@ -76,7 +76,7 @@ _LOOKUP_EVENTS = (
 )
 _PROCESS_EVENTS = ("os.system", "os.exec", "os.spawn", "os.fork", "os.forkpty")
 # The process launches judged by their argument vector: subprocess's own event, and os.posix_spawn,
-# which subprocess itself takes on some platforms and Pythons (3.13 on macOS among them).
+# which subprocess itself takes where it can (Linux with glibc 2.34 or later, for one).
 _SPAWN_EVENTS = ("subprocess.Popen", "os.posix_spawn", "os.posix_spawnp")
 # The only symbol the launcher looks up through ctypes (run.parent_death_hook, Linux).
 _CTYPES_SYMBOLS = ("prctl",)
@@ -93,8 +93,34 @@ class FenceError(Exception):
     """The fence was used in a way it does not allow (a second window, a window with no run)."""
 
 
-def runtime_verb_allowed(argv: Sequence[str]) -> bool:
-    """Whether the closed fence lets this container runtime command start (see the module docstring)."""
+# The options the launcher gives `apptainer exec` (run.build_argv, run.require_pid_namespace), with
+# or without a value: anything else before the image is refused.
+_APPTAINER_FLAGS = ("--containall", "--cleanenv", "--no-home", "--nv")
+_APPTAINER_VALUED = ("--no-mount", "--pwd", "--bind", "--env", "--cpus", "--memory")
+
+
+def _apptainer_exec_allowed(rest: Sequence[str], image: str | None) -> bool:
+    """``exec`` with the launcher's own options, none holding a URI, then the image: a path, never a
+    URI, and exactly ``image`` when the run pinned one. What follows the image is the job's own
+    command line, free text."""
+    i = 1
+    while i < len(rest) and rest[i].startswith("-"):
+        if rest[i] in _APPTAINER_FLAGS:
+            i += 1
+        elif rest[i] in _APPTAINER_VALUED and i + 1 < len(rest):
+            if "://" in rest[i + 1]:
+                return False
+            i += 2
+        else:
+            return False
+    if i >= len(rest) or "://" in rest[i]:
+        return False
+    return image is None or rest[i] == image
+
+
+def runtime_verb_allowed(argv: Sequence[str], image: str | None = None) -> bool:
+    """Whether the closed fence lets this container runtime command start (see the module docstring).
+    ``image`` is the image file the run pinned, which an ``apptainer exec`` must name exactly."""
     if not argv:
         return False
     name = os.path.basename(str(argv[0]))
@@ -102,10 +128,9 @@ def runtime_verb_allowed(argv: Sequence[str]) -> bool:
         return False
     rest = [str(a) for a in argv[1:]]
     if name in ("apptainer", "singularity"):
-        # no URI anywhere: an `exec docker://...` or `exec oras://...` would make the runtime fetch
-        if any("://" in a for a in rest):
-            return False
-        return rest[:1] in (["--version"], ["buildcfg"], ["exec"])
+        if rest[:1] in (["--version"], ["buildcfg"]):
+            return len(rest) == 1
+        return rest[:1] == ["exec"] and _apptainer_exec_allowed(rest, image)
     if rest[:1] in (["--version"], ["info"], ["rm"]):
         return True
     if rest[:2] in (["image", "inspect"], ["container", "inspect"]):
@@ -114,6 +139,13 @@ def runtime_verb_allowed(argv: Sequence[str]) -> bool:
         pulls = [a for a in rest if a == "--pull" or a.startswith("--pull=")]
         return pulls == ["--pull=never"]
     return False
+
+
+# Addresses that translate to IPv4 (NAT64, 6to4): what they reach cannot be told from the address,
+# so none counts as public.
+_TRANSLATED = tuple(
+    ipaddress.ip_network(n) for n in ("64:ff9b::/96", "64:ff9b:1::/48", "2002::/16")
+)
 
 
 class Registry:
@@ -138,6 +170,9 @@ class _Run:
         self.urls: set[str] = set()
         self.registry: Registry | None = None
         self.looked_up = False
+        self.runtimes: tuple[str, ...] | None = None
+        self.image: str | None = None
+        self.requests = 0  # sanctioned urllib requests not yet connected (one connect each)
 
 
 class Fence:
@@ -173,9 +208,9 @@ class Fence:
             argv = [argv] if isinstance(argv, (str, bytes)) else [os.fsdecode(a) for a in argv]
             if program is not None and (not argv or os.fsdecode(program) != argv[0]):
                 self._refuse("process_refused")
-            if runtime_verb_allowed(argv):
-                return
             if current.window and argv in current.argvs:
+                return
+            if runtime_verb_allowed(argv, current.image) and self._is_runtime(current, argv[0]):
                 return
             self._refuse("process_refused")
         elif event in ("ctypes.dlsym", "ctypes.dlsym/handle"):
@@ -198,11 +233,17 @@ class Fence:
             if registry is not None:
                 if event == "socket.__new__" and self._stream_allowed(args[1], args[2]):
                     return
-                if event == "socket.connect" and self._connect_allowed(registry, current, args[1]):
+                if (
+                    event == "socket.connect"
+                    and current.requests > 0
+                    and self._connect_allowed(registry, current, args[1])
+                ):
+                    current.requests -= 1  # one connection per sanctioned request
                     return
             self._refuse("network_refused")
         elif event == "urllib.Request":
             if current.window and current.registry is not None and args[0] in current.urls:
+                current.requests += 1
                 return
             self._refuse("request_refused")
 
@@ -225,7 +266,17 @@ class Fence:
             return False
         if registry.literal is not None:
             return ip == registry.literal and address[1] == registry.port
+        if ip.version == 6 and any(ip in network for network in _TRANSLATED):
+            return False
         return current.looked_up and ip.is_global and address[1] == registry.port
+
+    @staticmethod
+    def _is_runtime(current: _Run, program: str) -> bool:
+        """With the runtime resolved when the run opened, the program is that file (its real path),
+        not merely a file of that name anywhere."""
+        if current.runtimes is None:
+            return True
+        return os.path.realpath(program) in current.runtimes
 
     # ---- a run and its window ---------------------------------------------------------------------------
 
@@ -234,14 +285,18 @@ class Fence:
         return self._run is not None
 
     @contextlib.contextmanager
-    def run(self) -> Generator[Fence, None, None]:
-        """Close the fence for the block: everything above is refused until it ends."""
+    def run(self, runtimes: Sequence[str] | None = None) -> Generator[Fence, None, None]:
+        """Close the fence for the block: everything above is refused until it ends. ``runtimes`` are
+        the container runtime's paths resolved before the run (the standalone entry gives them, none
+        when there is no runtime): a runtime verb is then allowed only from that file, by real path."""
         self.install()
         with self._lock:
             if self._run is not None:
                 raise FenceError("a run is already open")
             self.refusals = []
             self._run = _Run()
+            if runtimes is not None:
+                self._run.runtimes = tuple(os.path.realpath(r) for r in runtimes)
         try:
             yield self
         finally:
@@ -272,6 +327,7 @@ class Fence:
             current.urls = set()
             current.registry = None
             current.looked_up = False
+            current.requests = 0
 
     def allow(self, argv: Sequence[str]) -> None:
         """Inside the window: let one more exact argument vector start (the pull, once cosign passed)."""
@@ -279,6 +335,11 @@ class Fence:
         if current is None or not current.window:
             raise FenceError("the window is not open")
         current.argvs.append([str(a) for a in argv])
+
+    def pin_image(self, path: str) -> None:
+        """The image file the run pinned: an ``apptainer exec`` must name exactly this path."""
+        if self._run is not None:
+            self._run.image = path
 
     def allow_url(self, url: str) -> None:
         """Inside the window, with a registry: let one exact address be requested."""

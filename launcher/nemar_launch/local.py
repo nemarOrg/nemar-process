@@ -449,6 +449,8 @@ class LocalImage(service.Image):
         except OSError:
             pass  # another file system: the original runs, still checked before it does
         self._pinned = (target, identity)
+        if self.fenced is not None:
+            self.fenced.pin_image(target)
         return target
 
     def before_exec(self, sif: str) -> None:
@@ -550,6 +552,17 @@ class LocalImage(service.Image):
         return proof
 
 
+def _runtimes(options: Options, env: Env) -> list[str]:
+    """The runtime ``_do_work`` will find (the same lookup over the same environment), resolved before
+    the fence closes, so the fence allows the runtime's verbs from that file only. None found: the run
+    fails at its own lookup, and no runtime may start meanwhile."""
+    names = run.RUNTIME_BINARIES if options.engine == "apptainer" else (options.engine,)
+    try:
+        return [run.find_runtime(env, names)[1]]
+    except Failure:
+        return []
+
+
 # ---- one run ----------------------------------------------------------------------------------------------
 
 
@@ -590,7 +603,7 @@ def main(
     image = LocalImage(options.pull, options.cosign, fenced)
     inputs: list[dict[str, Any]] = []
     try:
-        with fenced.run():
+        with fenced.run(runtimes=_runtimes(options, env)):
             log.info("standalone: engine {}, fence closed".format(options.engine))
             job = _start(state, options, env, settings, terminator, refused, image, inputs)
             service._finalize(state, env, terminator)

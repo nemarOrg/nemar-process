@@ -428,3 +428,16 @@ def test_a_fault_in_the_final_progress_build_is_one_line_and_never_the_exit(lrig
     text = (out / "launcher" / "launcher.log").read_text()
     assert "progress: final report not written ValueError" in text
     assert "/host/path" not in text
+
+
+def test_a_job_argument_holding_a_url_runs(lrig):
+    """The job's own arguments are free text (a DOI link): only the runtime's options and the image
+    position may hold no URI."""
+    lrig.write_spec(
+        lrig.script_spec('echo "$1" > $NEMAR_OUT/arg.txt', args=["https://doi.org/10.1/x"])
+    )
+    fenced = fence.Fence()
+    launch = lrig.run(lrig.argv(), fenced=fenced)
+    assert launch.exit == 0, launch.log
+    assert (lrig.out / "work" / "outputs" / "arg.txt").read_text() == "https://doi.org/10.1/x\n"
+    assert fenced.refusals == []
