@@ -231,6 +231,9 @@ class PlanStep:
     description: str
     executed_at: str
     quality: dict[str, Any] = field(default_factory=dict)
+    # A plugin's step names the plugin as its software (``plugins.Plugin.software``); None means the
+    # function's own (``software_of``). It is not hashed: the plan hash covers the function path.
+    software: dict[str, Any] | None = None
 
 
 @dataclass
@@ -255,6 +258,7 @@ class Plan:
         *,
         description: str,
         quality: dict[str, Any] | None = None,
+        software: dict[str, Any] | None = None,
     ) -> PlanStep:
         if self.has_step(step_id):
             raise ValueError("step {} is already in the plan".format(step_id))
@@ -265,6 +269,7 @@ class Plan:
             description=description,
             executed_at=utc_now(),
             quality=dict(quality or {}),
+            software=None if software is None else dict(software),
         )
         self.steps.append(step)
         self._events.append(("step", step_id))

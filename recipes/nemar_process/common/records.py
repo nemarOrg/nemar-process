@@ -117,7 +117,9 @@ def _processing_steps(
             "stepId": step.step_id,
             "name": step.function,
             "description": step.description,
-            "software": plans.software_of(step.function),
+            "software": step.software
+            if step.software is not None
+            else plans.software_of(step.function),
             "parameters": step.parameters,
             "inputSources": sources,
             "outputTargets": targets,
