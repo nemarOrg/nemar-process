@@ -84,7 +84,9 @@ None of this has been observed on the node's runtime, which may be a commercial 
 
 - **macOS Docker Desktop** is not verified: the entry is tested on Linux with Apptainer and with rootful Docker (CI), and with the stand-in runtimes on a developer's machine.
 - **The audit events the fence relies on** (`socket.*`, `urllib.Request`, `subprocess.Popen`, `os.system`, `os.exec`, `os.spawn`, `os.posix_spawn`) are confirmed by `tests/launcher/test_fence.py` on Python 3.9 and 3.12; an interpreter that raises them differently would weaken the fence, not the container's isolation.
-- **What a child process sends is outside the fence**: cosign talks to the registry and to Sigstore, `apptainer pull` to the registry, and the Docker daemon pulls nothing in this mode (`--pull=never`) but is a separate process.
+- **What a child process sends is outside the fence**: cosign talks to the registry and to Sigstore, and `apptainer pull` to the registry.
+  The Docker daemon is a separate process: without `--pull` it pulls nothing (the container runs with `--pull=never` and an absent image is `image_missing`); with `--pull` it pulls the verified digest when the launcher runs `docker pull` inside the window, and the container itself still runs with `--pull=never`.
+- **The SIF artifact's signature is not bound to the image digest**: `--pull` under Apptainer proves the artifact tagged `sha256-<hex>` was signed by the image workflow, not that it was built from the image `<hex>` (nemarOrg/nemar-process#80, as for the runner).
 - **`apptainer pull oras://...@sha256:<manifest>`** on a person's machine is exercised by CI's Apptainer leg against the public registry (`tests/e2e/test_local_pull_real.py` verifies the manifest and its layer; the runner's test pulls the file); other Apptainer versions are not.
 - **A public address is not tied to the name looked up**: inside the `--pull` window under Apptainer the launcher may connect to any public address on port 443 after it has looked up the registry's host, and to nothing else.
 
