@@ -1590,24 +1590,41 @@ def codeowners_rules(text: str) -> list[tuple[str, list[str]]]:
     return rules
 
 
+def codeowners_segments_match(pattern: list[str], path: list[str]) -> bool:
+    """Segment by segment: `**` takes zero or more segments, anything else one segment (fnmatch)."""
+    if not pattern:
+        return not path
+    if pattern[0] == "**":
+        return any(codeowners_segments_match(pattern[1:], path[i:]) for i in range(len(path) + 1))
+    return (
+        bool(path)
+        and fnmatch.fnmatchcase(path[0], pattern[0])
+        and codeowners_segments_match(pattern[1:], path[1:])
+    )
+
+
 def codeowners_pattern_covers(pattern: str, path: str) -> bool:
-    """Whether a CODEOWNERS pattern covers a repository path (no leading slash), gitignore style."""
+    """Whether a CODEOWNERS pattern covers a repository path (no leading slash), GitHub CODEOWNERS style.
+
+    A pattern with a leading or inner `/` is anchored at the root, one without matches at any depth; a
+    trailing `/` covers what is inside the directory; a matched directory covers everything under it,
+    except that a last segment of a bare `*` (`docs/*`) covers only the files directly in the directory;
+    `**` matches zero or more directories.
+    """
     anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
-    body = pattern.strip("/")
+    segments = pattern.strip("/").split("/")
+    if not anchored:
+        segments = ["**", *segments]
     directory_only = pattern.endswith("/")
+    direct_files_only = segments[-1] == "*"
     parts = path.split("/")
-    starts = [0] if anchored else range(len(parts))
-    size = len(body.split("/"))
-    for start in starts:
-        for end in range(start + size, len(parts) + 1) if "**" in body else [start + size]:
-            if end > len(parts):
-                continue
-            candidate = "/".join(parts[start:end])
-            if not fnmatch.fnmatchcase(candidate, body):
-                continue
-            if directory_only and end == len(parts):
-                continue  # a pattern ending in `/` covers what is inside the directory, not a file
-            return True
+    for end in range(1, len(parts) + 1):
+        if not codeowners_segments_match(segments, parts[:end]):
+            continue
+        if end == len(parts) and not directory_only:
+            return True  # the path itself
+        if end < len(parts) and not direct_files_only:
+            return True  # a directory above the path
     return False
 
 
@@ -1650,6 +1667,14 @@ def test_a_later_codeowners_rule_overrides_an_earlier_one():
     assert owners_of("scripts/bump_version.py", owners + "/runner/ @someone\n") == [
         "@nemarOrg/admins"
     ]
+    # GitHub's `docs/*` covers the files directly in docs/ only, and `/**/` zero or more directories
+    flat = owners.replace("/deploy/runner/ @nemarOrg/admins", "/deploy/* @nemarOrg/admins")
+    assert flat != owners
+    assert owners_of("deploy/runner/boot.py", flat) == []
+    assert owners_of("deploy/x.py", "/deploy/* @a\n") == ["@a"]
+    assert owners_of("runner/install.py", "/runner/**/install.py @a\n") == ["@a"]
+    assert owners_of("runner/nemar_runner/install.py", "/runner/**/install.py @a\n") == ["@a"]
+    assert owners_of("deploy/runner/boot.py", "* @a\n") == ["@a"]
 
 
 def test_the_dev_bump_checks_out_the_pushed_commit_and_pushes_it_to_dev():
