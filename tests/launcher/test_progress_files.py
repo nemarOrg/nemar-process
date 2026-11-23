@@ -327,13 +327,26 @@ def test_an_outputs_replaced_by_a_link_is_never_followed(outputs, tmp_path):
     assert caught.value.word == "not_readable"
 
 
-def test_an_outputs_replaced_by_a_link_after_the_last_read_is_refused_too(outputs, tmp_path):
+def test_an_outputs_replaced_by_a_link_after_the_last_read_is_refused_too(
+    outputs, tmp_path, monkeypatch
+):
+    """The fallback race: the recipe removes its directory (the progress file is missing, so the cached
+    state is used) and the container swaps ``outputs`` for a link before the table is read. The table's
+    own walk refuses the link."""
     write_run(outputs, recipe_file(2), [row("a.set")])
     source = progress.Source(str(outputs.parent))
     source.build()
     elsewhere = tmp_path / "elsewhere"
-    outputs.rename(elsewhere)
-    os.symlink(str(elsewhere), str(outputs))
+    real = progress.read_inside
+
+    def missing_then_swapped(base, relative, limit):
+        if relative[-1] == "progress.json":
+            outputs.rename(elsewhere)
+            os.symlink(str(elsewhere), str(outputs))
+            raise progress.Unusable("missing")
+        return real(base, relative, limit)
+
+    monkeypatch.setattr(progress, "read_inside", missing_then_swapped)
     with pytest.raises(progress.Unusable) as caught:
         source.build()  # the cached progress file is not a way around the walk
     assert caught.value.word == "not_readable"
