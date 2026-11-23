@@ -354,3 +354,30 @@ def test_an_expired_token_then_a_refused_body_ends_in_a_plain_heartbeat(tmp_path
         assert not rig.events("lease_lost")
     finally:
         rig.close()
+
+
+def test_a_reader_thread_that_cannot_start_leaves_the_heartbeat_renewing(
+    tmp_path, no_gate, monkeypatch
+):
+    """``RuntimeError: can't start new thread`` for the progress reader: one word, no progress, and the
+    lease is renewed as before."""
+    import threading
+
+    real = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith("progress-"):
+            raise RuntimeError("can't start new thread")
+        return real(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        assert run_job(rig) == "finished"
+        assert len(rig.events("progress_reader_not_started")) == 1
+        started = [b for b in rig.routes.bodies("heartbeat") if b["phase"] == "started"]
+        assert len(started) >= 4
+        assert with_progress(rig) == []
+        assert not rig.events("lease_lost")
+    finally:
+        rig.close()

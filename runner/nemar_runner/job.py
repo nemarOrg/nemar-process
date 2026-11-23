@@ -363,9 +363,13 @@ class Heartbeat(threading.Thread):
 
     def run(self) -> None:
         if self._out_dir is not None:
-            threading.Thread(
-                target=self._reader, name="progress-" + self._job.id, daemon=True
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._reader, name="progress-" + self._job.id, daemon=True
+                ).start()
+            except RuntimeError:  # no thread to be had: the heartbeat goes on, without progress
+                self._progress_off = True
+                self._log.warn("progress_reader_not_started", job=self._job.id)
         while not self._done.is_set():
             phase = "uploading" if self._uploading else "started"
             pause = self._tuning.heartbeat_seconds
