@@ -163,8 +163,9 @@ class Steps(NamedTuple):
     its own while the container phase stays one piece of code: the code (``scratch`` -> the code
     directory and the archive's SHA-256, or None and None without a bundle), the datasets (``scratch``
     -> the staged directories, in the order of ``job.data_names``), the image, where live progress is
-    posted (None: only written to ``launcher/progress.json``) and the reporter's cadence (None: the
-    module's constants). ``service_steps`` gives the service's."""
+    posted (None: only written to ``launcher/progress.json``), the reporter's cadence (None: the
+    module's constants) and the engine's pull policy (``runtime.build_argv``: the standalone entry's
+    is ``never``). ``service_steps`` gives the service's."""
 
     code: Callable[[str], tuple[str | None, str | None]]
     data: Callable[[str], list[stage.Staged]]
@@ -172,6 +173,7 @@ class Steps(NamedTuple):
     post: Callable[[dict[str, Any]], None] | None
     first_seconds: float | None = None
     report_seconds: float | None = None
+    engine_pull: str = "missing"
 
 
 def service_steps(
@@ -320,6 +322,7 @@ def _do_work(
                 settings.runner_label,
                 cpu_shares=engine_found.cpu_shares,
                 device=settings.device,
+                pull=steps.engine_pull,
             )
         if settings.device is not None:
             state.device = settings.device  # recorded only for a container that is about to start

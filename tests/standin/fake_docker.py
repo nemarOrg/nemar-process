@@ -46,6 +46,7 @@ import time
 
 VALUELESS = {
     "--pull=missing",
+    "--pull=never",
     "--network=bridge",
     "--read-only",
     "--no-healthcheck",

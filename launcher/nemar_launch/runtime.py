@@ -135,6 +135,8 @@ _CONTROLLERS = ("cpu", "memory", "pids")
 # The lowest CPU weight an engine takes (the kernel's own minimum): the smallest share among the
 # container's sibling control groups, and nothing more (see the module docstring).
 CPU_SHARES = 2
+# The engine pull policies ``build_argv`` writes: the service's, and the standalone entry's.
+PULL_POLICIES = ("missing", "never")
 
 
 def selected(env: Env) -> str:
@@ -217,13 +219,20 @@ def build_argv(
     runner_label: str,
     cpu_shares: bool = False,
     device: Device | None = None,
+    pull: str = "missing",
 ) -> list[str]:
     """The whole engine command line (see the module docstring for what each flag is for).
+
+    ``pull`` is the engine's own pull policy: ``missing`` for the service (``ensure_image`` has made
+    the image present, and the engine still verifies the digest of a reference that carries one), and
+    ``never`` for the standalone entry, which pulls only inside its fence's window, never here.
 
     ``cpu_shares`` is what ``preflight`` found: True only when the engine can apply CPU shares, and
     then ``--cpu-shares 2`` follows ``--cpus``. ``device`` is the runner's decision for a GPU job, if
     it made one: with None the GPU flags are what they always were."""
     check_device(device, job.gpus)
+    if pull not in PULL_POLICIES:
+        raise ValueError("an engine pull policy the launcher does not use")
     if limits.memory_mb is None:  # read_settings refuses this earlier; never run without a size
         raise Failure("runtime_error", "invalid_spec", "the memory size to enforce is not valid")
     uid, gid = current_user()
@@ -237,7 +246,7 @@ def build_argv(
         "{}={}".format(JOB_LABEL, job.job_id),
         "--label",
         "{}={}".format(RUNNER_LABEL, runner_label),
-        "--pull=missing",
+        "--pull={}".format(pull),
         "--network=bridge",
         "--user",
         "{}:{}".format(uid, gid),
@@ -498,7 +507,12 @@ def _volumes_declared(output: bytes) -> bool:
 
 
 def ensure_image(
-    engine_path: str, reference: str, env: Env, stop: threading.Event, log: Log
+    engine_path: str,
+    reference: str,
+    env: Env,
+    stop: threading.Event,
+    log: Log,
+    pull: bool = True,
 ) -> None:
     """Make the image present locally and prove it declares no volume.
 
@@ -508,11 +522,17 @@ def ensure_image(
     with the image already cached never needs the registry). An image whose configuration declares
     a ``VOLUME`` is ``image_missing`` too: the engine would mount a writable volume that is none of
     the declared binds. A set ``stop`` event (SIGTERM) ends any of these at once with ``Stopped``.
+
+    ``pull`` False (the standalone entry) never pulls: an absent image is ``image_missing`` at once.
     """
     inspect = [engine_path, "image", "inspect", "--format", "{{json .Config.Volumes}}", reference]
     status, output = _run(inspect, env, INSPECT_SECONDS, stop, capture=True)
     if status == 0:
         log.info("image: present locally")
+    elif not pull:
+        raise Failure(
+            "runtime_error", "image_missing", "the image is not present and is not pulled"
+        )
     else:
         log.info("image: pulling")
         pulled, _ = _run([engine_path, "pull", "--quiet", reference], env, PULL_SECONDS, stop)
