@@ -1407,6 +1407,7 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         ".github/workflows/nemar-cli-drift.yml",
         "tests/contract/**",
         "launcher/schema/**",
+        "runner/schema/**",
         "observer/schema/**",
         "tests/observer/fixtures/**",
         "deploy/tapis/**",
@@ -1421,6 +1422,7 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         "nemar-cli-latest",
         "nemar-cli-observation-latest",
         "nemar-cli-tapis-latest",
+        "nemar-cli-progress-latest",
     }
     for name, job in document["jobs"].items():
         assert job["continue-on-error"] is True, name
