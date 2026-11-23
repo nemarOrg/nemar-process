@@ -30,6 +30,9 @@ needs around it:
   (``nemar.input-digest.v2``), so a derivative can be keyed on what was read and not on the index
   file, whose bytes change when any one store of the dataset is converted again, and on everything
   the recipe was handed, positions included.
+* a read can keep what it read (``ZarrSource.load(keep_counts=True)``, nemar-ica's decomposition
+  input): the store's level-0 counts, int16 and read-only, with the array's conversion
+  (``ServingRows``), from which the values the content digest names are rebuilt bit for bit.
 
 ``eegprep_lean`` and ``eegprep`` are imported where they are used, so this module (and the tests of
 the attestation) import without them.
@@ -79,6 +82,13 @@ COMMIT_CHECK = "attested_by_caller"
 # Peak bytes per channel-sample of reading a recording and turning it into a dictionary (eegprep-lean
 # counts its ``max_bytes`` in this unit) and the default bound: 2 GiB of peak memory.
 DEFAULT_MAX_BYTES = 2 * 1024**3
+# A read that keeps the store's level-0 counts (``ZarrSource.load(keep_counts=True)``, nemar-ica's
+# decomposition input) holds them, int16 and read-only, beside eegprep-lean's peak: 2 more bytes per
+# channel-sample, counted in the bound before any signal is read. A level 0 that is not int16 would
+# break that count, so such a store is refused before its signal is read (``LEVEL0_NOT_INT16``).
+RETAINED_BYTES_PER_SAMPLE = 2
+LEVEL0_DTYPE = np.dtype(np.int16)
+LEVEL0_NOT_INT16 = "level0_not_int16"
 EEG = "EEG"
 # The index is read at most this far (64 MiB; the largest real one is well under 1 MiB). A ranged
 # read is read at most as far as its range is long; any other object (a metadata file, an unsharded
@@ -854,6 +864,51 @@ def input_digest_v2(rows: Iterable[Mapping[str, str]]) -> str:
 # ---- the source -------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ServingRows:
+    """A store's level-0 counts as they were read, kept for nemar-ica's decomposition input.
+
+    ``counts`` is the level-0 array itself, channels by samples in store row order, int16 and
+    read-only (2 bytes a channel-sample, never a float copy); ``attributes`` holds the array's own
+    conversion (``physical_formula``, ``scale``, ``offset``, one per channel of the group), and
+    ``channels`` the group's channel of each row. ``path``, ``group`` and ``content_sha256`` name the
+    content that was read, as the record's ``stores_content`` row does; ``rate``, ``unit`` and
+    ``labels`` are the window's, so the content digest can be computed again from these rows alone.
+
+    ``physical`` rebuilds rows with eegprep-lean's own ``to_physical`` (``digital * scale``, then
+    ``+ offset``, two roundings, as ``nemar.store-content.v1`` defines the values), the function the
+    read used, so the rows are those values bit for bit; ``microvolts`` then applies ``to_eeg``'s
+    factor, the unit eegprep holds data in.
+    """
+
+    path: str
+    group: str
+    content_sha256: str
+    counts: np.ndarray
+    attributes: Mapping[str, Any]
+    channels: tuple[int, ...]
+    rate: float
+    unit: str | None
+    labels: tuple[str, ...]
+
+    def physical(self, rows: Sequence[int]) -> np.ndarray:
+        """The physical values of these rows (indices into ``counts``), in the store's unit."""
+        from eegprep_lean.window import to_physical
+
+        picked = [int(row) for row in rows]
+        return to_physical(
+            self.counts[picked], dict(self.attributes), [self.channels[row] for row in picked]
+        )
+
+    def microvolts(self, rows: Sequence[int]) -> np.ndarray:
+        """``physical`` of these rows times the store unit's factor to microvolts (``to_eeg``'s)."""
+        from eegprep_lean.eeg import microvolts_per
+
+        values = self.physical(rows)
+        values *= microvolts_per(self.unit)  # in place: the same rounding as np.multiply
+        return values
+
+
 def location_source(located: int) -> str:
     """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
     BIDS route's words (``io._location_source``). The converter embeds the positions of the
@@ -1054,7 +1109,70 @@ class ZarrSource:
 
     # -- the reads
 
-    def load(self, path: str) -> io.Loaded:
+    @staticmethod
+    def _eeg_group(store: Any, groups: Sequence[Any]) -> Any:
+        """The group eegprep-lean's ``load_recording`` reads when none is named: the store's one EEG
+        group; a store with none, or with several, is refused as it refuses it."""
+        from eegprep_lean import IndexError_
+
+        if len(groups) == 1:
+            return groups[0]
+        if not groups:
+            raise IndexError_("the store has no EEG channel group")
+        return store.group()  # several groups: eegprep-lean refuses to choose
+
+    async def _read_counts(self, store: Any, group: Any) -> tuple[Any, np.ndarray, dict[str, Any]]:
+        """``load_recording``'s read of one whole group, keeping the level-0 counts it converts.
+
+        The reader's own steps (the store's electrode positions, level 0, the group's metadata, the
+        check that what was read is the size the index declares), with level 0 read as stored
+        (``read_window(physical=False)``) and converted here by the reader's own ``to_physical`` with
+        the array's own attributes: the window holds the values ``load_recording`` returns, bit for
+        bit. One more small request reads the array's metadata for those attributes, and a level 0
+        that is not int16 is refused there, before any of its signal is read. Returns the window,
+        the counts and the attributes.
+        """
+        from eegprep_lean import IndexError_, read_electrode_attributes, read_group_metadata
+        from eegprep_lean.store import open_array
+        from eegprep_lean.window import Window, read_window, to_physical
+
+        electrodes = await read_electrode_attributes(self.index, store, transport=self.transport)
+        array = await open_array(self.index.level0_url(store, group), transport=self.transport)
+        if np.dtype(array.dtype) != LEVEL0_DTYPE:
+            raise RecordingError(READ_FAILED, "load", LEVEL0_NOT_INT16)
+        attributes = dict(array.metadata.attributes)
+        metadata = await read_group_metadata(self.index, store, group, transport=self.transport)
+        stored = await read_window(
+            self.index,
+            store,
+            start_sample=0,
+            n_samples=group.n_samples,
+            group=group,
+            physical=False,
+            metadata=metadata,
+            transport=self.transport,
+        )
+        if stored.data.shape != (group.n_channels, group.n_samples):
+            # read_window clamps to the array's length: a whole recording that is not whole
+            raise IndexError_("the store and its index disagree on the group's shape")
+        counts = np.asarray(stored.data)
+        # the window read_window(physical=True) builds, with the electrodes load_recording adds: the
+        # unit is the group's as it states it, never renamed
+        window = Window(
+            data=to_physical(counts, attributes, stored.channels),
+            channels=stored.channels,
+            start_sample=stored.start_sample,
+            rate=stored.rate,
+            group_name=stored.group_name,
+            physical=True,
+            labels=stored.labels,
+            unit=metadata.unit(stored.channels),
+            original_rate=stored.original_rate,
+            electrodes=electrodes,
+        )
+        return window, counts, attributes
+
+    def load(self, path: str, *, keep_counts: bool = False) -> io.Loaded:
         """Read one whole recording (level 0, physical units) as a loaded EEGLAB dictionary.
 
         A store whose read would pass ``max_bytes`` is skipped as ``too_large`` before any signal
@@ -1068,6 +1186,12 @@ class ZarrSource:
         reports ``electrodes.tsv`` as the location source when at least one channel of the dictionary
         has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
         from inside a data file), and the count is the BIDS route's (``qc.count_located``).
+
+        With ``keep_counts`` (nemar-ica's decomposition input) the same dictionary is made from the
+        same values, and the loaded recording also keeps the store's level-0 counts, int16 and
+        read-only, with the array's conversion (``Loaded.serving``, a ``ServingRows``): the bound
+        counts ``RETAINED_BYTES_PER_SAMPLE`` more per channel-sample, and a level 0 that is not int16
+        is ``read_failed`` with the detail ``level0_not_int16`` (``_read_counts``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -1075,21 +1199,31 @@ class ZarrSource:
 
         store = self.index.store(path)
         groups = [group for group in store.groups if group.modality.upper() == EEG]
+        per_sample = PEAK_BYTES_PER_SAMPLE + (RETAINED_BYTES_PER_SAMPLE if keep_counts else 0)
         if len(groups) == 1:
-            needed = groups[0].n_channels * groups[0].n_samples * PEAK_BYTES_PER_SAMPLE
+            needed = groups[0].n_channels * groups[0].n_samples * per_sample
             if needed > self.max_bytes:
                 raise RecordingSkipped(TOO_LARGE, "load", "max_bytes")
         before = self.transport.bytes_read
         before_hosts = dict(self.transport.requests_by_host)
+        counts: np.ndarray | None = None
+        attributes: dict[str, Any] = {}
         try:
             try:
-                window = load_recording(
-                    self.dataset_id,
-                    path,
-                    max_bytes=self.max_bytes,
-                    transport=self.transport,
-                    index=self.index,
-                )
+                if keep_counts:
+                    window, counts, attributes = asyncio.run(
+                        self._read_counts(store, self._eeg_group(store, groups))
+                    )
+                else:
+                    window = load_recording(
+                        self.dataset_id,
+                        path,
+                        max_bytes=self.max_bytes,
+                        transport=self.transport,
+                        index=self.index,
+                    )
+            except RecordingError:
+                raise
             except MemoryError as error:
                 raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
             except Exception as error:
@@ -1112,6 +1246,22 @@ class ZarrSource:
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
         self.contents[path] = content
+        serving = None
+        if counts is not None:
+            counts.flags.writeable = False  # read-only: the rows the decomposition input is made of
+            serving = ServingRows(
+                path=path,
+                group=window.group_name,
+                content_sha256=content.sha256,
+                counts=counts,
+                attributes={
+                    key: attributes.get(key) for key in ("physical_formula", "scale", "offset")
+                },
+                channels=tuple(window.channels),
+                rate=float(window.rate),
+                unit=window.unit,
+                labels=tuple(window.labels or ()),
+            )
         try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
@@ -1138,6 +1288,7 @@ class ZarrSource:
             n_channels_with_locations=located,
             power_line_hz_declared=self.declared_power_line(path),
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
+            serving=serving,
         )
 
     # -- what the records say

@@ -18,7 +18,7 @@ import posixpath
 from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from eegprep import pop_load_frombids, pop_loadset
@@ -34,6 +34,9 @@ from nemar_process.common.errors import (
     RecordingSkipped,
 )
 from nemar_process.common.params import jsonable, signature_defaults
+
+if TYPE_CHECKING:
+    from nemar_process.common.zarr_input import ServingRows
 
 SUPPORTED = (".edf", ".bdf", ".vhdr", ".set")
 # The most channels times samples a recording may declare or hold and still be loaded. A float64
@@ -110,7 +113,12 @@ class Notes:
 
 @dataclass
 class Loaded:
-    """A loaded recording and what the loader reported about it."""
+    """A loaded recording and what the loader reported about it.
+
+    ``serving`` is set only by a read of the Zarr serving copy that keeps the store's level-0 counts
+    (``zarr_input.ZarrSource.load(keep_counts=True)``, nemar-ica's decomposition input): a
+    ``zarr_input.ServingRows``. It is None for a dataset directory and for every other read.
+    """
 
     eeg: dict[str, Any]
     function: str
@@ -121,6 +129,7 @@ class Loaded:
     n_channels_with_locations: int
     power_line_hz_declared: float | int | None
     inputs: list[dict[str, Any]]
+    serving: ServingRows | None = None
 
     def take(self) -> dict[str, Any]:
         """Hand the dataset to the caller and keep nothing: a long recording is gigabytes per copy.
@@ -129,6 +138,11 @@ class Loaded:
         """
         eeg, self.eeg = self.eeg, {}
         return eeg
+
+    def take_serving(self) -> ServingRows | None:
+        """Hand the kept counts to the caller and keep nothing, as ``take`` does the dataset."""
+        serving, self.serving = self.serving, None
+        return serving
 
 
 # ---- discovery --------------------------------------------------------------------------------
