@@ -288,6 +288,11 @@ def table_row(
     }
 
 
+# The summary metric names nemar-ica adds to the floor's; a plugin's headline metric may not take one
+# (the recipe passes them to ``plugins.load`` as ``reserved``).
+SUMMARY_METRICS = ("icaRank", "icaIterations", "icaFinalLogLikelihood", "icaDidConverge")
+
+
 def write_product(
     recording: Recording,
     context: RunContext,
@@ -300,12 +305,8 @@ def write_product(
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written."""
     block = facts(fit, profile)
-    summary = {
-        "icaRank": block["rank"],
-        "icaIterations": block["iterations"],
-        "icaFinalLogLikelihood": block["final_ll"],
-        "icaDidConverge": block["did_converge"],
-    }
+    values = (block["rank"], block["iterations"], block["final_ll"], block["did_converge"])
+    summary = dict(zip(SUMMARY_METRICS, values, strict=True))
     product = floor_outputs.write_product(
         recording,
         context,

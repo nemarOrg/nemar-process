@@ -10,6 +10,12 @@ and the skipped steps with their reasons. It leaves out measurements, the engine
 engine is pinned per product, not per rule), the clock, run ids and paths. Two recordings with the
 same decisions share a hash, so a dataset record can count variants.
 
+A quality plugin's step or skip is hashed like any other, with the plugin's identity (name, version,
+source-tree digest) as a ``plugin`` field of its resolved entry (owner decision, 2026-11-23): the hash
+records what ran, so two plugin versions with the same parameters, or a plugin that was skipped, give
+different hashes. The record keeps that identity in ``extensions.nemar.plugins``, which is where
+``resolved_plan`` reads it back. ``PlanStep.software`` is display only and never hashed.
+
 Parameters are typed in ``PARAMETER_TYPES``, one row per eegprep function: ``5.0`` and ``5`` are
 different text, so every parameter is cast to its table type before it is hashed, and a parameter
 that is not in the table is refused, which keeps the table complete. Adding a step is adding a row.
@@ -26,6 +32,7 @@ used. This is one of the two files that import such a module (the other is ``qc.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any
@@ -49,6 +56,9 @@ BAD_CHANNEL_RULES = {
 }
 
 # function path -> parameter -> type tag (see params.cast), or the tags of a nested mapping
+# The keys of a quality plugin's identity, hashed with its step and kept in extensions.nemar.plugins.
+PLUGIN_IDENTITY = ("name", "version", "tree_sha256")
+
 PARAMETER_TYPES: dict[str, dict[str, Any]] = {
     "eegprep.pop_load_frombids": {
         "dtype": "str",
@@ -231,6 +241,9 @@ class PlanStep:
     description: str
     executed_at: str
     quality: dict[str, Any] = field(default_factory=dict)
+    # A plugin's step names the plugin as its software (``plugins.Plugin.software``); None means the
+    # function's own (``software_of``). It is not hashed: the plan hash covers the function path.
+    software: dict[str, Any] | None = None
 
 
 @dataclass
@@ -242,6 +255,12 @@ class Plan:
     steps: list[PlanStep] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     rules: list[str] = field(default_factory=list)
+    # Quality plugin identity ({"name", "version", "tree_sha256"}) by step id, steps and skips alike;
+    # hashed as the ``plugin`` field of that step's resolved entry.
+    plugins: dict[str, dict[str, str]] = field(default_factory=dict, compare=False)
+    # Each plugin's entry for the record's ``extensions.nemar.plugins`` (``plugins.PluginOutcome``), in
+    # run order; the record writer takes it from here, never from a caller.
+    plugin_outcomes: list[dict[str, Any]] = field(default_factory=list, compare=False)
     # ("step" or "skip", step id) in the order each happened; kept for ``hash_as``, never written.
     _events: list[tuple[str, str]] = field(
         default_factory=list, init=False, repr=False, compare=False
@@ -255,6 +274,8 @@ class Plan:
         *,
         description: str,
         quality: dict[str, Any] | None = None,
+        software: dict[str, Any] | None = None,
+        plugin: Mapping[str, str] | None = None,
     ) -> PlanStep:
         if self.has_step(step_id):
             raise ValueError("step {} is already in the plan".format(step_id))
@@ -265,14 +286,30 @@ class Plan:
             description=description,
             executed_at=utc_now(),
             quality=dict(quality or {}),
+            software=None if software is None else dict(software),
         )
         self.steps.append(step)
         self._events.append(("step", step_id))
+        if plugin is not None:
+            self.plugins[step_id] = dict(plugin)
         return step
 
-    def add_skip(self, step_id: str, function: str, reason: str) -> None:
+    def add_skip(
+        self, step_id: str, function: str, reason: str, *, plugin: Mapping[str, str] | None = None
+    ) -> None:
         self.skipped.append({"step_id": step_id, "function": function, "reason": reason})
         self._events.append(("skip", step_id))
+        if plugin is not None:
+            self.plugins[step_id] = dict(plugin)
+
+    def add_plugin_outcome(self, entry: Mapping[str, Any]) -> None:
+        """Record a plugin's outcome; its identity must be the one its step or skip was hashed with."""
+        identity = self.plugins.get(entry["name"])
+        if identity is None or {key: entry[key] for key in PLUGIN_IDENTITY} != identity:
+            raise ValueError(
+                "plugin {} has no step or skip with this identity".format(entry["name"])
+            )
+        self.plugin_outcomes.append(dict(entry))
 
     def add_rule(self, name: str) -> None:
         if name not in self.rules:
@@ -288,6 +325,7 @@ class Plan:
                 self.recipe_version,
                 [(s.step_id, s.function, s.parameters) for s in self.steps],
                 self.skipped,
+                self.plugins,
             )
         )
 
@@ -316,6 +354,7 @@ class Plan:
                 version,
                 [(s.step_id, s.function, s.parameters) for s in self.steps[:ran]],
                 self.skipped[: len(prefix) - ran],
+                self.plugins,
             )
         )
 
@@ -325,15 +364,22 @@ def _resolved(
     version: str,
     steps: list[tuple[str, str, dict[str, Any]]],
     skipped: list[dict[str, str]],
+    plugins: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
+    identity = plugins or {}
+
+    def entry(item: dict[str, Any]) -> dict[str, Any]:
+        found = identity.get(item["step_id"])
+        return item if found is None else {**item, "plugin": dict(found)}
+
     return {
         "recipe": recipe,
         "recipe_version": version,
         "steps": [
-            {"step_id": step_id, "function": function, "parameters": parameters}
+            entry({"step_id": step_id, "function": function, "parameters": parameters})
             for step_id, function, parameters in steps
         ],
-        "skipped": skipped,
+        "skipped": [entry(dict(skip)) for skip in skipped],
     }
 
 
@@ -345,11 +391,29 @@ def resolved_plan(record: dict[str, Any]) -> dict[str, Any]:
         record["pipelineInfo"]["version"],
         [(s["stepId"], s["name"], s["parameters"]) for s in record["processingSteps"]],
         nemar["skipped_steps"],
+        {
+            plugin["name"]: {key: plugin[key] for key in PLUGIN_IDENTITY}
+            for plugin in nemar.get("plugins", [])
+        },
     )
 
 
 def plan_hash(resolved: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(resolved).encode("utf-8")).hexdigest()
+
+
+def _plugins_problem(entries: Any) -> str | None:
+    """Why ``extensions.nemar.plugins`` cannot be read back into the plan, or None."""
+    if not isinstance(entries, list):
+        return "extensions.nemar.plugins is not a list"
+    for number, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not all(
+            isinstance(entry.get(key), str) for key in PLUGIN_IDENTITY
+        ):
+            return "extensions.nemar.plugins[{}] lacks its identity ({})".format(
+                number, ", ".join(PLUGIN_IDENTITY)
+            )
+    return None
 
 
 def verify(record: dict[str, Any]) -> list[str]:
@@ -360,6 +424,9 @@ def verify(record: dict[str, Any]) -> list[str]:
     stored = nemar.get("plan_hash")
     if not stored:
         return ["extensions.nemar.plan_hash is missing"]
+    problem = _plugins_problem(nemar.get("plugins", []))
+    if problem is not None:
+        return [problem]
     recomputed = plan_hash(resolved_plan(record))
     if recomputed != stored:
         return [

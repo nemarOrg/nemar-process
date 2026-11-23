@@ -8,3 +8,4 @@
 !tests/fixtures/smoke
 **/__pycache__
 **/*.pyc
+**/.DS_Store
