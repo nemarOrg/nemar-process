@@ -38,6 +38,7 @@ import re
 import signal
 import stat
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Generator, Mapping, Sequence
@@ -300,9 +301,51 @@ def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
 
 
 def _owned_stat(info: os.stat_result, *, directory: bool, word: str) -> None:
+    """Of the expected kind, owned by the person or by root (a read-only system cache), and writable
+    by no one else."""
     kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-    if not kind_ok or info.st_uid != os.getuid() or info.st_mode & 0o022:
+    if not kind_ok or info.st_uid not in (os.getuid(), 0) or info.st_mode & 0o022:
         raise verify.Unverified(word)
+
+
+def _hashed_identity(
+    fd: int, proof: verify.SifProof | None, stop: threading.Event
+) -> tuple[int, int, int, int]:
+    """The identity of the image file open on ``fd``, checked (``_owned_stat``) and, with a proof,
+    hashed through that descriptor against the proof's layer (``layer_mismatch``). A file whose
+    identity changed while it was read is ``sif_changed``."""
+    before = os.fstat(fd)
+    _owned_stat(before, directory=False, word="sif_unsafe")
+    if proof is not None:
+        digest = hashlib.sha256()
+        while True:
+            if stop.is_set():
+                raise Stopped
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if "sha256:" + digest.hexdigest() != proof.layer:
+            raise verify.Unverified("layer_mismatch", "present")
+    identity = _identity(os.fstat(fd))
+    if identity != _identity(before):
+        raise verify.Unverified("sif_changed", "while_hashed")
+    return identity
+
+
+def _link_into(sif: str, directory: str, identity: tuple[int, int, int, int]) -> str:
+    """A hard link to ``sif`` in ``directory`` (made 0700), if it can be made and is the file whose
+    identity was taken; else ``sif`` itself (another file system, or a file that changed since: the
+    original then fails ``before_exec``)."""
+    try:
+        os.mkdir(directory, 0o700)
+        link = os.path.join(directory, os.path.basename(sif))
+        os.link(sif, link, follow_symlinks=False)
+        if _identity(os.lstat(link)) == identity:
+            return link
+    except OSError:
+        pass  # another file system: the original runs, still checked before it does
+    return sif
 
 
 def _owned(path: str, *, directory: bool, word: str) -> None:
@@ -344,6 +387,7 @@ class LocalImage(service.Image):
         self.fenced = fenced
         self.verification: dict[str, Any] | None = None
         self._pinned: tuple[str, tuple[int, int, int, int]] | None = None
+        self._log: Log | None = None
 
     def locate(self, job: spec.Job, env: Env) -> str:
         if not self.pull:
@@ -394,6 +438,7 @@ class LocalImage(service.Image):
         """Apptainer: with ``--pull`` verify (and pull if missing) the signed SIF artifact, then, in
         every case, pin the file that will run (``_pin``)."""
         proof: verify.SifProof | None = None
+        self._log = log
         with _unverified(log):
             if self.pull:
                 digest_hex = job.image["digest"].split(":", 1)[1]
@@ -429,35 +474,10 @@ class LocalImage(service.Image):
         except OSError:
             raise verify.Unverified("sif_unsafe", "not_opened") from None
         try:
-            before = os.fstat(fd)
-            _owned_stat(before, directory=False, word="sif_unsafe")
-            if proof is not None:
-                digest = hashlib.sha256()
-                while True:
-                    if terminator.stop.is_set():
-                        raise Stopped
-                    chunk = os.read(fd, 1024 * 1024)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                if "sha256:" + digest.hexdigest() != proof.layer:
-                    raise verify.Unverified("layer_mismatch", "present")
-            after = os.fstat(fd)
+            identity = _hashed_identity(fd, proof, terminator.stop)
         finally:
             os.close(fd)
-        identity = _identity(after)
-        if identity != _identity(before):
-            raise verify.Unverified("sif_changed", "while_hashed")
-        target = sif
-        directory = os.path.join(scratch, "image")
-        try:
-            os.mkdir(directory, 0o700)
-            link = os.path.join(directory, os.path.basename(sif))
-            os.link(sif, link, follow_symlinks=False)
-            if _identity(os.lstat(link)) == identity:
-                target = link
-        except OSError:
-            pass  # another file system: the original runs, still checked before it does
+        target = _link_into(sif, os.path.join(scratch, "image"), identity)
         self._pinned = (target, identity)
         if self.fenced is not None:
             self.fenced.pin_image(target)
@@ -472,6 +492,8 @@ class LocalImage(service.Image):
         except OSError:
             current = None
         if sif != target or current != identity:
+            if self._log is not None:
+                self._log.error("image_unverified reason=sif_changed")
             raise Failure("runtime_error", "image_unverified", "the image file changed")
 
     def _pull_image(

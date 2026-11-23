@@ -9,6 +9,7 @@ link in the scratch. Real files and the stand-in runtime; Python 3.9 compatible.
 from __future__ import annotations
 
 import os
+import threading
 
 import pytest
 from harness import IMAGE_HEX, SIF_NAME
@@ -181,3 +182,105 @@ def test_the_fence_is_told_the_pinned_image(lrig, tmp_path):
         with pytest.raises(fence.Refused):
             subprocess.run([apptainer, "exec", other, "true"], check=False)
         assert fence.runtime_verb_allowed([apptainer, "exec", path, "true"], path)
+
+
+# ---- the wiring and the two identity checks (review round 2) --------------------------------------------
+
+
+def test_a_change_between_pin_and_run_is_refused_by_do_work(lrig):
+    """The wiring: ``_do_work`` with a real code step that changes the pinned file's mtime (after the
+    image was pinned, before the runtime starts) ends ``image_unverified``; the runtime never runs."""
+    from nemar_launch import __main__ as service
+    from nemar_launch import bundle
+    from nemar_launch.provenance import Documents
+    from nemar_launch.settings import read_settings
+
+    lrig.write_spec(lrig.script_spec("echo ran > $NEMAR_OUT/ran.txt"))
+    options = local.Options(local.parser().parse_args(lrig.argv()))
+    env = local.environment(options, lrig.environ())
+    settings = read_settings(env)
+    os.makedirs(options.out, exist_ok=True)
+    layout = run.prepare_layout(options.out)
+    log = Log(layout.log_path)
+    state = service.Run(options.out, layout, log, Documents(layout.launcher, log))
+    job = spec.parse_local_text(local.read_spec(options.spec))
+    image = local.LocalImage()
+    terminator = run.Terminator(own_deadline_only=True)
+
+    def code(scratch):
+        assert image._pinned is not None
+        os.utime(image._pinned[0], ns=(1, 1))  # a real change to the pinned file
+        return bundle.from_file(options.code, job, scratch, log=log, stop=terminator.stop)
+
+    steps = service.Steps(
+        code=code, data=lambda _s: [], image=image, post=None, engine_pull="never"
+    )
+    with pytest.raises(Failure) as caught:
+        service._do_work(state, job, env, settings, terminator, steps)
+    log.close()
+    assert caught.value.detail == "image_unverified"
+    assert lrig.calls() == []
+    assert (
+        "image_unverified reason=sif_changed"
+        in (lrig.out / "launcher" / "launcher.log").read_text()
+    )
+
+
+def test_a_link_that_is_not_the_checked_file_is_not_used(tmp_path):
+    """``_link_into``: a file changed after its identity was taken is not linked in; the original is
+    returned (and fails ``before_exec``)."""
+    sif = tmp_path / ("c" * 64 + ".sif")
+    sif.write_bytes(b"image")
+    identity = local._identity(os.lstat(sif))
+    assert local._link_into(str(sif), str(tmp_path / "a"), identity) == str(
+        tmp_path / "a" / sif.name
+    )
+    os.utime(sif, ns=(5, 5))
+    assert local._link_into(str(sif), str(tmp_path / "b"), identity) == str(sif)
+
+
+def test_a_file_changed_while_it_is_hashed_is_refused(tmp_path):
+    """``_hashed_identity``: the file's modification time moves while it is read (a writer touching
+    it), so the identity before and after differ: ``sif_changed``."""
+    import hashlib
+
+    from nemar_launch import verify
+
+    sif = tmp_path / ("d" * 64 + ".sif")
+    content = os.urandom(1024 * 1024) * 64
+    sif.write_bytes(content)
+    proof = verify.SifProof("sha256:" + "0" * 64, "sha256:" + hashlib.sha256(content).hexdigest())
+    stop = threading.Event()
+    done = threading.Event()
+
+    def touch():
+        n = 10
+        while not done.is_set():
+            n += 1
+            os.utime(sif, ns=(n, n))
+
+    toucher = threading.Thread(target=touch)
+    toucher.start()
+    fd = os.open(str(sif), os.O_RDONLY)
+    try:
+        with pytest.raises(verify.Unverified) as caught:
+            local._hashed_identity(fd, proof, stop)
+    finally:
+        done.set()
+        toucher.join()
+        os.close(fd)
+    assert caught.value.reason == "sif_changed"
+    fd = os.open(str(sif), os.O_RDONLY)
+    try:
+        assert local._hashed_identity(fd, proof, stop) == local._identity(os.lstat(sif))
+    finally:
+        os.close(fd)
+
+
+def test_a_root_owned_read_only_image_is_accepted():
+    """A system cache: owned by root and writable by no one else. Real files of this machine."""
+    for path, directory in (("/", True), ("/bin/sh", False)):
+        info = os.stat(path)
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            pytest.skip("{} is not root-owned and closed here".format(path))
+        local._owned_stat(info, directory=directory, word="sif_unsafe")
