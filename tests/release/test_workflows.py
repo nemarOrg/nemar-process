@@ -894,18 +894,30 @@ def test_the_tools_a_release_gate_runs_are_the_versions_ci_runs():
 
 def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_container_tests():
     job = load("release-gate.yml")["jobs"]["release-gate"]
-    commands = "\n".join(s.get("run", "") for s in job["steps"])
+    commands = "\n".join(s.get("run", "") for s in job["steps"]) + "\n"
     for needed in (
         "uv lock --check",
         "actionlint -color=false .github/workflows/*.yml",
         "uv run pytest tests/release -q",
         # the suites as ci.yml splits them: one pytest over the whole tree cannot collect
-        "uv run pytest -q --ignore=tests/images",
+        # with ci.yml's markers: the runner stack needs a nemar-cli checkout, bun and the tiny-recipe
+        # SIF, so it runs only in ci.yml's launcher leg on 3.12, never in the gate
+        'uv run pytest -q --ignore=tests/images -m "not docker and not runner_stack"\n',
         "uv run pytest -q tests/images",
         "uv run --frozen --group runtime --extra cpu pytest -q tests/recipes",
-        'uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer"',
+        "uv run --frozen --group runtime --extra cpu pytest -q tests/e2e "
+        '-m "not apptainer and not docker and not runner_stack"\n',
     ):
         assert needed in commands, needed
+    ci = (
+        "\n".join(s.get("run", "") for job in load("ci.yml")["jobs"].values() for s in job["steps"])
+        + "\n"
+    )
+    assert '--ignore=tests/images -m "not docker and not runner_stack"\n' in ci
+    assert 'tests/e2e -m "not apptainer and not docker and not runner_stack"\n' in ci
+    for line in commands.splitlines():  # no suite of the gate collects tests/e2e without the marker
+        if "pytest" in line and ("tests/e2e" in line or "--ignore=tests/images" in line):
+            assert "not runner_stack" in line, line
     assert not re.search(r"uv run pytest -q\s*$", commands, re.M)  # the unsplit run that fails
     recipes = next(s for s in job["steps"] if "tests/recipes" in s.get("run", ""))
     assert recipes["env"]["NEMAR_REQUIRE_RUNTIME"] == "1"
