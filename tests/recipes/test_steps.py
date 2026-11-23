@@ -24,6 +24,7 @@ from nemar_process.common import io, plan, qc
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from nemar_process.nemar_floor import outputs, process, steps
 from recipe_support import (
+    PINNED_RECIPE_VERSION,
     SMOKE_SET,
     correlated_channels,
     floor_literals,
@@ -68,7 +69,7 @@ def test_the_fixtures_plan_is_the_pinned_order(fixture_result):
         },
     ]
     assert plan.rules == ["signal-channels-typed", "locations-usable"]
-    assert (plan.recipe_id, plan.recipe_version) == ("nemar-floor", "1.0.0")
+    assert (plan.recipe_id, plan.recipe_version) == ("nemar-floor", PINNED_RECIPE_VERSION)
 
 
 def test_every_step_carries_the_literal_function_and_parameters(fixture_result):
@@ -237,13 +238,15 @@ def test_a_short_all_eeg_recording_skips_the_signal_channels_and_the_two_window_
 
 
 def test_a_set_saved_with_an_empty_etc_runs_the_whole_floor(tmp_path):
-    """Without the loader's repair every cleaning step fails on such a set (sccn/eegprep#533)."""
+    """A set saved with an empty etc runs the floor whole. Without a repair every cleaning step failed
+    on one under eegprep 0.5.0 (sccn/eegprep#533); the commit the images pin reads the dict back, and the
+    loader repairs only an array (`test_loader.py`)."""
     data = correlated_channels(np.random.default_rng(3), 8, 250 * 70) * 10.0
     data[7, 10 * 250 : 20 * 250] = 0.0  # a flat stretch of 10 s
     write_set(tmp_path / "sub-01" / "eeg" / "sub-01_task-x_eeg.set", data)
     (recording,) = io.discover(tmp_path)
     loaded = io.load(recording)
-    assert loaded.etc_normalized
+    assert isinstance(loaded.eeg["etc"], dict)
     result = process(loaded)
     plan = result.plan
     assert step_of(plan, "flatline").quality["removedChannels"] == ["Ch8"]

@@ -27,6 +27,7 @@ Exit number: 0, or 10 to 16 for the seven failure codes (``codes.exit_number``).
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import platform
 import re
@@ -38,7 +39,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from . import bundle, net, provenance, run, spec, stage, upload
+from . import bundle, net, provenance, run, runtime, spec, stage, upload
 from .codes import (
     ENV_SLURM_JOB_ID,
     ENV_SPEC,
@@ -53,7 +54,7 @@ from .codes import (
     exit_number,
 )
 from .provenance import Documents, Log
-from .settings import Settings, read_settings
+from .settings import Device, Settings, check_device, read_settings
 
 _SLURM_ID = re.compile(r"^[0-9A-Za-z_+.-]{1,64}$")
 
@@ -76,6 +77,8 @@ class Run:
         self.timings: dict[str, float] = {}
         self.runtime_version = "unknown"
         self.slurm_job_id: str | None = None
+        # What a runner decided for a GPU job, set only when the container is about to start
+        self.device: Device | None = None
         self.files: list[dict[str, Any]] = []
         # True when no output may be uploaded: the full upload is skipped, the launcher files go
         # alone (an unreadable output, an over-limit result, a refused output directory).
@@ -109,6 +112,7 @@ class Run:
                 timings=self.timings,
                 slurm_job_id=self.slurm_job_id,
                 entry_exit_code=self.entry_exit_code,
+                device=None if self.device is None else self.device.record(),
             ),
         )
         self.docs.put(MANIFEST_FILE, provenance.build_manifest(self.job_id, self.files))
@@ -145,6 +149,8 @@ def _do_work(
     """
     log = state.log
     assert state.layout is not None
+    # a GPU the specification did not allow is refused before anything is created, fetched or run
+    check_device(settings.device, job.gpus)
     base = settings.scratch_base
     if _inside(base, state.out_dir):
         raise Failure(
@@ -161,9 +167,24 @@ def _do_work(
         tmp_dir = os.path.join(scratch, "tmp")
         os.mkdir(tmp_dir, 0o700)
 
-        runtime_name, runtime_path = run.find_runtime(env)
-        sif = run.resolve_sif(job, env)
+        engine = runtime.selected(env)
+        runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
+        sif = ""
+        if engine == runtime.APPTAINER:
+            runtime_name, runtime_path = run.find_runtime(env)
+            sif = run.resolve_sif(job, env)
+        else:  # Docker or Podman: the image comes from the registry, there is no image file
+            runtime_name, runtime_path = run.find_runtime(env, (engine,))
         state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
+        reference = runtime.image_reference(job)
+        engine_found: runtime.Assessment | None = None
+        if engine != runtime.APPTAINER:  # like the image file: before anything is fetched
+            assert settings.limits is not None  # read_settings refuses a launch without them
+            runtime.check_registry(reference, env)
+            engine_found = runtime.preflight(
+                engine, runtime_path, settings.limits, env, terminator.stop, log
+            )
+            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
 
         code_dir: str | None = None
         started = time.monotonic()
@@ -180,7 +201,10 @@ def _do_work(
             if not os.path.isfile(os.path.join(code_dir, *job.entry.split("/"))):
                 raise Failure("entry_not_found", None, "the entry is not in the bundle")
 
-        run.require_pid_namespace(runtime_path, sif, job, state.layout, tmp_dir, env, log)
+        if engine == runtime.APPTAINER:
+            run.require_pid_namespace(runtime_path, sif, job, state.layout, tmp_dir, env, log)
+        else:
+            log.info("pid namespace: private, the engine is never given a host namespace flag")
 
         started = time.monotonic()
         try:
@@ -192,20 +216,54 @@ def _do_work(
             raise Stopped  # a cancel must not run the entry
 
         binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
-        run.check_bind_sources(binds)
-        argv = run.build_argv(
-            runtime_path,
-            job,
-            sif,
-            binds,
-            run.cuda_visible_devices(job, env),
-            limits=settings.limits,
+        container: str | None = None
+        if engine == runtime.APPTAINER:
+            run.check_bind_sources(binds)
+            argv = run.build_argv(
+                runtime_path,
+                job,
+                sif,
+                binds,
+                run.cuda_visible_devices(job, env),
+                limits=settings.limits,
+                device=settings.device,
+            )
+        else:
+            runtime.check_mount_sources(binds)
+            assert settings.limits is not None  # read_settings refuses a launch without them
+            assert settings.runner_label is not None
+            assert engine_found is not None  # the preflight above ran for every engine
+            container = runtime.container_name()
+            log.info("container: named {}".format(container))
+            argv = runtime.build_argv(
+                engine,
+                runtime_path,
+                job,
+                reference,
+                container,
+                binds,
+                settings.limits,
+                settings.runner_label,
+                cpu_shares=engine_found.cpu_shares,
+                device=settings.device,
+            )
+        if settings.device is not None:
+            state.device = settings.device  # recorded only for a container that is about to start
+            log.info("device: {} ({})".format(settings.device.device, settings.device.reason))
+        oom_check = (
+            None
+            if container is None
+            else functools.partial(runtime.oom_killed, runtime_path, container, env)
         )
         started = time.monotonic()
         try:
-            outcome = run.run_container(argv, env, state.layout.work, terminator, log)
+            outcome = run.run_container(
+                argv, env, state.layout.work, terminator, log, oom_check=oom_check
+            )
         finally:
             state.phase("run", started)
+            if container is not None:
+                runtime.remove_container(runtime_path, container, env)
         state.entry_exit_code = outcome.entry_exit_code
         if outcome.failure is not None:
             raise outcome.failure

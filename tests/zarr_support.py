@@ -1,4 +1,4 @@
-"""A local stand-in for NEMAR's Zarr hosts, for the ``nemar-floor-zarr`` tests.
+"""A local stand-in for NEMAR's Zarr hosts, for the ``nemar-floor --input zarr`` tests.
 
 Real Zarr stores written by zarr itself, served over real HTTP that honors ``Range`` (the way
 eegprep-lean's own tests serve them), plus an index document in the format of the contract. The
@@ -17,18 +17,24 @@ import http.client
 import json
 import sys
 import threading
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 import pytest
-from nemar_process.common import zarr_hosts
 from nemar_process.common.zarr_input import Reply
 
-ZARR_HOST = next(iter(zarr_hosts.ZARR_HOSTS))
-DATA_HOST = next(iter(zarr_hosts.ZARR_DATA_HOSTS))
+# NEMAR's two Zarr environments, written out here as in the code under test (``zarr_hosts``), whose own
+# test pins that the two tables agree. The unprefixed names are the production pair.
+ZARR_HOST = "zarr.nemar.org"
+DATA_HOST = "nemar.s3.us-east-2.amazonaws.com"
+STAGING_ZARR_HOST = "zarr-test.nemar.org"
+STAGING_DATA_HOST = "nemar-dev.s3.us-east-2.amazonaws.com"
+PAIRS = {ZARR_HOST: DATA_HOST, STAGING_ZARR_HOST: STAGING_DATA_HOST}
 ORIGIN = "https://" + ZARR_HOST
+STAGING_ORIGIN = "https://" + STAGING_ZARR_HOST
 DATASET = "xx000001"
 VERSION = "v1.0.0"
 SOURCE_COMMIT = "a" * 40
@@ -37,6 +43,18 @@ RATE = 250.0
 N_CHANNELS = 8
 N_SAMPLES = 17_500  # 70 s: past the floor's short-recording rule, so every step runs
 LABELS = tuple("E{}".format(i + 1) for i in range(N_CHANNELS))
+# eight positions for those labels, in millimeters in a head-based RAS frame (CapTrak: +X right, +Y toward
+# the nose, +Z up), spread so that the floor's location guard (rank 3) accepts them
+POSITIONS = {
+    "E1": (-40.0, 70.0, 40.0),
+    "E2": (40.0, 70.0, 40.0),
+    "E3": (-60.0, 0.0, 60.0),
+    "E4": (60.0, 0.0, 60.0),
+    "E5": (-40.0, -70.0, 40.0),
+    "E6": (40.0, -70.0, 40.0),
+    "E7": (0.0, 40.0, 80.0),
+    "E8": (0.0, -40.0, 85.0),
+}
 EEG_ONE = "sub-01/eeg/sub-01_task-rest_eeg.edf"
 EEG_TWO = "sub-02/eeg/sub-02_task-rest_eeg.edf"
 EMG = "sub-03/emg/sub-03_task-rest_emg.edf"
@@ -81,8 +99,83 @@ def _signal(seed: int):
     )
 
 
-def write_group(root, name: str, *, modality: str, unit: str, data, scale: float = 0.5) -> None:
-    """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization."""
+def reference_content_sha256(
+    seed: int | None,
+    unit: str | None,
+    scale: float = 0.5,
+    labels: tuple[str, ...] | None = LABELS,
+) -> str:
+    """The content digest of a stand-in store (``seed`` None is the flat one), written out from the
+    definition (``nemar.store-content.v1``) and apart from the recipe's own function: the header
+    lines, then the physical values as little-endian binary64, channel-major. ``unit`` and
+    ``labels`` are what the header carries (None is ``unit`` alone, and a ``label`` alone per
+    channel), already decided by the two rules (shared or none, all or none)."""
+    import struct
+
+    import numpy as np
+
+    counts = np.zeros((N_CHANNELS, N_SAMPLES), dtype=int) if seed is None else _signal(seed)
+    with np.errstate(over="ignore"):
+        values = counts.astype(np.int16).astype(np.float64) * scale + 0.0
+    lines = [
+        "nemar.store-content.v1",
+        "shape {} {}".format(N_CHANNELS, N_SAMPLES),
+        "rate " + struct.pack(">d", RATE).hex(),
+        "unit" if unit is None else "unit " + unit,
+        *(["label"] * N_CHANNELS if labels is None else ["label " + label for label in labels]),
+        "data float64-le",
+    ]
+    header = "".join(line + "\n" for line in lines)
+    return hashlib.sha256(header.encode() + values.astype("<f8").tobytes(order="C")).hexdigest()
+
+
+def reference_locations_sha256(
+    positions: Mapping[str, tuple[float, ...]] | None = None,
+    system: str = "",
+    units: str = "",
+    labels: tuple[str, ...] = LABELS,
+) -> str:
+    """The locations digest of a stand-in store's group, written out from the definition
+    (``nemar.store-locations.v1``) and apart from the recipe's own function: the header lines, then a
+    ``position`` line per channel, with the 16 hexadecimal digits of each coordinate as a big-endian
+    binary64 (a zero as positive zero) when the store gives that channel's label a position, else
+    ``position`` alone. ``positions`` None is a store with no ``electrode_positions`` attribute: the
+    system and the units are then written bare, whatever the store states."""
+    import struct
+
+    def hexadecimal(value: float) -> str:
+        return struct.pack(">d", 0.0 if value == 0 else float(value)).hex()
+
+    lines = [
+        "nemar.store-locations.v1",
+        "system " + system if positions is not None and system else "system",
+        "units " + units if positions is not None and units else "units",
+    ]
+    for label in labels:
+        point = (positions or {}).get(label)
+        lines.append(
+            "position " + " ".join(hexadecimal(axis) for axis in point)
+            if point is not None
+            else "position"
+        )
+    return hashlib.sha256("".join(line + "\n" for line in lines).encode()).hexdigest()
+
+
+def write_group(
+    root,
+    name: str,
+    *,
+    modality: str,
+    unit: str,
+    data,
+    scale: float = 0.5,
+    labels: tuple[str, ...] | None = None,
+    units: tuple[str, ...] | None = None,
+) -> None:
+    """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization.
+
+    The labels and units are the stand-in's own (``LABELS``, ``unit``) unless a test gives each
+    channel's, as a store that states a label or a unit for some channels only would."""
     import numpy as np
 
     channels, _samples = data.shape
@@ -95,8 +188,10 @@ def write_group(root, name: str, *, modality: str, unit: str, data, scale: float
             "n_channels": channels,
             "channels": [
                 {
-                    "label": LABELS[i] if channels == N_CHANNELS else "C{}".format(i + 1),
-                    "unit": unit,
+                    "label": labels[i]
+                    if labels is not None
+                    else (LABELS[i] if channels == N_CHANNELS else "C{}".format(i + 1)),
+                    "unit": units[i] if units is not None else unit,
                     "channel_type": modality,
                     "row_index": i,
                     "original_rate": 500.0,
@@ -123,8 +218,10 @@ def write_group(root, name: str, *, modality: str, unit: str, data, scale: float
     )
 
 
-def index_document(source_commit: str = SOURCE_COMMIT) -> dict:
-    """The serving index of the stand-in dataset, in the contract's shape."""
+def index_document(
+    source_commit: str = SOURCE_COMMIT, zarr_host: str = ZARR_HOST, data_host: str = DATA_HOST
+) -> dict:
+    """The serving index of the stand-in dataset, in the contract's shape, for one pair of hosts."""
     eeg = group_entry("eeg_250hz", "EEG", RATE, N_CHANNELS, N_SAMPLES)
     stores = [
         {
@@ -154,8 +251,8 @@ def index_document(source_commit: str = SOURCE_COMMIT) -> dict:
         "format": "nemar-zarr-index",
         "format_version": 3,
         "dataset_id": DATASET,
-        "contract_base": "{}/{}/zarr/".format(ORIGIN, DATASET),
-        "data_base": "https://{}/{}/zarr/".format(DATA_HOST, DATASET),
+        "contract_base": "https://{}/{}/zarr/".format(zarr_host, DATASET),
+        "data_base": "https://{}/{}/zarr/".format(data_host, DATASET),
         "source_commit": source_commit,
         "engine_version": "3",
         "store_count": len(stores),
@@ -169,11 +266,11 @@ def index_bytes(document: dict) -> bytes:
 
 
 def default_policy(host: str, path: str) -> tuple[str, str | None]:
-    """What NEMAR's hosts do: the Zarr host answers the index itself and redirects every other read
-    to the data host, which serves it."""
-    if host == ZARR_HOST and not path.endswith("/index.json"):
-        return "redirect", "https://{}{}".format(DATA_HOST, path)
-    if host in (ZARR_HOST, DATA_HOST):
+    """What NEMAR's hosts do: a Zarr host answers the index itself and redirects every other read
+    to the data host of its own pair, which serves it."""
+    if host in PAIRS and not path.endswith("/index.json"):
+        return "redirect", "https://{}{}".format(PAIRS[host], path)
+    if host in PAIRS or host in PAIRS.values():
         return "serve", None
     return "missing", None
 
@@ -233,11 +330,49 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def _store(base: Path, path: str, groups: dict[str, tuple[Any, ...]]) -> None:
+def root_attributes(
+    positions: Mapping[str, tuple[float, ...]],
+    system: str,
+    units: str,
+    *,
+    source: str | None = None,
+    file: str | None = None,
+    coordsystem_file: str | None = None,
+) -> dict[str, Any]:
+    """The attributes of a store's root as NEMAR's converter writes them when the recording's dataset
+    has an electrodes file: ``electrode_positions`` (label to ``[x, y, z]``, as the file states them),
+    ``electrode_coordinate_system`` and ``electrode_coordinate_units`` (the coordsystem file's, each
+    an empty string when there is none), and, when the converter that wrote the store says so, the
+    provenance (``electrode_positions_source``, ``electrode_positions_file`` and
+    ``electrode_coordsystem_file``). A store given none of this has no root attributes at all, as
+    every store of a dataset without an electrodes file has none."""
+    attributes: dict[str, Any] = {
+        "electrode_positions": {label: list(point) for label, point in positions.items()},
+        "electrode_coordinate_system": system,
+        "electrode_coordinate_units": units,
+    }
+    for key, value in (
+        ("electrode_positions_source", source),
+        ("electrode_positions_file", file),
+        ("electrode_coordsystem_file", coordsystem_file),
+    ):
+        if value is not None:
+            attributes[key] = value
+    return attributes
+
+
+def _store(
+    base: Path,
+    path: str,
+    groups: dict[str, tuple[Any, ...]],
+    attributes: Mapping[str, Any] | None = None,
+) -> None:
     import zarr
     from zarr.storage import LocalStore
 
     store = zarr.create_group(store=LocalStore(base / zarr_name(path)), overwrite=True)
+    if attributes:
+        store.attrs.update(dict(attributes))
     for name, (modality, unit, data, *scale) in groups.items():
         write_group(store, name, modality=modality, unit=unit, data=data, scale=(scale or [0.5])[0])
 
@@ -246,24 +381,34 @@ class Served:
     """A running stand-in for NEMAR's Zarr hosts: real stores, the index, the requests seen.
 
     ``policy(host, path)`` says what each host does with a path (``default_policy``); a test
-    assigns another to make a host redirect somewhere else.
+    assigns another to make a host redirect somewhere else. ``attributes`` maps the path of one of
+    the three stores a floor run processes (``EEG_ONE``, ``EEG_TWO``, ``EEG_MU``) to the root
+    attributes its store carries (``root_attributes``); a store not named has none.
     """
 
-    def __init__(self, root: Path, source_commit: str = SOURCE_COMMIT) -> None:
+    def __init__(
+        self,
+        root: Path,
+        source_commit: str = SOURCE_COMMIT,
+        zarr_host: str = ZARR_HOST,
+        data_host: str = DATA_HOST,
+        attributes: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         import numpy as np
 
         self.root = root
         base = root / DATASET / "zarr"
         base.mkdir(parents=True)
         eeg = "eeg_250hz"
-        _store(base, EEG_ONE, {eeg: ("EEG", "uV", _signal(1))})
-        _store(base, EEG_TWO, {eeg: ("EEG", MICRO_SIGN, _signal(2))})
-        _store(base, EEG_MU, {eeg: ("EEG", GREEK_MU, _signal(3))})
+        given = attributes or {}
+        _store(base, EEG_ONE, {eeg: ("EEG", "uV", _signal(1))}, given.get(EEG_ONE))
+        _store(base, EEG_TWO, {eeg: ("EEG", MICRO_SIGN, _signal(2))}, given.get(EEG_TWO))
+        _store(base, EEG_MU, {eeg: ("EEG", GREEK_MU, _signal(3))}, given.get(EEG_MU))
         _store(base, EMG, {"emg_250hz": ("EMG", "uV", np.zeros((2, 500), dtype=int))})
         _store(base, BAD_UNIT, {eeg: ("EEG", "kV", _signal(4))})
         _store(base, FLAT, {eeg: ("EEG", "uV", np.zeros((N_CHANNELS, N_SAMPLES), dtype=int))})
         _store(base, NON_FINITE, {eeg: ("EEG", "uV", _signal(5), 1e308)})
-        self.index_bytes = index_bytes(index_document(source_commit))
+        self.index_bytes = index_bytes(index_document(source_commit, zarr_host, data_host))
         (base / "index.json").write_bytes(self.index_bytes)
         self.index_sha256 = hashlib.sha256(self.index_bytes).hexdigest()
         self.policy = default_policy
@@ -281,6 +426,38 @@ class Served:
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+
+
+def add_store(
+    served: Served,
+    path: str,
+    data,
+    *,
+    labels: tuple[str, ...] | None = None,
+    unit: str = "uV",
+    attributes: Mapping[str, Any] | None = None,
+) -> None:
+    """One more EEG store under a running stand-in's root, listed in its index (rewritten, so the
+    index's digest changes): one channel group of ``data``'s channels and samples, with the labels given
+    (``LABELS`` for eight channels, else ``C1``, ``C2``, ...) and the root attributes given
+    (``root_attributes``; none by default)."""
+    import zarr
+    from zarr.storage import LocalStore
+
+    base = served.root / DATASET / "zarr"
+    root = zarr.create_group(store=LocalStore(base / zarr_name(path)), overwrite=True)
+    if attributes:
+        root.attrs.update(dict(attributes))
+    write_group(root, "eeg_250hz", modality="EEG", unit=unit, data=data, labels=labels)
+    document = json.loads(served.index_bytes)
+    channels, samples = data.shape
+    group = group_entry("eeg_250hz", "EEG", RATE, channels, samples)
+    document["stores"].append({"path": path, "zarr": zarr_name(path), "groups": [group]})
+    document["store_count"] = len(document["stores"])
+    body = index_bytes(document)
+    (base / "index.json").write_bytes(body)
+    served.index_bytes = body
+    served.index_sha256 = hashlib.sha256(body).hexdigest()
 
 
 class StandIn:
@@ -391,6 +568,18 @@ def install() -> None:
 @pytest.fixture(scope="module")
 def served(tmp_path_factory):
     stand_in = Served(tmp_path_factory.mktemp("served"))
+    yield stand_in
+    stand_in.close()
+
+
+@pytest.fixture(scope="module")
+def served_staging(tmp_path_factory):
+    """The same stand-in dataset under the staging pair: its index names the staging hosts."""
+    stand_in = Served(
+        tmp_path_factory.mktemp("served_staging"),
+        zarr_host=STAGING_ZARR_HOST,
+        data_host=STAGING_DATA_HOST,
+    )
     yield stand_in
     stand_in.close()
 

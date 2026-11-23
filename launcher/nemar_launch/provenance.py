@@ -177,9 +177,10 @@ def build_provenance(
     timings: dict[str, float],
     slurm_job_id: str | None,
     entry_exit_code: int | None,
+    device: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     chosen = image or PLACEHOLDER_IMAGE
-    return {
+    document: dict[str, Any] = {
         "job_id": job_id,
         "launch_spec_digest": launch_spec_digest,
         "bundle_digest": bundle_digest,
@@ -190,3 +191,7 @@ def build_provenance(
         "slurm_job_id": slurm_job_id,
         "entry_exit_code": entry_exit_code,
     }
+    # only when a runner decided the device: provenance is otherwise exactly as it was
+    if device is not None:
+        document["device"] = device
+    return document

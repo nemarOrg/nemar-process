@@ -1,10 +1,11 @@
 """Recipes hold no numerics: a missing signal-processing step is added to eegprep, never written here.
 
-An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_process/` (the vendored
-signalJourney schema excepted) that fails on:
+An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_process/` that fails on:
 
 * an import of, or a reference to, a signal-processing library or module (`scipy.signal`,
-  `scipy.fft`, `scipy.linalg`, `numpy.fft`, scikit-learn, torch, pamica, MNE-Python);
+  `scipy.fft`, `scipy.linalg`, `numpy.fft`, scikit-learn, torch, pamica, MNE-Python); torch is
+  allowed in exactly one file, `common/device.py`, which asks it whether a GPU is usable and never
+  computes with it (`TORCH_ALLOWED`);
 * a call to a convolution, a correlation, a window function or a linear-algebra decomposition of
   NumPy (the single exception is `numpy.linalg.matrix_rank`, a rank test the location guard uses,
   not a decomposition of data);
@@ -25,6 +26,9 @@ import pytest
 from recipe_support import ROOT
 
 PACKAGE = ROOT / "recipes" / "nemar_process"
+# The one file that may import torch: the device facts (is a GPU usable, its name, the versions torch
+# reports), never numerics. Every other file, nemar-ica's included, is held to the rule.
+TORCH_ALLOWED = frozenset({"common/device.py"})
 
 BANNED_MODULES = (
     "scipy.signal",
@@ -136,20 +140,28 @@ def definition_problems(name: str) -> list[str]:
     return problems
 
 
-def scan(source: str) -> list[str]:
-    """Every way `source` writes signal processing itself, as a list of sentences."""
+def scan(source: str, allowed: frozenset[str] = frozenset()) -> list[str]:
+    """Every way `source` writes signal processing itself, as a list of sentences.
+
+    `allowed` names banned libraries this one file may import (torch, in the device module).
+    """
     tree = ast.parse(source)
     table = aliases(tree)
     problems: list[str] = []
+
+    def banned(dotted: str) -> str | None:
+        module = banned_module(dotted)
+        return None if module in allowed else module
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for item in node.names:
-                if banned_module(item.name):
+                if banned(item.name):
                     problems.append("imports {}".format(item.name))
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             for item in node.names:
                 full = node.module + "." + item.name
-                if banned_module(node.module) or banned_module(full):
+                if banned(node.module) or banned(full):
                     problems.append("imports {}".format(full))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             problems.extend(definition_problems(node.name))
@@ -157,37 +169,72 @@ def scan(source: str) -> list[str]:
             dotted = dotted_name(node, table)
             if dotted is None:
                 continue
-            if banned_module(dotted) or banned_reference(dotted):
+            if banned(dotted) or banned_reference(dotted):
                 problems.append("uses {}".format(dotted))
     return sorted(set(problems))
 
 
 def package_files():
-    return sorted(
-        path for path in PACKAGE.rglob("*.py") if "_vendor" not in path.relative_to(PACKAGE).parts
-    )
+    return sorted(PACKAGE.rglob("*.py"))
 
 
 def test_no_file_of_the_recipes_package_writes_signal_processing():
     files = package_files()
     assert files, "the scan found no file to scan, so it would pass for nothing"
     found = {
-        path.relative_to(ROOT).as_posix(): scan(path.read_text(encoding="utf-8")) for path in files
+        path.relative_to(ROOT).as_posix(): scan(
+            path.read_text(encoding="utf-8"),
+            frozenset({"torch"})
+            if path.relative_to(PACKAGE).as_posix() in TORCH_ALLOWED
+            else frozenset(),
+        )
+        for path in files
     }
     assert {name: problems for name, problems in found.items() if problems} == {}
 
 
-def test_the_scan_covers_the_validator_wrapper_and_skips_the_vendored_schema():
+def test_torch_is_imported_in_the_device_module_and_nowhere_else():
+    importers = sorted(
+        path.relative_to(PACKAGE).as_posix()
+        for path in package_files()
+        if any(
+            problem.split()[1].split(".")[0] == "torch"
+            for problem in scan(path.read_text(encoding="utf-8"))
+        )
+    )
+    assert importers == sorted(TORCH_ALLOWED)
+
+
+def test_the_device_module_is_not_allowed_anything_but_torch():
+    source = (
+        "import torch\nimport pamica\nfrom scipy import signal\nimport numpy as np\nnp.fft.rfft(x)"
+    )
+    found = scan(source, frozenset({"torch"}))
+    assert not any("torch" in problem for problem in found)
+    assert {"imports pamica", "imports scipy.signal", "uses numpy.fft.rfft"} <= set(found)
+    assert scan("import torch")  # and the allowance is for the one file, never a default
+
+
+def test_the_scan_covers_the_recipe_and_the_device_module():
+    names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
+    for name in (
+        "common/device.py",
+        "nemar_ica/pipeline.py",
+        "nemar_ica/outputs.py",
+        "nemar_ica/engines.py",
+    ):
+        assert name in names, name
+
+
+def test_the_scan_covers_the_validator_wrapper():
     names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
     assert "sj.py" in names
-    assert not [name for name in names if name.startswith("_vendor")]
 
 
 def test_the_scan_covers_the_zarr_recipe_and_its_input_layer():
     names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
     for name in (
-        "nemar_floor_zarr/__init__.py",
-        "nemar_floor_zarr/recipe.py",
+        "nemar_floor/zarr_recipe.py",
         "common/zarr_input.py",
         "common/zarr_hosts.py",
     ):

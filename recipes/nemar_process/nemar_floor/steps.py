@@ -18,7 +18,7 @@ from nemar_process.common.determinism import SEEDS
 from nemar_process.common.params import signature_defaults
 
 RECIPE_ID = "nemar-floor"
-RECIPE_VERSION = "1.0.0"
+RECIPE_VERSION = "1.0.0-b1"
 
 # The order of the steps (docs/recipes.md). Flatline runs on the unfiltered copy, before the drift
 # filter: after it, a flat stretch is no longer constant to within 20 machine epsilons, and none

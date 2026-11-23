@@ -9,6 +9,7 @@ real runtime:
          --bind <out>/work:/work  --bind <out>/work/tmp:/tmp
          [--bind <scratch>/code:/code:ro]  [--bind <dataset dir>:/data/<id>:ro ...]
          [--nv]  --env <allowlisted>=<value> ...  --env NEMAR_OUT=/work/outputs
+         [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
          <sif>  <entry or command> <args>
 
 * ``--containall`` (contain, clean environment, private PID and IPC namespaces), ``--cleanenv``
@@ -22,7 +23,12 @@ real runtime:
   value is read from the host. The runtime process itself is also given a short allowlist of host
   variables, not the launcher's environment, because ``APPTAINERENV_*`` / ``SINGULARITY_BIND``
   style variables in the launcher's environment would otherwise be honoured by the runtime.
-* ``--nv`` only when ``resources.gpus`` is above zero.
+* ``--nv`` only when ``resources.gpus`` is above zero, and, when a runner decided the device
+  (``settings.Device``), only for a ``cuda`` decision: ``--nv`` and ``CUDA_VISIBLE_DEVICES`` set to the
+  one GPU the runner named, never the scheduler's value; a ``cpu`` decision passes neither. The container
+  then also gets ``NEMAR_DEVICE``, ``NEMAR_DEVICE_REASON`` and, for ``cuda``, ``NEMAR_GPU_MEMORY_MB``
+  after ``NEMAR_OUT``: launcher-owned, the specification's allowlist cannot name them. Without a
+  decision (Tapis, SLURM, a job with no GPU) the command line is what it always was.
 
 After the container exits the launcher removes every symlink and special file under ``work/``
 (recorded in the log) and hashes ``work/outputs`` into the manifest itself: the container's own
@@ -39,8 +45,10 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from . import net, spec
@@ -49,6 +57,11 @@ from .codes import (
     CONTAINER_DATA,
     CONTAINER_OUTPUTS,
     CONTAINER_WORK,
+    ENGINE_RUNTIMES,
+    ENV_CONTAINER_RUNTIME,
+    ENV_DEVICE,
+    ENV_DEVICE_REASON,
+    ENV_GPU_MEMORY_MB,
     ENV_OUT,
     ENV_SIF_ROOT,
     LOG_FILE,
@@ -58,7 +71,7 @@ from .codes import (
     Stopped,
 )
 from .provenance import Log
-from .settings import Limits, read_settings
+from .settings import Device, Limits, check_device, read_settings
 from .stage import Staged
 
 # A SIGTERM within this many seconds of the job's end time is the time limit, not a cancellation.
@@ -68,6 +81,13 @@ PREFLIGHT_SECONDS = 120
 # After a SIGTERM the container gets this long to stop before the whole group is killed. Slurm
 # follows its SIGTERM with a SIGKILL after its own wait, and the record must be written before that.
 TERM_GRACE_SECONDS = 10
+# What the kernel sends the container child when the launcher dies (Linux `PR_SET_PDEATHSIG`):
+# SIGKILL under Apptainer, whose starter's death ends the container's namespace, and SIGTERM under
+# Docker and Podman, whose client forwards it to the container (a SIGKILL of the client would leave
+# the container running, to the runner's labeled removal).
+DEATH_SIGNAL_APPTAINER = int(signal.SIGKILL)
+DEATH_SIGNAL_ENGINE = int(signal.SIGTERM)
+_PR_SET_PDEATHSIG = 1
 _CUDA_VALUE = re.compile(r"[A-Za-z0-9,:_.-]{1,128}")
 # What Python runs inside the image for `runtime: python`. The image provides it on its PATH.
 IMAGE_PYTHON = "python"
@@ -91,15 +111,17 @@ _LOG_LIMIT = 100
 # ---- finding the runtime and the image ------------------------------------------------------------
 
 
-def find_runtime(env: Env) -> tuple[str, str]:
-    """The first of ``apptainer``, ``singularity`` on the launcher's PATH: (name, absolute path)."""
+def find_runtime(env: Env, names: tuple[str, ...] = RUNTIME_BINARIES) -> tuple[str, str]:
+    """The first of ``names`` (``apptainer``, ``singularity``) on the launcher's PATH: (name, path)."""
     search = env.get("PATH", "") or ""
-    for name in RUNTIME_BINARIES:
+    for name in names:
         for directory in search.split(os.pathsep):
             candidate = os.path.join(directory or ".", name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return name, candidate
-    raise Failure("runtime_error", "no_container_runtime", "no apptainer or singularity on PATH")
+    raise Failure(
+        "runtime_error", "no_container_runtime", "no {} on PATH".format(" or ".join(names))
+    )
 
 
 def resolve_sif(job: spec.Spec, env: Env) -> str:
@@ -240,7 +262,11 @@ def build_argv(
     binds: list[Bind],
     cuda: str | None = None,
     limits: Limits | None = None,
+    device: Device | None = None,
 ) -> list[str]:
+    check_device(device, job.gpus)
+    if device is not None:  # the runner's decision replaces the scheduler's own view of the GPUs
+        cuda = device.gpu_id if device.cuda else None
     argv = [runtime, "exec", *ISOLATION_FLAGS, "--pwd", CONTAINER_WORK]
     if limits is not None:  # the runtime's own cgroup limits, only when the runner proved them
         argv += ["--cpus", str(limits.cpus)]
@@ -248,15 +274,37 @@ def build_argv(
             argv += ["--memory", "{}M".format(limits.memory_mb)]
     for bind in binds:
         argv += ["--bind", bind.argument()]
-    if job.gpus > 0:
+    gpu = job.gpus > 0 if device is None else device.cuda
+    if gpu:
         argv.append("--nv")
     for name, value in job.env.items():
         argv += ["--env", env_argument(name, value)]
     if cuda is not None:
         argv += ["--env", env_argument("CUDA_VISIBLE_DEVICES", cuda)]
     argv += ["--env", env_argument(ENV_OUT, CONTAINER_OUTPUTS)]
+    argv += device_env_arguments(device)
     argv.append(sif)
     argv += entry_argv(job)
+    return argv
+
+
+def device_variables(device: Device | None) -> list[tuple[str, str]]:
+    """The variables the container gets for a runner's decision, in order, or none without one:
+    ``NEMAR_DEVICE``, ``NEMAR_DEVICE_REASON`` and, for ``cuda``, ``NEMAR_GPU_MEMORY_MB``. The recipe is
+    told the device and the cap and nothing about the host: no index, no host name."""
+    if device is None:
+        return []
+    found = [(ENV_DEVICE, device.device), (ENV_DEVICE_REASON, device.reason)]
+    if device.cuda:
+        found.append((ENV_GPU_MEMORY_MB, str(device.memory_mb)))
+    return found
+
+
+def device_env_arguments(device: Device | None) -> list[str]:
+    """``--env NAME=value`` for each of ``device_variables`` (Apptainer's CSV record form)."""
+    argv: list[str] = []
+    for name, value in device_variables(device):
+        argv += ["--env", env_argument(name, value)]
     return argv
 
 
@@ -486,6 +534,42 @@ def prepare_layout(out_dir: str) -> Layout:
 # ---- signals --------------------------------------------------------------------------------------
 
 
+_WAITID = getattr(os, "waitid", None)
+
+
+def has_exited(child: subprocess.Popen[bytes]) -> bool:
+    """Whether ``child`` has exited, WITHOUT reaping it where the system allows (``waitid`` with
+    ``WNOWAIT``, on Linux): a reaped child's process id is free for another process to take, and the
+    group kill that follows must not be able to hit a stranger. Where there is no ``waitid`` (macOS,
+    which only a developer's machine is) it falls back to ``poll``, which reaps."""
+    if _WAITID is not None:
+        try:
+            return _WAITID(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:  # already reaped elsewhere
+            return True
+    return child.poll() is not None
+
+
+def wait_for_exit(child: subprocess.Popen[bytes], timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for ``child`` to exit, without reaping it (see ``has_exited``)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if has_exited(child):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def end_group(child: subprocess.Popen[bytes]) -> int:
+    """Kill whatever is left in ``child``'s session (its own children), THEN reap ``child``: its
+    process id, which is the group's, is still ours while the group is signalled. Returns the
+    child's wait status."""
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(child.pid, signal.SIGKILL)
+    return child.wait()
+
+
 class Terminator:
     """Records a SIGTERM, passes it to the container, and asks running phases to stop."""
 
@@ -496,8 +580,14 @@ class Terminator:
         self._previous: dict[int, Any] = {}
 
     def _handle(self, _signum: int, _frame: Any) -> None:
+        self.terminate(time.time())
+
+    def terminate(self, now: float) -> None:
+        """What a SIGTERM is, taken at ``now`` (and what the job's end time is, when the launcher
+        reaches it itself): the first moment is the one recorded, the stop event is set, and the
+        signal goes to the container."""
         if self.received is None:
-            self.received = time.time()
+            self.received = now
         self.stop.set()
         self._forward()
 
@@ -505,7 +595,7 @@ class Terminator:
         """Pass the SIGTERM to the container's whole process group (it was started in a session of
         its own, so the group is the container and everything in it, and nothing of ours)."""
         child = self.child
-        if child is not None and child.poll() is None:
+        if child is not None and not has_exited(child):
             with contextlib.suppress(OSError, ProcessLookupError):
                 os.killpg(child.pid, signal.SIGTERM)
 
@@ -561,6 +651,116 @@ def _raise_oom_score() -> None:
         handle.write("1000")
 
 
+def parent_death_signal(env: Env) -> int:
+    """The signal the kernel sends the container child when the launcher dies: SIGTERM under Docker
+    and Podman (the engine's client forwards it to the container), SIGKILL otherwise (Apptainer)."""
+    if env.get(ENV_CONTAINER_RUNTIME) in ENGINE_RUNTIMES:
+        return DEATH_SIGNAL_ENGINE
+    return DEATH_SIGNAL_APPTAINER
+
+
+def parent_death_hook(signum: int, parent: int) -> Callable[[], None] | None:
+    """A function for ``Popen(preexec_fn=...)`` that asks the kernel to send the child ``signum``
+    when the launcher dies (Linux ``prctl(PR_SET_PDEATHSIG)``, through ``ctypes``, as the runner
+    does for the launcher), or None where the call does not exist (not Linux, no ``ctypes``).
+
+    ``parent`` is the launcher's pid, taken BEFORE the fork. The kernel's signal only covers a
+    parent that dies after the ``prctl``, so the hook also checks that the parent is still the one
+    that forked and ends the child with status 1 at once if it is not. A ``prctl`` the kernel
+    refuses raises in the child, before anything has run, and ``start_container`` says so and
+    starts again without it. The ``ctypes`` work is done here, in the launcher, so the hook itself
+    only makes two calls.
+
+    The signal follows the THREAD that created the child, so the child must be created by a thread
+    that lives as long as the launcher (``start_container`` insists on the main thread).
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+        # `prctl` is variadic in C: say what the five arguments are, so none is passed as a narrow int
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+    except (ImportError, OSError, AttributeError):
+        return None
+
+    def hook() -> None:
+        if prctl(_PR_SET_PDEATHSIG, signum, 0, 0, 0) != 0:
+            raise OSError("prctl(PR_SET_PDEATHSIG) failed")
+        if os.getppid() != parent:  # the launcher died between the fork and the prctl
+            os._exit(1)
+
+    return hook
+
+
+def _child_setup(death: Callable[[], None] | None) -> Callable[[], None]:
+    """The child's ``preexec_fn``: tie it to the launcher's life, then make it the OOM killer's
+    first choice."""
+
+    def setup() -> None:
+        if death is not None:
+            death()
+        _raise_oom_score()
+
+    return setup
+
+
+def _spawn(
+    argv: list[str], env: Env, work: str, death: Callable[[], None] | None
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        argv,
+        env=runtime_environment(env),
+        cwd=work,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        preexec_fn=_child_setup(death),
+    )
+
+
+def _runtime_not_started() -> Failure:
+    return Failure(
+        "runtime_error", "runtime_unusable", "the container runtime could not be started"
+    )
+
+
+def start_container(argv: list[str], env: Env, work: str, log: Log) -> subprocess.Popen[bytes]:
+    """Start the container runtime in a session of its own, tied to the launcher's life.
+
+    On Linux the kernel signals the child when the launcher dies (``parent_death_signal``), so a
+    launcher killed with SIGKILL, or one that crashes, does not leave a container running. Where
+    that cannot be arranged (another system, no ``ctypes``, a ``prctl`` the kernel refuses) the log
+    says ``pdeathsig_unavailable`` once and the container is started without it.
+
+    Only the main thread may call this: the kernel's signal follows the thread that created the
+    child, and any other thread can end while the launcher goes on, which would end the container
+    with it. ``RuntimeError`` otherwise (a launcher bug, recorded as ``internal_error``).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("the container must be started from the main thread")
+    death = parent_death_hook(parent_death_signal(env), os.getpid())
+    if death is not None:
+        try:
+            return _spawn(argv, env, work, death)
+        except subprocess.SubprocessError:  # the prctl failed in the child: nothing has run
+            pass
+        except OSError:
+            raise _runtime_not_started() from None
+    log.warning("pdeathsig_unavailable: the container will not follow the launcher if it is killed")
+    try:
+        return _spawn(argv, env, work, None)
+    except OSError:
+        raise _runtime_not_started() from None
+
+
 def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
     """``CUDA_VISIBLE_DEVICES`` for the container: the scheduler's own value, only for a GPU job and
     only when it is plain (digits, letters, comma, colon, dash, dot, underscore: ids, UUIDs,
@@ -574,69 +774,72 @@ def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
 
 
 def run_container(
-    argv: list[str], env: Env, work: str, terminator: Terminator, log: Log
+    argv: list[str],
+    env: Env,
+    work: str,
+    terminator: Terminator,
+    log: Log,
+    oom_check: Callable[[], bool] | None = None,
 ) -> Outcome:
     """Start the container, wait for it, and map how it ended (the first failure wins).
 
-    The container runs in a session of its own, so a SIGTERM reaches the whole of it and, if it has
-    not stopped ``TERM_GRACE_SECONDS`` later (a process that is PID 1 of its namespace ignores a
-    SIGTERM it has no handler for), the whole group is killed. ``entry_exit_code`` is the entry's
-    own status, with a signal death as 128 + the signal, as a shell reports it. 137 (SIGKILL, what
-    the kernel's out-of-memory killer sends) is ``out_of_memory``. Every other non-zero status,
-    255 included, is ``entry_failed`` and charged: the runtime's own fatal exit (255) and an entry
-    that exits 255 or ``-1`` cannot be told apart once user code could have run, and refunding
-    255 would let any entry end itself that way. ``runtime_unusable`` is only for a runtime that
-    cannot be started at all or whose preflight failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or ``runtime_error`` (detail
-    ``terminated``).
+    The container runs in a session of its own (``start_container``, which also ties it to the
+    launcher's life), so a SIGTERM reaches the whole of it and, if it has not stopped
+    ``TERM_GRACE_SECONDS`` later (a process that is PID 1 of its namespace ignores a SIGTERM it has
+    no handler for), the whole group is killed.
+
+    The job's end time (``SLURM_JOB_END_TIME``, else ``NEMAR_JOB_END_TIME``) is enforced here: when
+    it comes and no SIGTERM has been received, the launcher stops the container as a SIGTERM would
+    (the same record, the same grace), so a job that overruns ends ``time_limit`` whoever signals.
+
+    ``entry_exit_code`` is the entry's own status, with a signal death as 128 + the signal, as a
+    shell reports it. 137 (SIGKILL, what the kernel's out-of-memory killer sends) is
+    ``out_of_memory``. Every other non-zero status, 255 included, is ``entry_failed`` and charged:
+    the runtime's own fatal exit (255) and an entry that exits 255 or ``-1`` cannot be told apart
+    once user code could have run, and refunding 255 would let any entry end itself that way.
+    ``runtime_unusable`` is only for a runtime that cannot be started at all or whose preflight
+    failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or
+    ``runtime_error`` (detail ``terminated``).
     """
     log.info("run: starting the container with {}".format(os.path.basename(argv[0])))
-    try:
-        child = subprocess.Popen(
-            argv,
-            env=runtime_environment(env),
-            cwd=work,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            preexec_fn=_raise_oom_score,
-        )
-    except OSError:
-        raise Failure(
-            "runtime_error", "runtime_unusable", "the container runtime could not be started"
-        ) from None
+    child = start_container(argv, env, work, log)
     terminator.attach(child)
+    ends = end_time(env)
     killed = False
     try:
-        while True:
-            try:
-                status = child.wait(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                received = terminator.received
-                if (
-                    received is not None
-                    and not killed
-                    and time.time() - received >= TERM_GRACE_SECONDS
-                ):
-                    killed = True
-                    log.warning(
-                        "the container did not stop {} s after SIGTERM; killing it".format(
-                            TERM_GRACE_SECONDS
-                        )
+        while not wait_for_exit(child, 0.2):
+            now = time.time()
+            if ends is not None and terminator.received is None and now >= ends:
+                # Nobody has signaled the launcher, and the job's time is up: the launcher is what
+                # stops the container, exactly as the SIGTERM the scheduler or the runner would send
+                # (the same record, the same grace), so the end time does not depend on either.
+                log.warning("deadline reached; stopping the container")
+                terminator.terminate(now)
+            received = terminator.received
+            if received is not None and not killed and time.time() - received >= TERM_GRACE_SECONDS:
+                killed = True
+                log.warning(
+                    "the container did not stop {} s after SIGTERM; killing it".format(
+                        TERM_GRACE_SECONDS
                     )
-                    with contextlib.suppress(OSError, ProcessLookupError):
-                        os.killpg(child.pid, signal.SIGKILL)
+                )
+                with contextlib.suppress(OSError, ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
     finally:
         terminator.detach()
-    # Whatever is left in the group (the entry's own children) goes with it.
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(child.pid, signal.SIGKILL)
+    # Whatever is left in the group (the entry's own children) goes with it, before the child is
+    # reaped (its process id is the group's, and must not be free for a stranger to take).
+    status = end_group(child)
     code = 128 - status if status < 0 else status
     log.info("run: the container exited with {}".format(code))
     if terminator.received is not None:
         return Outcome(code, terminated_failure(terminator, env))
     if code == 0:
         return Outcome(code, None)
-    if code == 137:
+    # Under Apptainer a 137 is the kernel's out-of-memory killer. A container engine can say whether
+    # it was (`oom_check`); when it says it was not, the entry was killed some other way (a SIGKILL
+    # of its own, an operator) and that is an ordinary `entry_failed`, below.
+    if code == 137 and (oom_check is None or oom_check()):
         return Outcome(code, Failure("out_of_memory", None, "the entry was killed (exit 137)"))
     return Outcome(
         code, Failure("runtime_error", "entry_failed", "the entry exited with {}".format(code))

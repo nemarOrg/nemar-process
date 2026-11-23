@@ -14,11 +14,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 from nemar_process import cli as command
-from nemar_process.common import files, records
+from nemar_process.common import build, files, records
 from nemar_process.common.errors import RecordingError, RecordingSkipped
 from recipe_support import (
     DATASET,
     PINNED_COMMON_VERSION,
+    PINNED_EEGPREP_TEXT,
+    PINNED_ICA_RECIPE_VERSION,
     PINNED_RECIPE_VERSION,
     RECORDING,
     copy_fixture,
@@ -83,12 +85,14 @@ def test_a_run_on_the_fixture_exits_zero_and_writes_the_product_tree(first_run):
     base = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
     assert product_files(out) == sorted(
         [
+            "desc-nemarfloor_qcsummary.json",
             "desc-nemarfloor_recordings.tsv",
             "desc-nemarfloor_signalJourney.json",
             base + "badsegments.tsv",
             base + "channels.tsv",
             base + "filters.json",
             base + "qc.json",
+            base + "samplemask.tsv",
             base + "signalJourney.json",
         ]
     )
@@ -493,17 +497,145 @@ def test_the_image_digest_is_the_argument_else_the_environment_else_unknown(
     assert caught.value.code == 2
 
 
-def test_the_version_is_one_json_line(cli):
+@pytest.fixture
+def image_files(tmp_path, monkeypatch):
+    """Point the two files an image writes at files of the test (nothing there: not in an image).
+
+    The flavor file is read by the one reader in `common/build.py`, so that is where it is pointed.
+    """
+    flavor, digest = tmp_path / "flavor", tmp_path / "amica15.sha256"
+    monkeypatch.setattr(build, "FLAVOR_FILE", flavor)
+    monkeypatch.setattr(command, "AMICA15_SHA256_FILE", digest)
+    return flavor, digest
+
+
+def test_the_version_is_one_json_line(cli, image_files):
     code, out, _ = cli("version")
     assert code == 0
     document = json.loads(out)
     assert out.count("\n") == 1
     assert document["recipes"] == {
         "nemar-floor": PINNED_RECIPE_VERSION,
-        "nemar-floor-zarr": PINNED_RECIPE_VERSION,
+        "nemar-ica": PINNED_ICA_RECIPE_VERSION,
     }
+    assert document["inputs"] == {"nemar-floor": ["bids", "zarr"], "nemar-ica": ["bids", "zarr"]}
+    assert document["eegprep"] == PINNED_EEGPREP_TEXT  # with the commit it was installed from
     assert document["common"] == PINNED_COMMON_VERSION
-    assert set(document) == {"recipes", "common", "eegprep", "python", "numpy"}
+    assert set(document) == {
+        "recipes",
+        "inputs",
+        "common",
+        "eegprep",
+        "python",
+        "numpy",
+        "flavor",
+        "amica15_sha256",
+    }
+
+
+def test_naming_the_bids_input_changes_nothing(tmp_path, cli):
+    """``--input bids`` is the default: every file is the same, a record's clock and run id aside."""
+    common = [
+        "--dataset-dir",
+        DATASET,
+        "--dataset-id",
+        "on007823",
+        "--dataset-version",
+        "v1.0.0",
+        "--run-id",
+        "same",
+    ]
+    assert cli("run", "nemar-floor", *common, "--out", tmp_path / "plain")[0] == 0
+    assert (
+        cli("run", "nemar-floor", "--input", "bids", *common, "--out", tmp_path / "named")[0] == 0
+    )
+    names = product_files(tmp_path / "plain")
+    assert names == product_files(tmp_path / "named")
+    for name in names:
+        plain, named = (tmp_path / which / name for which in ("plain", "named"))
+        if name.endswith("_signalJourney.json"):  # these hold the time they were written
+            assert records.content_sha256(json.loads(plain.read_text())) == records.content_sha256(
+                json.loads(named.read_text())
+            ), name
+        elif name == "desc-nemarfloor_qcsummary.json":  # its one value that follows the clock
+            assert {**json.loads(plain.read_text()), "record_sha256": None} == {
+                **json.loads(named.read_text()),
+                "record_sha256": None,
+            }, name
+        else:
+            assert plain.read_bytes() == named.read_bytes(), name
+
+
+def test_outside_an_image_the_flavor_and_the_binary_digest_are_null(cli, image_files):
+    code, out, _ = cli("version")
+    assert code == 0
+    document = json.loads(out)
+    assert document["flavor"] is None
+    assert document["amica15_sha256"] is None
+
+
+@pytest.mark.parametrize("flavor", ["cpu", "cuda"])
+def test_in_an_image_the_version_says_the_flavor_and_the_binary_digest_it_reads(
+    cli, image_files, flavor
+):
+    flavor_file, digest_file = image_files
+    flavor_file.write_text(flavor + "\n", encoding="ascii")
+    digest_file.write_text("ab" * 32 + "\n", encoding="ascii")
+    code, out, _ = cli("version")
+    assert code == 0
+    document = json.loads(out)
+    assert document["flavor"] == flavor
+    assert document["amica15_sha256"] == "ab" * 32
+
+
+@pytest.mark.parametrize(
+    ("which", "text"),
+    [
+        ("flavor", "rocm\n"),
+        ("flavor", ""),
+        ("flavor", "CPU\n"),
+        ("flavor", "cpu cuda\n"),
+        ("digest", "ab" * 31 + "\n"),
+        ("digest", "AB" * 32 + "\n"),
+        ("digest", "xy" * 32 + "\n"),
+        ("digest", ""),
+    ],
+)
+def test_a_file_an_image_writes_that_holds_anything_else_is_a_broken_image(
+    cli, image_files, which, text
+):
+    target = image_files[0] if which == "flavor" else image_files[1]
+    target.write_text(text, encoding="ascii")
+    code, out, err = cli("version")
+    assert code == command.EXIT_INTERNAL
+    assert out == ""  # no document: a record never names an image that is not one
+    assert "does not hold what its writer writes" in err
+
+
+def test_a_symbolic_link_or_an_unreadable_file_is_refused_never_followed(
+    cli, image_files, tmp_path
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("cuda\n", encoding="ascii")
+    image_files[0].symlink_to(elsewhere)
+    code, out, err = cli("version")
+    assert code == command.EXIT_INTERNAL
+    assert out == ""
+    assert "symbolic link" in err
+    image_files[0].unlink()
+    image_files[0].write_bytes(b"\xff\xfe")
+    code, out, err = cli("version")
+    assert code == command.EXIT_INTERNAL
+    assert "cannot be read" in err
+
+
+def test_a_refused_flavor_file_gives_the_same_line_and_code_through_the_shared_reader(
+    cli, image_files
+):
+    image_files[0].write_text("rocm\n", encoding="ascii")
+    code, out, err = cli("version")
+    assert (code, out) == (command.EXIT_INTERNAL, "")
+    assert err == "the flavor file does not hold what its writer writes\n"
 
 
 def test_a_read_only_dataset_is_read_and_never_written(tmp_path, cli):
@@ -549,11 +681,11 @@ def test_a_validator_that_cannot_be_built_ends_the_run_before_it_writes_anything
     start: a validator that fails once would fail every record."""
     from nemar_process import sj
 
-    monkeypatch.setattr(sj, "SCHEMA_DIR", tmp_path / "no-schema")
+    monkeypatch.setattr(sj, "SIGNALJOURNEY_SCHEMA_TREE_SHA256", "0" * 64)
     out = tmp_path / "o"
     code, _, err = cli("run", "nemar-floor", "--dataset-dir", DATASET, "--out", out)
     assert code == 1
-    assert err.strip().splitlines()[-1] == "internal_error: FileNotFoundError"
+    assert err.strip().splitlines()[-1] == "internal_error: RuntimeError"
     assert "Traceback" not in err
     assert not out.exists()
 

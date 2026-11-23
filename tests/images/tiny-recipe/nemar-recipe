@@ -1,0 +1,28 @@
+#!/usr/local/bin/python3
+"""The command a job runs in the tiny image: any arguments, one product file, exit 0.
+
+It reads ``--out <directory>`` from the arguments (the launcher's product directory), writes
+``<directory>/summary.json`` and exits 0. Standard library only; no argument but ``--out`` is
+interpreted, and a missing ``--out`` is exit status 2.
+"""
+
+import json
+import os
+import sys
+
+
+def main(argv):
+    if "--out" not in argv or argv.index("--out") + 1 >= len(argv):
+        sys.stderr.write("nemar-recipe: --out <directory> is required\n")
+        return 2
+    out = argv[argv.index("--out") + 1]
+    os.makedirs(out, exist_ok=True)
+    summary = {"recipe": "tiny", "arguments": len(argv), "ok": True}
+    with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as handle:
+        json.dump(summary, handle)
+        handle.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

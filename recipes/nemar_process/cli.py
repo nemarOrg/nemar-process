@@ -5,14 +5,20 @@ directories into one, ``version``.
                               [--dataset-id ID] [--dataset-version TAG] [--source-commit SHA]
                               [--image-digest sha256:HEX] [--run-id ID]
                               [the recipe's own options, e.g. --time-budget-s N]
-    nemar-recipe run <zarr recipe> --zarr-base https://HOST --dataset-id ID --dataset-version TAG
-                              --source-commit SHA [--out DIR] [--recording STORE ...] [...]
-    nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [identity options]
+    nemar-recipe run <recipe> --input zarr --zarr-base https://HOST --dataset-id ID
+                              --dataset-version TAG --source-commit SHA [--out DIR]
+                              [--recording STORE ...] [...]
+    nemar-recipe aggregate <recipe> --in DIR [--in DIR ...] --out DIR [--resume] [identity options]
     nemar-recipe version
+
+``--input bids|zarr`` says what a recipe that reads more than one input reads (default ``bids``, a
+dataset directory); it is the same recipe either way (``nemar-floor``), with one set of steps, one
+name and one label. A name that was a recipe of its own (``nemar-floor-zarr``) is refused, exit 2,
+with the command that replaces it.
 
 The command is an argument vector, so a launch specification names it without a shell. It reads only
 ``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``). It opens no
-network connection, with one exception: a recipe whose input is ``zarr`` (``nemar-floor-zarr``)
+network connection, with one exception: a recipe run with ``--input zarr`` (``nemar-floor``)
 reads the dataset's Zarr serving copy over HTTPS from the hosts in the allowlist of
 ``common/zarr_hosts.py`` only (the Zarr host and, after one redirect, the data bucket), refuses
 ``--dataset-dir``, and holds nothing on disk. Standard error gets
@@ -49,7 +55,9 @@ Each recording runs inside one failure boundary: its files are written into a pr
 under ``--out`` and moved into place only when every file and the record exist, so a failed
 recording leaves no partial files, and its row is appended to the table in every case.
 ``aggregate`` reads and checks every input before it writes anything, stages its output under
-``--out`` and moves it into place at the end.
+``--out`` and moves it into place at the end. With ``--resume`` a run of the recordings that a time
+budget left out (exit 9) completes the product it continues: its rows replace the ``time_budget``
+rows of the other input, and any other recording that two inputs name is still an error.
 """
 
 from __future__ import annotations
@@ -70,7 +78,6 @@ import uuid
 import warnings
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from importlib import metadata
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -85,6 +92,7 @@ from nemar_process.common import (
     naming,
     records,
     table,
+    versions,
     zarr_hosts,
     zarr_input,
 )
@@ -106,8 +114,9 @@ from nemar_process.common.errors import (
     Status,
     is_cuda_out_of_memory,
 )
-from nemar_process.common.recipe import Identity, Option, Recipe, RunContext
-from nemar_process.recipes import REGISTRY
+from nemar_process.common.recipe import INPUTS, Identity, Option, Recipe, RunContext
+from nemar_process.nemar_floor import qc_summary
+from nemar_process.recipes import REGISTRY, RETIRED
 
 EXIT_OK = 0
 EXIT_INTERNAL = 1
@@ -164,11 +173,31 @@ def add_identity(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-id", type=matching(RUN_ID, "run id"))
 
 
-def declared_options() -> dict[str, Option]:
-    """The options of every registered recipe, by flag. A flag two recipes declare is one option:
-    declared differently, it is refused, because ``--help`` and the parsing could not both be true."""
-    found: dict[str, Option] = {}
+def every_recipe() -> Generator[Recipe]:
+    """Every registered recipe, each followed by its variants (the same recipe on another input)."""
     for recipe in REGISTRY.values():
+        yield recipe
+        yield from recipe.variants
+
+
+def recipe_name(value: str) -> str:
+    """A registered recipe, or a name that was one (which the command then answers with its
+    replacement, ``main``); anything else is a usage error as a choice not offered would be."""
+    if value in REGISTRY or value in RETIRED:
+        return value
+    raise argparse.ArgumentTypeError(
+        "invalid choice: {!r} (choose from {})".format(
+            value, ", ".join(repr(name) for name in sorted(REGISTRY))
+        )
+    )
+
+
+def declared_options() -> dict[str, Option]:
+    """The options of every registered recipe (and its variants), by flag. A flag two recipes declare
+    is one option: declared differently, it is refused, because ``--help`` and the parsing could not
+    both be true."""
+    found: dict[str, Option] = {}
+    for recipe in every_recipe():
         for option in recipe.options:
             if found.setdefault(option.flag, option) != option:
                 raise ValueError("{} is declared twice, differently".format(option.flag))
@@ -190,6 +219,17 @@ def add_options(run: argparse.ArgumentParser) -> None:
         )
 
 
+def reading(recipe: Recipe, args: argparse.Namespace, parser: argparse.ArgumentParser) -> Recipe:
+    """The recipe as it reads the input ``--input`` names, or itself when none is named."""
+    named = getattr(args, "input", None)
+    if named is None:
+        return recipe
+    try:
+        return recipe.reading(named)
+    except ValueError as error:
+        parser.error("--input {}: {}".format(named, error))
+
+
 def option_values(
     recipe: Recipe, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> dict[str, Any]:
@@ -203,25 +243,31 @@ def option_values(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nemar-recipe", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="run a recipe on a dataset directory")
-    run.add_argument("recipe", choices=sorted(REGISTRY))
+    run = commands.add_parser(
+        "run", help="run a recipe on a dataset directory or a Zarr serving copy"
+    )
+    run.add_argument("recipe", type=recipe_name, metavar="recipe", help=recipe_help())
     run.add_argument(
         "--dataset-dir",
-        help="the dataset (read only); required, except for a recipe whose input is a Zarr "
-        "serving copy, which refuses it",
+        help="the dataset (read only); required, except with --input zarr, which refuses it",
     )
     run.add_argument("--out", help="the product directory (default: $NEMAR_OUT/product)")
     run.add_argument(
         "--recording",
         action="append",
         default=[],
-        help="a recording, relative to the dataset (for a zarr recipe: a store of the index); "
+        help="a recording, relative to the dataset (with --input zarr: a store of the index); "
         "repeatable",
     )
     add_identity(run)
     add_options(run)
     aggregate = commands.add_parser("aggregate", help="merge product directories into one")
-    aggregate.add_argument("recipe", choices=sorted(REGISTRY))
+    aggregate.add_argument("recipe", type=recipe_name, metavar="recipe", help=recipe_help())
+    aggregate.add_argument(
+        "--input",
+        choices=INPUTS,
+        help="what the recipe's product directories were made from; only bids can be merged",
+    )
     aggregate.add_argument(
         "--in",
         dest="inputs",
@@ -230,9 +276,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="a product directory; repeatable",
     )
     aggregate.add_argument("--out", required=True)
+    aggregate.add_argument(
+        "--resume",
+        action="store_true",
+        help="a later run of the recordings a time budget left out replaces their time_budget rows "
+        "(any other recording that two inputs name is still an error)",
+    )
     add_identity(aggregate)
     commands.add_parser("version", help="print the versions as one JSON line")
     return parser
+
+
+def recipe_help() -> str:
+    return "one of: {}".format(", ".join(sorted(REGISTRY)))
 
 
 def identity_of(args: argparse.Namespace, dataset_dir: Path | None) -> Identity:
@@ -379,13 +435,16 @@ def finalize(
     ignored: dict[str, int],
     started_utc: str,
     built_by: tuple[dict[str, Any] | None, str | None] | None = None,
+    resumed: int | None = None,
 ) -> tuple[dict[str, Any], int, int]:
-    """Build and write the dataset record from the table in ``out``.
+    """Build and write the dataset record from the table in ``out``, and the recipe's QC summary.
 
     Returns the record, how many of the recordings in the table were skipped for their format, and
     how many were left out by the time budget, which with the counts in the record tell the exit
     code apart (``exit_for``). ``built_by`` is the build of the rows when they were made elsewhere
-    (the aggregate); a run states its own.
+    (the aggregate); a run states its own. ``resumed`` is how many ``time_budget`` rows a merge
+    with ``--resume`` replaced (zero when it replaced none); it is None, and the record has no such
+    field, for a run and for a merge that was not asked to resume.
     """
     label = recipe.label
     table_path = out / naming.dataset_path(label, "recordings", "tsv")
@@ -402,15 +461,26 @@ def finalize(
         nemar_extra=recipe.dataset_extras(context),
         built_by=built_by,
     )
+    if resumed is not None:  # beside pending_count, which counts the budget rows still left
+        record["extensions"]["nemar"]["report"]["resumed"] = resumed
     problems = records.check(record, context.validator)
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
+    if qc_summary.applies(recipe):  # after the record: it names the record file by its digest
+        qc_summary.write(recipe, out, record, rows)
     return (
         record,
         sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT),
         sum(1 for row in rows if row["code"] == TIME_BUDGET),
     )
+
+
+def dataset_files(recipe: Recipe) -> list[str]:
+    """The files at the root of a product besides its table and its record: the QC summary of the
+    floor. ``run`` writes them from the table and the record, and ``aggregate`` writes them from the
+    merged table and record and never copies an input's."""
+    return [qc_summary.path(recipe)] if qc_summary.applies(recipe) else []
 
 
 def result_line(
@@ -523,9 +593,10 @@ def zarr_arguments(
     ``--dataset-dir`` is refused, and the origin, the dataset id, the version and the commit the
     caller attests are required. The attestation is checked here, before any network is used.
     """
+    command = "{} --input {}".format(recipe.id, recipe.input)
     if args.dataset_dir is not None:
         parser.error(
-            "--dataset-dir is not an option of {}: it reads a Zarr serving copy".format(recipe.id)
+            "--dataset-dir is not an option of {}: it reads a Zarr serving copy".format(command)
         )
     named = (
         ("--zarr-base", options.get("zarr_base")),
@@ -535,7 +606,7 @@ def zarr_arguments(
     )
     missing = [flag for flag, value in named if value is None]
     if missing:
-        parser.error("{} requires {}".format(recipe.id, ", ".join(missing)))
+        parser.error("{} requires {}".format(command, ", ".join(missing)))
     try:
         return zarr_input.attest(
             args.source_commit,
@@ -600,7 +671,7 @@ def network_fence(recipe: Recipe) -> zarr_hosts.Fence:
 
 
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    recipe = REGISTRY[args.recipe]
+    recipe = reading(REGISTRY[args.recipe], args, parser)
     options = option_values(recipe, args, parser)
     budget = TimeBudget(options.get("time_budget_s"))  # the clock starts here
     if args.out:
@@ -828,7 +899,11 @@ def read_input(directory: Path, recipe: Recipe, table_name: str, record_name: st
         ) from error
     for path in listed:
         relative = path.relative_to(directory)
-        if PARTIAL in relative.parts or relative.as_posix() in (table_name, record_name):
+        if PARTIAL in relative.parts or relative.as_posix() in (
+            table_name,
+            record_name,
+            *dataset_files(recipe),
+        ):
             continue
         if path.is_file():
             found.files[relative.as_posix()] = path
@@ -878,6 +953,57 @@ def agreed_identity(given: Identity, inputs: list[ProductInput]) -> Identity:
     )
 
 
+class DuplicateRecording(Exception):
+    """Two inputs name one recording, and no replacement the merge was asked for resolves it."""
+
+
+def is_budget_row(row: Mapping[str, Any]) -> bool:
+    """A recording the time budget left unstarted: the one row a later run may replace."""
+    return row["status"] == "skipped" and row["code"] == TIME_BUDGET
+
+
+def merge_rows(
+    inputs: Sequence[ProductInput], resume: bool
+) -> tuple[dict[str, dict[str, Any]], list[int]]:
+    """The rows of the merged table by path, and how many rows of each input replaced a budget row.
+
+    A recording that two inputs name is an error (``DuplicateRecording``), whichever order they were
+    given in. With ``resume`` there is one exception: exactly two inputs name it and exactly one of
+    the two rows is ``skipped`` with the code ``time_budget``, and then the other row is taken and
+    the budget row is dropped. Two real rows, two budget rows, and a recording that three inputs
+    name (the pairs could be taken in more than one order) are still errors.
+
+    An input all of whose rows replace budget rows is a remainder. One that has recordings of its
+    own as well as rows that replace, is refused (``InputUnusable``, by its position): its record
+    counts the other datatypes of the cut recordings' subjects and of its own recordings' together,
+    and nothing in it says which of them the product it completes did not count already.
+    """
+    named: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for number, item in enumerate(inputs):
+        for row in item.rows:
+            named.setdefault(row["path"], []).append((number, row))
+    merged: dict[str, dict[str, Any]] = {}
+    replaced = [0] * len(inputs)
+    for path in sorted(named):
+        found = named[path]
+        if len(found) == 1:
+            merged[path] = found[0][1]
+            continue
+        real = [(number, row) for number, row in found if not is_budget_row(row)]
+        if not (resume and len(found) == 2 and len(real) == 1 and found[0][0] != found[1][0]):
+            raise DuplicateRecording("two inputs name the same recording: {}".format(path))
+        winner, merged[path] = real[0]
+        replaced[winner] += 1
+    for number, item in enumerate(inputs):
+        if 0 < replaced[number] < len(item.rows):
+            raise InputUnusable(
+                "input {} holds recordings of its own as well as rows that replace budget rows: "
+                "keep a remainder to the cut recordings only, and merge a run of other "
+                "recordings as a separate step".format(number + 1)
+            )
+    return merged, replaced
+
+
 def copy_file(source: Path, target: Path) -> None:
     """Copy a file; a source that cannot be read is an input problem, a target that cannot be
     written is an output problem."""
@@ -894,11 +1020,13 @@ def copy_file(source: Path, target: Path) -> None:
 
 
 def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    recipe = REGISTRY[args.recipe]
+    recipe = reading(REGISTRY[args.recipe], args, parser)
     if recipe.input != "bids":
         # the merged record would have no input of its own to state: the inputs' say where each read
         parser.error(
-            "aggregate does not support {}: its input is not a dataset directory".format(recipe.id)
+            "aggregate does not support {} --input {}: its input is not a dataset directory".format(
+                recipe.id, recipe.input
+            )
         )
     out = Path(args.out)
     try:
@@ -937,20 +1065,27 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
     except InputUnusable as error:
         print(error, file=sys.stderr)
         return EXIT_DATASET_UNREADABLE
-    merged: dict[str, dict[str, Any]] = {}
+    try:
+        merged, replaced = merge_rows(inputs, args.resume)
+    except DuplicateRecording as error:
+        print(error, file=sys.stderr)
+        return EXIT_INTERNAL
+    except InputUnusable as error:
+        print(error, file=sys.stderr)
+        return EXIT_DATASET_UNREADABLE
     targets: dict[str, Path] = {}
     ignored: dict[str, int] = {}
-    for item in inputs:
-        for row in item.rows:
-            if row["path"] in merged:
-                print("two inputs name the same recording: {}".format(row["path"]), file=sys.stderr)
-                return EXIT_INTERNAL
-            merged[row["path"]] = row
+    for number, item in enumerate(inputs):
         for relative, source in item.files.items():
             if relative in targets:
                 print("two inputs hold the same file: {}".format(relative), file=sys.stderr)
                 return EXIT_INTERNAL
             targets[relative] = source
+        if replaced[number]:
+            # a remainder (an input that only partly replaces is refused by ``merge_rows``): every
+            # row replaced a budget row, so the product it completes already counted the other
+            # datatypes of every subject it owns (it ran those recordings too)
+            continue
         for datatype, count in item.ignored.items():
             ignored[datatype] = ignored.get(datatype, 0) + count
     try:
@@ -970,9 +1105,17 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 for path in sorted(merged):
                     writer.append(merged[path])
             record, unsupported, unfinished = finalize(
-                recipe, staging, context, dict(sorted(ignored.items())), started, built_by
+                recipe,
+                staging,
+                context,
+                dict(sorted(ignored.items())),
+                started,
+                built_by,
+                resumed=sum(replaced) if args.resume else None,
             )
-            files.move_into_place(staging, out, [*sorted(targets), table_name, record_name])
+            files.move_into_place(
+                staging, out, [*sorted(targets), table_name, record_name, *dataset_files(recipe)]
+            )
     except InputUnusable as error:
         print(error, file=sys.stderr)
         return EXIT_DATASET_UNREADABLE
@@ -989,17 +1132,37 @@ def aggregate_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
 # ---- version ----------------------------------------------------------------------------------
 
 
+# What an image says about itself, in two files it writes as root at build time (docs/images.md):
+# the flavor, one word (read by `build.image_flavor`, the one reader of it, and named by a record's
+# image tag), and the SHA-256 of the native AMICA binary it carries. Module attributes so that a test
+# points them at files of its own; outside an image there is no file and the value is null.
+AMICA15_SHA256_FILE = Path("/opt/amica/amica15.sha256")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
 def version_command() -> int:
     import numpy
 
-    versions = {
+    try:
+        flavor = build.image_flavor()
+        amica15 = build.read_image_fact(
+            AMICA15_SHA256_FILE, lambda word: bool(HEX64.fullmatch(word)), "amica15 digest"
+        )
+    except build.BuildRefused as error:
+        print(error, file=sys.stderr)
+        return EXIT_INTERNAL
+    document = {
         "recipes": {key: REGISTRY[key].version for key in sorted(REGISTRY)},
+        "inputs": {key: list(REGISTRY[key].inputs) for key in sorted(REGISTRY)},
         "common": COMMON_VERSION,
-        "eegprep": metadata.version("eegprep"),
+        # with the commit it was installed from, as the engine stamp and every step name it
+        "eegprep": versions.distribution_version("eegprep"),
         "python": platform.python_version(),
         "numpy": numpy.__version__,
+        "flavor": flavor,
+        "amica15_sha256": amica15,
     }
-    print(json.dumps(versions, sort_keys=True))
+    print(json.dumps(document, sort_keys=True))
     return EXIT_OK
 
 
@@ -1007,6 +1170,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command in ("run", "aggregate") and args.recipe in RETIRED:
+            print("{} is now: {}".format(args.recipe, RETIRED[args.recipe]), file=sys.stderr)
+            return EXIT_USAGE
         if args.command == "version":
             return version_command()
         if args.command == "run":

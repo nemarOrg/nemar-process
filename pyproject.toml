@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nemar-process"
-version = "0.1.0"
+version = "0.1.1-dev14"
 description = "NEMAR's processing repository: the launcher, runtime images, recipes and Tapis definitions."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,10 +12,13 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-# The CPU flavor of the runtime image (the only flavor in this phase). The extra exists so that
-# `[tool.uv.sources]` can send torch to the CPU index; a CUDA flavor adds its own extra later.
-# The floor is pamica 0.4.0's own.
-cpu = ["torch>=2.12.1"]
+# The two flavors of the runtime image. Each extra exists so that `[tool.uv.sources]` can send torch
+# to that flavor's index, and the two are declared in conflict (`[tool.uv] conflicts` below): an
+# environment holds one torch. Both pin torch 2.12.1, pamica 0.4.0's own floor (`torch>=2.12.1`): the
+# CUDA 12.9 build in one (the `cu128` index stops at torch 2.11.0) and the CPU build in the other, so
+# both images and every uv-based test run use one torch version. A test requires the two to match.
+cpu = ["torch==2.12.1"]
+cuda = ["torch==2.12.1"]
 
 [dependency-groups]
 dev = [
@@ -24,33 +27,43 @@ dev = [
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
     "pyyaml>=6.0",
     "ruff>=0.17",
     "ty>=0.0.89",
     { include-group = "signaljourney" },
 ]
 
-# The signalJourney validator is not on PyPI and finds its schema relative to its own source tree,
-# so it is installed from a pinned commit and pointed at the schema vendored into
-# `recipes/nemar_process/_vendor/signalJourney/` (docs/upstream.md). The development environment
-# and the runtime image share this one declaration.
+# The signalJourney validator, the release from PyPI: a wheel that packages its schema. The import
+# package is `signaljourney_validator`. `recipes/nemar_process/sj.py` pins the tree digest of that
+# packaged schema, so moving this pin to a release whose schema differs fails a test until the
+# difference is reviewed and the digest moved (docs/upstream.md). The development environment and
+# the runtime image share this one declaration.
 signaljourney = [
-    "signaljourney-validator @ git+https://github.com/signalJourney/signalJourney@169c3261d044039c359bab7e121e78157a4f5af9",
+    "signalJourney==0.2.0",
 ]
 
 # The runtime image's packages (`images/nemar-python/`). Exact pins for what NEMAR chose; NumPy and
 # SciPy are left to the lock. eegprep takes four extras and never `eeglab` (it installs the Octave
 # bridge `oct2py`) or `full` and `all` (they include it): there is no MATLAB path in the image.
 runtime = [
-    "eegprep[mne,pybids,picard,torch]==0.5.0",
+    # eegprep at the `develop` merge commit of sccn/eegprep#617 (pAMICA through `pop_runica`), which
+    # holds #621 (the ASR state) and #616 (eegprep-lean). No eegprep release holds them, and
+    # `develop` still says 0.5.0 like the PyPI release that has none, so every record, stamp and
+    # `nemar-recipe version` names the commit too (`eegprep@0.5.0+<commit>`, docs/recipes.md). The
+    # next move is to the eegprep release that contains them, by the card that pins that release.
+    # The `pamica` extra asks for the `pamica==0.4.0` pinned below.
+    "eegprep[mne,pybids,picard,torch,pamica] @ git+https://github.com/sccn/eegprep@edf694c8344b9c4c68672eac3acf9a819f1462a8",
     "mne==1.13.2",
     "pamica==0.4.0",
-    # The Zarr reader of the `nemar-floor-zarr` recipe (docs/recipes.md). A separate distribution
-    # from eegprep (eegprep stays 0.5.0, the engine the records name) installed from the head of
-    # sccn/eegprep#616 until it merges; move the pin to the merge commit or the release then, and
-    # `uv lock`. zarr is pinned to the version the reader's `zarr` extra was written against.
+    # The Zarr reader of the Zarr input of `nemar-floor` and `nemar-ica` (docs/recipes.md). A
+    # separate distribution from eegprep (the engine the records name) installed from the `develop`
+    # merge commit of sccn/eegprep#627, which holds #626 and #616, fills `chanlocs` from the
+    # electrode positions a store declares and reads them as NEMAR's locations digest defines them;
+    # the next move is to the eegprep release that contains it, by the card that pins that release,
+    # and `uv lock`. zarr is pinned to the version the reader's `zarr` extra was written against.
     "zarr==3.4.0",
-    "eegprep-lean[zarr] @ git+https://github.com/sccn/eegprep@14ba46e8da5340cd7ae6adb644cda24fb3f5e483#subdirectory=packages/eegprep-lean",
+    "eegprep-lean[zarr] @ git+https://github.com/sccn/eegprep@2736f99265f278ea9b9184a8b639a2e384f7859b#subdirectory=packages/eegprep-lean",
     "numpy",
     "scipy",
     # The recipes pin the BLAS thread pools to one and record what they found (docs/recipes.md).
@@ -65,6 +78,9 @@ runtime = [
 [tool.uv]
 package = false
 
+# An image is one flavor: the two torch builds never share an environment, so uv resolves them apart.
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
 # A package with no wheel for a target is built on the machine, in an isolated environment whose
 # build requirements uv resolves afresh (uv.lock does not record them), so a new release of the
 # build backend would change what is installed while `uv lock --check` stays green. These pins are
@@ -72,32 +88,43 @@ package = false
 # requirements are still fetched from PyPI by name and version (docs/images.md).
 build-constraint-dependencies = ["setuptools==84.2.1"]
 
-# torch comes from the CPU index only, never from PyPI (whose Linux wheels carry the CUDA runtime).
+# torch comes from one of two explicit indexes, never from PyPI (whose Linux wheels carry the CUDA
+# runtime): the CPU index for the `cpu` extra, the CUDA 12.9 index for the `cuda` extra.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", extra = "cpu" }]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
 # `launcher` holds the package `nemar_launch` (stdlib only, shipped as a zip); `observer` holds the
-# stdlib-only program `observe`; `recipes` holds the package `nemar_process`; `tests/standin` holds
+# stdlib-only program `observe`; `runner` holds the stdlib-only package `nemar_runner`; `recipes` holds the package `nemar_process`; `tests/standin` holds
 # the stdlib HTTP stand-ins. None is installed, so all go on the path here, which also makes
 # `uv run --no-project --python 3.9 --with pytest pytest tests/launcher tests/observer` work.
-pythonpath = ["launcher", "observer", "recipes", "scripts", "tests/standin", "tests"]
+pythonpath = ["launcher", "observer", "runner", "recipes", "scripts", "tests/standin", "tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "apptainer: needs a real Apptainer or Singularity binary; skipped locally when none is found, required in CI",
+    "docker: needs a real Docker daemon (or Podman) and the registry; skipped where there is none, required in the docker CI job",
+    "runner_stack: starts nemar-cli's local stack from a full checkout (NEMAR_CLI_DIR) and runs the runner against it; skipped where the checkout, bun or Apptainer is absent, required in ci.yml's `launcher (python 3.12)` leg",
     "network: reads NEMAR's public Zarr serving copy over the internet; skipped unless selected with `-m network`",
 ]
 
 [tool.coverage.run]
 branch = true
-source = ["launcher", "recipes", "scripts"]
+source = ["launcher", "runner", "recipes", "scripts"]
 omit = ["launcher/schema/*"]
 # The launcher also runs as a child process of the tests (signals, the shell wrapper); count those.
 patch = ["subprocess"]
@@ -109,10 +136,10 @@ skip_covered = true
 [tool.ty.environment]
 python-version = "3.12"
 # The launcher package, the observer, the zip builders and the stand-ins are imported by name, not installed.
-extra-paths = ["launcher", "observer", "recipes", "scripts", "tests/standin", "tests"]
+extra-paths = ["launcher", "observer", "runner", "recipes", "scripts", "tests/standin", "tests"]
 
 [tool.ty.src]
-include = ["images", "launcher", "observer", "recipes", "scripts", "tests"]
+include = ["images", "launcher", "observer", "runner", "recipes", "scripts", "tests"]
 
 # The runtime image's packages (eegprep, NumPy, torch, threadpoolctl) are installed in the runtime
 # environment, not in the development one, so the files that run only there import them unresolved
@@ -137,5 +164,5 @@ import-not-found = "ignore"
 # `build-constraint-dependencies` above.
 [tool.nemar-process.build-backends]
 docopt = "setuptools"
+eegprep = "setuptools"
 eegprep-lean = "setuptools"
-signaljourney-validator = "setuptools"

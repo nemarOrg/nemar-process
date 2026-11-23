@@ -92,7 +92,7 @@ These are the facts that nothing has confirmed yet.
 - **A SIF's content hash is not verified by the launcher** (see above); the release's digest file records the file's SHA-256, but it is an unsigned release asset, so it guards only against a corrupted copy.
 - **The existence checks rely on GHCR answering with exactly 404.** `scripts/check_tag_absent.py` lets a publication go on only when a manifest `HEAD` for the tag answers 404, and stops on every other answer. Unconfirmed: that GHCR answers 404 for an absent tag, including in a package that does not exist yet, and that its token endpoint accepts the actor and the workflow's token as basic authentication. If the first release stops at this check, the check needs a change; it is not bypassed.
 - **Signature verification** needs cosign 3 or newer; older versions may not read signatures made by cosign 3. What a passing check proves, and what it does not, is in [images.md](images.md).
-- **Build requirements are pinned by version, not by hash.** `docopt` and the signalJourney validator are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
+- **Build requirements are pinned by version, not by hash.** `docopt` and `eegprep-lean` are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
 - **Thread counts.** The image pins one thread per math library; a recipe that wants more must set them, and what is right on a node is unmeasured.
 
 ### Owner items for the image
@@ -184,8 +184,7 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
   The command exits 9 (`time_budget_exhausted`) after it wrote its dataset record, and 8 (`engine_unavailable`) before it wrote anything.
   The launcher records both as `runtime_error` with the detail `entry_failed` and, from its code and its tests (an entry that writes files and then exits 3), still hashes and uploads what the entry wrote and completes the upload; nothing was run with exit 9 or 8 in particular, and no real storage or Worker took the upload.
   Unverified: whether the Worker keeps the uploaded outputs of a job it records as failed, so that the finished recordings of an exit-9 run are not lost, and whether the job is charged for the time used and how.
-  Resuming a budget-cut run is not supported in 1.0.0: `aggregate` refuses two inputs that name the same recording, so a later run of the skipped recordings cannot replace their `time_budget` rows (the Worker runs one whole dataset per job, so nothing needs it yet).
-  Resume or replace is a follow-up: nemarOrg/nemar-process#16.
+  A budget-cut run is completed by a second run of the recordings it skipped, merged with `aggregate --resume` ([recipes.md](recipes.md)); the Worker runs one whole dataset per job, so nothing dispatches the second run yet, and nothing has done it outside the tests.
   Epic A's recipe registry should treat the Worker's handling of failed jobs' outputs as open before it dispatches a recipe that can exit 9.
 - **Exit 8 is charged.**
   The launcher records every non-zero entry exit except 137 as `runtime_error` with the detail `entry_failed`, which is the submitter's and charged, so an `engine_unavailable` exit (no GPU, a binary that is not there), which is the platform's fault, is charged too.
@@ -199,6 +198,17 @@ Abbreviations used here: European Data Format (EDF), BioSemi Data Format (BDF), 
 - **CUDA out-of-memory by name.**
   The recipes recognize torch's out-of-memory error by the name and module of its class, so torch is never imported for it.
   The test uses a class made to carry that name and, where torch is installed, torch's own class built by hand; a real GPU running out of memory was not produced, and a torch release that renames the class would make it a plain `step_failed`.
+
+## The decomposition recipe (`nemar-ica`)
+
+[recipes.md](recipes.md) says what the recipe does.
+Abbreviations used here: central processing unit (CPU), graphics processing unit (GPU), Compute Unified Device Architecture (CUDA), adaptive mixture independent component analysis (AMICA); pAMICA is the Python implementation of AMICA and ICLabel is EEGLAB's classifier of independent components.
+No GPU host has run it: the GPU path (`--ica-device cuda`, or `auto` with a GPU the runner granted) is exercised only by its decision rule on the CPU, and what a CUDA record says (`bit_reproducible` null, the GPU's name) is as eegprep and pAMICA state it, unmeasured until the pAMICA workstream's CUDA determinism measurement.
+The native AMICA binary runs only in the image, so its cases (the record's shape, two short runs that are not byte identical, the informational E1R line at the full length only, the comparison of the two engines) run in the image workflow and not on a developer's machine; this document does not say that job passed.
+The per-iteration log-likelihood the binary writes is read as eegprep loads it (`LL`), and its length is taken as the number of iterations; no stop reason is read from the binary, so `stop_reason` and `did_converge` of its records are null.
+Wall time and peak memory of a 2000-iteration fit on a real recording are not measured here (a 50-iteration fit of the 19-channel, 282-second fixture takes about 11 seconds on one thread of a laptop).
+ICLabel cannot run on a recording whose channels have no locations, which on the Zarr input is every store that declares no electrode positions and every store whose unit or coordinate system eegprep-lean's reader refuses; such a recording fails at `iclabel` with the detail `iclabel_no_locations`, found before ASR and the fit (see [upstream.md](upstream.md)). A store that declares positions is read by eegprep-lean (sccn/eegprep pull requests 626 and 627, merged); what ICLabel makes of positions in a template space, whose origin is the anterior commissure and which neither the Zarr reader nor the BIDS route recenters, is not measured here.
+No minimum number of samples is enforced before a fit.
 
 ## The Tapis definitions and the observer
 

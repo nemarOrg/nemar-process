@@ -4,13 +4,17 @@ name: Release Gate
 # every other change reaches main. ci.yml runs on it as well; this adds what a release owes:
 #   - the lock is current (`uv lock --check`),
 #   - every workflow lints (actionlint) and the release tests pass (tests/release),
-#   - the whole test suite passes, including the Apptainer tests, which may not be skipped here.
+#   - the test suite passes except `runner_stack`, with the Apptainer tests, which may not be skipped here,
+#   - the Docker end to end passes in a step of its own, which may not be skipped either.
 # The suites run the way ci.yml splits them, because one `pytest` over the whole tree cannot collect
 # (tests/images has a conftest.py of its own, which tests/launcher would import by name):
 # everything but tests/images, then tests/images, then the recipes and the launch end to end in the
 # lock's `runtime` environment with NEMAR_REQUIRE_RUNTIME so they cannot be skipped.
-# The comparisons with nemar-cli's contract and with signalJourney stay in ci.yml, which needs
-# checkouts of them.
+# The markers are ci.yml's: `runner_stack` needs a nemar-cli checkout, bun and the tiny-recipe SIF and
+# runs in ci.yml's required `launcher (python 3.12)` leg, not here. ci.yml's docker job is not a required
+# check, so the Docker end to end (`-m docker`) runs here in its own step with NEMAR_REQUIRE_DOCKER, where a
+# missing daemon is a failure.
+# The comparisons with nemar-cli's contract stay in ci.yml, which needs checkouts of it.
 # Nothing here pushes, signs or publishes.
 
 on:
@@ -102,7 +106,7 @@ jobs:
         run: uv run pytest tests/release -q
 
       - name: The test suite, but tests/images
-        run: uv run pytest -q --ignore=tests/images
+        run: uv run pytest -q --ignore=tests/images -m "not docker and not runner_stack"
 
       - name: The runtime image's tests
         run: uv run pytest -q tests/images
@@ -112,4 +116,9 @@ jobs:
           NEMAR_REQUIRE_RUNTIME: "1"
         run: |
           uv run --frozen --group runtime --extra cpu pytest -q tests/recipes
-          uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer"
+          uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer and not docker and not runner_stack"
+
+      - name: The Docker end to end, which may not be skipped
+        env:
+          NEMAR_REQUIRE_DOCKER: "1"
+        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker

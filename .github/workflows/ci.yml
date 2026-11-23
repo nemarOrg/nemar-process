@@ -1,12 +1,23 @@
 name: ci
 
+# Starts on a pull request and on a push to `main` or `dev`; a push to any other branch starts `lint` only
+# (lint.yml: ruff, ruff format, ty and actionlint), and the pull request that follows starts this workflow
+# once. There is no path filter: the jobs below are required checks, and a skipped workflow would leave them
+# waiting.
 on:
   push:
-    branches: ["main", "dev", "feature/**"]
+    branches: ["main", "dev"]
   pull_request:
 
 permissions:
   contents: read
+
+# A pull request has one run at a time: a newer head cancels the older run, whose checks belong to a commit
+# that is no longer the head. A push run is its own group (its commit), so pushes to `dev` and `main` never
+# cancel or replace each other.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Pinned by version and by the sha256 of the .deb; bump both together (docs/contracts.md).
@@ -23,53 +34,37 @@ env:
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
+# `lint` is lint.yml, not a job here: it runs ruff, ruff format, ty and actionlint on every push to any branch
+# and on every pull request. `bump-validator` and `release-gate`, also required, are workflows of their own.
 jobs:
-  lint:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: ${{ env.UV_VERSION }}
-      - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run ty check
-      # The launcher and the observer must stay on the Python 3.9 floor.
-      - run: uv run ty check --python-version 3.9 launcher observer
-
-  actionlint:
-    # Every workflow in the repository, including the release workflows (docs/release.md), which the
-    # `images` job's tests do not read.
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install actionlint
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
-          tar -xzf actionlint.tar.gz actionlint
-          sudo install -m 0755 actionlint /usr/local/bin/actionlint
-          actionlint --version
-      - run: actionlint -color=false .github/workflows/*.yml
-
   launcher:
     name: launcher (python ${{ matrix.python }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         python: ["3.9", "3.12"]
     env:
-      # In CI neither the container tests nor the drift comparison may be skipped unnoticed.
+      # In CI neither the container tests nor the drift comparison nor the signature tests (which need the
+      # real cosign and the public registry) nor the check of the service units by systemd-analyze may be
+      # skipped unnoticed.
       NEMAR_REQUIRE_APPTAINER: "1"
       NEMAR_REQUIRE_DRIFT: "1"
+      NEMAR_REQUIRE_COSIGN: "1"
+      NEMAR_REQUIRE_SYSTEMD: "1"
       NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
       NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version the image workflow signs with (image-nemar-python.yml). The action is pinned by commit
+      # and checks the binary it installs against the checksums and the signature it carries; the
+      # signature tests (tests/runner/test_verify_image.py) run the installed cosign against the public
+      # registry.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: "v3.1.4"
 
       - name: Read the nemar-cli pin
         id: pin
@@ -136,41 +131,116 @@ jobs:
         if: matrix.python == '3.9'
         run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
 
-      # The gates of the phase, in order, on 3.12.
+      # The gates of the phase, in order, on 3.12. `lint` and the deploy group of `static` run ruff, ty and
+      # the launcher zip check, so they are not repeated here.
       - name: Gates
         if: matrix.python == '3.12'
         run: |
           uv sync --frozen
-          uv run ruff check .
-          uv run ruff format --check .
-          uv run ty check
-          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images
-          uv run python scripts/build_launcher_zip.py --check
+          uv run pytest --cov=launcher --cov-fail-under=85 --ignore=tests/images -m "not docker and not runner_stack"
 
-  images:
-    # The runtime image's declaration, lock, vendored schema, smoke fixture, Dockerfile and workflows.
-    # The image itself is built and smoke-tested by image-nemar-python.yml.
-    runs-on: ubuntu-24.04
-    env:
-      # In CI neither the workflow linter nor the comparison with signalJourney may be skipped unnoticed.
-      NEMAR_REQUIRE_ACTIONLINT: "1"
-      NEMAR_REQUIRE_SIGNALJOURNEY: "1"
-      NEMAR_SIGNALJOURNEY_DIR: ${{ github.workspace }}/.signaljourney
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Read the vendored signalJourney commit
-        id: sj
-        run: |
-          echo "ref=$(sed -n 's/^commit: //p' recipes/nemar_process/_vendor/signalJourney/SOURCE)" >> "$GITHUB_OUTPUT"
-
-      - name: Check out signalJourney at that commit (the vendored copy is compared with it)
+      # `nemar-runner once` against NEMAR's own local stack (nemar-cli's compute-local-stack.ts, started from a
+      # full checkout at the pin) through the real claim, heartbeat, outputs and complete routes, with a real
+      # Apptainer container built here (DM-18, gate G3). The Gates step deselects this marker; here neither a
+      # missing Apptainer, a missing image nor a missing checkout may skip (NEMAR_REQUIRE_APPTAINER, above).
+      # Not sparse: the stack imports nemar-cli's backend and its test helpers (Miniflare, the migrations).
+      # A second checkout beside the sparse one, which the drift tests of both legs keep.
+      - name: Check out nemar-cli in full at the pinned commit (the stack runs from it)
+        if: matrix.python == '3.12'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: signalJourney/signalJourney
-          ref: ${{ steps.sj.outputs.ref }}
-          path: .signaljourney
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli-stack
           fetch-depth: 1
+
+      # Development dependencies included (Miniflare, the test helpers), and no lifecycle script: the
+      # checkout's husky would set core.hooksPath. The backend has its own lockfile.
+      - name: Install the stack's dependencies
+        if: matrix.python == '3.12'
+        run: |
+          set -euo pipefail
+          (cd .nemar-cli-stack && bun install --frozen-lockfile --ignore-scripts)
+          (cd .nemar-cli-stack/backend && bun install --frozen-lockfile --ignore-scripts)
+
+      # The SIF is named by the Docker image id, which is the digest the stack's `--image` carries and
+      # the file name the runner looks for (`<sif_root>/<hex>.sif`).
+      - name: Build the tiny image into a SIF
+        if: matrix.python == '3.12'
+        env:
+          NEMAR_E2E_SIF_DIR: ${{ github.workspace }}/.cache/runner-stack-sif
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            docker build -t tiny:ci tests/images/tiny-recipe && break
+            echo "docker build attempt $attempt failed" >&2
+            [ "$attempt" = 3 ] && exit 1
+            sleep 10
+          done
+          id=$(docker inspect --format '{{.Id}}' tiny:ci)
+          hex=${id#sha256:}
+          if ! [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "unexpected image id: $id" >&2
+            exit 1
+          fi
+          mkdir -p "$NEMAR_E2E_SIF_DIR"
+          for attempt in 1 2 3; do
+            apptainer build --force "$NEMAR_E2E_SIF_DIR/${hex}.sif" docker-daemon://tiny:ci && break
+            echo "apptainer build attempt $attempt failed" >&2
+            [ "$attempt" = 3 ] && exit 1
+            sleep 10
+          done
+          ls -l "$NEMAR_E2E_SIF_DIR"
+
+      - name: The runner against the local stack
+        if: matrix.python == '3.12'
+        env:
+          NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli-stack
+          NEMAR_E2E_SIF_DIR: ${{ github.workspace }}/.cache/runner-stack-sif
+        run: uv run --frozen pytest tests/e2e/test_runner_stack.py -q -rs
+
+  docker:
+    # The launcher with NEMAR_CONTAINER_RUNTIME=docker against the runner's own Docker daemon and a
+    # real image pinned by digest (DM-10): isolation as the container sees it, and the memory kill.
+    # The other jobs deselect this test (`-m "not docker"`); here a missing daemon is a failure.
+    name: docker backend (end to end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEMAR_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Docker version
+        run: docker version
+      - name: Launch end to end (real Docker)
+        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
+
+  static:
+    # The former `images` and `deploy` jobs as one required check, in this order: the images group (the
+    # runtime image's declaration, lock, signalJourney schema digest, smoke fixture, Dockerfile and
+    # workflows, which image-nemar-python.yml builds and smoke-tests), then the deploy group (the Tapis
+    # application and system definitions, the schemas derived from Tapis's own OpenAPI files, the
+    # registration script and the queue observer, docs/operator.md). One job, so the rulesets list one name.
+    # Each group's checks keep their own step names (`images: ...`, `deploy: ...`), so a failure still says
+    # which former job it came from. Every step of the deploy group has `if: ${{ !cancelled() }}`, so an
+    # images failure does not hide a deploy failure; the condition only decides that a step runs, and a
+    # failed step fails the job, so nothing here can make the job pass. There is no job-level `if`, no
+    # `continue-on-error` and no `timeout-minutes`, as in the two jobs this one replaces.
+    runs-on: ubuntu-24.04
+    env:
+      # In CI the workflow linter may not be skipped unnoticed (the images group).
+      NEMAR_REQUIRE_ACTIONLINT: "1"
+      # The deploy group: in CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
+      NEMAR_REQUIRE_TAPIS_DRIFT: "1"
+      NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
+      # ... nor the comparison of the observation schema and fixtures with nemar-cli's.
+      NEMAR_REQUIRE_OBSERVATION_DRIFT: "1"
+      NEMAR_CLI_OBSERVATION_DIR: ${{ github.workspace }}/.nemar-cli-observation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install actionlint
         run: |
@@ -186,11 +256,66 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Gates
+      - name: "images: the lock and the pins of the image workflow"
         run: |
           uv sync --frozen
           uv lock --check
           uv run pytest tests/images --cov=recipes --cov=scripts
+
+      # The deploy group. The nemar-cli checkouts come after the images group, so tests/images runs in the
+      # tree it always ran in.
+      - name: Read the nemar-cli pin of the Tapis client
+        if: ${{ !cancelled() }}
+        id: pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the definitions are compared with the client's own source)
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .nemar-cli-tapis
+          sparse-checkout: |
+            /backend/src/services/tapis/
+            /shared/contract/compute.ts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Read the nemar-cli pin of the observation schema
+        if: ${{ !cancelled() }}
+        id: observation-pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the observation schema and fixtures are compared with its own)
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.observation-pin.outputs.ref }}
+          path: .nemar-cli-observation
+          sparse-checkout: |
+            /shared/contract/compute-observation.schema.json
+            /test/fixtures/compute-observation/
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: "deploy: the Tapis definitions, the zips and the observer"
+        if: ${{ !cancelled() }}
+        run: |
+          uv sync --frozen
+          # The schemas are what the vendored specifications derive, and nothing else.
+          uv run python scripts/derive_tapis_schemas.py --check
+          # The digests recorded in the applications are those of the reproducible zips.
+          uv run python scripts/build_launcher_zip.py --check
+          uv run python scripts/build_observer_zip.py --check
+          # Each application and each rendered template validates; registration, rendering,
+          # hygiene and the observer are tested against local stand-ins.
+          uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
+
+      - name: "deploy: the observer on its Python floor (3.9)"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/observer
 
   recipes:
     # The recipes run in the runtime environment (eegprep, NumPy, SciPy, threadpoolctl), which the
@@ -212,150 +337,4 @@ jobs:
       # recipe on the fixture, against stand-in routes. The same test runs in the SIF in
       # image-nemar-python.yml, where the isolation is real.
       - name: Launch end to end (stand-in runtime)
-        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer"
-
-  deploy:
-    # The Tapis application and system definitions, the schemas derived from Tapis's own OpenAPI
-    # files, the registration script and the queue observer (docs/operator.md).
-    name: deploy (tapis definitions and observer)
-    runs-on: ubuntu-24.04
-    env:
-      # In CI the comparison with NEMAR's Tapis client may not be skipped unnoticed.
-      NEMAR_REQUIRE_TAPIS_DRIFT: "1"
-      NEMAR_CLI_TAPIS_DIR: ${{ github.workspace }}/.nemar-cli-tapis
-      # ... nor the comparison of the observation schema and fixtures with nemar-cli's.
-      NEMAR_REQUIRE_OBSERVATION_DRIFT: "1"
-      NEMAR_CLI_OBSERVATION_DIR: ${{ github.workspace }}/.nemar-cli-observation
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Read the nemar-cli pin of the Tapis client
-        id: pin
-        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
-
-      - name: Check out nemar-cli at that commit (the definitions are compared with the client's own source)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: nemarOrg/nemar-cli
-          ref: ${{ steps.pin.outputs.ref }}
-          path: .nemar-cli-tapis
-          sparse-checkout: |
-            /backend/src/services/tapis/
-            /shared/contract/compute.ts
-          sparse-checkout-cone-mode: false
-          fetch-depth: 1
-
-      - name: Read the nemar-cli pin of the observation schema
-        id: observation-pin
-        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
-
-      - name: Check out nemar-cli at that commit (the observation schema and fixtures are compared with its own)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: nemarOrg/nemar-cli
-          ref: ${{ steps.observation-pin.outputs.ref }}
-          path: .nemar-cli-observation
-          sparse-checkout: |
-            /shared/contract/compute-observation.schema.json
-            /test/fixtures/compute-observation/
-          sparse-checkout-cone-mode: false
-          fetch-depth: 1
-
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Gates
-        run: |
-          uv sync --frozen
-          # The schemas are what the vendored specifications derive, and nothing else.
-          uv run python scripts/derive_tapis_schemas.py --check
-          # The digests recorded in the applications are those of the reproducible zips.
-          uv run python scripts/build_launcher_zip.py --check
-          uv run python scripts/build_observer_zip.py --check
-          # Each application and each rendered template validates; registration, rendering,
-          # hygiene and the observer are tested against local stand-ins.
-          uv run pytest tests/deploy tests/observer --cov=observer --cov-fail-under=85
-
-      - name: Observer tests on its Python floor (3.9)
-        run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/observer
-
-  nemar-cli-latest:
-    # Advisory: says, without failing, when nemar-cli's `dev` has a launch schema newer than the pin.
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: nemarOrg/nemar-cli
-          ref: dev
-          path: .nemar-cli-dev
-          sparse-checkout: shared/contract
-          fetch-depth: 1
-      - run: |
-          theirs=.nemar-cli-dev/shared/contract/compute-launch.schema.json
-          if [ ! -f "$theirs" ]; then
-            echo "::warning title=nemar-cli dev has no launch schema yet::The pin in tests/contract/nemar-cli-pin.json still points at a commit of the epic branch."
-          elif cmp -s "$theirs" launcher/schema/launch-spec.v1.json; then
-            echo "launcher/schema/launch-spec.v1.json equals nemar-cli dev"
-          else
-            echo "::warning title=launch schema differs from nemar-cli dev::Bump the pin (docs/contracts.md) once the change is reviewed."
-          fi
-
-  nemar-cli-observation-latest:
-    # Advisory: says, without failing, when nemar-cli's compute epic branch has changed the observation
-    # schema or the observer fixtures since the commit the pin `tests/contract/nemar-cli-observation-pin.json`
-    # names, so the copies here are moved deliberately.
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compare the pin with the epic branch
-        run: |
-          set -euo pipefail
-          ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-observation-pin.json"))["ref"])')
-          branch=feature/issue-2005-epic-compute-core
-          # The API call comes first and on its own: a failure of it (the pinned commit is not on that
-          # branch yet, the branch is gone once the epic merges, or the commit is unknown) must not read
-          # as "nothing changed".
-          if ! files=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename'); then
-            echo "::warning title=nemar-cli's observation schema could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
-            exit 0
-          fi
-          changed=$(printf '%s\n' "$files" | grep -E '^(shared/contract/compute-observation\.schema\.json$|test/fixtures/compute-observation/)' || true)
-          if [ -n "$changed" ]; then
-            echo "::warning title=nemar-cli's observation schema or fixtures moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Copy them (docs/contracts.md, Bumping the pin), then bump the pin in tests/contract/nemar-cli-observation-pin.json."
-          else
-            echo "the observation schema and fixtures are unchanged since the pin"
-          fi
-
-  nemar-cli-tapis-latest:
-    # Advisory: says, without failing, when nemar-cli's compute epic branch has changed the files the
-    # Tapis definitions are compared with (the client and the contract) since the commit the pin
-    # `tests/contract/nemar-cli-tapis-pin.json` names, so the agreement test is moved deliberately.
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compare the pin with the epic branch
-        run: |
-          set -euo pipefail
-          ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-tapis-pin.json"))["ref"])')
-          branch=feature/issue-2005-epic-compute-core
-          # The API call comes first and on its own: a failure of it (the branch is gone once the epic
-          # merges, or the commit is unknown) must not read as "nothing changed".
-          if ! files=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename'); then
-            echo "::warning title=nemar-cli's Tapis client could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
-            exit 0
-          fi
-          changed=$(printf '%s\n' "$files" | grep -E '^(backend/src/services/tapis/|shared/contract/compute\.ts$)' || true)
-          if [ -n "$changed" ]; then
-            echo "::warning title=nemar-cli's Tapis client moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Read them, update the agreement test if the request changed, then bump the pin in tests/contract/nemar-cli-tapis-pin.json."
-          else
-            echo "the Tapis client and contract files are unchanged since the pin"
-          fi
+        run: uv run --frozen --group runtime --extra cpu pytest tests/e2e -m "not apptainer and not docker and not runner_stack"

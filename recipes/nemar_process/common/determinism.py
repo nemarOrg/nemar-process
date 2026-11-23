@@ -23,7 +23,7 @@ from typing import Any
 
 from threadpoolctl import threadpool_info, threadpool_limits
 
-from nemar_process.common import COMMON_VERSION, build
+from nemar_process.common import COMMON_VERSION, build, versions
 
 # Seeds inside the engine that no argument reaches (sccn/eegprep#540 asks for a parameter). Recorded in every record (extensions.nemar.seeds)
 # and compared with eegprep's source by tests/recipes/test_determinism.py.
@@ -103,18 +103,21 @@ def engine_info(limit: int = 1, extra: Mapping[str, Any] | None = None) -> dict[
 
     ``extra`` are the recipe's fields (``Recipe.engine_extra``): plain JSON values under names the
     stamp does not already use. ``torch`` and ``pamica`` are recorded when they are installed.
+    ``version`` is eegprep's with the commit it was installed from (``versions.distribution_version``:
+    ``0.5.0+<commit>`` for a git install, the bare version for an index install).
 
-    The build file is read here too, and not recorded here (a record's ``process`` block states it):
-    the stamp is made before anything is created, so a build that contradicts itself ends the run
-    before it writes a byte (``BuildRefused``).
+    The build file, and the flavor file beside it, are read here too, and not recorded here (a
+    record's ``process`` block and image tag state them): the stamp is made before anything is
+    created, so a build that contradicts itself, or a build file without a valid flavor file, ends
+    the run before it writes a byte (``BuildRefused``).
     """
     import numpy
 
-    build.build_info()
+    build.image_provenance()
 
     stamp: dict[str, Any] = {
         "package": "eegprep",
-        "version": metadata.version("eegprep"),
+        "version": versions.distribution_version("eegprep"),
         "python": platform.python_version(),
         "numpy": numpy.__version__,
         "scipy": metadata.version("scipy"),

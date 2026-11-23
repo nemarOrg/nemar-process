@@ -12,7 +12,7 @@ import pytest
 from nemar_process import sj
 from nemar_process.common import files, records
 from nemar_process.nemar_floor import RECIPE
-from recipe_support import make_context
+from recipe_support import PINNED_RECIPE_VERSION, make_context
 
 
 def succeeded(i, **changes):
@@ -118,7 +118,9 @@ def test_plan_hashes_are_counted_so_variants_are_visible(mixed):
 def test_the_report_is_the_process_envelope_and_lists_only_the_failed_and_skipped(mixed):
     report = mixed[0]["extensions"]["nemar"]["report"]
     assert report["process"] == "nemar-floor"
-    assert report["engine_version"].startswith("nemar-floor@1.0.0/eegprep==")
+    assert report["engine_version"].startswith(
+        "nemar-floor@{}/eegprep==".format(PINNED_RECIPE_VERSION)
+    )
     assert report["engine_version"].endswith("/sha256:" + "b" * 64)
     assert report["source_commit"] == "0123456789abcdef0123456789abcdef01234567"
     assert (report["started_utc"], report["finished_utc"]) == (

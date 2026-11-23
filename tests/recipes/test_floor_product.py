@@ -17,15 +17,15 @@ import pytest
 from nemar_process.common import files, io, naming, records
 from nemar_process.common.errors import RecordingError
 from nemar_process.nemar_floor import outputs
-from recipe_support import DATASET, make_context
+from recipe_support import DATASET, PINNED_ICA_RECIPE_VERSION, make_context
 
 ICA_INFO = replace(
     outputs.INFO,
     id="nemar-ica",
-    version="1.0.0",
+    version=PINNED_ICA_RECIPE_VERSION,
     label=naming.label("nemar-ica"),
-    recording_description="nemar-ica 1.0.0 test recording description",
-    dataset_description="nemar-ica 1.0.0 test dataset description",
+    recording_description="nemar-ica test recording description",
+    dataset_description="nemar-ica test dataset description",
 )
 
 
@@ -90,7 +90,7 @@ def test_the_default_identity_is_looked_up_when_called_not_when_defined(
     assert caught.value.detail == "schema"
 
 
-def test_another_recipe_gets_the_floors_four_files_under_its_own_label_and_name(
+def test_another_recipe_gets_the_floors_files_under_its_own_label_and_name(
     fixture_result, recording, tmp_path
 ):
     result = replace(fixture_result, plan=own_plan(fixture_result))
@@ -110,6 +110,7 @@ def test_another_recipe_gets_the_floors_four_files_under_its_own_label_and_name(
             base + "channels.tsv",
             base + "filters.json",
             base + "qc.json",
+            base + "samplemask.tsv",
             base + "sphere.tsv",
             base + "signalJourney.json",
         ]
@@ -117,11 +118,17 @@ def test_another_recipe_gets_the_floors_four_files_under_its_own_label_and_name(
     assert not [name for name in product.files if "nemarfloor" in name]
     record = product.record
     assert record["pipelineInfo"]["name"] == "nemar-ica"
-    assert record["extensions"]["nemar"]["recipe"] == {"id": "nemar-ica", "version": "1.0.0"}
+    assert record["extensions"]["nemar"]["recipe"] == {
+        "id": "nemar-ica",
+        "version": PINNED_ICA_RECIPE_VERSION,
+    }
     # the state files are stamped with the recipe that wrote them
     for suffix in ("filters.json", "qc.json"):
         document = json.loads((tmp_path / (base + suffix)).read_text(encoding="utf-8"))
-        assert (document["recipe"], document["recipeVersion"]) == ("nemar-ica", "1.0.0")
+        assert (document["recipe"], document["recipeVersion"]) == (
+            "nemar-ica",
+            PINNED_ICA_RECIPE_VERSION,
+        )
     assert records.check(record, make_context().validator) == []
 
 

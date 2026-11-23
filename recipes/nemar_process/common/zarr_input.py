@@ -7,16 +7,29 @@ needs around it:
 
 * the index is read once (at most ``MAX_INDEX_BYTES``), checked for shape (``validate_document``),
   its SHA-256 recorded, and the run refused when the index was built from another commit than the
-  one the caller attests, or names a ``data_base`` off the allowlist (``ZarrSource.open``);
+  one the caller attests, or names a ``data_base`` other than the data host of the pair the
+  ``--zarr-base`` belongs to (``ZarrSource.open``);
 * the caller's check that the index describes the tagged data is recorded, never made here
   (``attest``): the network of a run reaches the hosts of ``zarr_hosts`` only, so the commit graph
   is out of reach, and every record says ``commit_check: attested_by_caller``;
 * every request goes through ``GuardedTransport``, which takes its hosts from the allowlist in
-  ``zarr_hosts`` and from nowhere else: the first request is to the Zarr host, the answer may
-  redirect once, and only to ``https://`` on the data host (the ``Location`` header of the Zarr
-  host's answer, which for a read is the public bucket); any other redirect, a second hop included,
-  is refused. Proxies and credentials are never used, and the hosts actually contacted are kept for
-  the records. ``zarr_hosts.Fence`` is the second line, a socket-level audit hook for the run.
+  ``zarr_hosts`` and from nowhere else, and is bound to the one pair its base names: the first
+  request is to that Zarr host, the answer may redirect once, and only to ``https://`` on the data
+  host of that pair (the ``Location`` header of the Zarr host's answer, which for a read is the
+  public bucket); any other redirect, a second hop included, is refused. Proxies and credentials
+  are never used, and the hosts actually contacted are kept for the records. ``zarr_hosts.Fence`` is
+  the second line, a socket-level audit hook for the run.
+
+* every store read in full is named by the content that was read: ``window_content_sha256`` is the
+  SHA-256 of the physical values of the window eegprep-lean returned under a header of the
+  serving rate, unit and labels (``nemar.store-content.v1``, the platform's definition), and by the
+  electrode positions it was handed: ``window_locations_sha256`` is the SHA-256 of the positions,
+  coordinate system and units the store states for that group's channels
+  (``nemar.store-locations.v1``, the platform's definition, amended 2026-11-16). ``input_digest_v2``
+  is the digest of a dataset's stores by path, group, content and locations
+  (``nemar.input-digest.v2``), so a derivative can be keyed on what was read and not on the index
+  file, whose bytes change when any one store of the dataset is converted again, and on everything
+  the recipe was handed, positions included.
 
 ``eegprep_lean`` and ``eegprep`` are imported where they are used, so this module (and the tests of
 the attestation) import without them.
@@ -25,22 +38,25 @@ the attestation) import without them.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
 import posixpath
 import re
+import struct
 import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib import metadata
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urljoin
 
-from nemar_process.common import io, naming, zarr_hosts
+import numpy as np
+
+from nemar_process.common import io, naming, qc, versions, zarr_hosts
 from nemar_process.common.errors import (
     CONVERT_FAILED,
     OUT_OF_MEMORY,
@@ -187,17 +203,18 @@ class ResponseTooLarge(OSError):
     """A response longer than the limit it was read under."""
 
 
-def redirect_target(current: str, location: str | None) -> str:
-    """Where a redirect from ``current`` may go: ``https://`` on a data host, else ``RedirectRefused``.
+def redirect_target(current: str, location: str | None, data_host: str) -> str:
+    """Where a redirect from ``current`` may go: ``https://`` on ``data_host``, else ``RedirectRefused``.
 
-    ``location`` is the ``Location`` header, read as a relative reference to ``current``, so a path on
-    the Zarr host itself, a scheme-relative address, ``http://``, any other scheme, an address with a
-    user name or a port, and an IP literal are all refused: only the host names in
-    ``zarr_hosts.ZARR_DATA_HOSTS`` are allowed, exactly.
+    ``data_host`` is the data host of the pair the run is bound to (``zarr_hosts.data_host_of``), never
+    a host of the other pair. ``location`` is the ``Location`` header, read as a relative reference to
+    ``current``, so a path on the Zarr host itself, a scheme-relative address, ``http://``, any other
+    scheme, an address with a user name or a port, and an IP literal are all refused: only that one
+    host name is allowed, exactly, apart from case.
     """
     target = urljoin(current, location or "")  # no Location is the address itself: refused below
-    if zarr_hosts.https_host(target, zarr_hosts.ZARR_DATA_HOSTS) is None:
-        raise RedirectRefused("the redirect leads to a place that is not an allowed data host")
+    if zarr_hosts.https_host(target, (data_host,)) is None:
+        raise RedirectRefused("the redirect leads to a place that is not the pair's data host")
     return target
 
 
@@ -270,9 +287,10 @@ def read_cap(start: int | None, end: int | None, limit: int | None) -> int:
 class GuardedTransport:
     """eegprep-lean's transport, limited to the allowlist, with one redirect, counting what it reads.
 
-    The first request is to the Zarr host (``--zarr-base``, which must be on
-    ``zarr_hosts.ZARR_HOSTS``). If the answer is a redirect it is followed once, to ``https://`` on
-    ``ZARR_DATA_HOSTS`` (``redirect_target``); a second redirect is refused. Every request is made by
+    The transport is bound to one pair of ``zarr_hosts.ZARR_HOST_PAIRS``, the one whose Zarr host is
+    ``--zarr-base``. The first request is to that Zarr host. If the answer is a redirect it is
+    followed once, to ``https://`` on the data host of the same pair (``redirect_target``); a second
+    redirect is refused, and so is a request to a host of the other pair. Every request is made by
     ``fetch`` (``fetch_https``, looked up when called, unless a caller gives another: the tests give
     a stand-in for the external hosts), with eegprep-lean's native User-Agent and a ``Range`` header
     when a range is asked for, and a ranged request answered in full is refused. A reply longer than
@@ -285,6 +303,8 @@ class GuardedTransport:
         if host is None:
             raise ValueError("the base is not an https address on a Zarr host")
         self.host = host
+        self.data_host = zarr_hosts.data_host_of(host)
+        self.pair = zarr_hosts.pair_name(host)
         self._fetch = fetch
         self.bytes_read = 0
         self.requests = 0
@@ -330,7 +350,7 @@ class GuardedTransport:
         cap = read_cap(start, end, limit)
         current, hops = url, 0
         while True:
-            allowed = zarr_hosts.ZARR_HOSTS if hops == 0 else zarr_hosts.ZARR_DATA_HOSTS
+            allowed = (self.host,) if hops == 0 else (self.data_host,)
             host = zarr_hosts.https_host(current, allowed)
             if host is None:
                 raise TransportError("request refused: not an allowed https host", url=current)
@@ -344,7 +364,9 @@ class GuardedTransport:
                         "a second redirect was refused", url=current, status=reply.status
                     )
                 try:
-                    current = redirect_target(current, reply.headers.get("location"))
+                    current = redirect_target(
+                        current, reply.headers.get("location"), self.data_host
+                    )
                 except RedirectRefused as error:
                     raise TransportError(str(error), url=current, status=reply.status) from error
                 hops = 1
@@ -387,11 +409,22 @@ def _whole(value: Any, low: int, high: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
 
 
+def _encodable(value: str) -> bool:
+    """Whether the text has a UTF-8 form: a lone surrogate (JSON can spell one) has none, and a name
+    that has none would end the run in an encoding error where the text is written or hashed."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _name(value: Any) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value) <= MAX_NAME_LENGTH
         and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        and _encodable(value)
     )
 
 
@@ -434,7 +467,12 @@ def validate_document(document: Any) -> None:
         for group in groups:
             if not isinstance(group, dict):
                 raise IndexInvalid("a group is not an object")
-            if not _name(group.get("name")) or not isinstance(group.get("modality"), str):
+            modality = group.get("modality")
+            if (
+                not _name(group.get("name"))
+                or not isinstance(modality, str)
+                or not _encodable(modality)
+            ):
                 raise IndexInvalid("a group has no usable name or modality")
             rate = group.get("rate")
             if (
@@ -450,24 +488,387 @@ def validate_document(document: Any) -> None:
                 raise IndexInvalid("a group has no usable n_samples")
 
 
+# ---- what was read: the content digest of a store and the input digest of a dataset -----------
+
+STORE_CONTENT_FORMAT = "nemar.store-content.v1"
+STORE_LOCATIONS_FORMAT = "nemar.store-locations.v1"
+INPUT_DIGEST_V2_FORMAT = "nemar.input-digest.v2"
+# The `locations` of a version 2 row when a recipe by design hands eegprep no positions from the store.
+# It never means that the store has none (that is a digest, of a text with every position alone), and
+# no recipe of this repository writes it: both Zarr recipes hand positions through ``to_eeg``.
+LOCATIONS_NONE = "none"
+LINE_BREAKS = ("\r", "\n")
+ROW_BREAKS = (*LINE_BREAKS, "\t")  # a row's pieces are tab-separated lines
+# Matched whole with ``fullmatch``: a ``$`` would accept a trailing line feed.
+CONTENT_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+class Undigestable(ValueError):
+    """A store, or a row of a dataset, that has no digest, never a digest of a guess: a unit or label
+    that cannot be a line of the header (a line feed or a carriage return, a lone surrogate), a list
+    that is not one per channel, a value or a rate that is not finite, no channel or no sample, or a
+    row that is not one of the input digest's."""
+
+
+class StoreContent(NamedTuple):
+    """What a store's digests name: the channel group that was read, the SHA-256 of its content, and
+    the SHA-256 of the electrode positions it was handed (``nemar.store-locations.v1``)."""
+
+    group: str
+    sha256: str
+    locations: str
+
+
+def _utf8(name: str, text: Any) -> bytes:
+    """The text as the UTF-8 bytes it is hashed as, exactly as given (no normalization, no trimming);
+    ``Undigestable`` when it is not text or has no UTF-8 (a lone surrogate)."""
+    if not isinstance(text, str):
+        raise Undigestable("the {} is not text".format(name))
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise Undigestable("the {} is not text in UTF-8".format(name)) from error
+
+
+def _line(name: str, text: str | None) -> str:
+    """``name`` alone when there is no text, else ``name``, a space and the text; ``Undigestable``
+    when the text could not be a line. Only text that enters the header is looked at."""
+    if text is None:
+        return name
+    _utf8(name, text)
+    if any(character in text for character in LINE_BREAKS):
+        raise Undigestable("the {} cannot be a line of the header".format(name))
+    return "{} {}".format(name, text)
+
+
+def _per_channel(values: Sequence[str | None] | None, channels: int, name: str) -> list[Any]:
+    """One entry per channel as the store states it (text, empty or absent); a list absent as a whole
+    is every channel absent, and one that is not one per channel is refused."""
+    if values is None:
+        return [None] * channels
+    if isinstance(values, (str, bytes)) or len(values) != channels:
+        raise Undigestable("the {} are not one per channel".format(name))
+    for value in values:
+        if value is not None and not isinstance(value, str):
+            raise Undigestable("a channel's {} is not text".format(name))
+    return list(values)
+
+
+def store_content_header(
+    shape: tuple[int, int],
+    rate: float,
+    units: Sequence[str | None] | None,
+    labels: Sequence[str | None] | None,
+) -> bytes:
+    """The header lines of ``nemar.store-content.v1``, each ending in a line feed, as UTF-8.
+
+    ``nemar.store-content.v1``; ``shape C S`` (channels and samples); ``rate H``, the 16 lower-case
+    hexadecimal digits of the rate (the serving rate, never the archived one) as an IEEE-754 binary64,
+    big-endian; ``unit`` and the unit; one ``label`` line per channel; ``data float64-le``.
+
+    ``units`` and ``labels`` are each channel's, as the store states them, and two rules decide the
+    text. The unit is shared or none: ``unit`` carries text only when every channel states the same
+    non-empty unit, and otherwise is ``unit`` alone, so an empty unit is no unit and never ``unit``
+    and a space. Labels are all or none: the ``label`` lines carry labels only when every channel has
+    a non-empty one, and otherwise every line is ``label`` alone. Text the rules drop is never looked
+    at; text that enters the header with a carriage return, a line feed or a lone surrogate has no
+    digest (``Undigestable``).
+    """
+    channels, samples = shape
+    if channels < 1 or samples < 1:
+        raise Undigestable("the group has no channel or no sample")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+        raise Undigestable("the rate is not a finite number")
+    each_unit = _per_channel(units, channels, "units")
+    each_label = _per_channel(labels, channels, "labels")
+    shared = each_unit[0] if each_unit and each_unit[0] and len(set(each_unit)) == 1 else None
+    named = each_label if each_label and all(each_label) else [None] * channels
+    lines = [
+        STORE_CONTENT_FORMAT,
+        "shape {} {}".format(int(channels), int(samples)),
+        "rate " + struct.pack(">d", float(rate)).hex(),
+        _line("unit", shared),
+        *(_line("label", label) for label in named),
+        "data float64-le",
+    ]
+    return "".join(line + "\n" for line in lines).encode("utf-8")
+
+
+def store_content_sha256(
+    data: Any,
+    rate: float,
+    units: Sequence[str | None] | None,
+    labels: Sequence[str | None] | None,
+) -> str:
+    """The content digest of one channel group: SHA-256 of the header, then the values.
+
+    The values are the physical ones, ``data`` as channels by samples, written as little-endian
+    binary64 in C order (all of channel 0, then channel 1): what is hashed is the values and not how
+    an array lays them out in memory. ``Undigestable`` for what has no digest: no channel or no
+    sample, a rate that is not finite, a value that is not finite. A non-finite scale, offset or
+    digital value, or a product that overflows, is a non-finite value here, because ``data`` is
+    what eegprep-lean made of them (``physical = digital * scale + offset``, two separately rounded
+    operations, never fused).
+    """
+    values = np.asarray(data)
+    if values.ndim != 2:
+        raise Undigestable("the data is not channels by samples")
+    shape = (values.shape[0], values.shape[1])
+    hasher = hashlib.sha256(store_content_header(shape, rate, units, labels))
+    for channel in values:  # one at a time: the same bytes as the whole array, with no second copy
+        row = np.ascontiguousarray(channel, dtype="<f8")
+        if not np.isfinite(row).all():
+            raise Undigestable("a value is not finite")
+        hasher.update(row.tobytes(order="C"))
+    return hasher.hexdigest()
+
+
+def window_content_sha256(window: Any) -> str:
+    """The digest of an eegprep-lean ``Window``: its data, rate, unit and labels. The window states
+    the unit its channels share (or None) and the labels all of them have (or None), which are the
+    same two rules, so they are passed on as every channel's. Its ``original_rate`` is the rate the
+    recording was acquired at and is never read."""
+    values = np.asarray(window.data)
+    channels = values.shape[0] if values.ndim == 2 else 0  # any other shape is refused below
+    units = None if window.unit is None else [window.unit] * channels
+    return store_content_sha256(values, window.rate, units, window.labels)
+
+
+def _stated(value: Any) -> str:
+    """A system or units value as text: a string as it is, anything else the empty string (eegprep-lean
+    reads it the same way)."""
+    return value if isinstance(value, str) else ""
+
+
+def _coordinates(entry: Any) -> tuple[float, float, float] | None:
+    """The three coordinates of a position entry, or None: a list of exactly three numbers, each
+    finite and none a boolean (Python's ``True`` is an ``int``, so a boolean coordinate is the trap).
+
+    A number that is not finite as a binary64 has no position, and that is no refusal: a NaN, an
+    infinity, and an integer too large for a binary64, on which ``math.isfinite`` and ``float`` raise
+    ``OverflowError``, which is caught here for the same answer a JSON reader that reads it as an
+    infinity gives. That is the platform's definition. Through the pinned reader such an integer
+    (any of at least 2**1024 - 2**970, an integer literal of more than 4300 digits included) is
+    already a channel without a position before this function is reached, because eegprep-lean parses
+    the store root's integers as binary64; the catch here keeps this digest equal to the definition
+    for a caller that builds an ``ElectrodeAttributes`` by hand.
+    """
+    if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+        return None
+    try:
+        if not all(
+            isinstance(axis, (int, float)) and not isinstance(axis, bool) and math.isfinite(axis)
+            for axis in entry
+        ):
+            return None
+        return float(entry[0]), float(entry[1]), float(entry[2])
+    except OverflowError:
+        return None
+
+
+def _coordinate_hex(value: float) -> str:
+    """The 16 lower-case hexadecimal digits of a coordinate as an IEEE-754 binary64, big-endian, as
+    the rate is written. A zero is written as positive zero whatever its sign: ``JSON.parse`` reads
+    ``-0`` and ``-0.0`` as negative zero and Python's own parse reads ``-0`` as the integer 0, so
+    without the rule one store could have two digests. eegprep-lean's reader already makes every zero
+    positive; the rule keeps this digest the definition's for any caller."""
+    return struct.pack(">d", 0.0 if value == 0 else value).hex()
+
+
+def store_locations_text(
+    labels: Sequence[str | None] | None, electrodes: Any, channels: int | None = None
+) -> str:
+    """The text of ``nemar.store-locations.v1``: what a reader handed eegprep for one read group, as
+    the store states it (before any unit change, axis change or recentering), each line ending in a
+    line feed.
+
+    ``nemar.store-locations.v1``; ``system`` and, after a space, the coordinate system text; ``units``
+    and the unit text; then one line per channel in stored order, ``position`` and the 16 hexadecimal
+    digits of each of x, y and z (``_coordinate_hex``), or ``position`` alone.
+
+    ``electrodes`` is what eegprep-lean read from the store root (``Window.electrodes``): None when
+    the store declares no positions, else an ``ElectrodeAttributes``, whose positions, system and
+    units are the store's, already reduced to entries of three finite numbers. ``labels`` is the
+    group's channel labels in stored order (``Window.labels``, where None is that not every channel
+    has one; ``channels`` is then the count of channels, which a list of labels carries itself). The
+    system and units lines carry text only when positions are present and the text is non-empty. A
+    channel gets coordinates only when every channel of the group has a non-empty label (the all or
+    none rule of ``nemar.store-content.v1``, so an unlabeled group joins nothing), positions are
+    present, they hold an entry under exactly that label (no case fold, no trimming, no Unicode
+    normalization), and that entry is three finite numbers. Labels are not written: the content
+    digest of the same group fixes them and their order.
+
+    Not hashed: the converter's provenance (``source``, ``file``) and any entry under a label the
+    group does not have. They do not change what eegprep receives, so a recipe that branches on one
+    must first change the definition. ``Undigestable`` for a group with no channel, labels that are
+    not one text or None per channel, and a system or units text that enters the text and holds a
+    carriage return, a line feed or a lone surrogate (text that is dropped is never looked at).
+    """
+    if labels is None:
+        if channels is None or channels < 1:
+            raise Undigestable("the group has no channel")
+        each: list[Any] = [None] * channels
+    else:
+        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)) or len(labels) < 1:
+            raise Undigestable("the labels are not a list of at least one entry")
+        each = list(labels)
+        if channels is not None and channels != len(each):
+            raise Undigestable("the labels are not one per channel")
+        if any(label is not None and not isinstance(label, str) for label in each):
+            raise Undigestable("a channel's label is not text")
+    present = electrodes is not None
+    system = _stated(electrodes.coordinate_system) if present else ""
+    units = _stated(electrodes.coordinate_units) if present else ""
+    lines = [
+        STORE_LOCATIONS_FORMAT,
+        _line("system", system or None),
+        _line("units", units or None),
+    ]
+    named = all(each)
+    for label in each:
+        found = _coordinates(electrodes.positions.get(label)) if present and named else None
+        if found is None:
+            lines.append("position")
+        else:
+            lines.append("position " + " ".join(_coordinate_hex(axis) for axis in found))
+    return "".join(line + "\n" for line in lines)
+
+
+def store_locations_sha256(
+    labels: Sequence[str | None] | None, electrodes: Any, channels: int | None = None
+) -> str:
+    """The locations digest of one channel group: SHA-256 of ``store_locations_text`` as 64 lower-case
+    hexadecimal digits. A store that states no position still has one (the text of a group with
+    every ``position`` alone), which is not ``none``."""
+    return hashlib.sha256(
+        store_locations_text(labels, electrodes, channels).encode("utf-8")
+    ).hexdigest()
+
+
+def window_locations_sha256(window: Any) -> str:
+    """The locations digest of an eegprep-lean ``Window``: its labels and its electrode attributes,
+    the channel count being its data's rows (the window states the labels all channels have, or None)."""
+    values = np.asarray(window.data)
+    channels = values.shape[0] if values.ndim == 2 else 0  # any other shape is refused here too
+    return store_locations_sha256(window.labels, window.electrodes, channels)
+
+
+def content_rows(read: Mapping[str, Sequence[str]]) -> list[dict[str, str]]:
+    """The rows of a dataset record's ``stores_content``: ``{"path", "group", "content_sha256",
+    "locations"}`` for each store read in full, sorted by path in code point order. ``read`` maps a
+    path to its group, its content digest and its locations digest (a ``StoreContent``)."""
+    rows = []
+    for path in sorted(read):  # a str sorts by code point, which is the order of its UTF-8 bytes
+        group, digest, locations = read[path]
+        rows.append(
+            {"path": path, "group": group, "content_sha256": digest, "locations": locations}
+        )
+    return rows
+
+
+def _row_text(name: str, text: Any) -> str:
+    """A row's path or group as a piece of a tab-separated line: non-empty text with no tab, no line
+    feed, no carriage return and no lone surrogate."""
+    _utf8(name, text)
+    if not text:
+        raise Undigestable("the {} is empty".format(name))
+    if any(character in text for character in ROW_BREAKS):
+        raise Undigestable("the {} cannot be a piece of a line".format(name))
+    return text
+
+
+def _row_fields(row: Any, with_locations: bool = False) -> tuple[Any, ...]:
+    """A row's path, group and content digest (and its locations when ``with_locations``);
+    ``Undigestable`` for a row that is not an object or lacks one of them."""
+    if not isinstance(row, Mapping):
+        raise Undigestable("a row is not an object")
+    names = ("path", "group", "content_sha256", *(("locations",) if with_locations else ()))
+    try:
+        return tuple(row[name] for name in names)
+    except KeyError as error:
+        raise Undigestable("a row has no {}".format(error.args[0])) from error
+
+
+def _checked_rows(rows: Iterable[Any], with_locations: bool) -> list[tuple[str, ...]]:
+    """Every row's checked fields in path order (by the UTF-8 bytes of the path, whatever order
+    ``rows`` come in); ``Undigestable`` for a row that is not one of the input digest's."""
+    fields = sorted(
+        (_row_fields(row, with_locations) for row in rows),
+        key=lambda found: _utf8("path", found[0]),
+    )
+    checked = []
+    seen = set()
+    for raw_path, raw_group, digest, *rest in fields:
+        path, group = _row_text("path", raw_path), _row_text("group", raw_group)
+        if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest):
+            raise Undigestable("a content_sha256 is not 64 lower-case hexadecimal digits")
+        for locations in rest:
+            if not isinstance(locations, str) or not (
+                locations == LOCATIONS_NONE or CONTENT_SHA256.fullmatch(locations)
+            ):
+                raise Undigestable("a locations is not none or 64 lower-case hexadecimal digits")
+        if path in seen:
+            raise Undigestable("a path is repeated")
+        seen.add(path)
+        checked.append((path, group, digest, *rest))
+    return checked
+
+
+def input_digest(rows: Iterable[Mapping[str, str]]) -> str:
+    """Version 1 of the input digest, no longer stated by any record this repository writes (a Zarr
+    record states ``input_digest_v2``); it stays defined because records written before version 2
+    state it, and it is the one definition of the platform's that has no locations.
+
+    ``sha256:`` and the SHA-256 of the lines ``path TAB group TAB content_sha256 LF``, one per
+    store read in full, sorted by path in code point order (the order of the paths' UTF-8 bytes,
+    whatever order ``rows`` come in), each text as it is given.
+
+    ``Undigestable`` (a ``ValueError``) for a row that is not one: not an object, or without a path,
+    a group or a ``content_sha256``; a path repeated; an empty path or group; a tab, a line feed, a
+    carriage return or a lone surrogate in a path or group; or a ``content_sha256`` that is not 64
+    lower-case hexadecimal digits. No rows is the digest of no text, and is not refused here (the key
+    consumer's check for a non-empty ``stores_content`` comes first).
+    """
+    lines = ["{}\t{}\t{}\n".format(*fields) for fields in _checked_rows(rows, False)]
+    return "sha256:" + hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def input_digest_v2(rows: Iterable[Mapping[str, str]]) -> str:
+    """``nemar.input-digest.v2``: ``sha256:`` and the SHA-256 of the line ``nemar.input-digest.v2``
+    and then one line ``path TAB group TAB content_sha256 TAB locations LF`` per store read in full,
+    sorted by path in code point order as in version 1.
+
+    ``locations`` is a store's locations digest (64 lower-case hexadecimal digits) or exactly
+    ``none``: the recipe by design handed eegprep no positions from that store, never "the store had
+    none", which is a digest of ``store_locations_text``. The header line means a version 1 text and
+    a version 2 text are never the same bytes. Every refusal of ``input_digest`` holds, and so does
+    a ``locations`` that is missing, not text, or neither shape (``Undigestable``); a row that is a
+    list is not an object and is refused. No rows is the digest of the header alone, and is not
+    refused here, as in version 1.
+    """
+    lines = ["{}\t{}\t{}\t{}\n".format(*fields) for fields in _checked_rows(rows, True)]
+    text = INPUT_DIGEST_V2_FORMAT + "\n" + "".join(lines)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # ---- the source -------------------------------------------------------------------------------
+
+
+def location_source(located: int) -> str:
+    """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
+    BIDS route's words (``io._location_source``). The converter embeds the positions of the
+    dataset's own electrodes file, and ``embedded`` cannot occur, because the serving copy keeps no
+    position from inside a data file."""
+    return "electrodes.tsv" if located > 0 else "none"
 
 
 def reader_string() -> str:
     """``eegprep-lean@<version>+<commit>``, the commit read from how pip or uv installed it.
 
-    A reader installed from a release has no commit to name and is ``eegprep-lean@<version>``.
+    A reader installed from a release has no commit to name and is ``eegprep-lean@<version>``. The
+    rule is the one every record applies to eegprep too (``versions.distribution_version``).
     """
-    distribution = metadata.distribution(READER_DISTRIBUTION)
-    text = distribution.read_text("direct_url.json")
-    found = None
-    if text:
-        try:
-            found = json.loads(text).get("vcs_info", {}).get("commit_id")
-        except (ValueError, AttributeError):
-            found = None
-    suffix = "+{}".format(found) if isinstance(found, str) and COMMIT.fullmatch(found) else ""
-    return "{}@{}{}".format(READER_DISTRIBUTION, distribution.version, suffix)
+    return "{}@{}".format(READER_DISTRIBUTION, versions.distribution_version(READER_DISTRIBUTION))
 
 
 class ZarrSource:
@@ -504,6 +905,13 @@ class ZarrSource:
         self.index: Any = None
         self.store_bytes: dict[str, int] = {}
         self.store_hosts: dict[str, list[str]] = {}
+        # what each store read in full was, by content and by the positions it was handed (a store
+        # with none is in ``stores_unread``)
+        self.contents: dict[str, StoreContent] = {}
+        # what eegprep-lean says it did with each store's positions (``etc["nemar"]["locations"]``,
+        # copied as written), or None for a store that declares none, for each recording it turned
+        # into a dictionary
+        self.reader_locations: dict[str, dict[str, Any] | None] = {}
         self.scope: list[str] = []  # the source paths of the stores the run covers (``select``)
 
     # -- the index
@@ -512,8 +920,8 @@ class ZarrSource:
         """Read the index and check it; ``SourceRefused`` when it cannot serve this run.
 
         Nothing but the index is requested here, and nothing is read from a store until every check
-        has passed: the shape of the document, a ``data_base`` on the allowlist, the contract base,
-        the commit, and the count of stores.
+        has passed: the shape of the document, a ``data_base`` on the data host of the base's pair, the
+        contract base, the commit, and the count of stores.
         """
         from eegprep_lean import read_index
 
@@ -528,11 +936,12 @@ class ZarrSource:
             document = json.loads(body)
             validate_document(document)
             if (
-                zarr_hosts.https_host(str(document.get("data_base")), zarr_hosts.ZARR_DATA_HOSTS)
+                zarr_hosts.https_host(str(document.get("data_base")), (self.transport.data_host,))
                 is None
             ):
                 raise SourceRefused(
-                    "the index's data_base is not an https address on an allowed data host"
+                    "the index's data_base is not an https address on the data host of the Zarr "
+                    "host's pair"
                 )
             index = asyncio.run(
                 read_index(
@@ -653,6 +1062,12 @@ class ZarrSource:
         was read into a dictionary (the unit, ``eeg_checkset``, the checks of the loader) is
         ``convert_failed``, each with a class name or a fixed word; running out of memory in either
         is ``out_of_memory``. The unit is passed through as the serving copy states it.
+
+        The positions a store declares reach eegprep through ``to_eeg`` (eegprep-lean fills ``chanlocs``
+        from them, or refuses them with a reason it records); no template is ever applied. The load
+        reports ``electrodes.tsv`` as the location source when at least one channel of the dictionary
+        has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
+        from inside a data file), and the count is the BIDS route's (``qc.count_located``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -686,10 +1101,25 @@ class ZarrSource:
                 host for host, count in after.items() if count > before_hosts.get(host, 0)
             )
         try:
+            # what was read, named before anything is made of it: a store whose metadata cannot be
+            # digested is not used (its content could not be named), and one the floor then fails is
+            # still a store that was read in full; the positions it was handed are named with it
+            content = StoreContent(
+                window.group_name, window_content_sha256(window), window_locations_sha256(window)
+            )
+        except Undigestable as error:
+            raise RecordingError(CONVERT_FAILED, "load", "undigestable_metadata") from error
+        except MemoryError as error:
+            raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
+        self.contents[path] = content
+        try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
+            # the reader's own record of what it did with the store's positions, as it wrote it
+            reader_locations = copy.deepcopy(eeg["etc"]["nemar"].get("locations"))
             eeg = eeg_checkset(eeg)
             eeg, notes = io.normalize(eeg)
+            located = qc.count_located(eeg["chanlocs"])
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
         except RecordingError as error:
@@ -697,14 +1127,15 @@ class ZarrSource:
             raise RecordingError(CONVERT_FAILED, "load", error.code) from error
         except Exception as error:
             raise RecordingError(CONVERT_FAILED, "load", type(error).__name__) from error
+        self.reader_locations[path] = reader_locations
         return io.Loaded(
             eeg=eeg,
             function=LOAD_FUNCTION,
             parameters=load_parameters(self.max_bytes),
             etc_normalized=notes.etc_normalized,
             etc_keys_dropped=notes.keys_dropped,
-            location_source="none",
-            n_channels_with_locations=0,
+            location_source=location_source(located),
+            n_channels_with_locations=located,
             power_line_hz_declared=self.declared_power_line(path),
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
         )
@@ -730,12 +1161,17 @@ class ZarrSource:
     def input_fields(
         self, stores: Sequence[str], bytes_read: int, hosts: Sequence[str]
     ) -> dict[str, Any]:
-        """``extensions.nemar.input``: where the data came from and what the caller attested."""
+        """``extensions.nemar.input``: where the data came from and what the caller attested.
+
+        What was read, by content, is added by the record that states it (``recording_extras``,
+        ``dataset_extras``).
+        """
         attestation = self.attestation
         return {
             "kind": "zarr",
             "profile": "serving",
             "zarr_base": self.base,
+            "zarr_pair": self.transport.pair,
             "dataset_id": self.dataset_id,
             "version": self.dataset_version,
             "source_commit": attestation.source_commit,
@@ -751,22 +1187,56 @@ class ZarrSource:
         }
 
     def recording_extras(self, path: str) -> dict[str, Any]:
-        """What a recording's record adds to ``extensions.nemar``: its input and the reader."""
-        return {
-            "input": self.input_fields(
-                [path], self.store_bytes.get(path, 0), self.store_hosts.get(path, [])
-            ),
-            "reader": reader_string(),
-        }
+        """What a recording's record adds to ``extensions.nemar``: its input, the reader, and what
+        the reader did with the store's positions.
+
+        The input names the channel group that was read, the content digest of the store and its
+        locations digest (when this source read it: a recording handed in by a test was not read by
+        it). ``reader_locations`` is eegprep-lean's record of the positions (``etc["nemar"]["locations"]``:
+        its key names and values, never renamed or recomputed: what the store stated, how many
+        channels were located and, when none was, why), or null when the store declares no positions.
+        """
+        fields = self.input_fields(
+            [path], self.store_bytes.get(path, 0), self.store_hosts.get(path, [])
+        )
+        extras: dict[str, Any] = {"input": fields, "reader": reader_string()}
+        if path in self.contents:
+            content = self.contents[path]
+            fields["group"] = content.group
+            fields["content_sha256"] = content.sha256
+            fields["locations"] = content.locations
+        if path in self.reader_locations:
+            extras["reader_locations"] = copy.deepcopy(self.reader_locations[path])
+        return extras
 
     def dataset_extras(self) -> dict[str, Any]:
-        """What the dataset record adds: every store in scope and every byte read (the index's too)."""
-        return {
-            "input": self.input_fields(
-                self.scope, self.transport.bytes_read, self.transport.contacted
-            ),
-            "reader": reader_string(),
+        """What the dataset record adds: every store in scope and every byte read (the index's too),
+        what was read by content, and what the reader did with each store's positions.
+
+        ``stores_content`` has a row for every store in scope whose group was read in full (sorted
+        by path), each of four fields (``path``, ``group``, ``content_sha256`` and ``locations``, the
+        locations digest of the positions the store handed eegprep: no row says ``none``, because
+        both Zarr recipes hand positions through ``to_eeg``), ``input_digest`` is
+        ``nemar.input-digest.v2`` of exactly those rows (the field keeps its name), and
+        ``stores_unread`` lists the stores in scope that have no digest (never read, or not
+        digestable), so that a record that names its whole input says so with an empty list.
+
+        ``reader_locations`` maps the path of every store this source turned into a dictionary (read,
+        and every later step of the load returned) to eegprep-lean's record of its positions,
+        exactly as a recording's record carries it (null when the store declares none), with the paths
+        in code point order. It is the one place that keeps the reader's ``reason`` for a recording that
+        writes no record of its own (nemar-ica's ``iclabel_no_locations`` fails before it writes one).
+        """
+        fields = self.input_fields(self.scope, self.transport.bytes_read, self.transport.contacted)
+        rows = content_rows(self.contents)
+        fields["stores_content"] = rows
+        fields["input_digest"] = input_digest_v2(rows)
+        fields["stores_unread"] = sorted(path for path in self.scope if path not in self.contents)
+        locations = {
+            path: copy.deepcopy(self.reader_locations[path])
+            for path in sorted(self.reader_locations)
         }
+        return {"input": fields, "reader": reader_string(), "reader_locations": locations}
 
 
 LOAD_FUNCTION = "eegprep_lean.load_recording"
