@@ -68,7 +68,7 @@ with contextlib.suppress(ImportError):  # a Python built without ctypes has no p
 
 PROGRAM = "nemar-launch-local"
 ENGINES = ("apptainer", "docker")
-SIGNALS = (int(signal.SIGTERM), int(signal.SIGINT), int(signal.SIGHUP))
+SIGNALS = (int(signal.SIGTERM), int(signal.SIGINT), int(signal.SIGHUP), int(signal.SIGQUIT))
 FIRST_SECONDS = 0.1  # until the recipe's progress file is first read
 REPORT_SECONDS = 10.0  # then: progress.json is a local file, a person watches it
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -472,7 +472,7 @@ def main(
     docs = Documents(layout.launcher if layout is not None else None, log)
     state = service.Run(options.out, layout, log, docs)
     terminator = run.Terminator(own_deadline_only=True)
-    terminator.install(SIGNALS)
+    terminator.install(SIGNALS, keep_ignored=True)
     image = LocalImage(options.pull, options.cosign, fenced)
     inputs: list[dict[str, Any]] = []
     try:

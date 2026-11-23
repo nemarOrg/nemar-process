@@ -189,7 +189,7 @@ def test_a_failing_entry_is_entry_failed_and_still_reported(lrig):
     assert launch.report["result"] == launch.result
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGHUP, signal.SIGTERM])
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT])
 def test_ctrl_c_a_closed_terminal_or_sigterm_stop_the_job(lrig, signum):
     lrig.write_spec(lrig.script_spec("sleep 30"))
     timer = threading.Timer(1.5, os.kill, (os.getpid(), signum))
@@ -384,3 +384,20 @@ def test_a_dataset_holding_a_mount_point_is_refused(tmp_path):
     (plain / "sub").mkdir(parents=True)
     (plain / "sub" / "a").write_text("abc")
     assert local.count_input(str(plain)) == {"files": 1, "bytes": 3}
+
+
+def test_a_signal_ignored_at_start_stays_ignored(lrig):
+    """Under ``nohup`` SIGHUP is ignored when the launcher starts: a closed terminal must not stop the
+    job, and the launcher leaves the disposition as it found it."""
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        lrig.write_spec(lrig.script_spec("sleep 2; echo done > $NEMAR_OUT/done.txt"))
+        timer = threading.Timer(0.8, os.kill, (os.getpid(), signal.SIGHUP))
+        timer.start()
+        launch = lrig.run(lrig.argv())
+        timer.join()
+        assert launch.exit == 0, launch.log
+        assert (lrig.out / "work" / "outputs" / "done.txt").exists()
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)

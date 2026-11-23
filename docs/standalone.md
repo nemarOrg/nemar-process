@@ -32,7 +32,15 @@ nemar-launch/nemar-launch-local \
 | `--pull` | verify NEMAR's signed image with cosign and pull it if it is missing (below) |
 | `--cosign PATH` | the cosign binary for `--pull` (default: `cosign` on `PATH`) |
 
-`Ctrl-C` (SIGINT), a closed terminal (SIGHUP) and SIGTERM each stop the job, as SIGTERM stops a service job: the record says `terminated`, and the container's process group is killed if it has not stopped 10 seconds later.
+`Ctrl-C` (SIGINT), `Ctrl-\` (SIGQUIT), a closed terminal (SIGHUP) and SIGTERM each stop the job, as SIGTERM stops a service job: the record says `terminated` (only the launcher's own stop at `--time-limit-s` is `time_limit`), and the container's process group is killed if it has not stopped 10 seconds later.
+A signal ignored when the launcher starts stays ignored: under `nohup`, a closed terminal does not stop the job.
+
+A launcher killed with SIGKILL, or a machine that goes down, can leave a stopped Docker container behind (Apptainer's ends with the launcher).
+Every standalone container is named `nemar-launch-<hex>` and labeled with the placeholder job id; remove what is left with:
+
+```bash
+docker ps -aq --filter label=nemar.job=job_000000000000000000000000 | xargs -r docker rm -f
+```
 
 The exit status is the job's: 0, or 10 to 16 for the failure code in `result.json` (the codes of [launcher.md](launcher.md)).
 2 is a command line that cannot be used (a missing option, Docker without limits, a `--code` that is not a `.tar.gz`, a `--data` name given twice); then nothing is created.

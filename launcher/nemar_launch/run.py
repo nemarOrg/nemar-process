@@ -614,12 +614,17 @@ class Terminator:
     def detach(self) -> None:
         self.child = None
 
-    def install(self, signals: tuple[int, ...] = (int(signal.SIGTERM),)) -> None:
+    def install(
+        self, signals: tuple[int, ...] = (int(signal.SIGTERM),), keep_ignored: bool = False
+    ) -> None:
         """Handle each of ``signals`` as a SIGTERM: the service's launcher takes SIGTERM only (Slurm's
-        and the runner's); the standalone entry also takes SIGINT and SIGHUP (a person's Ctrl-C, a
-        closed terminal), which stop the job the same way."""
+        and the runner's); the standalone entry also takes SIGINT, SIGHUP and SIGQUIT (a person's
+        Ctrl-C, a closed terminal, Ctrl-\\), which stop the job the same way. With ``keep_ignored``
+        (standalone) a signal ignored when the launcher started stays ignored, as ``nohup`` asks."""
         try:
             for number in signals:
+                if keep_ignored and signal.getsignal(number) is signal.SIG_IGN:
+                    continue
                 self._previous[number] = signal.signal(number, self._handle)
         except ValueError:  # not the main thread: nothing to install
             self.restore()
