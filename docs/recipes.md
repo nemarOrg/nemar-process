@@ -602,8 +602,25 @@ The CPU is the default path and a GPU a bonus: the lab workstations are shared a
 
 `--ica-device cpu` and `--ica-device cuda` are taken as asked (reason `requested`).
 A job never fails because a GPU is busy, and `auto` never exits for the lack of one.
-`common/device.py` is the only module under `recipes/` that imports torch, and it never computes with it: it asks whether a GPU is usable, its name and the versions torch states.
-The device never enters the engine stamp (the stamp gains `ica_engine`, `pamica-torch` or `amica15`, and nothing else), so a GPU run and a CPU run carry one engine stamp and match one registry tuple.
+
+A job on the GPU protects the people who share it, after the resolution as well:
+
+- **The cap.** Before the job's first fit on the GPU, the recipe initializes CUDA and, when `NEMAR_GPU_MEMORY_MB` is set (the runner sets it with `cuda`; outside a runner only an operator does), caps the share of the GPU's memory torch may take in this process at `min(1, cap / total)` (`torch.cuda.set_per_process_memory_fraction`), so the job never grows past the cap: an allocation beyond it is an out-of-memory error.
+  Without the variable no cap applies. A value that is not a whole number of mebibytes (at least 1, at most seven digits) is exit 2, found by the preflight before anything is written.
+- **Out of memory.** Under `auto`, a fit on the GPU that raises an exception whose chain of causes and contexts holds torch's `torch.cuda.OutOfMemoryError` (recognized by its class, never by its message) hands back the memory torch cached (`torch.cuda.empty_cache`) and fits the same recording again on the CPU, with every setting the same (seed, threads, float64, `max_iter`, `block_size`, rank; only `device` differs in the step's parameters), and every later recording of the job runs on the CPU too.
+  On the CPU, one seed and one thread give identical files, so that refit is byte for byte the recording's CPU run in the same image.
+  Any other exception fails the recording as before.
+- **Contention.** Right after the job first initializes CUDA it reads how much of the GPU's memory is neither free nor reserved by its own allocator (what other processes hold, plus its own CUDA context: `total - free - torch.cuda.memory_reserved(0)` from `torch.cuda.mem_get_info(0)`).
+  Before each later fit on the GPU it reads the same quantity again; growth of more than 256 MiB (a constant, which the dataset record states as `gpu_contention_mib`) moves that recording and every later one of the job to the CPU.
+  A fit already running is never interrupted.
+
+A move is for the rest of the job, and nothing returns a job to the GPU.
+A recording moved by an earlier one, or moving itself, states the move's event as its `device_reason` (`cuda_oom` or `gpu_contended`) and `fallback` true, and the dataset record lists each move in `fallbacks` as the event, the recording's position among those the run started (from 0) and its path, at the moment it is made, so a move made in a recording that then fails is still listed.
+An explicit `--ica-device cuda` is never answered with another device: the cap applies, contention is not read, and a fit that runs out of the GPU's memory fails the recording (`out_of_memory`, detail `cuda`).
+None of this can be shown on a machine without a GPU; the tests cover the rule, the reading and the record shapes on the CPU, and the real out-of-memory error and the real contention are checked on a GPU by an operator.
+`common/device.py` is the only module under `recipes/` that imports torch, and it never computes with it: it asks whether a GPU is usable, its name, its memory and the versions torch states, sets the cap, recognizes the out-of-memory error by its class and empties torch's cache.
+The device never enters the engine stamp (the stamp gains `ica_engine`, `pamica-torch` or `amica15`, and nothing else), so a GPU run and a CPU run carry one engine stamp and match one registry tuple, and a job that ran some recordings on each carries one stamp too.
+On the GPU and the CPU each recording is pAMICA's fit with the same seed and settings; whether the two devices agree on the same recording is measured on a GPU against a pre-registered matched correlation of 0.999, and nothing here claims it.
 
 ### Preflight (exit 8, nothing written)
 
@@ -612,7 +629,7 @@ The device never enters the engine stamp (the stamp gains `ica_engine`, `pamica-
 - `--ica-engine amica15` with the binary missing, not executable, or with a SHA-256 other than the one the image wrote beside it (`/opt/amica/amica15.sha256`): `no_amica15`.
 
 No other engine is ever substituted.
-The device changes only under `auto`, by the rule above, and is always recorded.
+The device changes only under `auto`, by the rules above, and is always recorded.
 
 ### What is written
 
@@ -648,10 +665,10 @@ The recordings table has the columns `path`, `datatype`, `status`, `code`, `step
 - `dtype` (`float64`) and `engine_input_dtype`: the binary reads the 32-bit data file eegprep writes for it, so it sees the data rounded to float32 (about 1e-7 relative), which the float32-stored EEGLAB sample of the informational comparison does not show;
 - ASR's `maxmem_mb`, the digest of its state (of the `_asr.json` bytes), the window and step it applied and the channels it names;
 - the good-channel set and its count, ICLabel's version and the SHA-256 of its network file, and the input profile (`archive` for a dataset directory, `serving` for the Zarr serving copy);
-- the device facts: `device_requested`, `device` (the one that ran), `device_reason`, `fallback` (true exactly when `device_requested` is `auto` and the CPU ran), `gpu_name` (CUDA only), `torch_version`, `torch_cuda`, `threads` and `image_flavor` (from `/opt/nemar/flavor`, null outside an image).
+- the device facts: `device_requested`, `device` (the one that ran), `device_reason` (the resolution's reason, or `cuda_oom` or `gpu_contended` after a move), `fallback` (true exactly when `device_requested` is `auto` and the CPU ran), `gpu_memory_cap_mb` (the cap the job's GPU memory was held to; null when no cap was passed or the job never initialized CUDA), `gpu_name` (CUDA only), `torch_version`, `torch_cuda`, `threads` and `image_flavor` (from `/opt/nemar/flavor`, null outside an image); `bit_reproducible` follows the device that ran the recording, so a refit on the CPU with one thread states true.
 
-The dataset record adds `devices` (the recordings that wrote a product, per device) and `ica_run` (engine, device asked for, threads and iterations), because its steps hold only constants.
-A merge of product directories (`aggregate`) ran no recording and states neither; each row of its table still says its recording's device.
+The dataset record adds `devices` (the recordings that wrote a product, per device: a recording that failed is in no count, whatever device it started on), `fallbacks` (every move of the job to the CPU, in the order made, each with its `event`, `index` and `path`; empty when none), `gpu_contention_mib` (256) and `ica_run` (engine, device asked for, threads and iterations), because its steps hold only constants.
+A merge of product directories (`aggregate`) ran no recording and states none of them; each row of its table still says its recording's device.
 
 ### Failures and skips
 
@@ -659,6 +676,7 @@ A merge of product directories (`aggregate`) ran no recording and states neither
 |---|---|---|---|
 | `failed` | `step_failed` | `asr_maxmem` (step `asr`) | ASR's memory budget would depend on the machine (above) |
 | `failed` | `ica_degenerate` | `PamicaFitError` (step `ica`) | pAMICA stopped on a degenerate reason and set no field |
+| `failed` | `out_of_memory` | `cuda` (step `ica`) | the fit ran out of the GPU's memory under an explicit `--ica-device cuda` (under `auto` it is fitted again on the CPU instead, above) |
 | `skipped` | `ica_ineligible` | `rank_too_low` (step `ica`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
 | `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
 | `failed` | `step_failed` | the exception's class (step `iclabel`) | ICLabel raised after the fit |
@@ -745,6 +763,8 @@ A move of N, and the first release, regenerate the golden decisions into the dir
 Every layer became `1.0.0-b1` on 2026-11-16, when nothing had been released and no image had carried a pre-release version: the one image in the registry, `0.1.0-cpu`, is a demonstration build that wrote `nemar-floor` `1.0.0` records before the sample masks, the QC summary and the `mask_grid` existed.
 `1.0.0-b1` names the floor with them, for both inputs (the patch bump first made for them is withdrawn), and its channel table and bad-segment table on the fixture are byte-identical to `1.0.0`'s.
 The device module, the version helper and four rows of a table of `nemar-ica` are a change the bump is skipped for, and nothing moves N: `device.py` adds fields only to `nemar-ica`'s records, which no released recipe wrote, and the helper changes no byte any released (recipe, version, input) wrote, because a released image installs eegprep from an index and its text keeps the bare version (the `+<commit>` text appears only in records no release wrote), so `COMMON_VERSION` and `nemar-floor` stay at `1.0.0-b1`; the four rows are the entries of `PARAMETER_TYPES` in `common/plan.py` for `eegprep.clean_asr`, `eegprep.pop_reref`, `eegprep.pop_runica` and `eegprep.pop_iclabel`, added because `plan.typed` refuses a function that is not in the table and `common/recipe.py` has no hook with which a recipe could register one, and they change no byte any floor record holds; the floor fixture's product tree was compared on eegprep 0.5.0 from PyPI with these changes and found byte-identical to the base's, clocks aside, and after the pin moved the only bytes that differ are the eegprep version texts, the hashes derived from them and the clocks.
+The cap on the job's GPU memory and the moves to the CPU (the device section of `nemar-ica`) moved no N either, because no image had been published from a commit where `nemar-ica` is `1.0.0-b1` when they were made (the first nemar-process release's `v*` tag publishes no image); they add `gpu_memory_cap_mb` to `nemar-ica`'s recording records and `_ica.json`, and `fallbacks` and `gpu_contention_mib` to its dataset record, and touch no module the floor imports.
+A run of two recordings of the fixture cut to 8 channels and 60 seconds on the CPU, with and without these changes, wrote byte-identical matrices, states and tables of components, and its records differ only in those fields and in the digests and sizes taken over them (the `_ica.json` entry of `outputs`, each row's `record_content_sha256` and the table's digest), clocks aside.
 
 A second recipe that embeds the floor uses these, none of which the floor sets:
 
