@@ -252,10 +252,21 @@ def bind_data(job: spec.Job, options: Options, scratch_base: str) -> list[tuple[
 
 
 def count_input(directory: str) -> dict[str, int]:
-    """The regular files under a dataset directory and their bytes (links are not followed)."""
+    """The regular files under a dataset directory and their bytes (links are not followed). A directory
+    on another device (a mount point inside the dataset) is refused, ``bind_source_unsafe``: the bind
+    would hand the job a file system the person did not name."""
     files = 0
     size = 0
-    for root, _dirs, names in os.walk(directory):
+    device = os.lstat(directory).st_dev
+    for root, dirs, names in os.walk(directory):
+        for name in dirs:
+            try:
+                if os.lstat(os.path.join(root, name)).st_dev != device:
+                    raise Failure(
+                        "runtime_error", "bind_source_unsafe", "a dataset holds a mount point"
+                    )
+            except OSError:
+                continue
         for name in names:
             try:
                 info = os.lstat(os.path.join(root, name))

@@ -59,7 +59,7 @@
   },
   "tags": ["nemar", "launcher"],
   "notes": {
-    "launcher_sha256": "815c04ede17a9069efe5c5f4286d2403b879c9e56c2923706cc0afc31860374e",
+    "launcher_sha256": "e6a6dab08870a4279d886160cbc2bbe8607f55b6d654e6e288b4fa007a443ab5",
     "source": "https://github.com/nemarOrg/nemar-process"
   }
 }

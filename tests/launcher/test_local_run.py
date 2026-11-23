@@ -349,3 +349,38 @@ def test_only_absolute_path_entries_are_searched(lrig, monkeypatch):
     options = local.Options(local.parser().parse_args(lrig.argv()))
     built = local.environment(options, environ)
     assert built.get("PATH") == str(lrig.bin_dir)
+
+
+def mount_holder():
+    """A small directory of this machine that holds a mount point (Linux: /sys/fs; macOS:
+    /System/Volumes), or None."""
+    for candidate in ("/sys/fs", "/System/Volumes"):
+        try:
+            device = os.lstat(candidate).st_dev
+            for name in os.listdir(candidate):
+                child = os.path.join(candidate, name)
+                if (
+                    not os.path.islink(child)
+                    and os.path.isdir(child)
+                    and os.lstat(child).st_dev != device
+                ):
+                    return candidate
+        except OSError:
+            continue
+    return None
+
+
+def test_a_dataset_holding_a_mount_point_is_refused(tmp_path):
+    from nemar_launch import local
+    from nemar_launch.codes import Failure
+
+    holder = mount_holder()
+    if holder is None:
+        pytest.skip("no small directory holding a mount point on this machine")
+    with pytest.raises(Failure) as caught:
+        local.count_input(holder)
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "bind_source_unsafe")
+    plain = tmp_path / "plain"
+    (plain / "sub").mkdir(parents=True)
+    (plain / "sub" / "a").write_text("abc")
+    assert local.count_input(str(plain)) == {"files": 1, "bytes": 3}
