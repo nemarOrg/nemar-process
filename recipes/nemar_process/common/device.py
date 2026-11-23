@@ -1,9 +1,11 @@
 """Which device a decomposition runs on, and the device facts a record states.
 
 The only module under ``recipes/`` that imports torch, and it never does numerics with it: it asks
-whether a GPU is usable, reads the GPU's name and states the versions torch reports. The numerics
-are eegprep's (and pAMICA's, through eegprep); ``tests/recipes/test_upstream_first.py`` allows
-torch in this file and nowhere else.
+whether a GPU is usable, reads the GPU's name, its memory and the versions torch reports, caps the
+share of the GPU's memory this process may take, recognizes torch's CUDA out-of-memory error by its
+class and hands the GPU memory torch keeps cached back to the driver. The numerics are eegprep's
+(and pAMICA's, through eegprep); ``tests/recipes/test_upstream_first.py`` allows torch in this file
+and nowhere else.
 
 The owner's rule (docs/recipes.md, ``nemar-ica``): the CPU is the default path and a GPU a bonus
 when it is idle. ``resolve`` turns what was asked (``--ica-device auto|cuda|cpu``) and what the
@@ -11,11 +13,19 @@ runner decided (the launcher-owned variables ``NEMAR_DEVICE``, ``NEMAR_DEVICE_RE
 device that runs, with the reason and whether it was a fallback. Outside a runner no variable is
 set, and a visible GPU is used, else the CPU. The device never enters the engine stamp, so a GPU run
 and a CPU run of one recipe carry the same stamp.
+
+After the resolution, a job on the GPU protects the people who share it: its memory is capped at
+``NEMAR_GPU_MEMORY_MB`` before its first fit (``start_gpu``), and a CUDA out-of-memory error or
+another process taking memory on the GPU moves it to the CPU for the rest of the job
+(``next_device`` is the rule, ``contended`` the reading). The move is the run's state, which
+``nemar_ica/tally.py`` keeps; nothing here moves a job by itself.
 """
 
 from __future__ import annotations
 
+import gc
 import os
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -27,9 +37,25 @@ DEVICES = ("auto", "cuda", "cpu")
 # The two devices that can run: what ``auto`` resolves to, and what the runner may name.
 RUNNING = ("cuda", "cpu")
 
-# Set by the runner's launcher inside the container, never by the job.
+# Set by the runner's launcher inside the container, never by the job (the cap only with ``cuda``).
 ENV_DEVICE = "NEMAR_DEVICE"
 ENV_REASON = "NEMAR_DEVICE_REASON"
+ENV_MEMORY = "NEMAR_GPU_MEMORY_MB"
+# A cap in mebibytes: a whole number of at least one, written with at most seven digits.
+MEMORY_MB = re.compile(r"[1-9][0-9]{0,6}")
+MIB = 1 << 20
+
+# What can happen to a job's device after a recording's resolution. ``start`` and ``ok`` (a fit that
+# finished) never move it; the two moves send a job on the GPU to the CPU for the rest of the job.
+START = "start"
+OK = "ok"
+CUDA_OOM = "cuda_oom"
+GPU_CONTENDED = "gpu_contended"
+EVENTS = (START, OK, CUDA_OOM, GPU_CONTENDED)
+MOVES = frozenset({CUDA_OOM, GPU_CONTENDED})
+# Other processes holding more than this much more of the GPU's memory than when the job first
+# initialized CUDA is contention. A constant, which the dataset record states (``gpu_contention_mib``).
+CONTENTION_MIB = 256
 
 # The reasons ``resolve`` itself gives; the runner's own words (``gpu_idle``, ``gpu_busy`` and so on)
 # come through ``NEMAR_DEVICE_REASON`` as the runner wrote them.
@@ -138,8 +164,10 @@ def resolve(
 
     It is resolved for each recording (``outputs.produce``), and once more by the preflight, before
     anything is written, only to refuse an explicit ``cuda`` with no GPU. None of its inputs changes
-    during a run, so every recording of a run resolves to the same device; the dataset record's
-    ``devices`` counts the recordings that wrote a product on each device.
+    during a run, so every recording of a run resolves to the same device. What can happen after the
+    resolution, a move to the CPU (``next_device``), is the run's state, and it overrides the
+    resolution of every later recording (``nemar_ica/tally.py``). The dataset record's ``devices``
+    counts the recordings that wrote a product on each device.
 
     * ``cpu`` runs on the CPU, reason ``requested``.
     * ``cuda`` runs on the GPU, reason ``requested``; with no GPU visible the run is refused before
@@ -177,6 +205,116 @@ def resolve(
     return Resolution(requested, "cpu", NO_GPU)
 
 
+def next_device(current: str, event: str) -> str:
+    """The device a job runs on after ``event``, from the device it ran on: the rule of the moves.
+
+    From ``cuda``, ``cuda_oom`` (a fit ran out of the GPU's memory) and ``gpu_contended`` (another
+    process took memory on the GPU) move the job to ``cpu`` for the rest of it; ``start`` and ``ok``
+    leave it where it is. ``cpu`` never moves: nothing returns a job to the GPU.
+    """
+    if current not in RUNNING:
+        raise ValueError("a job runs on one of {}".format(", ".join(RUNNING)))
+    if event not in EVENTS:
+        raise ValueError("an event is one of {}".format(", ".join(EVENTS)))
+    if current == "cuda" and event in MOVES:
+        return "cpu"
+    return current
+
+
+def memory_cap_mb(environ: Mapping[str, str] | None = None) -> int | None:
+    """The cap on the job's GPU memory the launcher passed, in mebibytes; None when it passed none.
+
+    A value that is not a whole number of at least one, written with at most seven digits and
+    nothing else, is a usage error that never echoes the value.
+    """
+    values = os.environ if environ is None else environ
+    value = values.get(ENV_MEMORY)
+    if value is None or value == "":
+        return None
+    if not MEMORY_MB.fullmatch(value):
+        raise DeviceUsageError(
+            "{} must be a whole number of mebibytes, at least 1, in at most seven digits (the "
+            "runner sets it with a GPU): correct it or unset it".format(ENV_MEMORY)
+        )
+    return int(value)
+
+
+def memory_fraction(cap_mb: int, total_bytes: int) -> float:
+    """The share of the GPU's memory a cap of ``cap_mb`` mebibytes is, and never more than all of it."""
+    return min(1.0, cap_mb * MIB / total_bytes)
+
+
+def contended(baseline: int, now: int) -> bool:
+    """Whether other processes now hold more than ``CONTENTION_MIB`` more of the GPU's memory, in
+    bytes, than they held when this job first initialized CUDA (``baseline``)."""
+    return now - baseline > CONTENTION_MIB * MIB
+
+
+def holds_cuda_out_of_memory(error: BaseException) -> bool:
+    """Whether torch's CUDA out-of-memory error is ``error`` or anywhere in its chain of causes and
+    contexts. The error is recognized by its class and never by its message; without torch there is
+    no such error."""
+    try:
+        import torch
+    except ImportError:
+        return False
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        link = pending.pop()
+        if link is None or id(link) in seen:
+            continue
+        if isinstance(link, torch.cuda.OutOfMemoryError):
+            return True
+        seen.add(id(link))
+        pending.extend((link.__cause__, link.__context__))
+    return False
+
+
+@dataclass(frozen=True)
+class GpuStart:
+    """What a job set and read when it first initialized CUDA, before its first fit there.
+
+    ``cap_mb`` is the cap applied (None: none was passed, and torch may use the whole GPU) and
+    ``baseline`` the memory, in bytes, that other processes held on the GPU then.
+    """
+
+    cap_mb: int | None
+    baseline: int
+
+
+def others_bytes() -> int:
+    """The GPU memory, in bytes, that is neither free nor reserved by torch's allocator in this
+    process: what other processes hold, and what this one holds outside the allocator (its CUDA
+    context, and memory the CUDA libraries take for themselves)."""
+    import torch
+
+    free, total = torch.cuda.mem_get_info(0)
+    return int(total - free - torch.cuda.memory_reserved(0))
+
+
+def start_gpu(cap_mb: int | None) -> GpuStart:
+    """Initialize CUDA for the job, cap its memory at ``cap_mb`` when one was passed, and read what
+    other processes hold. Called once per job, before its first fit on the GPU, so that torch never
+    grows past the cap: an allocation beyond it raises torch's out-of-memory error instead."""
+    import torch
+
+    _, total = torch.cuda.mem_get_info(0)  # the job's first CUDA initialization
+    if cap_mb is not None:
+        torch.cuda.set_per_process_memory_fraction(memory_fraction(cap_mb, int(total)), 0)
+    return GpuStart(cap_mb, others_bytes())
+
+
+def release_cached_memory() -> None:
+    """Hand the GPU memory torch keeps cached back to the driver, after a fit that ran out of it, so
+    that the CPU refit that follows does not sit on the GPU. The collection first frees what the
+    failed fit's objects still held."""
+    import torch
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def bit_reproducible(engine: str, device: str, threads: int) -> bool | None:
     """Whether a run's weights repeat bit for bit, as far as the recipe may say.
 
@@ -193,14 +331,21 @@ def bit_reproducible(engine: str, device: str, threads: int) -> bool | None:
     return None
 
 
-def facts(resolution: Resolution, *, threads: int) -> dict[str, Any]:
-    """The device facts of one recording's record, as the record and ``_ica.json`` state them."""
+def facts(
+    resolution: Resolution, *, threads: int, gpu_memory_cap_mb: int | None = None
+) -> dict[str, Any]:
+    """The device facts of one recording's record, as the record and ``_ica.json`` state them.
+
+    ``gpu_memory_cap_mb`` is the cap the job's GPU memory was held to (``GpuStart.cap_mb``), None
+    when none was passed or the job never initialized CUDA.
+    """
     torch_version, torch_cuda = torch_facts()
     return {
         "device_requested": resolution.requested,
         "device": resolution.device,
         "device_reason": resolution.reason,
         "fallback": resolution.fallback,
+        "gpu_memory_cap_mb": gpu_memory_cap_mb,
         "gpu_name": gpu_name() if resolution.device == "cuda" else None,
         "torch_version": torch_version,
         "torch_cuda": torch_cuda,
