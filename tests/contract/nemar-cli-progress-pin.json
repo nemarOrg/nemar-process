@@ -1,7 +1,7 @@
 {
   "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors. Both are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
-  "ref": "3d17fabe8049b007ab6de76c9dc66e817ad2056d",
+  "ref": "1b6453609c32b4d7250810ae62c8da212773e590",
   "schema": {
     "source": "shared/contract/compute-progress.schema.json",
     "copy": "launcher/schema/compute-progress.v1.json",
@@ -11,8 +11,8 @@
   "vectors": {
     "source": "shared/contract/compute-progress-vectors.json",
     "copy": "tests/contract/compute-progress-vectors.json",
-    "sha256": "75536cc27f346444a4c4483e19569481152ae0d6ed841bda22800266c5fdccdc",
-    "bytes": 16548
+    "sha256": "c6a527a38e14ceee3ef7b64e31ee8d03021e3c1471a4114cbbb30f06ef9552c2",
+    "bytes": 18306
   },
   "words": {
     "progress_contract": "shared/contract/compute-progress.ts",
