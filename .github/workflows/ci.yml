@@ -155,6 +155,12 @@ jobs:
         if: matrix.python == '3.9'
         run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
 
+      # The standalone entry's fence on 3.13, where subprocess may start a program through os.posix_spawn
+      # (the fence judges that event by the same rules); the floor's own leg (3.9) is above.
+      - name: Fence and standalone tests on 3.13
+        if: matrix.python == '3.9'
+        run: uv run --no-project --python 3.13 --with pytest --with jsonschema pytest tests/launcher/test_fence.py tests/launcher/test_local_run.py tests/launcher/test_local_pull.py tests/launcher/test_local_cli.py
+
       # The gates of the phase, in order, on 3.12. `lint` and the deploy group of `static` run ruff, ty and
       # the launcher zip check, so they are not repeated here.
       - name: Gates
