@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from nemar_process.common import build
-from nemar_process.common.errors import REASON, EngineUnavailable
+from nemar_process.common.errors import REASON, EngineUnavailable, is_cuda_out_of_memory
 
 DEVICES = ("auto", "cuda", "cpu")
 # The two devices that can run: what ``auto`` resolves to, and what the runner may name.
@@ -271,24 +271,11 @@ def contended(baseline: int, now: int) -> bool:
 
 
 def holds_cuda_out_of_memory(error: BaseException) -> bool:
-    """Whether torch's CUDA out-of-memory error is ``error`` or anywhere in its chain of causes and
-    contexts. The error is recognized by its class and never by its message; without torch there is
-    no such error."""
-    try:
-        import torch
-    except ImportError:
-        return False
-    seen: set[int] = set()
-    pending: list[BaseException | None] = [error]
-    while pending:
-        link = pending.pop()
-        if link is None or id(link) in seen:
-            continue
-        if isinstance(link, torch.cuda.OutOfMemoryError):
-            return True
-        seen.add(id(link))
-        pending.extend((link.__cause__, link.__context__))
-    return False
+    """Whether torch's CUDA out-of-memory error (``torch.cuda.OutOfMemoryError``) is ``error`` or
+    anywhere in its chain of causes and contexts. The one chain walk is ``errors``' own, which every
+    step boundary uses too: the error is recognized by its class (its module and name), never by its
+    message, and without torch there is no such error."""
+    return is_cuda_out_of_memory(error)
 
 
 @dataclass(frozen=True)
