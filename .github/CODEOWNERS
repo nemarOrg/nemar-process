@@ -5,3 +5,8 @@
 /.github/CODEOWNERS @nemarOrg/admins
 /scripts/bump_version.py @nemarOrg/admins
 /scripts/sync_dev_merge.py @nemarOrg/admins
+# What a runner bundle builds and installs: a workstation runs what a signed `nemar-runner-v*` tag built
+# (docs/release.md).
+/scripts/build_runner_bundle.py @nemarOrg/admins
+/deploy/runner/ @nemarOrg/admins
+/runner/nemar_runner/install.py @nemarOrg/admins
