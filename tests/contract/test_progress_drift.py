@@ -191,3 +191,153 @@ def test_the_recipes_standard_checkpoints_are_nemar_clis():
 
     assert (*recipe.STANDARD_CHECKPOINTS, recipe.STORED_CHECKPOINT) == rules.STANDARD_CHECKPOINTS
     assert recipe.MAX_CHECKPOINTS == rules.PROGRESS_MAX_CHECKPOINTS
+
+
+# ---- three readers of one object agree ------------------------------------------------------------------
+#
+# The schema copy (through jsonschema, the test oracle), the launcher's validator (``spec``, the schema
+# with its references inlined) and the runner's hand mirror (``contract.check_progress``) accept and
+# refuse the same objects: the runner may never attach what the Worker refuses, and the launcher may
+# never write it.
+
+GOOD = {
+    "format": "nemar.progress.v1",
+    "checkpoint": "import",
+    "counts": {
+        "import": {"passed": 1, "failed": 1, "skipped": 0, "total": 3},
+        "quality": {"passed": 1, "failed": 0, "skipped": 1, "total": 3},
+    },
+    "failures": [
+        {"path": "sub-02/b.set", "code": "load_failed", "step": None, "checkpoint": "import"}
+    ],
+}
+
+
+def variant(change):
+    document = json.loads(json.dumps(GOOD))
+    change(document)
+    return document
+
+
+def _set(path, value):
+    def change(document):
+        node = document
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return change
+
+
+def _drop(path):
+    def change(document):
+        node = document
+        for key in path[:-1]:
+            node = node[key]
+        del node[path[-1]]
+
+    return change
+
+
+FAILURE = ("failures", 0)
+REFUSED = [
+    _set(("extra",), 1),
+    _drop(("format",)),
+    _set(("format",), "nemar.progress.v2"),
+    _set(("checkpoint",), "Import"),
+    _set(("checkpoint",), "import\n"),
+    _set(("checkpoint",), ""),
+    _set(("checkpoint",), "a" * 33),
+    _set(("counts",), {}),
+    _set(("counts",), []),
+    _set(("counts", "Bad"), {"passed": 0, "failed": 0, "skipped": 0, "total": 3}),
+    _set(("counts", "import", "extra"), 1),
+    _drop(("counts", "import", "total")),
+    _set(("counts", "import", "passed"), True),
+    _set(("counts", "import", "passed"), 1.5),
+    _set(("counts", "import", "passed"), -1),
+    _set(("counts", "import", "total"), 1_000_001),
+    _set(("counts", "import", "passed"), "1"),
+    _set(("failures",), {}),
+    _set(("failures",), [GOOD["failures"][0]] * 11),
+    _set(FAILURE, "x"),
+    _set((*FAILURE, "extra"), 1),
+    _drop((*FAILURE, "step")),
+    _set((*FAILURE, "path"), "/abs.set"),
+    _set((*FAILURE, "path"), "../a.set"),
+    _set((*FAILURE, "path"), "a/../b.set"),
+    _set((*FAILURE, "path"), "a/.."),
+    _set((*FAILURE, "path"), "s3:a.set"),
+    _set((*FAILURE, "path"), "a\\b.set"),
+    _set((*FAILURE, "path"), "é.set"),
+    _set((*FAILURE, "path"), "a\n.set"),
+    _set((*FAILURE, "path"), ""),
+    _set((*FAILURE, "path"), "a" * 257),
+    _set((*FAILURE, "code"), "Load_failed"),
+    _set((*FAILURE, "code"), "load-failed"),
+    _set((*FAILURE, "step"), ".load"),
+    _set((*FAILURE, "step"), 3),
+    _set((*FAILURE, "step"), "load\n"),
+    _set((*FAILURE, "checkpoint"), "Import"),
+    _set((*FAILURE, "path"), 5),
+]
+ACCEPTED = [
+    lambda d: None,
+    _set((*FAILURE, "step"), "line_noise_50"),
+    _set((*FAILURE, "path"), "a" * 256),
+    _set((*FAILURE, "path"), "sub-01/eeg/a b.set"),
+    _set((*FAILURE, "path"), "a/..b/c"),
+    _set(("failures",), []),
+]
+
+
+def readers():
+    import importlib.util
+
+    if importlib.util.find_spec("jsonschema") is None:
+        pytest.skip("jsonschema (the test oracle) is not installed")
+    import jsonschema
+    from nemar_launch import progress as launcher_progress
+    from nemar_launch import spec
+    from nemar_runner import contract
+
+    oracle = jsonschema.Draft202012Validator({**SCHEMA, "$ref": "#/$defs/Progress"})
+    inlined = launcher_progress.progress_schema()
+    return (
+        lambda document: not list(oracle.iter_errors(document)),
+        lambda document: not spec.validate(document, inlined),
+        lambda document: contract.check_progress(document) is None,
+    )
+
+
+@pytest.mark.parametrize("index", range(len(REFUSED)))
+def test_every_reader_refuses_what_the_schema_refuses(index):
+    document = variant(REFUSED[index])
+    assert [read(document) for read in readers()] == [False, False, False]
+
+
+@pytest.mark.parametrize("index", range(len(ACCEPTED)))
+def test_every_reader_accepts_what_the_schema_accepts(index):
+    document = variant(ACCEPTED[index])
+    assert [read(document) for read in readers()] == [True, True, True]
+
+
+def test_the_runners_progress_words_and_caps_are_the_schemas():
+    from nemar_runner import contract
+
+    end = r"(?![\s\S])"
+    assert DEFS["CheckpointName"]["pattern"] == "^" + contract.PROGRESS_CHECKPOINT_RE.pattern + end
+    assert DEFS["FailureCode"]["pattern"] == "^" + contract.PROGRESS_FAILURE_CODE_RE.pattern + end
+    assert DEFS["StepId"]["pattern"] == "^" + contract.PROGRESS_STEP_RE.pattern + end
+    assert DEFS["ProgressPath"]["pattern"] == "^" + contract.PROGRESS_PATH_RE.pattern + end
+    assert DEFS["Progress"]["properties"]["format"]["const"] == contract.PROGRESS_FORMAT
+    assert DEFS["Count"]["maximum"] == contract.PROGRESS_MAX_RECORDINGS
+    assert DEFS["Progress"]["properties"]["failures"]["maxItems"] == contract.PROGRESS_MAX_FAILURES
+    assert (
+        DEFS["Progress"]["properties"]["counts"]["maxProperties"]
+        == contract.PROGRESS_MAX_CHECKPOINTS
+    )
+    from nemar_launch import checkpoints as rules
+
+    assert contract.PROGRESS_MIN_INTERVAL_SECONDS == rules.PROGRESS_MIN_INTERVAL_SECONDS
+    assert contract.PROGRESS_MAX_BYTES == rules.PROGRESS_MAX_BYTES

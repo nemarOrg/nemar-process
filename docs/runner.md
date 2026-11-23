@@ -180,6 +180,11 @@ The readiness probe of [`doctor`](#doctor) runs `apptainer exec --containall --c
   A thread starts only after the launcher process is spawned (never before or during an image pull: the contract has no other phase), sends `started` at once and then renews the lease every 60 seconds; `uploading` is sent at once when the launcher has written `<job>/out/launcher/result.json` (the path the launcher uses, `launcher/` under its output directory).
   It goes on until the completion is sent or given up: removing containers, deleting the directory and retrying the completion can outlast the 600-second lease.
   A heartbeat that fails is retried and the job goes on, and the thread survives any error.
+- **Live progress** (ADR 0134).
+  A `started` heartbeat carries the job's live progress, `nemar.progress.v1`, when the launcher has written one to `<job>/out/launcher/progress.json` ([launcher.md](launcher.md)), at most once in 50 seconds (the Worker ignores a report sooner than that).
+  Because the Worker parses a heartbeat strictly, and one whose progress breaks the schema renews no lease, the runner reads the file without following a link and without blocking (a regular file of at most 16 KiB), parses it strictly, and checks it with `contract.check_progress`, a mirror of the schema at least as strict, before it attaches it; anything wrong means a plain heartbeat.
+  If the Worker still refuses the body (`invalid_body`, for example an older Worker that does not know the field), the same heartbeat is sent again at once without progress, and progress stays off for the rest of the job: the lease never waits a cycle for it.
+  An `uploading` heartbeat never carries progress.
 - **Deadline.**
   SIGTERM to the process group at `NEMAR_JOB_END_TIME` plus 60 seconds, SIGKILL 30 seconds after any SIGTERM.
   The launcher stops its own container at `NEMAR_JOB_END_TIME` itself (SIGTERM, and SIGKILL 10 seconds later), so the runner's signal 60 seconds after normally finds the container gone and is the backstop for a launcher that is stuck outside its container.

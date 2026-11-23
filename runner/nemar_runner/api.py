@@ -242,9 +242,14 @@ class Api:
             self._log.error("claim_answer_refused", where=error.where)
             raise ApiError("bad_response") from None
 
-    def heartbeat(self, job_id: str, lease_id: str, phase: str) -> bool:
-        """Renew a lease; True when the Worker says to stop the job."""
-        body = {"job_id": job_id, "lease_id": lease_id, "phase": phase}
+    def heartbeat(
+        self, job_id: str, lease_id: str, phase: str, progress: dict[str, Any] | None = None
+    ) -> bool:
+        """Renew a lease; True when the Worker says to stop the job. ``progress`` is the job's live
+        progress object (ADR 0134), already checked by the caller (``contract.check_progress``)."""
+        body: dict[str, Any] = {"job_id": job_id, "lease_id": lease_id, "phase": phase}
+        if progress is not None:
+            body["progress"] = progress
         answer = self._authed("/compute/runners/heartbeat", body, _SMALL_MAX_BYTES)
         try:
             return contract.read_heartbeat_response(answer)
