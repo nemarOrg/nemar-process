@@ -57,7 +57,7 @@ Its digest, recorded as `launch_spec_digest`, is the SHA-256 of the file's bytes
 A specification the launcher refuses is `runtime_error`, `invalid_spec` (exit 13), as on the service path.
 
 The names on the command line are exactly the specification's (`invalid_spec` otherwise).
-A dataset directory is resolved to its real path and bound whole: a directory that is missing is `dataset_fetch_failed`, `dataset_not_found` (exit 11); one that overlaps the output directory or the scratch is `runtime_error`, `bind_source_unsafe`.
+A dataset directory is resolved to its real path and bound whole: a directory that is missing is `dataset_fetch_failed`, `dataset_not_found` (exit 11); one that overlaps the output directory (inside it or holding it), or that is or holds the scratch directory, is `runtime_error`, `bind_source_unsafe`; a dataset inside the scratch directory is accepted.
 Reading a dataset as a local Zarr store is a recipe follow-up, not part of this mode.
 
 The code is the file given with `--code`: it is copied into the scratch while it is hashed, must hold exactly `bundle.size` bytes (`size_mismatch`) whose SHA-256 is `bundle.sha256` (`digest_mismatch`), and is then extracted with every rule of a fetched bundle; a file that cannot be read is `content_missing` (each `code_fetch_failed`, exit 10).

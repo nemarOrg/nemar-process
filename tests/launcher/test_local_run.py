@@ -260,3 +260,71 @@ def test_ctrl_c_near_the_time_limit_is_terminated_not_time_limit(lrig):
         "runtime_error",
         "terminated",
     )
+
+
+@pytest.mark.parametrize(
+    ("where", "refused"),
+    [("holds_scratch", True), ("is_scratch", True), ("inside_scratch", False)],
+)
+def test_a_dataset_may_sit_in_the_scratch_but_not_hold_it(tmp_path, where, refused):
+    lrig = LocalRig(tmp_path)
+    try:
+        if where == "holds_scratch":
+            data, scratch = lrig.data_root, lrig.data_root / "scratch"
+        elif where == "is_scratch":
+            data = scratch = lrig.data_root
+        else:
+            scratch, data = lrig.data_root, lrig.data_root / "ds1"
+        scratch.mkdir(exist_ok=True)
+        data.mkdir(exist_ok=True)
+        (data / "a.txt").write_text("a")
+        lrig.write_spec(lrig.script_spec("true", datasets=("ds1",)))
+        argv = lrig.argv({"ds1": str(data)})
+        argv[argv.index("--scratch") + 1] = str(scratch)
+        launch = lrig.run(argv)
+        if refused:
+            assert launch.result["detail"] == "bind_source_unsafe"
+            assert lrig.calls() == []
+        else:
+            assert launch.exit == 0, launch.log
+    finally:
+        lrig.close()
+
+
+def test_the_scratch_case_has_its_own_message(tmp_path):
+    from nemar_launch import local, spec
+    from nemar_launch.codes import Failure
+
+    data = tmp_path / "data"
+    (data / "scratch").mkdir(parents=True)
+    job = spec.LocalSpec(
+        {
+            "runtime": "image",
+            "command": ["true"],
+            "args": [],
+            "image": {},
+            "env": {},
+            "resources": {"gpus": 0},
+            "datasets": [{"name": "ds1"}],
+        },
+        "0" * 64,
+    )
+    options = local.Options(
+        local.parser().parse_args(
+            [
+                "--spec",
+                "s",
+                "--out",
+                str(tmp_path / "out"),
+                "--sif-root",
+                "x",
+                "--data",
+                "ds1=" + str(data),
+            ]
+        )
+    )
+    with pytest.raises(Failure) as caught:
+        local.bind_data(job, options, str(data / "scratch"))
+    assert caught.value.message == "a dataset contains the scratch"
+    ((name, held),) = local.bind_data(job, options, str(tmp_path / "elsewhere"))
+    assert (name, held.source) == ("ds1", os.path.realpath(data))

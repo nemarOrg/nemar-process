@@ -212,10 +212,17 @@ def _overlaps(a: str, b: str) -> bool:
     return os.path.commonpath([a, b]) in (a, b)
 
 
+def _contains(directory: str, inner: str) -> bool:
+    """Whether ``inner`` is ``directory`` or below it (real paths)."""
+    directory, inner = os.path.realpath(directory), os.path.realpath(inner)
+    return os.path.commonpath([directory, inner]) == directory
+
+
 def bind_data(job: spec.Job, options: Options, scratch_base: str) -> list[tuple[str, stage.Staged]]:
     """Each dataset's directory, real and whole, in the specification's order: the names on the command
     line are exactly the specification's (``invalid_spec``), each a directory (``dataset_not_found``),
-    none overlapping the output directory or the scratch (``bind_source_unsafe``)."""
+    none overlapping the output directory or holding the scratch (``bind_source_unsafe``: the job would
+    read its own code and temporary files through it). A dataset inside the scratch base is fine."""
     if sorted(options.data) != sorted(job.data_names):
         raise Failure("runtime_error", "invalid_spec", "--data names are not the specification's")
     bound = []
@@ -225,8 +232,10 @@ def bind_data(job: spec.Job, options: Options, scratch_base: str) -> list[tuple[
             raise Failure(
                 "dataset_fetch_failed", "dataset_not_found", "a dataset directory is missing"
             )
-        if _overlaps(real, options.out) or _overlaps(real, scratch_base):
+        if _overlaps(real, options.out):
             raise Failure("runtime_error", "bind_source_unsafe", "a dataset overlaps the output")
+        if _contains(real, scratch_base):
+            raise Failure("runtime_error", "bind_source_unsafe", "a dataset contains the scratch")
         bound.append((name, stage.Staged({}, real)))
     return bound
 
