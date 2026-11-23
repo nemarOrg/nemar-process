@@ -332,9 +332,10 @@ def start_gpu(cap_mb: int | None) -> GpuStart:
 
 
 def release_cached_memory() -> None:
-    """Hand the GPU memory torch keeps cached back to the driver, after a fit that ran out of it, so
-    that the CPU refit that follows does not sit on the GPU. The collection first frees what the
-    failed fit's objects still held."""
+    """Hand the GPU memory torch keeps cached back to the driver. Both moves call it: after a fit
+    that ran out of the GPU's memory, before the CPU refit, and when contention moves the job, before
+    the recording's fit on the CPU; neither then sits on the GPU's memory. The collection first frees
+    what a failed fit's objects still held. The CUDA context stays until the job ends."""
     import torch
 
     gc.collect()

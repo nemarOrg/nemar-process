@@ -150,8 +150,8 @@ def zarr_run_recording(
 
 def run_facts(context: RunContext) -> dict[str, Any]:
     """What the dataset record says of the run: its settings, per device its products, every move
-    of the job to the CPU (``fallbacks``) and the growth of other processes' GPU memory that counts
-    as contention (``gpu_contention_mib``).
+    of the job to the CPU (``fallbacks``) and the growth of the GPU memory outside this process's
+    torch allocator that counts as contention (``gpu_contention_mib``).
 
     A merge of product directories (``aggregate``) has no options and ran no recording: it states
     none of them, and each row of the table still says the device its recording ran on.
