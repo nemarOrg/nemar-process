@@ -166,6 +166,20 @@ class Options:
             raise Usage("--cosign is for --pull")
 
 
+DEFAULT_PATH = b"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def standalone_path(path: bytes | None) -> tuple[bytes, bool]:
+    """The ``PATH`` the runtime and cosign are looked up on: the absolute directories of ``path`` only
+    (an empty or relative entry would find a program in whatever directory the run was started from),
+    or ``DEFAULT_PATH`` when none is left; and whether it is the default. It never holds an empty
+    entry, so no lookup can fall back to the working directory."""
+    kept = [entry for entry in (path or b"").split(b":") if entry.startswith(b"/")]
+    if not kept:
+        return DEFAULT_PATH, True
+    return b":".join(kept), False
+
+
 def environment(options: Options, environ: Mapping[bytes, bytes]) -> Env:
     """The launcher's environment: the allowlisted host variables and the ``NEMAR_*`` values derived
     from the command line, nothing else (no specification, lease, scheduler or device variable).
@@ -176,11 +190,7 @@ def environment(options: Options, environ: Mapping[bytes, bytes]) -> Env:
         for name in run.HOST_PASSTHROUGH
         if name.encode() in environ
     }
-    path = mapping.get(b"PATH")
-    if path is not None:
-        # only absolute directories: an empty entry or a relative one would find the runtime or
-        # cosign in whatever directory the person started the run from
-        mapping[b"PATH"] = b":".join(p for p in path.split(b":") if p.startswith(b"/"))
+    mapping[b"PATH"] = standalone_path(mapping.get(b"PATH"))[0]
 
     def put(name: str, value: str) -> None:
         mapping[name.encode()] = os.fsencode(value)
@@ -596,6 +606,8 @@ def main(
             "runtime_error", "output_dir_not_empty", "the output directory is unusable"
         )
     log = Log(layout.log_path if layout is not None else None)
+    if standalone_path((os.environb if environ is None else environ).get(b"PATH"))[1]:
+        log.info("PATH: no absolute directory given; using {}".format(DEFAULT_PATH.decode()))
     docs = Documents(layout.launcher if layout is not None else None, log)
     state = service.Run(options.out, layout, log, docs)
     terminator = run.Terminator(own_deadline_only=True)

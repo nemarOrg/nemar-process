@@ -441,3 +441,44 @@ def test_a_job_argument_holding_a_url_runs(lrig):
     assert launch.exit == 0, launch.log
     assert (lrig.out / "work" / "outputs" / "arg.txt").read_text() == "https://doi.org/10.1/x\n"
     assert fenced.refusals == []
+
+
+@pytest.mark.parametrize("path", [b"bin:.", b"", None, b"::", b"/nonexistent::."])
+def test_no_lookup_ever_falls_back_to_the_working_directory(lrig, monkeypatch, path):
+    """The reviewer's cases: a PATH of relative entries only, an empty one, none at all. The runtime and
+    cosign are never found in the directory the run started from; with no absolute entry the fixed
+    default is used, and the log says so."""
+    from nemar_launch import local, run, verify
+    from nemar_launch.codes import Failure
+
+    work = lrig.tmp / "cwd"
+    work.mkdir()
+    for name in ("apptainer", "cosign"):
+        (work / name).write_text("#!/bin/sh\nexit 0\n")
+        (work / name).chmod(0o755)
+    monkeypatch.chdir(work)
+    environ = lrig.environ()
+    if path is None:
+        del environ[b"PATH"]
+    else:
+        environ[b"PATH"] = path
+    options = local.Options(local.parser().parse_args(lrig.argv()))
+    env = local.environment(options, environ)
+    entries = (env.get("PATH") or "").split(":")
+    assert all(entry.startswith("/") for entry in entries)
+    if path in (None, b"", b"bin:.", b"::"):
+        assert env.get("PATH") == local.DEFAULT_PATH.decode()
+    try:
+        found = run.find_runtime(env)[1]
+    except Failure:
+        found = None
+    assert found is None or not found.startswith(str(work))
+    try:
+        cosign = verify.find_cosign(None, env.get("PATH") or "")
+    except verify.Unverified:
+        cosign = None
+    assert cosign is None or not cosign.startswith(str(work))
+    lrig.write_spec(lrig.script_spec("true"))
+    launch = lrig.run(lrig.argv(), environ)
+    if path in (None, b"", b"bin:.", b"::"):
+        assert "PATH: no absolute directory given; using /usr/local/sbin" in launch.log
