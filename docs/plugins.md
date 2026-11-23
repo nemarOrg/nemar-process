@@ -1,13 +1,29 @@
 # Quality plugins
 
-**Planned, not built.**
+**Partly built.**
+The loader, the runner for metric plugins and the two contracts a plugin is checked against are built (Phase 5, P1); no plugin of NEMAR's ships yet, and no recipe runs plugins yet.
+Figures are on hold (owner direction, 2026-11-23): what can be drawn in the browser from data, such as topographic maps from the mixing weights and channel locations, or component activations from the signals and the unmixing weights, is not stored as an image, and a design for that is being written; until it lands, a plugin that declares a figure is refused, and the figure sections below are the plan, not what is built.
 This page describes the plugin interface that nemar-cli ADR 0134 decides on.
 The interface is one part of a general job platform that anyone can follow, not something private to NEMAR's pipeline:
 a job that runs in a nemar-process image (or one built from it) under the launcher, declares its checkpoints and writes signalJourney records and a recordings table gets the same progress and results reports wherever it runs ([progress.md](progress.md)).
 The plugin manifest is one of the platform's public, versioned interfaces, beside the launch specification ([launcher.md](launcher.md)), the progress object and the neuroschema extensions ([Where each schema lives](#where-each-schema-lives)).
-No plugin code, manifest loader or plugin test exists in this repository yet;
-until it does, the recipes' own `qc` step ([recipes.md](recipes.md)) is the only quality measurement a run makes.
-Where this page and the implementation disagree once it lands, the implementation and its tests win and this page is corrected.
+Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md)) is the only quality measurement a run makes.
+
+## As built: loading, running, rendering
+
+- **Loading** (`recipes/nemar_process/common/plugins.py`, `load`): a recipe pins its plugins as a literal, `PLUGINS = ((name, version), ...)`; there is no discovery.
+  A plugin is the package `nemar_process.plugins.<name with - as _>` with a `manifest.json` and a `run`.
+  The manifest is validated against `#/$defs/PluginManifest` of the byte copy of nemar-cli's schema (`common/contract.py`; the schema's root accepts anything, so validating the root would check nothing), with nemar-cli's extra rules (`bounds_reversed`, `quality_without_metric`, `figures_without_figure`).
+  The loader refuses a name that is not a step word, an entry that is not the package module, a name or version other than the pin, a checkpoint other than the recipe map's, a declared figure (on hold), reading the dataset, reading a recipe the host does not provide, a missing `run`, and a metric name two plugins declare.
+  Each `plugin@version` is pinned to the SHA-256 of its source tree in `tests/recipes/plugin_digests.json`: code that changes without a new version fails that test.
+- **Running** (`run_checkpoint`): a plugin gets only the views its manifest reads and copies of its parameters, and becomes a plan step whose id is its name, whose function is its `run`, and whose `software` is the plugin itself.
+  Each metric becomes a neuroschema `qualityMetric` (value, unit, description, the declared bounds, the plugin's name and version) in the step's `qualityMetrics`, validated against the vendored neuroschema bundle; headline metrics also go to the record's `summaryMetrics`.
+  The record's `extensions.nemar.plugins` lists each plugin with its version, checkpoint, the SHA-256 of its manifest and whether it ran.
+- **A plugin never fails the recording** (owner decision, 2026-11-23).
+  An exception, or an output that breaks the manifest (a missing or extra key, NaN, infinity, a bool, a value outside the declared bounds, a metric neuroschema refuses, a figure while figures are on hold), skips that plugin: the plan records the skip with the word `plugin_failed`, the record keeps only the exception's class name or the rule's word, its metrics are absent, a fixed line `plugin_skipped: <name> code=plugin_failed detail=<word>` goes to standard error, and the rest of the recording is kept.
+- **The recordings table's `skipped_steps` column** (`plugins.table_columns`, `skipped_steps_cell`): a skipped plugin leaves the recording `succeeded`, so a recipe that runs plugins adds this column before `record_content_sha256`.
+  It is empty, or `<step>:<code>` pairs joined by `;` (here `plugin_failed`); nemar-cli counts a checkpoint that holds a skipped step as `skipped` for that recording and every other checkpoint as passed.
+  A table without the column (the floor's, an older one) had no plugin steps.
 
 Abbreviations used here: tab-separated values (TSV), JavaScript Object Notation (JSON), ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), quality control (QC), Portable Network Graphics (PNG), Scalable Vector Graphics (SVG), mutual information reduction (MIR), decibel (dB), hertz (Hz).
 

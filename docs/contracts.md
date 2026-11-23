@@ -116,6 +116,7 @@ The schema and the counting vectors are written in nemar-cli and copied here; th
 
 It has its own pin, `tests/contract/nemar-cli-progress-pin.json`, apart from the launch specification's.
 It records the nemar-cli commit, and the SHA-256 and size of the schema and of the vectors.
+The same pin holds the two files the quality plugins are checked against (ADR 0134 decision 6), copied into the recipes package so they ship in the image: the plugin manifest schema (`shared/contract/plugin-manifest.schema.json`, copied to `recipes/nemar_process/common/contract/plugin-manifest.v1.json`) and the vendored neuroschema bundle (`shared/contract/neuroschema/dataset.bundle.json`, copied to `recipes/nemar_process/common/contract/neuroschema.bundle.json`).
 The commit is on nemar-cli's pipeline progress epic branch (`feature/issue-2324-epic-pipeline-progress`): it stays reachable once that epic is merged into `dev` with a merge commit, and the pin then moves to the `dev` commit that holds the same bytes (only `ref` changes).
 
 - `test_each_copy_is_the_pinned_bytes` needs no checkout and always runs.
@@ -135,9 +136,11 @@ REF=<the new nemar-cli commit, 40 hex digits>
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress.schema.json" > launcher/schema/compute-progress.v1.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress-vectors.json" > tests/contract/compute-progress-vectors.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-runner.schema.json" > runner/schema/compute-runner.v1.json
-shasum -a 256 launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json
-wc -c launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json
-# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of the schema and the vectors
+git -C "$NEMAR_CLI" show "${REF}:shared/contract/plugin-manifest.schema.json" > recipes/nemar_process/common/contract/plugin-manifest.v1.json
+git -C "$NEMAR_CLI" show "${REF}:shared/contract/neuroschema/dataset.bundle.json" > recipes/nemar_process/common/contract/neuroschema.bundle.json
+shasum -a 256 launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
+wc -c launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
+# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of the schema, the vectors, the plugin manifest and the bundle
 # edit tests/contract/nemar-cli-runner-pin.json: the same ref, and the sha256 and bytes of the runner schema
 NEMAR_CLI_PROGRESS_DIR="$NEMAR_CLI" NEMAR_REQUIRE_PROGRESS_DRIFT=1 \
 NEMAR_CLI_RUNNER_DIR="$NEMAR_CLI" NEMAR_REQUIRE_RUNNER_DRIFT=1 \
