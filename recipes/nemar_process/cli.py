@@ -763,8 +763,8 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
                 return EXIT_DATASET_UNREADABLE
         seen: set[str] = set()
         table_path = out / naming.dataset_path(recipe.label, "recordings", "tsv")
-        # the local progress file the launcher reports live progress from (ADR 0134); removed only
-        # after the dataset record is written, so a long finalize does not read as stalled
+        # the local progress file the launcher reports live progress from (ADR 0134); it stays through
+        # finalize (the `finally` below) and is removed once the dataset record is written or refused
         tracker = progress.begin(recipe, out, table_path)
         try:
             try:

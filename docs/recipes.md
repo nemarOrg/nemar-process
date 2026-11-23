@@ -417,7 +417,7 @@ Floats were not compared across hosts, and no other architecture was run.
 
 ### The local progress file
 
-A recipe that declares checkpoints (ADR 0134; `CHECKPOINTS` beside `STEP_ORDER` in its `steps.py`, printed by `nemar-recipe version`) writes one small file while it runs, when `NEMAR_OUT` is set and `--out` is inside it: `$NEMAR_OUT/.nemar-progress/progress.json` (`common/progress.py`).
+A recipe that declares checkpoints (ADR 0134; `CHECKPOINTS` beside `STEP_ORDER` in its `steps.py`, printed by `nemar-recipe version`) writes one small file while it runs, when `NEMAR_OUT` is set and `--out` is inside it but is not `NEMAR_OUT` itself (the file is never written into the product tree): `$NEMAR_OUT/.nemar-progress/progress.json` (`common/progress.py`).
 It is outside the product tree, so it never reaches a derivative, and it is removed when the run ends, after the dataset record is written.
 It holds the format word `nemar.recipe-progress.v1`, the recipe's id and version, its checkpoint map, the recordings table's path relative to `NEMAR_OUT`, the number of recordings the run found (each of them gets exactly one row), and the running recording with the step it is in (`errors.guarded` notes each step as it starts).
 It is written to a temporary file and moved into place, so a reader never sees half of one; a write that fails turns it off for the rest of the run with one line on standard error (`progress_file_disabled`), and no recording ever fails because of it.

@@ -112,8 +112,10 @@ _TRACKER: Tracker | None = None
 
 
 def begin(recipe: Recipe, out: Path, table: Path) -> Tracker | None:
-    """The tracker of a run, or None: a recipe with no checkpoint map, no ``NEMAR_OUT``, or an ``--out``
-    that is not inside it writes no progress file (the launcher reads it under ``NEMAR_OUT`` only)."""
+    """The tracker of a run, or None: a recipe with no checkpoint map, no ``NEMAR_OUT``, an ``--out`` that
+    is not inside it (the launcher reads the file under ``NEMAR_OUT`` only), or an ``--out`` that would
+    hold the progress directory (``--out`` is ``NEMAR_OUT`` itself: the product tree is never touched)
+    writes no progress file."""
     global _TRACKER
     _TRACKER = None
     given = os.environ.get("NEMAR_OUT")
@@ -124,6 +126,8 @@ def begin(recipe: Recipe, out: Path, table: Path) -> Tracker | None:
         table.resolve().relative_to(root)
         out.resolve().relative_to(root)
     except ValueError:
+        return None
+    if location(root).parent.is_relative_to(out.resolve()):
         return None
     _TRACKER = Tracker(root, recipe, table.resolve())
     return _TRACKER

@@ -120,6 +120,16 @@ def test_no_tracker_without_nemar_out_a_map_or_an_out_inside_it(tmp_path, monkey
     progress.step_started("load")  # no tracker: nothing happens, nothing raises
 
 
+def test_no_tracker_when_out_is_nemar_out_itself(tmp_path, monkeypatch):
+    """The progress directory would be inside the product tree: refused, so ``--out`` is never touched."""
+    nemar_out = tmp_path / "outputs"
+    nemar_out.mkdir()
+    monkeypatch.setenv("NEMAR_OUT", str(nemar_out))
+    assert progress.begin(FLOOR, nemar_out, nemar_out / "t.tsv") is None
+    assert progress.begin(FLOOR, nemar_out / "product", nemar_out / "product" / "t.tsv") is not None
+    progress.end()
+
+
 def test_the_module_opens_no_connection():
     """The recipe's no-network fence is unchanged: the progress module imports no network module."""
     tree = ast.parse(Path(progress.__file__).read_text(encoding="utf-8"))
@@ -193,4 +203,56 @@ def test_a_real_run_writes_the_file_as_it_goes_and_removes_it(tmp_path, monkeypa
     monkeypatch.delenv("NEMAR_OUT")
     assert run_floor(tmp_path / "plain") == 0
     assert product(nemar_out / "product") == product(tmp_path / "plain")
+    capsys.readouterr()
+
+
+def test_the_file_stays_through_finalize_and_is_gone_after(tmp_path, monkeypatch):
+    """The order the command keeps: finalize (wrapped here, and still run) sees the progress file, and the
+    run's end removes it."""
+    nemar_out = tmp_path / "outputs"
+    nemar_out.mkdir()
+    monkeypatch.setenv("NEMAR_OUT", str(nemar_out))
+    seen: list[bool] = []
+    real = command.finalize
+
+    def watched(*args, **kwargs):
+        seen.append(progress.location(nemar_out).exists())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(command, "finalize", watched)
+    assert run_floor(nemar_out / "product") == 0
+    assert seen == [True]
+    assert not (nemar_out / progress.DIRECTORY).exists()
+
+
+def test_an_unsupported_recording_is_discovered_and_gets_its_row(tmp_path, monkeypatch, capsys):
+    """Every recording discovered gets exactly one row, the unsupported ones included (a FIF the recipe
+    does not load, and a named file that is no recording): a count of only the runnable recordings would
+    leave a total the rows never reach."""
+    from recipe_support import RECORDING, copy_fixture, write_fif
+
+    dataset = copy_fixture(tmp_path / "dataset")
+    fif = "sub-CUCOV076/eeg/sub-CUCOV076_task-other_eeg.fif"
+    write_fif(dataset / fif)
+    (dataset / "sub-CUCOV076" / "eeg" / "notes.txt").write_text("not a recording")
+    nemar_out = tmp_path / "outputs"
+    nemar_out.mkdir()
+    written: list[dict] = []
+    real = files.write_text
+
+    def recording(path: Path, text: str) -> None:
+        if path.name == progress.FILE:
+            written.append(json.loads(text))
+        real(path, text)
+
+    monkeypatch.setattr(files, "write_text", recording)
+    monkeypatch.setenv("NEMAR_OUT", str(nemar_out))
+    out = nemar_out / "product"
+    named = [RECORDING, fif, "sub-CUCOV076/eeg/notes.txt"]
+    argv = ["run", "nemar-floor", "--dataset-dir", str(dataset), "--out", str(out)]
+    code = command.main(argv + [arg for path in named for arg in ("--recording", path)])
+    assert code == 0
+    rows = (out / "desc-nemarfloor_recordings.tsv").read_text().splitlines()[1:]
+    assert sum("\tunsupported_format\t" in line for line in rows) == 2
+    assert {d["discovered"] for d in written} == {len(rows)} == {3}
     capsys.readouterr()
