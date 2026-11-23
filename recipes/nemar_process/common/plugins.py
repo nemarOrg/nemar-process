@@ -17,9 +17,9 @@ discovery: no entry points, no environment variable, no directory scan.
 A plugin never fails the recording (owner decision, 2026-11-23). An exception, or an output that
 breaks its manifest (a key missing or added, a value that is NaN, infinite, a bool or outside the
 declared bounds, a metric neuroschema refuses), skips that plugin: the plan records the skip with the
-word ``plugin_failed``, its metrics are absent (not null-filled), a fixed-word line names the plugin,
-the recordings table's ``skipped_steps`` cell names the step and the code, and the rest of the recording
-is kept. Nothing a plugin returned is published unless all of it passed.
+word ``plugin_failed`` (so the recordings table's existing ``skipped_steps`` cell, built from the
+plan's skips, holds ``<plugin>:plugin_failed``), its metrics are absent (not null-filled), a fixed-word
+line names the plugin, and the rest of the recording is kept. Nothing a plugin returned is published unless all of it passed.
 """
 
 from __future__ import annotations
@@ -116,60 +116,6 @@ class CheckpointRun:
 
     outcomes: list[PluginOutcome] = field(default_factory=list)
     summary_metrics: dict[str, Any] = field(default_factory=dict)
-    # (plugin step id, code) for each plugin step that was skipped in this recording, in run order:
-    # the recordings table's ``skipped_steps`` cell (``skipped_steps_cell``).
-    skipped_steps: list[tuple[str, str]] = field(default_factory=list)
-
-
-# ---- the recordings table's skipped_steps column (lead decision, 2026-11-23) --------------------------
-#
-# A skipped plugin leaves the recording ``succeeded`` (owner decision Q3), so the row says which plugin
-# steps were skipped, and why, in one more column: empty, or ``<step>:<code>`` pairs joined by ``;``.
-# nemar-cli counts a checkpoint that holds a skipped step as ``skipped`` for that recording (the first
-# such step and its code are its failure) and every other checkpoint as passed. Only a recipe that runs
-# plugins has the column; a table without it (the floor's, an older one) had no plugin steps.
-
-SKIPPED_STEPS_COLUMN = "skipped_steps"
-SKIPPED_STEPS_SEPARATOR = ";"
-SKIPPED_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")  # nemar-cli's failure-code pattern
-
-
-def table_columns(columns: Sequence[Any]) -> tuple[Any, ...]:
-    """A recipe's table columns with ``skipped_steps``, placed before ``record_content_sha256``."""
-    from nemar_process.common.recipe import Column
-
-    names = [column.name for column in columns]
-    if SKIPPED_STEPS_COLUMN in names:
-        raise ValueError("the table already has a skipped_steps column")
-    column = Column(SKIPPED_STEPS_COLUMN, "text")
-    at = names.index("record_content_sha256") if "record_content_sha256" in names else len(names)
-    return (*columns[:at], column, *columns[at:])
-
-
-def skipped_steps_cell(runs: Iterable[CheckpointRun]) -> str:
-    """The ``skipped_steps`` cell of one recording: empty, or ``step:code`` pairs in run order."""
-    pairs: list[str] = []
-    for run in runs:
-        for step, code in run.skipped_steps:
-            if not STEP_WORD.fullmatch(step) or not SKIPPED_CODE.fullmatch(code):
-                raise ValueError("a skipped step is a step word and a code word")
-            pair = "{}:{}".format(step, code)
-            if pair not in pairs:
-                pairs.append(pair)
-    return SKIPPED_STEPS_SEPARATOR.join(pairs)
-
-
-def parse_skipped_steps(cell: str) -> list[tuple[str, str]]:
-    """The (step, code) pairs of a ``skipped_steps`` cell; refuses a cell that is not well formed."""
-    if cell == "":
-        return []
-    pairs = []
-    for item in cell.split(SKIPPED_STEPS_SEPARATOR):
-        step, separator, code = item.partition(":")
-        if not separator or not STEP_WORD.fullmatch(step) or not SKIPPED_CODE.fullmatch(code):
-            raise ValueError("not a skipped_steps cell")
-        pairs.append((step, code))
-    return pairs
 
 
 def module_name(name: str, package: str = PACKAGE) -> str:
@@ -368,7 +314,6 @@ def run_checkpoint(
             detail = error.word if isinstance(error, _OutputRefused) else type(error).__name__
             outcome.status, outcome.code, outcome.detail = "skipped", PLUGIN_FAILED, detail
             plan.add_skip(plugin.name, plugin.function, PLUGIN_FAILED)
-            result.skipped_steps.append((plugin.name, PLUGIN_FAILED))
             _log_skip(plugin, detail)
             result.outcomes.append(outcome)
             continue

@@ -2,9 +2,9 @@
 
 A plugin never fails the recording (owner decision, 2026-11-23): an exception or an output that breaks
 its manifest skips that plugin, with the word ``plugin_failed`` and only the exception's class name
-or the rule's word, nothing it returned is kept, and the recordings table's ``skipped_steps`` cell
-names the step and the code. Figures are on hold, so a result that carries one is refused. The plugins
-here are real modules (``tests/plugin_fixtures``).
+or the rule's word, nothing it returned is kept, and the recordings table's existing ``skipped_steps``
+cell (built from the plan's skips) holds ``<plugin>:plugin_failed``. Figures are on hold, so a result
+that carries one is refused. The plugins here are real modules (``tests/plugin_fixtures``).
 """
 
 from __future__ import annotations
@@ -112,7 +112,6 @@ def assert_skipped(plan, result, plugin, detail, capsys):
         "detail": detail,
     }
     assert result.summary_metrics == {}
-    assert result.skipped_steps == [(plugin.name, "plugin_failed")]
     err = capsys.readouterr().err
     assert "plugin_skipped: {} code=plugin_failed detail={}\n".format(plugin.name, detail) in err
 
@@ -268,50 +267,7 @@ def test_plugin_steps_are_recorded_with_their_software_and_metrics(
     assert record["summaryMetrics"]["fxShare"] == 40.0
     assert plans.verify(record) == []
     assert [p["status"] for p in record["extensions"]["nemar"]["plugins"]] == ["ran", "skipped"]
-
-
-# ---- the recordings table's skipped_steps column --------------------------------------------------------
-
-
-def test_a_skipped_plugin_is_a_skipped_step_with_its_code(loaded):
-    plan = fresh_plan()
-    run = plugins.run_checkpoint(
-        [loaded["fx-raises"], loaded["fx-metrics"]],
-        "quality",
-        {"nemar-floor": {"share": 1, "level": 1}},
-        plan,
-    )
-    assert run.skipped_steps == [("fx-raises", "plugin_failed")]
-    assert plugins.skipped_steps_cell([run]) == "fx-raises:plugin_failed"
-
-
-def test_a_recording_with_nothing_skipped_has_an_empty_cell(loaded):
-    _, run = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
-    assert plugins.skipped_steps_cell([run]) == ""
-    assert plugins.parse_skipped_steps("") == []
-
-
-def test_the_cell_reads_back_and_refuses_what_is_not_one():
-    cell = "a-plugin:plugin_failed;b:too_short"
-    assert plugins.parse_skipped_steps(cell) == [("a-plugin", "plugin_failed"), ("b", "too_short")]
-    for bad in ("a", "a:", ":b", "a:B", "a b:c", "a:b;", "a:b c"):
-        with pytest.raises(ValueError):
-            plugins.parse_skipped_steps(bad)
-
-
-def test_the_column_sits_before_the_record_digest_and_round_trips(tmp_path):
-    from nemar_process.common import table
-    from nemar_process.nemar_ica import recipe as ica
-
-    columns = plugins.table_columns(ica.COLUMNS)
-    names = [c.name for c in columns]
-    assert names.index("skipped_steps") == names.index("record_content_sha256") - 1
-    assert len(columns) == len(ica.COLUMNS) + 1
-    with pytest.raises(ValueError):
-        plugins.table_columns(columns)
-    path = tmp_path / "t.tsv"
-    with table.TableWriter(path, columns) as writer:
-        writer.append({"path": "a", "status": "succeeded", "skipped_steps": "x:plugin_failed"})
-        writer.append({"path": "b", "status": "succeeded", "skipped_steps": ""})
-    rows = table.read_rows(path, columns)
-    assert [r["skipped_steps"] for r in rows] == ["x:plugin_failed", ""]
+    # the recordings table's skipped_steps cell, built from the plan's skips as for any step
+    cell = product.row["skipped_steps"].split(",")
+    assert cell[-1] == "fx-raises:plugin_failed"
+    assert all(":" in pair for pair in cell)

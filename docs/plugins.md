@@ -21,9 +21,7 @@ Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md
   The record's `extensions.nemar.plugins` lists each plugin with its version, checkpoint, the SHA-256 of its manifest and whether it ran.
 - **A plugin never fails the recording** (owner decision, 2026-11-23).
   An exception, or an output that breaks the manifest (a missing or extra key, NaN, infinity, a bool, a value outside the declared bounds, a metric neuroschema refuses, a figure while figures are on hold), skips that plugin: the plan records the skip with the word `plugin_failed`, the record keeps only the exception's class name or the rule's word, its metrics are absent, a fixed line `plugin_skipped: <name> code=plugin_failed detail=<word>` goes to standard error, and the rest of the recording is kept.
-- **The recordings table's `skipped_steps` column** (`plugins.table_columns`, `skipped_steps_cell`): a skipped plugin leaves the recording `succeeded`, so a recipe that runs plugins adds this column before `record_content_sha256`.
-  It is empty, or `<step>:<code>` pairs joined by `;` (here `plugin_failed`); nemar-cli counts a checkpoint that holds a skipped step as `skipped` for that recording and every other checkpoint as passed.
-  A table without the column (the floor's, an older one) had no plugin steps.
+- **The recordings table**: a skipped plugin leaves the recording `succeeded`; the plan's skip lands in the row's existing `skipped_steps` cell like any skipped step (`<plugin>:plugin_failed`, comma-joined with the others), and nemar-cli counts a pair whose step is a plugin step as `skipped` at that plugin's checkpoint.
 
 Abbreviations used here: tab-separated values (TSV), JavaScript Object Notation (JSON), ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), quality control (QC), Portable Network Graphics (PNG), Scalable Vector Graphics (SVG), mutual information reduction (MIR), decibel (dB), hertz (Hz).
 
