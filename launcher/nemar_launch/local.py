@@ -31,14 +31,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import itertools
 import os
 import re
 import signal
+import stat
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from typing import Any
 
 from . import __main__ as service
@@ -280,6 +282,44 @@ def count_input(directory: str) -> dict[str, int]:
     return {"files": files, "bytes": size}
 
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _owned_stat(info: os.stat_result, *, directory: bool, word: str) -> None:
+    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if not kind_ok or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise verify.Unverified(word)
+
+
+def _owned(path: str, *, directory: bool, word: str) -> None:
+    """``path`` is no link, of the expected kind, the person's own and writable by no one else."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise verify.Unverified(word, "missing") from None
+    _owned_stat(info, directory=directory, word=word)
+
+
+@contextlib.contextmanager
+def _unverified(log: Log) -> Generator[None, None, None]:
+    """An ``Unverified`` is ``runtime_error``, ``image_unverified`` (exit 13), its reason in the log."""
+    try:
+        yield
+    except verify.Unverified as unverified:
+        log.error(
+            "image_unverified reason={}{}".format(
+                unverified.reason, " ({})".format(unverified.why) if unverified.why else ""
+            )
+        )
+        raise Failure(
+            "runtime_error", "image_unverified", "the image is not the verified one"
+        ) from None
+
+
 class LocalImage(service.Image):
     """The standalone entry's image. Without ``--pull`` nothing is pulled or verified: Apptainer runs
     ``<sif-root>/<hex>.sif`` and under Docker an absent image is ``image_missing``
@@ -293,6 +333,7 @@ class LocalImage(service.Image):
         self.cosign = cosign
         self.fenced = fenced
         self.verification: dict[str, Any] | None = None
+        self._pinned: tuple[str, tuple[int, int, int, int]] | None = None
 
     def locate(self, job: spec.Job, env: Env) -> str:
         if not self.pull:
@@ -314,40 +355,112 @@ class LocalImage(service.Image):
         terminator: run.Terminator,
         log: Log,
     ) -> str:
-        if not self.pull:
-            if engine != runtime.APPTAINER:
-                runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
-            return sif
-        digest_hex = job.image["digest"].split(":", 1)[1]
-        path = env.get("PATH", "") or ""
-        try:
-            bare = verify.check_reference(job.image["uri"], digest_hex)
-            cosign = verify.find_cosign(self.cosign, path)
-            home = verify.cosign_home(scratch)
-            if engine == runtime.APPTAINER:
-                self._pull_sif(
-                    runtime_path, sif, digest_hex, cosign, path, home, env, scratch, terminator
-                )
-            else:
+        if engine == runtime.APPTAINER:
+            return self._sif(runtime_path, job, sif, env, scratch, terminator, log)
+        if self.pull:
+            digest_hex = job.image["digest"].split(":", 1)[1]
+            path = env.get("PATH", "") or ""
+            with _unverified(log):
+                bare = verify.check_reference(job.image["uri"], digest_hex)
+                cosign = verify.find_cosign(self.cosign, path)
+                home = verify.cosign_home(scratch)
                 self._pull_image(
                     runtime_path, bare, digest_hex, cosign, path, home, env, terminator, log
                 )
-        except verify.Unverified as unverified:
-            log.error(
-                "image_unverified reason={}{}".format(
-                    unverified.reason, " ({})".format(unverified.why) if unverified.why else ""
-                )
-            )
-            raise Failure(
-                "runtime_error", "image_unverified", "the image is not the signed one"
-            ) from None
-        log.info(
-            "image: verified by cosign ({})".format(self.verification and self.verification["kind"])
-        )
-        if engine == runtime.APPTAINER:
-            return run.resolve_sif(job, env)
+            log.info("image: verified by cosign (image)")
         runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
         return sif
+
+    def _sif(
+        self,
+        apptainer: str,
+        job: spec.Job,
+        sif: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> str:
+        """Apptainer: with ``--pull`` verify (and pull if missing) the signed SIF artifact, then, in
+        every case, pin the file that will run (``_pin``)."""
+        proof: verify.SifProof | None = None
+        with _unverified(log):
+            if self.pull:
+                digest_hex = job.image["digest"].split(":", 1)[1]
+                path = env.get("PATH", "") or ""
+                verify.check_reference(job.image["uri"], digest_hex)
+                cosign = verify.find_cosign(self.cosign, path)
+                home = verify.cosign_home(scratch)
+                proof = self._pull_sif(
+                    apptainer, sif, digest_hex, cosign, path, home, env, scratch, terminator
+                )
+            pinned = self._pin(sif, scratch, proof, terminator)
+        if proof is not None:
+            log.info("image: verified by cosign (sif)")
+        return pinned
+
+    def _pin(
+        self,
+        sif: str,
+        scratch: str,
+        proof: verify.SifProof | None,
+        terminator: run.Terminator,
+    ) -> str:
+        """The image file that will run, pinned. The directory and the file must not be links, must be
+        the person's own and writable by no one else (``sif_root_unsafe``, ``sif_unsafe``); with
+        ``--pull`` the file is hashed through the descriptor it was checked on (``layer_mismatch``). Its
+        identity (device, inode, size, modification time) is kept, and ``before_exec`` refuses a file
+        that changed since (``sif_changed``). Where the scratch is on the same file system the file is
+        hard-linked into it (0700) and the link is what runs, so a rename over the original changes
+        nothing."""
+        _owned(os.path.dirname(sif), directory=True, word="sif_root_unsafe")
+        try:
+            fd = os.open(sif, os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        except OSError:
+            raise verify.Unverified("sif_unsafe", "not_opened") from None
+        try:
+            before = os.fstat(fd)
+            _owned_stat(before, directory=False, word="sif_unsafe")
+            if proof is not None:
+                digest = hashlib.sha256()
+                while True:
+                    if terminator.stop.is_set():
+                        raise Stopped
+                    chunk = os.read(fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                if "sha256:" + digest.hexdigest() != proof.layer:
+                    raise verify.Unverified("layer_mismatch", "present")
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        identity = _identity(after)
+        if identity != _identity(before):
+            raise verify.Unverified("sif_changed", "while_hashed")
+        target = sif
+        directory = os.path.join(scratch, "image")
+        try:
+            os.mkdir(directory, 0o700)
+            link = os.path.join(directory, os.path.basename(sif))
+            os.link(sif, link, follow_symlinks=False)
+            if _identity(os.lstat(link)) == identity:
+                target = link
+        except OSError:
+            pass  # another file system: the original runs, still checked before it does
+        self._pinned = (target, identity)
+        return target
+
+    def before_exec(self, sif: str) -> None:
+        if self._pinned is None:
+            return
+        target, identity = self._pinned
+        try:
+            current = _identity(os.lstat(target))
+        except OSError:
+            current = None
+        if sif != target or current != identity:
+            raise Failure("runtime_error", "image_unverified", "the image file changed")
 
     def _pull_image(
         self,
@@ -393,11 +506,11 @@ class LocalImage(service.Image):
         env: Env,
         scratch: str,
         terminator: run.Terminator,
-    ) -> None:
+    ) -> verify.SifProof:
         """Apptainer: cosign verifies the SIF artifact found by its tag; the launcher reads that
         artifact's manifest by the digest cosign named from the registry, and a missing file is pulled
         by that digest into a part file and hashed against the manifest's one layer before it is renamed;
-        a file already there is hashed against it too. The window allows the two cosign command lines,
+        a file already there is hashed against it by ``_pin``, after the window. The window allows the two cosign command lines,
         the registry's host and its token and manifest addresses, and (once cosign has passed) the
         pull."""
         stop = terminator.stop
@@ -414,9 +527,9 @@ class LocalImage(service.Image):
             token = verify.fetch_token(base, stop)
             self.fenced.allow_url(verify.manifest_url(base, manifest))
             proof = verify.SifProof(manifest, verify.fetch_layer(base, manifest, token, stop))
-            if os.path.isfile(sif):
-                verify.checked_sif(sif, proof, stop)
-            else:
+            if not os.path.lexists(
+                sif
+            ):  # a file already there is hashed by _pin, outside the window
                 verify.pull_sif(
                     apptainer,
                     os.path.dirname(sif),
@@ -434,6 +547,7 @@ class LocalImage(service.Image):
             "sif_manifest": proof.manifest,
             "sif_layer": proof.layer,
         }
+        return proof
 
 
 # ---- one run ----------------------------------------------------------------------------------------------

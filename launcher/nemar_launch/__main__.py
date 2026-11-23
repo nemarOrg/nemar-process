@@ -157,6 +157,10 @@ class Image:
             runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
         return sif
 
+    def before_exec(self, sif: str) -> None:
+        """Immediately before the runtime is started on ``sif`` (the PID probe, the job): nothing for
+        the service; the standalone entry refuses an image file that changed since it was pinned."""
+
 
 class Steps(NamedTuple):
     """What ``_do_work`` gets its inputs from, injected so the standalone entry (``local.py``) can give
@@ -278,6 +282,7 @@ def _do_work(
                 raise Failure("entry_not_found", None, "the entry is not in the bundle")
 
         if engine == runtime.APPTAINER:
+            steps.image.before_exec(sif)
             run.require_pid_namespace(runtime_path, sif, job, state.layout, tmp_dir, env, log)
         else:
             log.info("pid namespace: private, the engine is never given a host namespace flag")
@@ -351,6 +356,8 @@ def _do_work(
             log.warning("progress_reporter_not_started")
             reporter = None
         try:
+            if engine == runtime.APPTAINER:
+                steps.image.before_exec(sif)
             outcome = run.run_container(
                 argv, env, state.layout.work, terminator, log, oom_check=oom_check
             )

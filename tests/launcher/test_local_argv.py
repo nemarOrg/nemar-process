@@ -3,7 +3,8 @@
 The same job is launched by the service path (``__main__``, through the harness ``Rig``) and by the
 standalone entry (``local``), each in its own directory with the stand-in runtime; once each run's own
 directory and the random names are written as placeholders, the two command lines are equal, except for
-what the standalone entry documents: Docker's ``--pull=never`` (the service's is ``--pull=missing``), its
+what the standalone entry documents: the Apptainer image file it pinned (a hard link in its scratch),
+Docker's ``--pull=never`` (the service's is ``--pull=missing``), its
 own random runner label, and the job label's placeholder job id. Python 3.9 compatible.
 """
 
@@ -87,7 +88,15 @@ def local_argv(tmp_path, engine: str) -> list:
 
 
 def test_apptainer_argv_is_the_services(tmp_path):
-    assert local_argv(tmp_path, "apptainer") == service_argv(tmp_path, "apptainer")
+    """Except the image file: the standalone entry runs its pinned hard link in the scratch (0700),
+    the service the file under NEMAR_SIF_ROOT."""
+    local = local_argv(tmp_path, "apptainer")
+    service = service_argv(tmp_path, "apptainer")
+    differ = [(a, b) for a, b in zip(local, service) if a != b]
+    assert len(local) == len(service)
+    assert differ == [
+        ("<T>/scratch/<S>/image/" + IMAGE_HEX + ".sif", "<T>/sif/" + IMAGE_HEX + ".sif")
+    ]
 
 
 def test_docker_argv_differs_only_where_documented(tmp_path):

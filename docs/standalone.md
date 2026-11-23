@@ -77,6 +77,7 @@ The container phase is one piece of code for both entries (`__main__._do_work`):
 What differs, and only this:
 
 - Docker runs with `--pull=never` (the service path's is `--pull=missing`), and each run gets a random runner label (`nemar.runner=rnr_<24 hex>`); the job label names the placeholder job id `job_000000000000000000000000`.
+- Under Apptainer the image file is pinned: `--sif-root` and `<hex>.sif` must not be links, must be the person's own and writable by no one else (`image_unverified`, log reason `sif_root_unsafe` or `sif_unsafe`); the file's identity (device, inode, size, modification time) is taken when it is checked (and hashed, with `--pull`) and checked again immediately before the runtime starts on it (`sif_changed`); and where the scratch is on the same file system the file is hard-linked into the scratch (0700) and the link is what runs.
 - No device decision is made (as on Tapis): `resources.gpus` is what the specification says.
 - The documents name the placeholder job id, `staging` is empty and `slurm_job_id` is null.
 - The launcher's environment is built from an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR`) and the `NEMAR_*` values derived from the command line, which pass through `settings.read_settings` as a runner's do.
