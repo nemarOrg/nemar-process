@@ -274,10 +274,12 @@ def test_the_dataset_record_lists_every_move_and_states_the_contention_threshold
 def test_the_refit_on_the_cpu_passes_every_setting_the_fit_on_the_gpu_passed():
     settings = Settings.from_options(RECIPE.option_values({"ica_max_iter": 50}))
     on_gpu = pipeline.decomposition_call(settings, GPU_IDLE, 6)
-    on_cpu = pipeline.decomposition_call(settings, Resolution("auto", "cpu", "cuda_oom"), 6)
+    moved = Resolution("auto", "cpu", "cuda_oom")
+    on_cpu = pipeline.moved_call(on_gpu, moved)  # what the refit runs with: the one call, moved
     assert {key for key in on_gpu if on_gpu[key] != on_cpu.get(key)} == {"device"}
     assert set(on_gpu) == set(on_cpu)
     assert (on_gpu["device"], on_cpu["device"]) == ("cuda", "cpu")
+    assert on_cpu == pipeline.decomposition_call(settings, moved, 6)  # a CPU run's own call
     assert (on_cpu["seed"], on_cpu["threads"], on_cpu["pcakeep"]) == (5489, 1, 6)
 
 

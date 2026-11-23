@@ -204,10 +204,16 @@ def amica15_account(eeg: dict[str, Any]) -> dict[str, Any]:
     return account
 
 
+def moved_call(call: dict[str, Any], resolution: device.Resolution) -> dict[str, Any]:
+    """The same call on ``resolution``'s device: every other argument as it was."""
+    return {**call, "device": resolution.device}
+
+
 def run_decomposition(
-    eeg: dict[str, Any], settings: Settings, resolution: device.Resolution, rank: int
+    eeg: dict[str, Any], settings: Settings, call: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """``pop_runica`` with the engine asked for: the decomposed EEG and the engine's account of it.
+    """``pop_runica`` with ``call`` (``decomposition_call``): the decomposed EEG and the engine's
+    account of it.
 
     A decomposition pAMICA stops on a degenerate reason raises ``PamicaFitError`` and sets no field:
     that is ``ica_degenerate``, and never another engine in its place.
@@ -215,7 +221,6 @@ def run_decomposition(
     from eegprep import pop_runica
     from eegprep.functions.popfunc.eeg_pamica import PamicaFitError
 
-    call = decomposition_call(settings, resolution, rank)
     try:
         fitted = pop_runica(eeg, gui=False, **call)
     except PamicaFitError as error:
@@ -231,28 +236,30 @@ def decompose(
     resolution: device.Resolution,
     rank: int,
     slot: tally.Slot | None,
-) -> tuple[dict[str, Any], dict[str, Any], device.Resolution]:
-    """The fit on ``resolution``'s device; the decomposed EEG, the engine's account and the device
-    that ran it.
+) -> tuple[dict[str, Any], dict[str, Any], device.Resolution, dict[str, Any]]:
+    """The fit on ``resolution``'s device: the decomposed EEG, the engine's account, the device that
+    ran it and the call it ran with.
 
-    When the run decides that the error the fit raised is a move to the CPU (``tally.after_failure``:
-    torch's CUDA out-of-memory error, under ``auto``), the GPU memory torch cached is handed back and
-    the same data are fitted again on the CPU, with every setting but the device the same
-    (``decomposition_call``). Every other error ends the recording as it would have. ``pop_runica``
-    fits a copy, so the data of the second fit are those of the first. Without a ``slot`` (a caller
-    outside a run) nothing is moved.
+    The call is built once. When the run decides that the error the fit raised is a move to the CPU
+    (``tally.after_failure``: torch's CUDA out-of-memory error, under ``auto``), the GPU memory torch
+    cached is handed back and the same data are fitted again with that call on the CPU, only
+    ``device`` replaced (``moved_call``). Every other error ends the recording as it would have.
+    ``pop_runica`` fits a copy, so the data of the second fit are those of the first. Without a
+    ``slot`` (a caller outside a run) nothing is moved.
     """
+    call = decomposition_call(settings, resolution, rank)
     try:
-        fitted, fit = run_decomposition(eeg, settings, resolution, rank)
-        return fitted, fit, resolution
+        fitted, fit = run_decomposition(eeg, settings, call)
+        return fitted, fit, resolution, call
     except Exception as error:
         refit = None if slot is None else tally.after_failure(slot, resolution, error)
         if refit is None:
             raise
     # after the handler, so that nothing still holds the failed fit's memory on the GPU
     device.release_cached_memory()
-    fitted, fit = run_decomposition(eeg, settings, refit, rank)
-    return fitted, fit, refit
+    call = moved_call(call, refit)
+    fitted, fit = run_decomposition(eeg, settings, call)
+    return fitted, fit, refit, call
 
 
 def component_variance(eeg: dict[str, Any], rank: int) -> list[float]:
@@ -358,8 +365,7 @@ def process(
     with guarded("ica"):
         if slot is not None:
             resolution = tally.before_fit(slot, resolution)
-        eeg, fit, resolution = decompose(eeg, settings, resolution, rank, slot)
-        call = decomposition_call(settings, resolution, rank)
+        eeg, fit, resolution, call = decompose(eeg, settings, resolution, rank, slot)
         variance = component_variance(eeg, rank)
         plan.add_step(
             "ica",
