@@ -25,7 +25,6 @@ line names the plugin, and the rest of the recording is kept. Nothing a plugin r
 from __future__ import annotations
 
 import copy
-import functools
 import hashlib
 import importlib
 import json
@@ -53,21 +52,6 @@ PLUGIN_FAILED = "plugin_failed"
 # The detail of a skip for an exception: its class name when it is a plain identifier, else this word.
 EXCEPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 UNNAMED_EXCEPTION = "exception"
-
-
-@functools.cache
-def reserved_metric_names() -> frozenset[str]:
-    """The summary metric names the recipes write themselves, which a plugin's headline metric may not
-    take (``write_product`` would refuse it, failing the recording).
-
-    Read from each recipe's own declaration (the floor's and nemar-ica's ``SUMMARY_KEYS``), never
-    listed here; where these names are owned is still open, and this function is the one place the
-    loader asks, so the source can move without touching it.
-    """
-    from nemar_process.nemar_floor import outputs as floor_outputs
-    from nemar_process.nemar_ica import outputs as ica_outputs
-
-    return frozenset((*floor_outputs.SUMMARY_KEYS, *ica_outputs.SUMMARY_KEYS))
 
 
 class PluginLoadError(Exception):
@@ -264,17 +248,21 @@ def load(
     checkpoints: Mapping[str, str],
     provides: Iterable[str],
     steps: Iterable[str],
+    reserved: Iterable[str],
     package: str = PACKAGE,
 ) -> list[Plugin]:
     """The recipe's pinned plugins, loaded and checked, in pinned order.
 
     ``checkpoints`` maps each plugin's name to the checkpoint the recipe's map puts it in,
     ``provides`` names the recipes whose outputs the host can hand a plugin, and ``steps`` are the
-    recipe's own step ids, which a plugin's name (its step id) may not repeat. Once every pin has
+    recipe's own step ids, which a plugin's name (its step id) may not repeat, and ``reserved`` the
+    summary metric names the recipe writes itself (its ``SUMMARY_METRICS``), which no plugin metric may
+    take (``write_product`` would refuse it, failing the recording). Once every pin has
     loaded, each plugin's function gets its parameter row in ``plan.PARAMETER_TYPES``.
     """
     provided = frozenset(provides)
     recipe_steps = frozenset(steps)
+    reserved_names = frozenset(reserved)
     loaded: list[Plugin] = []
     names: set[str] = set()
     metrics: set[str] = set()
@@ -286,8 +274,7 @@ def load(
         names.add(name)
         plugin = _load_one(name, version, checkpoints, provided, package)
         declared = plugin.manifest["outputs"]["metrics"]
-        reserved = reserved_metric_names()
-        if any(m in reserved and spec.get("headline") for m, spec in declared.items()):
+        if reserved_names & set(declared):
             raise PluginLoadError(name, "metric_reserved")
         if metrics & set(declared):
             raise PluginLoadError(name, "metric_repeated")

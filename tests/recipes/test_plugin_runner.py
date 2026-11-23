@@ -40,6 +40,7 @@ def loaded():
             checkpoints=CHECKPOINTS,
             provides=["nemar-floor"],
             steps=(),
+            reserved=(),
             package="plugin_fixtures",
         )
     }

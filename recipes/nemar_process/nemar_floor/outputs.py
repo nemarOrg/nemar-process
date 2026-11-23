@@ -164,8 +164,8 @@ def _strongest_line(result: FloorResult) -> tuple[int | None, float | None, floa
 
 
 # The summary metric names the floor writes (``summary_metrics``); a plugin's headline metric may not
-# take one (``plugins.reserved_metric_names``).
-SUMMARY_KEYS = (
+# take one (the recipe passes them to ``plugins.load`` as ``reserved``).
+SUMMARY_METRICS = (
     "nChannelsInput",
     "nSignalChannels",
     "nGoodChannels",

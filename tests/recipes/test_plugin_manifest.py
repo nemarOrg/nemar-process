@@ -109,6 +109,7 @@ def test_the_fixture_plugins_load_in_pinned_order_with_their_parameter_rows():
         checkpoints=QUALITY,
         provides=["nemar-floor", "nemar-ica"],
         steps=(),
+        reserved=(),
         package="plugin_fixtures",
     )
     assert [p.name for p in loaded] == ["fx-echo", "fx-metrics"]
@@ -157,6 +158,7 @@ def load_one(name, version="1.0.0", checkpoint="quality", provides=("nemar-floor
         checkpoints={name: checkpoint},
         provides=provides,
         steps=(),
+        reserved=(),
         package="tmp_plugins",
     )
 
@@ -187,6 +189,7 @@ def test_a_name_that_is_a_recipe_step_is_refused(plugin_dir):
             checkpoints={"qc": "quality"},
             provides=["nemar-floor"],
             steps=("highpass", "qc"),
+            reserved=(),
             package="tmp_plugins",
         ),
     )
@@ -285,6 +288,7 @@ def test_a_plugin_the_map_does_not_place_is_refused(plugin_dir):
             checkpoints={},
             provides=["nemar-floor"],
             steps=(),
+            reserved=(),
             package="tmp_plugins",
         ),
     )
@@ -318,6 +322,7 @@ def test_a_plugin_pinned_twice_is_refused(plugin_dir):
             checkpoints={"twice": "quality"},
             provides=["nemar-floor"],
             steps=(),
+            reserved=(),
             package="tmp_plugins",
         ),
     )
@@ -333,28 +338,41 @@ def test_a_metric_two_plugins_declare_is_refused(plugin_dir):
             checkpoints={"first": "quality", "second": "quality"},
             provides=["nemar-floor"],
             steps=(),
+            reserved=(),
             package="tmp_plugins",
         ),
     )
 
 
-def test_a_headline_metric_with_a_reserved_name_is_refused(plugin_dir):
+@pytest.mark.parametrize("headline", [True, False])
+def test_a_metric_with_a_recipe_summary_name_is_refused(plugin_dir, headline):
+    from nemar_process.nemar_floor import outputs as floor_outputs
+
     manifest = manifest_for("shadow")
     metric = next(iter(manifest["outputs"]["metrics"].values()))
-    manifest["outputs"]["metrics"] = {"percentGoodChannels": {**metric, "headline": True}}
+    manifest["outputs"]["metrics"] = {"percentGoodChannels": {**metric, "headline": headline}}
     write_plugin(plugin_dir, "shadow", manifest)
-    refused("metric_reserved", lambda: load_one("shadow"))
+    refused(
+        "metric_reserved",
+        lambda: plugins.load(
+            [("shadow", "1.0.0")],
+            checkpoints={"shadow": "quality"},
+            provides=["nemar-floor"],
+            steps=(),
+            reserved=floor_outputs.SUMMARY_METRICS,
+            package="tmp_plugins",
+        ),
+    )
 
 
-def test_the_reserved_names_are_the_recipes_summary_metrics(fixture_result):
+def test_the_recipes_declare_the_summary_metrics_they_write(fixture_result):
     from nemar_process.nemar_floor import outputs as floor_outputs
     from nemar_process.nemar_ica import outputs as ica_outputs
 
-    assert tuple(floor_outputs.summary_metrics(fixture_result)) == floor_outputs.SUMMARY_KEYS
-    assert plugins.reserved_metric_names() == {
-        *floor_outputs.SUMMARY_KEYS,
-        *ica_outputs.SUMMARY_KEYS,
-    }
+    assert set(floor_outputs.summary_metrics(fixture_result)) == set(floor_outputs.SUMMARY_METRICS)
+    # nemar-ica builds its summary by zipping SUMMARY_METRICS (strict) with its four values
+    assert len(set(ica_outputs.SUMMARY_METRICS)) == 4
+    assert not set(ica_outputs.SUMMARY_METRICS) & set(floor_outputs.SUMMARY_METRICS)
 
 
 def test_parameter_rows_are_registered_only_when_every_pin_loads(plugin_dir):
@@ -368,6 +386,7 @@ def test_parameter_rows_are_registered_only_when_every_pin_loads(plugin_dir):
             checkpoints={"early": "quality", "absent": "quality"},
             provides=["nemar-floor"],
             steps=(),
+            reserved=(),
             package="tmp_plugins",
         ),
     )
