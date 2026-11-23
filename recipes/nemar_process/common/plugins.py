@@ -295,15 +295,8 @@ class _OutputRefused(Exception):
 def _metric_value(value: Any, declared: Mapping[str, Any]) -> float | None:
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, numbers.Real)
-        or type(value).__name__
-        in {
-            "bool_",
-            "bool",
-        }
-    ):
+    # A bool is an int to Python, so it is refused by type; NumPy's bool is not a number at all.
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise _OutputRefused("metric_not_a_number")
     number = float(value)
     if not math.isfinite(number):
