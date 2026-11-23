@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from nemar_process.common import device
+from nemar_process.common import device, errors
 from nemar_process.common.device import Resolution
 from nemar_process.common.errors import RecordingError, guarded
 from nemar_process.nemar_ica import RECIPE, pipeline, tally
@@ -113,25 +113,40 @@ def test_torchs_cuda_out_of_memory_error_is_recognized_wherever_the_chain_holds_
     assert in_context(error).__cause__ is None
     assert device.holds_cuda_out_of_memory(in_context(error))  # the context alone
     assert device.holds_cuda_out_of_memory(wrapped(wrapped(error), outer=KeyError))
-    # what a step boundary makes of it: the recipe's own failure, with torch's error in its chain
-    for raised in (error, wrapped(error)):
+    # what a step boundary makes of it: out_of_memory on the GPU however the error came wrapped (an
+    # explicit --ica-device cuda ends so), with torch's error still in the chain
+    for raised in (error, wrapped(error), in_context(error), wrapped(wrapped(error))):
+        assert errors.is_cuda_out_of_memory(raised)
         with pytest.raises(RecordingError) as ended, guarded("ica"):
             raise raised
+        assert (ended.value.code, ended.value.step, ended.value.detail) == (
+            "out_of_memory",
+            "ica",
+            "cuda",
+        )
         assert device.holds_cuda_out_of_memory(ended.value)
 
 
 def test_an_out_of_memory_message_without_the_class_is_not_recognized():
     message = "CUDA out of memory. Tried to allocate 2.00 GiB"
-    assert not device.holds_cuda_out_of_memory(RuntimeError(message))
-    assert not device.holds_cuda_out_of_memory(MemoryError(message))
-    assert not device.holds_cuda_out_of_memory(wrapped(RuntimeError(message)))
-    assert not device.holds_cuda_out_of_memory(in_context(RuntimeError(message)))
+    for error in (
+        RuntimeError(message),
+        MemoryError(message),
+        wrapped(RuntimeError(message)),
+        in_context(RuntimeError(message)),
+    ):
+        assert not device.holds_cuda_out_of_memory(error)
+        assert not errors.is_cuda_out_of_memory(error)
+    with pytest.raises(RecordingError) as ended, guarded("ica"):
+        raise wrapped(RuntimeError(message))
+    assert (ended.value.code, ended.value.detail) == ("step_failed", "RuntimeError")
 
 
 def test_a_chain_that_loops_ends_the_search():
     first, second = RuntimeError("first"), RuntimeError("second")
     first.__context__, second.__context__ = second, first
     assert not device.holds_cuda_out_of_memory(first)
+    assert not errors.is_cuda_out_of_memory(first)
 
 
 # ---- the reading of contention, the cap ----------------------------------------------------------

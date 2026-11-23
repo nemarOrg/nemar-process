@@ -105,16 +105,28 @@ class EngineUnavailable(Exception):
 
 
 def is_cuda_out_of_memory(error: BaseException) -> bool:
-    """Whether ``error`` is torch's CUDA out-of-memory error, found by name.
+    """Whether torch's CUDA out-of-memory error is ``error`` or anywhere in its chain of causes and
+    contexts, found by name.
 
     Torch is never imported here: where it is absent no error of its class exists, and where it is
-    present the class is found among the error's bases by module and name. The message is not read,
-    since a message can hold a path.
+    present the class is found among each linked error's bases by module and name, so an error a
+    library raised from torch's is recognized too. A chain that loops ends the search. The message is
+    not read, since a message can hold a path.
     """
-    return any(
-        base.__name__ == "OutOfMemoryError" and base.__module__.split(".")[0] == "torch"
-        for base in type(error).__mro__
-    )
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        link = pending.pop()
+        if link is None or id(link) in seen:
+            continue
+        if any(
+            base.__name__ == "OutOfMemoryError" and base.__module__.split(".")[0] == "torch"
+            for base in type(link).__mro__
+        ):
+            return True
+        seen.add(id(link))
+        pending.extend((link.__cause__, link.__context__))
+    return False
 
 
 @contextlib.contextmanager
@@ -123,8 +135,8 @@ def guarded(step_id: str):
 
     A ``RecordingError`` passes as it is. ``MemoryError`` is ``out_of_memory`` in this step, and any
     other exception is ``step_failed`` in it: the step is what a reader needs to find the cause. A
-    CUDA out-of-memory error is ``out_of_memory`` with the detail ``cuda``, so that a record tells a
-    full GPU from a full host.
+    CUDA out-of-memory error, or an error whose chain holds one, is ``out_of_memory`` with the detail
+    ``cuda``, so that a record tells a full GPU from a full host.
     """
     try:
         yield
