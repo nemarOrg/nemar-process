@@ -36,11 +36,14 @@ nemar-launch/nemar-launch-local \
 A signal ignored when the launcher starts stays ignored: under `nohup`, a closed terminal does not stop the job.
 
 A launcher killed with SIGKILL, or a machine that goes down, can leave a stopped Docker container behind (Apptainer's ends with the launcher).
-Every standalone container is named `nemar-launch-<hex>` and labeled with the placeholder job id; remove what is left with:
+Every standalone container is named `nemar-launch-<hex>` and labeled with the placeholder job id; remove what is left, once no standalone job runs, with:
 
 ```bash
-docker ps -aq --filter label=nemar.job=job_000000000000000000000000 | xargs -r docker rm -f
+docker ps -aq --filter label=nemar.job=job_000000000000000000000000 \
+  --filter status=exited --filter status=created | xargs -r docker rm
 ```
+
+This removes only stopped standalone containers, never a running one (a job still running on this machine, or one another launcher started); the container's own name is also in `launcher.log` (`container: named nemar-launch-<hex>`).
 
 The exit status is the job's: 0, or 10 to 16 for the failure code in `result.json` (the codes of [launcher.md](launcher.md)).
 2 is a command line that cannot be used (a missing option, Docker without limits, a `--code` that is not a `.tar.gz`, a `--data` name given twice); then nothing is created.
@@ -87,7 +90,14 @@ What differs, and only this:
 ## The fence
 
 The launcher has no reason to reach the network or start any program but the container runtime in this mode, and its fence (`nemar_launch/fence.py`) holds it to that inside its own process, with one audit hook (PEP 578).
-For the whole run (the progress thread, the container phase, the read-back and the reports included) it refuses every socket, every name and reverse lookup, every `urllib` request, every program but `apptainer`, `singularity` or `docker` with the verbs the launcher uses (`--version`, `buildcfg`, `exec`, `info`, `image inspect`, `container inspect`, `rm`, and `run` with `--pull=never`), and `os.system`, `os.exec*`, `os.spawn*` and `os.posix_spawn`.
+For the whole run (the progress thread, the container phase, the read-back and the reports included) it refuses:
+
+- every socket, every name and reverse lookup, and every `urllib` request;
+- every program but the container runtime resolved before the run, by real path (a file named `docker` elsewhere is refused), with the verbs the launcher uses (`--version`, `buildcfg`, `exec`, `info`, `image inspect`, `container inspect`, `rm`, and `run` with `--pull=never`);
+- an `apptainer exec` with any option but the launcher's own, with `://` in an option or in the image position, or naming any image but the file the run pinned; the job's own arguments after the image are free text (a DOI link is fine);
+- a program started under another name than its argument vector shows (`executable=`); `os.posix_spawn` is judged like `subprocess` (Python takes it on Linux with glibc 2.34 or later);
+- `os.system`, `os.exec*`, `os.spawn*`, `os.fork` and `os.forkpty`; `ctypes` symbol lookups other than `prctl`; and importing `multiprocessing` or `concurrent.futures.process`, which start interpreters no hook of this process sees.
+
 A refusal fails the call like any the system denies, and the log's last line counts the refusals (`fence: refusals none` in a normal run).
 
 The fence does not reach into a child process: the container runtime's own network (an Apptainer image pull, the Docker daemon) is outside it.
@@ -103,7 +113,7 @@ Then, once, after the runtime's checks and before the code, the PID namespace pr
 - Docker: `cosign verify` with nemar-process's image workflow identity (the runner's policy, [images.md](images.md)) must name the digest in every entry; the image is then pulled by that digest (`docker pull --quiet`) only if it is absent.
 - Apptainer: cosign verifies the signed SIF artifact `ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`; the launcher reads that artifact's manifest from the registry by the digest cosign named, with an anonymous token (the only addresses the window lets this process request); the manifest must hash to that digest and hold one layer; a missing file is pulled by the manifest digest into a hidden part file, which must hash to the layer before it is renamed to `<hex>.sif`, and a file already there must hash to it too.
 
-The window allows exactly the command lines computed when it opens (`cosign version --json`, `cosign verify ...`, the `docker pull`, and the `apptainer pull` once cosign has passed) and, under Apptainer, a lookup of the registry's host and connections to public addresses only after it.
+The window allows exactly the command lines computed when it opens (`cosign version --json`, `cosign verify ...`, the `docker pull`, and the `apptainer pull` once cosign has passed) and, under Apptainer, a lookup of the registry's host, IPv4 and IPv6 stream sockets, and one connection to a public address (NAT64 and 6to4 are not) for each request the launcher makes to the token or the manifest address.
 cosign (3 or later) runs with `PATH` and a `HOME` inside the scratch, removed at the end, so the Sigstore trust root is fetched on every `--pull`; nothing is cached.
 A failed verification is `runtime_error`, `image_unverified` (exit 13), with the reason in the log (`reference_refused`, `cosign_missing`, `cosign_failed`, `cosign_timeout`, `digest_mismatch`, `manifest_mismatch`, `layer_mismatch`); a pull that fails is `image_missing`.
 Nothing runs after either.

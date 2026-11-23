@@ -83,12 +83,13 @@ None of this has been observed on the node's runtime, which may be a commercial 
 ## The standalone entry (`nemar-launch-local`)
 
 - **macOS Docker Desktop** is not verified: the entry is tested on Linux with Apptainer and with rootful Docker (CI), and with the stand-in runtimes on a developer's machine.
-- **The audit events the fence relies on** (`socket.*`, `urllib.Request`, `subprocess.Popen`, `os.system`, `os.exec`, `os.spawn`, `os.posix_spawn`) are confirmed by `tests/launcher/test_fence.py` on Python 3.9 and 3.12; an interpreter that raises them differently would weaken the fence, not the container's isolation.
+- **The audit events the fence relies on** (`socket.*`, `urllib.Request`, `subprocess.Popen`, `os.posix_spawn`, `os.system`, `os.exec`, `os.spawn`, `os.fork`, `os.forkpty`, `ctypes.dlsym`, `import`) are confirmed by `tests/launcher/test_fence.py` on Python 3.9, 3.12 and 3.13 (the 3.13 run is in CI's 3.9 leg); the `ctypes` rule (only `prctl`) is confirmed on Linux by the CI launcher legs, not on a developer's macOS. An interpreter that raises them differently would weaken the fence, not the container's isolation.
 - **What a child process sends is outside the fence**: cosign talks to the registry and to Sigstore, and `apptainer pull` to the registry.
   The Docker daemon is a separate process: without `--pull` it pulls nothing (the container runs with `--pull=never` and an absent image is `image_missing`); with `--pull` it pulls the verified digest when the launcher runs `docker pull` inside the window, and the container itself still runs with `--pull=never`.
 - **The SIF artifact's signature is not bound to the image digest**: `--pull` under Apptainer proves the artifact tagged `sha256-<hex>` was signed by the image workflow, not that it was built from the image `<hex>` (nemarOrg/nemar-process#80, as for the runner).
 - **`apptainer pull oras://...@sha256:<manifest>`** on a person's machine is exercised by CI's Apptainer leg against the public registry (`tests/e2e/test_local_pull_real.py` verifies the manifest and its layer; the runner's test pulls the file); other Apptainer versions are not.
 - **A public address is not tied to the name looked up**: inside the `--pull` window under Apptainer the launcher may connect to any public address on port 443 after it has looked up the registry's host, and to nothing else.
+- **The pinned image file after `before_exec`**: the standalone entry checks the image file's identity immediately before the runtime starts on it, and runs a hard link in its 0700 scratch where it can. A write after that check through a file descriptor opened for writing earlier, or by root or by the person's own processes (who own the file), is not caught; a private copy of a multi-gigabyte image is not worth closing that.
 
 ## The runtime image (nemar-python)
 

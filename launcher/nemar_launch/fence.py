@@ -13,11 +13,14 @@ included), it refuses:
 * every name and reverse lookup (``getaddrinfo``, ``gethostbyname``, ``gethostbyaddr``,
   ``getnameinfo``, ``getservbyname``, ``getservbyport``) and every ``urllib.request.Request``;
 * every program but the container runtime: ``subprocess.Popen`` is allowed only for a program named
-  ``apptainer``, ``singularity`` or ``docker`` and only with the verbs the launcher uses (``--version``,
-  ``buildcfg``, ``exec``, ``info``, ``image inspect``, ``container inspect``, ``rm``, and ``run``
-  carrying ``--pull=never`` and no other ``--pull``), never an Apptainer argument holding ``://``, and
-  only when the program run is the vector's own ``argv[0]`` (an ``executable=`` naming another program is
-  refused); ``os.posix_spawn`` is judged by the same rules (subprocess takes it on some platforms);
+  ``apptainer``, ``singularity`` or ``docker`` that is, by real path, the runtime resolved when the run
+  opened, and only with the verbs the launcher uses (``--version``, ``buildcfg``, ``exec``, ``info``,
+  ``image inspect``, ``container inspect``, ``rm``, and ``run`` carrying ``--pull=never`` and no other
+  ``--pull``); an ``apptainer exec`` must use only the launcher's own options, none holding ``://``,
+  and name exactly the image file the run pinned (the job's own arguments after it are free text); the
+  program run must be the vector's own ``argv[0]`` (an ``executable=`` naming another program is
+  refused); ``os.posix_spawn`` is judged by the same rules (subprocess takes it where it can, Linux with
+  glibc 2.34 or later for one);
   ``os.system``, ``os.exec*``, ``os.spawn*``, ``os.fork`` and ``os.forkpty`` are refused outright;
 * ``ctypes`` symbol lookups other than ``prctl`` (``run.parent_death_hook``), and importing
   ``multiprocessing`` or ``concurrent.futures.process`` (each starts interpreters no hook of this process
@@ -29,8 +32,9 @@ datasets and any user code), the fence also allows exactly the argument vectors 
 ``cosign version --json``, ``cosign verify`` with the signing policy, ``docker pull --quiet`` of the
 pinned digest, and (added once cosign has passed) ``apptainer pull`` of the signed SIF artifact into
 its part file. For Apptainer it also allows, in this process, a lookup of exactly the registry's host
-(``verify.REGISTRY_BASE``), IPv4 and IPv6 stream sockets only, connections only to public addresses
-(written as text, never an integer) after that lookup (or, for a base that
+(``verify.REGISTRY_BASE``), IPv4 and IPv6 stream sockets only, one connection per sanctioned request
+(so ``http.client`` straight to the registry is refused), only to public addresses (written as text,
+never an integer; NAT64 and 6to4 are not public) after that lookup (or, for a base that
 is an IP literal, as the tests' loopback registry is, to exactly that address and port), and
 ``urllib.request.Request`` only for the anonymous token address and the manifest address of the signed
 artifact. A second window in one run is refused; the window closes when its block ends, however it
