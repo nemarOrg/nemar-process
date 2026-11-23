@@ -404,30 +404,46 @@ def test_a_signal_ignored_at_start_stays_ignored(lrig):
 
 
 def test_a_fault_in_the_final_progress_build_is_one_line_and_never_the_exit(lrig):
-    """A recordings table that becomes a directory after the reporter's last read (a fault no reader
-    expects, here an IsADirectoryError-like refusal path) costs the final progress.json only."""
+    """A real fault (the launcher directory cannot be written when the final progress.json goes in)
+    costs that file only: one line naming the error's class, and the job's exit is unchanged."""
+    from nemar_launch import __main__ as service
     from nemar_launch import local, progress, run
-    from nemar_launch.provenance import Log
-
-    class Faulty(progress.Source):
-        def build(self, finished: bool = False):
-            raise ValueError("a launcher bug with a /host/path in its message")
+    from nemar_launch.provenance import Documents, Log
 
     out = lrig.tmp / "fault"
     out.mkdir()
     layout = run.prepare_layout(str(out))
+    outputs = out / "work" / "outputs"
+    (outputs / ".nemar-progress").mkdir()
+    (outputs / "product").mkdir()
+    (outputs / ".nemar-progress" / "progress.json").write_text(
+        json.dumps(
+            {
+                "format": "nemar.recipe-progress.v1",
+                "recipe": {"id": "nemar-floor", "version": "1.0.0-b1"},
+                "checkpoints": FLOOR_MAP,
+                "table": "product/t_recordings.tsv",
+                "discovered": 1,
+                "running": [],
+            }
+        )
+    )
+    (outputs / "product" / "t_recordings.tsv").write_text(
+        "path\tstatus\tcode\tstep\na.set\tsucceeded\tn/a\tn/a\n"
+    )
     log = Log(layout.log_path)
-
-    from nemar_launch import __main__ as service
-    from nemar_launch.provenance import Documents
-
     state = service.Run(str(out), layout, log, Documents(layout.launcher, log))
-    state.progress_source = Faulty(layout.work)
-    local._final_progress(state, layout, log)  # never raises
+    state.progress_source = progress.Source(layout.work)
+    state.progress_source.build()  # the reporter's read
+    os.chmod(layout.launcher, 0o500)  # a real fault: the final file cannot be written
+    try:
+        local._final_progress(state, layout, log)  # never raises
+    finally:
+        os.chmod(layout.launcher, 0o700)
     log.close()
     text = (out / "launcher" / "launcher.log").read_text()
-    assert "progress: final report not written ValueError" in text
-    assert "/host/path" not in text
+    assert "progress: final report not written PermissionError" in text
+    assert not (out / "launcher" / "progress.json").exists()
 
 
 def test_a_job_argument_holding_a_url_runs(lrig):
