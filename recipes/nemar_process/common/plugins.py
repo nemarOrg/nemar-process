@@ -25,24 +25,49 @@ line names the plugin, and the rest of the recording is kept. Nothing a plugin r
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import importlib
 import json
 import math
 import numbers
+import os
 import re
 import sys
+import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from nemar_process.common import contract, progress
 from nemar_process.common import plan as plans
 
 PACKAGE = "nemar_process.plugins"
-STEP_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+# A plugin's name is a step word without ``.``: its package is the name with ``-`` as ``_``, so a dot
+# would make it a subpackage that the digest test (one manifest per direct child) would not see.
+PLUGIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 PLUGIN_FAILED = "plugin_failed"
+# The detail of a skip for an exception: its class name when it is a plain identifier, else this word.
+EXCEPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+UNNAMED_EXCEPTION = "exception"
+
+
+@functools.cache
+def reserved_metric_names() -> frozenset[str]:
+    """The summary metric names the recipes write themselves, which a plugin's headline metric may not
+    take (``write_product`` would refuse it, failing the recording).
+
+    Read from each recipe's own declaration (the floor's and nemar-ica's ``SUMMARY_KEYS``), never
+    listed here; where these names are owned is still open, and this function is the one place the
+    loader asks, so the source can move without touching it.
+    """
+    from nemar_process.nemar_floor import outputs as floor_outputs
+    from nemar_process.nemar_ica import outputs as ica_outputs
+
+    return frozenset((*floor_outputs.SUMMARY_KEYS, *ica_outputs.SUMMARY_KEYS))
 
 
 class PluginLoadError(Exception):
@@ -72,11 +97,16 @@ class Plugin:
     entry: str
     manifest: dict[str, Any]
     manifest_sha256: str
+    tree_sha256: str
     run: Callable[..., Any]
 
     @property
     def function(self) -> str:
         return self.entry + ".run"
+
+    def identity(self) -> dict[str, str]:
+        """What the plan hash holds of the plugin (``plan.PLUGIN_IDENTITY``)."""
+        return {"name": self.name, "version": self.version, "tree_sha256": self.tree_sha256}
 
     def software(self) -> dict[str, Any]:
         return {"name": self.name, "version": self.version, "functionCall": self.function}
@@ -90,6 +120,7 @@ class PluginOutcome:
     version: str
     checkpoint: str
     manifest_sha256: str
+    tree_sha256: str
     status: str
     code: str | None = None
     detail: str | None = None
@@ -101,6 +132,7 @@ class PluginOutcome:
             "version": self.version,
             "checkpoint": self.checkpoint,
             "manifest_sha256": self.manifest_sha256,
+            "tree_sha256": self.tree_sha256,
             "status": self.status,
         }
         if self.code is not None:
@@ -135,11 +167,27 @@ def _strict_json(text: str) -> Any:
     return json.loads(text, object_pairs_hook=pairs, parse_constant=no_constant)
 
 
+def symlinks(directory: Path) -> list[str]:
+    """The symbolic links (to files or to directories) inside a plugin's tree, by relative path."""
+    found = []
+    for root, dirs, names in os.walk(directory, followlinks=False):
+        for name in [*dirs, *names]:
+            path = Path(root) / name
+            if path.is_symlink():
+                found.append(path.relative_to(directory).as_posix())
+    return sorted(found)
+
+
 def tree_sha256(directory: Path) -> str:
-    """The SHA-256 of a plugin's source tree: every ``.py`` and ``.json`` file, by relative path."""
+    """The SHA-256 of a plugin's source tree: every regular file but ``__pycache__``, by relative path.
+
+    A tree that holds a symbolic link is refused: what it points to is not part of the reviewed tree.
+    """
+    if symlinks(directory):
+        raise ValueError("a plugin tree holds a symbolic link")
     digest = hashlib.sha256()
     for path in sorted(directory.rglob("*")):
-        if path.is_file() and path.suffix in {".py", ".json"} and "__pycache__" not in path.parts:
+        if path.is_file() and "__pycache__" not in path.relative_to(directory).parts:
             relative = path.relative_to(directory).as_posix().encode("utf-8")
             digest.update(relative + b"\0" + hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
@@ -152,14 +200,22 @@ def _load_one(
     provides: frozenset[str],
     package: str,
 ) -> Plugin:
-    if not STEP_WORD.fullmatch(name):
-        raise PluginLoadError(name, "name_not_a_step_word")
+    if not PLUGIN_NAME.fullmatch(name):
+        raise PluginLoadError(name, "name_not_a_plugin_name")
     entry = module_name(name, package)
     try:
         module = importlib.import_module(entry)
-    except ImportError as error:
-        raise PluginLoadError(name, "not_importable") from error
-    directory = Path(module.__file__ or "").resolve().parent
+    except ModuleNotFoundError as error:
+        if error.name is not None and entry.startswith(error.name):
+            raise PluginLoadError(name, "not_importable") from error
+        raise PluginLoadError(name, "import_failed") from error
+    except Exception as error:
+        raise PluginLoadError(name, "import_failed") from error
+    if module.__file__ is None:
+        raise PluginLoadError(name, "not_a_package")
+    directory = Path(module.__file__).resolve().parent
+    if symlinks(directory):
+        raise PluginLoadError(name, "symlink_in_tree")
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
         raise PluginLoadError(name, "no_manifest")
@@ -197,6 +253,7 @@ def _load_one(
         entry=entry,
         manifest=manifest,
         manifest_sha256=hashlib.sha256(raw).hexdigest(),
+        tree_sha256=tree_sha256(directory),
         run=run,
     )
 
@@ -206,29 +263,38 @@ def load(
     *,
     checkpoints: Mapping[str, str],
     provides: Iterable[str],
+    steps: Iterable[str],
     package: str = PACKAGE,
 ) -> list[Plugin]:
     """The recipe's pinned plugins, loaded and checked, in pinned order.
 
-    ``checkpoints`` maps each plugin's name to the checkpoint the recipe's map puts it in, and
-    ``provides`` names the recipes whose outputs the host can hand a plugin. Each plugin's function
-    gets its parameter row in ``plan.PARAMETER_TYPES`` (every manifest parameter as written).
+    ``checkpoints`` maps each plugin's name to the checkpoint the recipe's map puts it in,
+    ``provides`` names the recipes whose outputs the host can hand a plugin, and ``steps`` are the
+    recipe's own step ids, which a plugin's name (its step id) may not repeat. Once every pin has
+    loaded, each plugin's function gets its parameter row in ``plan.PARAMETER_TYPES``.
     """
     provided = frozenset(provides)
+    recipe_steps = frozenset(steps)
     loaded: list[Plugin] = []
     names: set[str] = set()
     metrics: set[str] = set()
     for name, version in pins:
         if name in names:
             raise PluginLoadError(name, "pinned_twice")
+        if name in recipe_steps:
+            raise PluginLoadError(name, "name_is_a_step")
         names.add(name)
         plugin = _load_one(name, version, checkpoints, provided, package)
-        outputs = plugin.manifest["outputs"]
-        if metrics & set(outputs["metrics"]):
+        declared = plugin.manifest["outputs"]["metrics"]
+        reserved = reserved_metric_names()
+        if any(m in reserved and spec.get("headline") for m, spec in declared.items()):
+            raise PluginLoadError(name, "metric_reserved")
+        if metrics & set(declared):
             raise PluginLoadError(name, "metric_repeated")
-        metrics |= set(outputs["metrics"])
-        plans.PARAMETER_TYPES[plugin.function] = dict.fromkeys(plugin.manifest["parameters"], "any")
+        metrics |= set(declared)
         loaded.append(plugin)
+    for plugin in loaded:
+        plans.PARAMETER_TYPES[plugin.function] = dict.fromkeys(plugin.manifest["parameters"], "any")
     return loaded
 
 
@@ -276,6 +342,25 @@ def _quality_metrics(plugin: Plugin, values: Mapping[str, Any]) -> dict[str, dic
     return out
 
 
+def read_only(value: Any) -> Any:
+    """A view of ``value`` a plugin cannot change: mappings become ``MappingProxyType``, lists and
+    tuples tuples, arrays read-only views, all the way down. Anything else is passed as it is."""
+    if isinstance(value, Mapping):
+        return types.MappingProxyType({key: read_only(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(read_only(item) for item in value)
+    if isinstance(value, np.ndarray):
+        view = value.view()
+        view.setflags(write=False)
+        return view
+    return value
+
+
+def _exception_detail(error: Exception) -> str:
+    name = type(error).__name__
+    return name if EXCEPTION_NAME.fullmatch(name) else UNNAMED_EXCEPTION
+
+
 def _log_skip(plugin: Plugin, detail: str) -> None:
     sys.stderr.write(
         "plugin_skipped: {} code={} detail={}\n".format(plugin.name, PLUGIN_FAILED, detail)
@@ -299,11 +384,19 @@ def run_checkpoint(
             continue
         progress.step_started(plugin.name)
         outcome = PluginOutcome(
-            plugin.name, plugin.version, plugin.checkpoint, plugin.manifest_sha256, "ran"
+            plugin.name,
+            plugin.version,
+            plugin.checkpoint,
+            plugin.manifest_sha256,
+            plugin.tree_sha256,
+            "ran",
         )
-        given = {recipe: inputs[recipe] for recipe in plugin.manifest["reads"]["recipes"]}
         parameters = copy.deepcopy(plugin.manifest["parameters"])
         try:
+            # a recipe the host did not hand over is a KeyError here, and skips the plugin
+            given = {
+                recipe: read_only(inputs[recipe]) for recipe in plugin.manifest["reads"]["recipes"]
+            }
             returned = plugin.run(given, copy.deepcopy(parameters))
             if not isinstance(returned, PluginResult):
                 raise _OutputRefused("result_not_a_plugin_result")
@@ -311,9 +404,9 @@ def run_checkpoint(
             if returned.figures:
                 raise _OutputRefused("figures_on_hold")
         except Exception as error:  # noqa: BLE001  (a plugin never fails the recording: it is skipped)
-            detail = error.word if isinstance(error, _OutputRefused) else type(error).__name__
+            detail = error.word if isinstance(error, _OutputRefused) else _exception_detail(error)
             outcome.status, outcome.code, outcome.detail = "skipped", PLUGIN_FAILED, detail
-            plan.add_skip(plugin.name, plugin.function, PLUGIN_FAILED)
+            plan.add_skip(plugin.name, plugin.function, PLUGIN_FAILED, plugin=plugin.identity())
             _log_skip(plugin, detail)
             result.outcomes.append(outcome)
             continue
@@ -326,6 +419,7 @@ def run_checkpoint(
             ),
             quality=quality,
             software=plugin.software(),
+            plugin=plugin.identity(),
         )
         declared = plugin.manifest["outputs"]["metrics"]
         for name, metric in quality.items():

@@ -31,7 +31,6 @@ BUNDLE_PATH = HERE / "neuroschema.bundle.json"
 MANIFEST_FORMAT = "nemar.plugin-manifest.v1"
 MANIFEST_MAX_BYTES = 65_536  # nemar-cli's PLUGIN_MANIFEST_MAX_BYTES
 QUALITY_METRIC_ID = "nsc:/definitions/qualityMetric.schema.json"
-DATA_QUALITY_ID = "nsc:/extensions/dataQuality.schema.json"
 
 
 @functools.cache

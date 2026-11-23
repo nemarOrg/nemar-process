@@ -36,7 +36,11 @@ def loaded():
     return {
         p.name: p
         for p in plugins.load(
-            PINS, checkpoints=CHECKPOINTS, provides=["nemar-floor"], package="plugin_fixtures"
+            PINS,
+            checkpoints=CHECKPOINTS,
+            provides=["nemar-floor"],
+            steps=(),
+            package="plugin_fixtures",
         )
     }
 
@@ -107,19 +111,78 @@ def assert_skipped(plan, result, plugin, detail, capsys):
         "version": plugin.version,
         "checkpoint": plugin.checkpoint,
         "manifest_sha256": plugin.manifest_sha256,
+        "tree_sha256": plugin.tree_sha256,
         "status": "skipped",
         "code": "plugin_failed",
         "detail": detail,
     }
     assert result.summary_metrics == {}
     err = capsys.readouterr().err
-    assert "plugin_skipped: {} code=plugin_failed detail={}\n".format(plugin.name, detail) in err
+    assert err == "plugin_skipped: {} code=plugin_failed detail={}\n".format(plugin.name, detail)
+    return err
 
 
 def test_an_exception_skips_the_plugin_keeping_only_its_class_name(loaded, capsys):
     plan, result = run_one(loaded["fx-raises"], {})
-    assert_skipped(plan, result, loaded["fx-raises"], "ValueError", capsys)
-    assert "message" not in repr(result.outcomes) + capsys.readouterr().err
+    err = assert_skipped(plan, result, loaded["fx-raises"], "ValueError", capsys)
+    assert "message" not in repr(result.outcomes) + err
+
+
+def test_an_exception_whose_class_name_is_not_an_identifier_is_named_exception(loaded, capsys):
+    injected = type("Bad\nplugin_skipped: other code=x", (Exception,), {})
+
+    def run(inputs, parameters):
+        raise injected("message")
+
+    plugin = replace(loaded["fx-raises"], run=run)
+    plan, result = run_one(plugin, {})
+    err = assert_skipped(plan, result, plugin, "exception", capsys)
+    assert "other" not in err
+
+
+def test_a_missing_input_skips_the_plugin(loaded, capsys):
+    plan = fresh_plan()
+    result = plugins.run_checkpoint([loaded["fx-metrics"]], "quality", {}, plan)
+    assert_skipped(plan, result, loaded["fx-metrics"], "KeyError", capsys)
+
+
+@pytest.mark.parametrize("target", ["mapping", "nested", "array", "list"])
+def test_a_plugin_cannot_change_its_inputs(loaded, capsys, target):
+    floor = {"meta": {"n": 1}, "data": np.arange(3.0), "items": [1, 2]}
+
+    def run(inputs, parameters):
+        view = inputs["nemar-floor"]
+        if target == "mapping":
+            view["meta"] = None
+        elif target == "nested":
+            view["meta"]["n"] = 2
+        elif target == "array":
+            view["data"][0] = 9.0
+        else:
+            view["items"].append(3)
+        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+
+    plugin = replace(loaded["fx-metrics"], run=run)
+    plan, result = run_one(plugin, floor)
+    detail = {"mapping": "TypeError", "nested": "TypeError", "array": "ValueError"}
+    assert_skipped(plan, result, plugin, detail.get(target, "AttributeError"), capsys)
+    assert floor["meta"] == {"n": 1}
+    assert floor["data"].tolist() == [0.0, 1.0, 2.0]
+    assert floor["data"].flags.writeable
+    assert floor["items"] == [1, 2]
+
+
+def test_a_plugin_can_read_its_inputs(loaded):
+    seen = {}
+
+    def run(inputs, parameters):
+        view = inputs["nemar-floor"]
+        seen.update(total=float(view["data"].sum()), n=view["meta"]["n"], first=view["items"][0])
+        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+
+    plugin = replace(loaded["fx-metrics"], run=run)
+    run_one(plugin, {"meta": {"n": 1}, "data": np.arange(3.0), "items": [4]})
+    assert seen == {"total": 3.0, "n": 1, "first": 4}
 
 
 def echo(returns):
@@ -205,6 +268,33 @@ def test_skips_and_steps_change_the_plan_hash(loaded):
     assert len({good.hash(), bad.hash(), empty.hash()}) == 3
 
 
+def test_a_plugin_skip_changes_the_hash_of_an_otherwise_equal_plan(loaded):
+    ran, _ = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
+    skipped, _ = run_one(loaded["fx-metrics"], {})  # the plugin raises KeyError and is skipped
+    assert skipped.skipped
+    assert not skipped.steps
+    assert ran.hash() != skipped.hash()
+
+
+def test_two_plugin_versions_with_equal_parameters_hash_differently(loaded):
+    first = loaded["fx-metrics"]
+    second = replace(first, version="0.1.1", tree_sha256="0" * 64)
+    floor = {"share": 1, "level": 1}
+    one, _ = run_one(first, floor)
+    two, _ = run_one(second, floor)
+    assert one.steps[0].parameters == two.steps[0].parameters
+    assert one.hash() != two.hash()
+    other_tree, _ = run_one(replace(first, tree_sha256="1" * 64), floor)
+    assert other_tree.hash() != one.hash()
+
+
+def test_the_display_software_is_not_hashed(loaded):
+    plan, _ = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
+    before = plan.hash()
+    plan.steps[0].software = {"name": "renamed", "version": "9", "functionCall": "x"}
+    assert plan.hash() == before
+
+
 # ---- plugin steps reach the record --------------------------------------------------
 
 
@@ -266,6 +356,10 @@ def test_plugin_steps_are_recorded_with_their_software_and_metrics(
     assert skip in record["extensions"]["nemar"]["skipped_steps"]
     assert record["summaryMetrics"]["fxShare"] == 40.0
     assert plans.verify(record) == []
+    assert record["extensions"]["nemar"]["plan_hash"] == made.hash()
+    tampered = copy.deepcopy(dict(record))
+    tampered["extensions"]["nemar"]["plugins"][0]["version"] = "9.9.9"
+    assert plans.verify(tampered) != []
     assert [p["status"] for p in record["extensions"]["nemar"]["plugins"]] == ["ran", "skipped"]
     # the recordings table's skipped_steps cell, built from the plan's skips as for any step
     cell = product.row["skipped_steps"].split(",")

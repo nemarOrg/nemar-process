@@ -108,6 +108,7 @@ def test_the_fixture_plugins_load_in_pinned_order_with_their_parameter_rows():
         [("fx-echo", "0.1.0"), ("fx-metrics", "0.1.0")],
         checkpoints=QUALITY,
         provides=["nemar-floor", "nemar-ica"],
+        steps=(),
         package="plugin_fixtures",
     )
     assert [p.name for p in loaded] == ["fx-echo", "fx-metrics"]
@@ -155,6 +156,7 @@ def load_one(name, version="1.0.0", checkpoint="quality", provides=("nemar-floor
         [(name, version)],
         checkpoints={name: checkpoint},
         provides=provides,
+        steps=(),
         package="tmp_plugins",
     )
 
@@ -171,8 +173,49 @@ def test_a_plugin_as_declared_loads(plugin_dir):
     assert plugin.version == "1.0.0"
 
 
-def test_a_name_that_is_not_a_step_word_is_refused(plugin_dir):
-    refused("name_not_a_step_word", lambda: load_one("bad name"))
+@pytest.mark.parametrize("name", ["bad name", "dotted.name", ".hidden", "a/b"])
+def test_a_name_that_is_not_a_plugin_name_is_refused(plugin_dir, name):
+    refused("name_not_a_plugin_name", lambda: load_one(name))
+
+
+def test_a_name_that_is_a_recipe_step_is_refused(plugin_dir):
+    write_plugin(plugin_dir, "qc", manifest_for("qc"))
+    refused(
+        "name_is_a_step",
+        lambda: plugins.load(
+            [("qc", "1.0.0")],
+            checkpoints={"qc": "quality"},
+            provides=["nemar-floor"],
+            steps=("highpass", "qc"),
+            package="tmp_plugins",
+        ),
+    )
+
+
+def test_a_plugin_whose_import_raises_is_refused(plugin_dir):
+    package = write_plugin(plugin_dir, "boom", manifest_for("boom"))
+    (package / "__init__.py").write_text("raise RuntimeError('at import')\n")
+    refused("import_failed", lambda: load_one("boom"))
+
+
+def test_a_plugin_whose_dependency_is_missing_is_refused_as_failing_import(plugin_dir):
+    package = write_plugin(plugin_dir, "needy", manifest_for("needy"))
+    (package / "__init__.py").write_text("import no_such_module_anywhere\n")
+    refused("import_failed", lambda: load_one("needy"))
+
+
+def test_a_namespace_package_is_refused(plugin_dir):
+    (plugin_dir / "hollow").mkdir()
+    (plugin_dir / "hollow" / "manifest.json").write_text(json.dumps(manifest_for("hollow")))
+    refused("not_a_package", lambda: load_one("hollow"))
+
+
+def test_a_plugin_tree_with_a_symlink_is_refused(plugin_dir, tmp_path):
+    package = write_plugin(plugin_dir, "linked", manifest_for("linked"))
+    outside = tmp_path / "outside.py"
+    outside.write_text("z = 1\n")
+    (package / "helper.py").symlink_to(outside)
+    refused("symlink_in_tree", lambda: load_one("linked"))
 
 
 def test_an_absent_module_is_refused(plugin_dir):
@@ -238,7 +281,11 @@ def test_a_plugin_the_map_does_not_place_is_refused(plugin_dir):
     refused(
         "checkpoint_mismatch",
         lambda: plugins.load(
-            [("unplaced", "1.0.0")], checkpoints={}, provides=["nemar-floor"], package="tmp_plugins"
+            [("unplaced", "1.0.0")],
+            checkpoints={},
+            provides=["nemar-floor"],
+            steps=(),
+            package="tmp_plugins",
         ),
     )
 
@@ -270,6 +317,7 @@ def test_a_plugin_pinned_twice_is_refused(plugin_dir):
             [("twice", "1.0.0"), ("twice", "1.0.0")],
             checkpoints={"twice": "quality"},
             provides=["nemar-floor"],
+            steps=(),
             package="tmp_plugins",
         ),
     )
@@ -284,9 +332,46 @@ def test_a_metric_two_plugins_declare_is_refused(plugin_dir):
             [("first", "1.0.0"), ("second", "1.0.0")],
             checkpoints={"first": "quality", "second": "quality"},
             provides=["nemar-floor"],
+            steps=(),
             package="tmp_plugins",
         ),
     )
+
+
+def test_a_headline_metric_with_a_reserved_name_is_refused(plugin_dir):
+    manifest = manifest_for("shadow")
+    metric = next(iter(manifest["outputs"]["metrics"].values()))
+    manifest["outputs"]["metrics"] = {"percentGoodChannels": {**metric, "headline": True}}
+    write_plugin(plugin_dir, "shadow", manifest)
+    refused("metric_reserved", lambda: load_one("shadow"))
+
+
+def test_the_reserved_names_are_the_recipes_summary_metrics(fixture_result):
+    from nemar_process.nemar_floor import outputs as floor_outputs
+    from nemar_process.nemar_ica import outputs as ica_outputs
+
+    assert tuple(floor_outputs.summary_metrics(fixture_result)) == floor_outputs.SUMMARY_KEYS
+    assert plugins.reserved_metric_names() == {
+        *floor_outputs.SUMMARY_KEYS,
+        *ica_outputs.SUMMARY_KEYS,
+    }
+
+
+def test_parameter_rows_are_registered_only_when_every_pin_loads(plugin_dir):
+    write_plugin(plugin_dir, "early", manifest_for("early"))
+    function = "tmp_plugins.early.run"
+    plans.PARAMETER_TYPES.pop(function, None)
+    refused(
+        "not_importable",
+        lambda: plugins.load(
+            [("early", "1.0.0"), ("absent", "1.0.0")],
+            checkpoints={"early": "quality", "absent": "quality"},
+            provides=["nemar-floor"],
+            steps=(),
+            package="tmp_plugins",
+        ),
+    )
+    assert function not in plans.PARAMETER_TYPES
 
 
 def test_a_plugin_that_declares_a_figure_is_refused_while_figures_are_on_hold(plugin_dir):
@@ -316,6 +401,33 @@ def test_every_shipped_plugin_version_has_its_recorded_tree_digest():
             directory
         )
     assert recorded == DIGESTS
+
+
+def test_the_tree_digest_covers_every_file_but_pycache(tmp_path):
+    tree = tmp_path / "p"
+    tree.mkdir()
+    (tree / "__init__.py").write_text("x = 1\n")
+    before = plugins.tree_sha256(tree)
+    (tree / "weights.bin").write_bytes(b"\x00\x01")
+    with_data = plugins.tree_sha256(tree)
+    assert with_data != before
+    (tree / "__pycache__").mkdir()
+    (tree / "__pycache__" / "x.pyc").write_bytes(b"cache")
+    assert plugins.tree_sha256(tree) == with_data
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_the_tree_digest_refuses_a_symlink(tmp_path, kind):
+    tree = tmp_path / "p"
+    tree.mkdir()
+    target = tmp_path / ("t.py" if kind == "file" else "tdir")
+    if kind == "file":
+        target.write_text("y = 1\n")
+    else:
+        target.mkdir()
+    (tree / "link").symlink_to(target)
+    with pytest.raises(ValueError):
+        plugins.tree_sha256(tree)
 
 
 def test_the_tree_digest_changes_with_any_source_file(tmp_path):
