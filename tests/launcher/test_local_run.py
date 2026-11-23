@@ -160,7 +160,7 @@ def test_a_refused_specification_is_invalid_spec(lrig):
     launch = lrig.run(lrig.argv())
     assert (launch.exit, launch.result["detail"]) == (13, "invalid_spec")
     assert launch.report is None  # no image to name: the report is not written, the log says so
-    assert "results report not written" in launch.log
+    assert "results report not written (no_specification)" in launch.log
 
 
 def test_a_missing_image_file_is_image_missing(lrig):

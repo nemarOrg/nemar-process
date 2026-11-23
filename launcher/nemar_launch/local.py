@@ -30,7 +30,6 @@ Standard library only, Python 3.9.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import itertools
 import os
 import re
@@ -542,13 +541,18 @@ def _results_report(
     started: float,
 ) -> None:
     log = state.log
+    if state.image is None:
+        # no specification was read (refused, unreadable, or a setting refused first): nothing ran,
+        # and there is no image to name, so there is no report
+        log.info("results report not written (no_specification)")
+        return
     try:
         built, word = report.build(
             run_id=uuid.uuid4().hex,
             started=started,
             finished=max(time.time(), started),
-            spec_digest=state.digest or hashlib.sha256(b"").hexdigest(),
-            image=state.image or {"uri": "unknown", "digest": "sha256:" + "0" * 64},
+            spec_digest=state.digest,
+            image=state.image,
             verification=image.verification,
             bundle_sha256=state.bundle_digest,
             inputs=inputs,

@@ -111,4 +111,4 @@ The results report says what ran, on what and what came out: the run's random id
 Paths are relative to the job's outputs; no host path is in it.
 It is checked against the copied schema (`launcher/schema/compute-results-report.v1.json`) and the rules a schema cannot state before it is written; a problem is a fixed word inside it and never changes the exit.
 A run so short that the reporter never read the recipe's progress file before the recipe removed it has `checkpoints: null` with the reason `no_progress_file`.
-A specification that could not be read leaves no report (there is no image to name), and the log says so.
+A specification that could not be read or was refused, or a setting refused before it was read, leaves no report (there is no image to name), and the log says `results report not written (no_specification)`.
