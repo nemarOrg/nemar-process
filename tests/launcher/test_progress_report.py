@@ -317,7 +317,7 @@ def test_retry_after_is_obeyed_within_its_bounds(tmp_path, routes, fast, header,
 class Broken(progress.Source):
     """A source with a fault no reader foresaw (standing in for a bug in the launcher's own code)."""
 
-    def build(self):
+    def build(self, finished: bool = False):
         raise RuntimeError("a bug")
 
 
@@ -376,7 +376,7 @@ class StoppedWhileBuilding(progress.Source):
 
     reporter: progress.Reporter | None = None
 
-    def build(self):
+    def build(self, finished: bool = False):
         document = super().build()
         assert self.reporter is not None
         self.reporter.stop()
@@ -411,3 +411,27 @@ def test_a_reporter_keeps_the_cadence_it_was_given(tmp_path):
     assert reporter.tick() == 10.0
     plain = progress.Reporter(source, str(launcher), None, Lines())
     assert plain.tick() == progress.REPORT_SECONDS
+
+
+def test_the_finished_object_is_built_from_the_last_file_with_nothing_running(tmp_path):
+    """After the run (the recipe removed its progress file as it ended) the standalone entry builds one
+    last object: nothing running, so a run whose every recording has a row is at its last checkpoint,
+    and the counts are the reconcile counts."""
+    import shutil
+
+    from nemar_launch import checkpoints as rules
+
+    outputs = tmp_path / "outputs"
+    rows = "sub-01/eeg/a.set\teeg\tsucceeded\tn/a\tn/a\tn/a\nsub-02/eeg/b.set\teeg\tsucceeded\tn/a\tn/a\tn/a\n"
+    write_run(outputs, discovered=2, rows=rows)
+    source = progress.Source(str(outputs.parent))
+    live = source.build()
+    assert live["checkpoint"] == FLOOR_MAP[1]["checkpoint"]  # the running step's (drift)
+    shutil.rmtree(outputs / ".nemar-progress")
+    final = source.build(finished=True)
+    assert final["checkpoint"] == FLOOR_MAP[-1]["checkpoint"]
+    mapping = [(c["checkpoint"], tuple(c["steps"])) for c in FLOOR_MAP]
+    table = rules.parse_recordings_table((outputs / TABLE).read_text())
+    assert final["counts"] == rules.count_recordings(table, mapping, 2)
+    assert source.state is not None
+    assert source.state["recipe"]["id"] == "nemar-floor"

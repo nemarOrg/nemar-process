@@ -257,6 +257,7 @@ def check_recipe_progress(document: Any) -> dict[str, Any]:
         ):
             raise bad
     return {
+        "recipe": {"id": recipe["id"], "version": recipe["version"]},
         "checkpoints": mapping,
         "table": parts,
         "discovered": document["discovered"],
@@ -343,7 +344,15 @@ class Source:
         self.work = work
         self._state: dict[str, Any] | None = None
 
-    def build(self) -> dict[str, Any]:
+    @property
+    def state(self) -> dict[str, Any] | None:
+        """The last good progress file, checked (``check_recipe_progress``), or None."""
+        return self._state
+
+    def build(self, finished: bool = False) -> dict[str, Any]:
+        """The progress object now; with ``finished`` (after the container exited and the outputs were
+        read back) one last object from the last good progress file with nothing running, so the run is
+        at its last checkpoint once every recording has a row."""
         try:
             data = read_inside(
                 self.work,
@@ -356,7 +365,10 @@ class Source:
                 raise
             # the recipe removed its directory as the run ended: go on from the last file read
         assert self._state is not None
-        lines = table_lines(self.work, [OUTPUTS, *self._state["table"]])
+        state: dict[str, Any] = self._state
+        if finished:
+            state = {**self._state, "running": False, "step": None}
+        lines = table_lines(self.work, [OUTPUTS, *state["table"]])
         try:
             first = next(lines, None)
             rows = [] if first is None else rules.parse_recordings_lines(_chain(first, lines))
@@ -364,7 +376,7 @@ class Source:
             raise Unusable("table_" + problem.reason) from None
         finally:
             lines.close()
-        return build_object(self._state, rows)
+        return build_object(state, rows)
 
 
 def write_report(directory: str, document: Mapping[str, Any], counter: itertools.count) -> None:
