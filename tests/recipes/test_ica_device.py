@@ -265,9 +265,18 @@ def test_contention_under_auto_moves_the_job_and_lists_both_readings(fresh_tally
     moved = tally.contention_move(path, GPU_IDLE, 400 * MIB, 656 * MIB + 1)
     assert moved is not None
     assert (moved.device, moved.reason, moved.fallback) == ("cpu", "gpu_contended", True)
-    assert tally.fallbacks() == [
-        {"event": "gpu_contended", "path": path, "baseline_mib": 400.0, "others_mib": 656.0}
-    ]
+    (entry,) = tally.fallbacks()
+    assert entry == {
+        "event": "gpu_contended",
+        "path": path,
+        "baseline_bytes": 400 * MIB,
+        "others_bytes": 656 * MIB + 1,
+        "baseline_mib": 400.0,
+        "others_mib": 656.0,
+    }
+    # the whole bytes check against the threshold exactly, where the mebibytes are rounded
+    assert entry["others_bytes"] - entry["baseline_bytes"] > device.CONTENTION_MIB * MIB
+    assert entry["others_mib"] - entry["baseline_mib"] == device.CONTENTION_MIB
     later = tally.begin(GPU_IDLE)
     assert (later.device, later.reason) == ("cpu", "gpu_contended")
 

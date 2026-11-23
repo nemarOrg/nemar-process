@@ -15,7 +15,8 @@ recording is fitted again on the CPU, with every setting the same) or when the G
 this process's torch allocator grew by more than ``device.CONTENTION_MIB`` since the job first
 initialized CUDA (``before_fit``: that recording and every later one). That memory is mostly other
 processes', but it can include the job's own CUDA libraries, so a ``gpu_contended`` move lists what
-was measured (``baseline_mib``, ``others_mib``). Both moves hand the memory torch cached back to the
+was measured (``baseline_bytes`` and ``others_bytes``, which the rule compares exactly, and the same
+in mebibytes, ``baseline_mib`` and ``others_mib``). Both moves hand the memory torch cached back to the
 driver; the CUDA context stays until the job ends. The rule is ``device.next_device``; the move is
 the run's state because every recording resolves its device alike (``device.resolve``), and it
 overrides the resolution of every later one. A move is listed when it is made, so a recording that
@@ -63,7 +64,7 @@ def _move(
     path: str,
     resolution: Resolution,
     event: str,
-    measured: dict[str, float] | None = None,
+    measured: dict[str, Any] | None = None,
 ) -> Resolution | None:
     """Move the job by ``event`` when the rule says so, and list the move with what was measured;
     None when it stays (an explicit device, or the CPU)."""
@@ -106,11 +107,16 @@ def contention_move(
 ) -> Resolution | None:
     """The move a contention reading makes, from the two readings in bytes (``device.others_bytes``
     when the job first initialized CUDA, and now): ``gpu_contended`` under ``auto`` on the GPU when
-    the growth is above ``device.CONTENTION_MIB``, listed with both readings in mebibytes; None
-    otherwise."""
+    the growth is above ``device.CONTENTION_MIB``, listed with both readings in whole bytes (so a
+    record can be checked against the threshold exactly) and in mebibytes; None otherwise."""
     if not device.contended(baseline, now):
         return None
-    measured = {"baseline_mib": device.as_mib(baseline), "others_mib": device.as_mib(now)}
+    measured = {
+        "baseline_bytes": baseline,
+        "others_bytes": now,
+        "baseline_mib": device.as_mib(baseline),
+        "others_mib": device.as_mib(now),
+    }
     return _move(path, resolution, device.GPU_CONTENDED, measured)
 
 
