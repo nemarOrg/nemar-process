@@ -98,15 +98,16 @@ The workflows read one secret and need settings that only the owner can change; 
 **The bot jobs run repository code with the release token in their git configuration.**
 `auto-bump-dev.yml`, `auto-tag.yml` and `sync-dev.yml` check out with `AUTO_TAG_PAT` and then run `scripts/bump_version.py` and `scripts/sync_dev_merge.py` from the checkout.
 Whoever can change those files, or the workflows, on a branch the bot runs for can use the token.
-So the protection below is load-bearing, not tidiness: branch protection on `dev` and `main` that nobody but the token's account can bypass, code owner review on `.github/workflows/`, `scripts/bump_version.py` and `scripts/sync_dev_merge.py` (`.github/CODEOWNERS` names them), and the environment below.
+So the protection below is load-bearing, not tidiness: branch protection on `dev` and `main` that nobody outside the `release-bot` team can bypass, code owner review on `.github/workflows/`, `scripts/bump_version.py` and `scripts/sync_dev_merge.py` (`.github/CODEOWNERS` names them), and the environment below.
 
-- The secret `AUTO_TAG_PAT`: a token with contents write on this repository, held by a **dedicated machine account**, the only account allowed to bypass protection on `dev`, `main` and the `v*` tags.
-  Bypass is granted per account, and the token's own pushes must not need a person's.
+- The secret `AUTO_TAG_PAT`: a token with contents write on this repository, held by the single member of the `release-bot` team.
+  That team is the only bypass actor on the three rulesets (`release-dev`, `release-main` and `release-tags` for `v*`), so the token's pushes do not need a person's approval.
+  Its member is a person's account today; moving the token to a dedicated machine account is an owner item.
 - An environment named `release` that **holds the secret** (not the repository), with deployment branches and tags limited to `main`, `dev` and `v*` tags.
   The three bot jobs declare `environment: release`; a repository secret would be readable by any workflow on any branch a writer pushes, and a pushed `v*` tag runs that tag's own copy of `sync-dev.yml`.
 - `main`: a pull request required, with the checks `lint` (from `lint.yml`), `static`, `launcher (python 3.9)`, `launcher (python 3.12)`, `recipes` (from `ci.yml`), `bump-validator` and `release-gate` required; **merge commits only** (no squash, no rebase); code owner review required.
-- `dev`: a pull request required, with the checks `lint` (from `lint.yml`), `static`, `launcher (python 3.9)`, `launcher (python 3.12)`, `recipes` (from `ci.yml`) and `bump-validator` required; the machine account may bypass for the bump commits. `docker backend (end to end)` runs but is not required.
-- A tag rule on `v*` that only the machine account may create, update or delete.
+- `dev`: a pull request required, with the checks `lint` (from `lint.yml`), `static`, `launcher (python 3.9)`, `launcher (python 3.12)`, `recipes` (from `ci.yml`) and `bump-validator` required; the `release-bot` team may bypass for the bump commits. `docker backend (end to end)` runs but is not required.
+- A tag rule on `v*` that only the `release-bot` team may create, update or delete.
 - A tag rule on `nemar-runner-v*` that only the owners may create, update or delete, and code owner review on `scripts/build_runner_bundle.py`, `deploy/runner/` and `runner/nemar_runner/install.py`: a workstation trusts a bundle that this workflow signed for such a tag, so who can push the tag and who can change what it builds are who can change what runs on a workstation.
   Whether releases are immutable, and the tag rulesets that go with them, are part of the owner items recorded on nemarOrg/nemar-process#9.
 
