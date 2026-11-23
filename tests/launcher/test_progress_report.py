@@ -259,6 +259,8 @@ def test_retry_after_is_read_as_whole_seconds_only():
     assert failure(" 12 ").retry_after == 12
     assert failure("Wed, 21 Oct 2015 07:28:00 GMT").retry_after is None
     assert failure("-1").retry_after is None
+    assert failure("\u00b2").retry_after is None  # a digit to str.isdigit, not to int
+    assert failure("1234567").retry_after is None
     assert failure(None).retry_after is None
     assert failure("7").status == 429
     assert failure("7").retryable
@@ -332,3 +334,38 @@ def test_a_launch_under_a_lease_posts_nothing_and_leaves_the_file_for_the_runner
     assert rig.callbacks.progress_requests == []
     written = json.loads((rig.out / "launcher" / "progress.json").read_text())
     assert written["checkpoint"] == "quality"
+
+
+@pytest.mark.parametrize("status", [408, 425])
+def test_a_408_or_425_is_tried_again_at_the_next_tick(tmp_path, routes, fast, status):
+    callbacks, server = routes
+    callbacks.progress_queue = [(status, "later")]
+    reporter, _launcher = reporter_for(tmp_path, server.base_url, Lines())
+    run_for(reporter, 0.9)
+    assert len(callbacks.progress_requests) >= 2
+    assert len(callbacks.progress_reports) >= 1
+
+
+@pytest.mark.parametrize("status", [200, 202])
+def test_a_2xx_that_is_not_json_is_accepted_and_the_posts_go_on(tmp_path, routes, fast, status):
+    callbacks, server = routes
+    callbacks.progress_queue = [(status, None)] * 2
+    log = Lines()
+    reporter, _launcher = reporter_for(tmp_path, server.base_url, log)
+    run_for(reporter, 0.9)
+    assert len(callbacks.progress_requests) >= 3
+    assert reporter.posted >= 3
+    assert not any("posts_stopped" in line for line in log.lines)
+
+
+def test_a_reporter_that_cannot_start_leaves_the_launch_to_finish(rig, fast, monkeypatch):
+    """No thread to be had (``RuntimeError: can't start new thread``): one word, and the job runs."""
+
+    def refuse(_self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(progress.Reporter, "start", refuse)
+    launch = rig.launch(rig.script_spec(RECIPE_SCRIPT))
+    assert launch.exit == 0, launch.log
+    assert "progress_reporter_not_started" in launch.log
+    assert rig.callbacks.progress_reports == []

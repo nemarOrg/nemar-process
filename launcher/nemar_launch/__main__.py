@@ -258,7 +258,7 @@ def _do_work(
         # live progress (ADR 0134) beside the container: written to launcher/progress.json, where a
         # runner reads it for its heartbeat, and on Tapis (no lease) posted to the job-token route.
         # It never touches the container and never fails the job.
-        reporter = progress.Reporter(
+        reporter: progress.Reporter | None = progress.Reporter(
             progress.Source(state.layout.work),
             state.layout.launcher,
             None
@@ -267,13 +267,18 @@ def _do_work(
             log,
         )
         started = time.monotonic()
-        reporter.start()
+        try:
+            reporter.start()
+        except RuntimeError:  # no thread to be had: the job runs, without live progress
+            log.warning("progress_reporter_not_started")
+            reporter = None
         try:
             outcome = run.run_container(
                 argv, env, state.layout.work, terminator, log, oom_check=oom_check
             )
         finally:
-            reporter.stop()
+            if reporter is not None:
+                reporter.stop()
             state.phase("run", started)
             if container is not None:
                 runtime.remove_container(runtime_path, container, env)

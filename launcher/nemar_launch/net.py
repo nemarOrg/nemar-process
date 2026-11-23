@@ -20,6 +20,7 @@ import http.client
 import json
 import os
 import random
+import re
 import socket
 import ssl
 import stat
@@ -135,11 +136,16 @@ def transport_detail(failure: HttpFailure) -> str:
     return "bad_response" if failure.word == "bad_response" else "fetch_failed"
 
 
+# ASCII digits only: `str.isdigit()` is also true for "\u00b2" (superscript two), which `int` refuses.
+_DIGITS = re.compile(r"[0-9]{1,6}")
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+
+
 def _retry_after(error: urllib.error.HTTPError) -> int | None:
     """The whole seconds of a ``Retry-After`` header, or None (absent, a date, or not digits)."""
     headers = getattr(error, "headers", None)
     value = headers.get("Retry-After") if headers is not None else None
-    if not isinstance(value, str) or not value.strip().isdigit() or len(value.strip()) > 6:
+    if not isinstance(value, str) or _DIGITS.fullmatch(value.strip()) is None:
         return None
     return int(value.strip())
 
@@ -377,7 +383,7 @@ def _content_range_start(header: str | None) -> int | None:
     if not header or not header.startswith("bytes "):
         return None
     first = header[len("bytes ") :].split("-", 1)[0]
-    return int(first) if first.isdigit() else None
+    return int(first) if _ASCII_DIGITS.fullmatch(first) else None
 
 
 def download(
@@ -463,7 +469,7 @@ def download(
         if state.have < checker.size:
             if (
                 length_header is not None
-                and length_header.isdigit()
+                and _ASCII_DIGITS.fullmatch(length_header) is not None
                 and received >= int(length_header)
             ):
                 # The server's own body ended where it said it would: a short file, not a dropped

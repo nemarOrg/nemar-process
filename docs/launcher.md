@@ -477,7 +477,7 @@ When there is no progress file (an entry that is not a recipe that declares chec
 
 A thread beside the container builds the object once a minute (the first as soon as it can be built) and writes it to `launcher/progress.json`, replacing the file in one step.
 On Tapis (no lease), it also posts it to `POST <api_base>/compute/jobs/<job_id>/progress` with the job token, never following a redirect, with a 15-second timeout.
-A 429 waits what its `Retry-After` asks (between 1 and 600 seconds, 60 when it says nothing); a 5xx, a timeout or a network fault tries again at the next report; any other refusal stops the posts for the rest of the job.
+A 429 waits what its `Retry-After` asks (ASCII digits only, between 1 and 600 seconds, 60 when it says nothing); a 408, a 425, a 5xx, a timeout or a network fault tries again at the next report; a 2xx is accepted, a body that is not JSON (a proxy's page) included, and does not stop the posts; any other refusal stops the posts for the rest of the job. If the reporter's thread cannot be started, the job runs without live progress and the log says `progress_reporter_not_started`.
 Under a runner (a lease) nothing is posted: the runner reads `launcher/progress.json` and carries it on its heartbeat ([runner.md](runner.md)).
 A report never fails the job: every fault is caught and logged once, as a fixed word.
 `launcher/progress.json` is not one of the four launcher files and is never uploaded.

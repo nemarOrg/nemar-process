@@ -382,13 +382,22 @@ def route_url(api_base: str, job_id: str) -> str:
 
 
 def poster(api_base: str, job_id: str, token: str) -> Callable[[dict[str, Any]], None]:
-    """Post one report to the job-token route (a Tapis job: no lease, no redirect, a short timeout)."""
+    """Post one report to the job-token route (a Tapis job: no lease, no redirect, a short timeout).
+
+    A 2xx is accepted whatever its body: the route answers with JSON, but a 2xx whose body is not JSON
+    (a proxy's page) still means the report arrived, and must not stop the posts."""
     from . import net
 
     url = route_url(api_base, job_id)
 
     def post(document: dict[str, Any]) -> None:
-        net.post_json(url, document, token, timeout=POST_TIMEOUT_SECONDS)
+        try:
+            net.post_json(url, document, token, timeout=POST_TIMEOUT_SECONDS)
+        except net.HttpFailure as failure:
+            status = failure.status
+            if failure.word == "bad_response" and status is not None and 200 <= status < 300:
+                return
+            raise
 
     return post
 
@@ -398,8 +407,9 @@ class Reporter(threading.Thread):
 
     Each tick builds the object (``Source.build``), writes ``launcher/progress.json`` (a runner carries
     it on its heartbeat) and, when ``post`` is given (a Tapis job), posts it. The next tick is a cadence
-    later; a 429 waits what its ``Retry-After`` asks (1 to 600 seconds, 60 when it says nothing); a 5xx,
-    a timeout or a network fault tries again at the next tick; any other refusal (the route refused the
+    later; a 429 waits what its ``Retry-After`` asks (1 to 600 seconds, 60 when it says nothing); a 408, a
+    425, a 5xx, a timeout or a network fault tries again at the next tick; a 2xx is accepted, a body that
+    is not JSON included (``poster``); any other refusal (the route refused the
     job, the body, or its state) stops the posts for the rest of the job. Nothing a tick does can fail
     the job: every fault is caught and logged once per word, with no value read from a file, no address
     and no token.

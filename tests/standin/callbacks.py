@@ -165,6 +165,12 @@ class Callbacks:
                     if self.progress_retry_after is not None:
                         headers["Retry-After"] = self.progress_retry_after
                     return _too_soon(headers)
+                if code is None:  # a proxy's answer: a page, not the route's JSON
+                    return Response(
+                        status=status,
+                        body=b"<html>ok</html>",
+                        headers={"Content-Type": "text/html"},
+                    )
                 return self._refuse(status, code)
         try:
             body = request.json()
