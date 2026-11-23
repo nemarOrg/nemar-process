@@ -54,6 +54,7 @@ RESULT_RELATIVE = os.path.join("launcher", "result.json")
 # the launcher's live progress object (ADR 0134), which the heartbeat carries
 PROGRESS_RELATIVE = ("launcher", "progress.json")
 PROGRESS_MAX_FILE_BYTES = 16 * 1024
+PROGRESS_READ_SECONDS = 15.0  # how often the reader refreshes the snapshot the heartbeat carries
 _RESULT_MAX_BYTES = 65_536
 
 
@@ -272,6 +273,9 @@ class Heartbeat(threading.Thread):
         self._out_dir = out_dir
         self._progress_off = False
         self._progress_sent_at: float | None = None
+        self._snapshot: dict[str, Any] | None = None
+        self._snapshot_lock = threading.Lock()
+        self._drop_said = False
 
     def uploading(self) -> None:
         """The launcher's result exists: the next heartbeat says `uploading`, now."""
@@ -288,43 +292,80 @@ class Heartbeat(threading.Thread):
         if self.is_alive():
             self.join(self._tuning.http_timeout_seconds + 5)
 
+    def _read_progress(self) -> None:
+        """Refresh the snapshot from the job's ``launcher/progress.json``: read, parsed strictly and
+        checked, or None. Runs on its own thread (``_reader``), never on the heartbeat's: a read that
+        hangs (a network file system) can never delay a lease renewal. A dropped object is logged once
+        per job with a fixed word and the check's path word or the exception's class, never a value."""
+        if self._out_dir is None:
+            return
+        value: Any = None
+        reason: str | None = None
+        try:
+            data = read_private_file(self._out_dir, PROGRESS_RELATIVE, PROGRESS_MAX_FILE_BYTES)
+            if data is not None:
+                value = json.loads(
+                    data.decode("utf-8"),
+                    object_pairs_hook=_no_duplicate_keys,
+                    parse_constant=_no_constant,
+                )
+                reason = contract.check_progress(value)
+        except (OSError, ValueError, RecursionError) as error:
+            value, reason = None, type(error).__name__
+        if reason is not None:
+            value = None
+            if not self._drop_said:
+                self._drop_said = True
+                self._log.warn("heartbeat_progress_dropped", job=self._job.id, reason=reason)
+        with self._snapshot_lock:
+            self._snapshot = value
+
+    def _reader(self) -> None:
+        while not self._done.is_set() and not self._progress_off:
+            try:
+                self._read_progress()
+            except Exception as error:  # noqa: BLE001 - a reader fault only means no progress
+                self._log.error(
+                    "progress_reader_error", job=self._job.id, error=type(error).__name__
+                )
+            self._done.wait(min(PROGRESS_READ_SECONDS, self._tuning.heartbeat_seconds))
+
     def _progress(self, phase: str) -> dict[str, Any] | None:
-        """The progress object to carry on this heartbeat, or None. Never raises."""
+        """The last checked snapshot to carry on this heartbeat, or None. No I/O: it never blocks."""
         if phase != "started" or self._progress_off or self._out_dir is None:
             return None
         sent = self._progress_sent_at
         if sent is not None and time.monotonic() - sent < contract.PROGRESS_MIN_INTERVAL_SECONDS:
             return None
-        try:
-            data = read_private_file(self._out_dir, PROGRESS_RELATIVE, PROGRESS_MAX_FILE_BYTES)
-            if data is None:
-                return None
-            value = json.loads(
-                data.decode("utf-8"),
-                object_pairs_hook=_no_duplicate_keys,
-                parse_constant=_no_constant,
-            )
-        except (OSError, ValueError, RecursionError):
-            return None
-        return value if contract.check_progress(value) is None else None
+        with self._snapshot_lock:
+            return self._snapshot
 
     def _beat(self, phase: str) -> bool:
-        """One heartbeat: with progress when there is some to carry, and, if the Worker refuses the
-        body because of it, at once again without (the lease must not wait a cycle)."""
+        """One heartbeat, with progress when there is a snapshot to carry.
+
+        If a heartbeat that carried progress fails with anything but a lease, fatal or drain word, the same
+        heartbeat goes again at once WITHOUT progress (the lease never waits a cycle for it); a refusal
+        that will not change (any status below 500 but 429) also turns progress off for the job. A failed
+        plain resend is handled as any failed heartbeat."""
         progress = self._progress(phase)
         try:
             stop = self._api.heartbeat(self._job.id, self._job.lease_id, phase, progress)
         except ApiError as error:
-            if progress is None or error.status != 400 or error.word != "invalid_body":
+            if progress is None or error.lease_lost or error.fatal or error.drain:
                 raise
-            self._progress_off = True
-            self._log.warn("heartbeat_progress_refused", job=self._job.id)
+            if not error.transient:
+                self._progress_off = True
+                self._log.warn("heartbeat_progress_refused", job=self._job.id, **error.fields())
             return self._api.heartbeat(self._job.id, self._job.lease_id, phase)
         if progress is not None:
             self._progress_sent_at = time.monotonic()
         return stop
 
     def run(self) -> None:
+        if self._out_dir is not None:
+            threading.Thread(
+                target=self._reader, name="progress-" + self._job.id, daemon=True
+            ).start()
         while not self._done.is_set():
             phase = "uploading" if self._uploading else "started"
             pause = self._tuning.heartbeat_seconds

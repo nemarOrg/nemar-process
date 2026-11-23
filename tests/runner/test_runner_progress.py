@@ -206,3 +206,151 @@ def test_an_oversized_file_is_refused(tmp_path):
     (out / "launcher" / "progress.json").write_bytes(b" " * (job.PROGRESS_MAX_FILE_BYTES + 1))
     with pytest.raises(ValueError):
         job.read_private_file(str(out), job.PROGRESS_RELATIVE, job.PROGRESS_MAX_FILE_BYTES)
+
+
+def refused_with_progress(status, body, content_type="application/json"):
+    from server import Response
+
+    def answer(request_body, _n):
+        if "progress" not in request_body:
+            return None
+        if content_type == "application/json":
+            return Response.json_body(status, body)
+        return Response(status=status, body=body, headers={"Content-Type": content_type})
+
+    return answer
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "content_type"),
+    [
+        (403, b"<html>forbidden</html>", "text/html"),
+        (413, {"error": "too large"}, "application/json"),
+        (400, {"error": "bad", "code": "something_else"}, "application/json"),
+        (400, b"", "text/plain"),
+    ],
+)
+def test_any_refusal_of_a_progress_heartbeat_is_resent_plain_at_once_and_turns_progress_off(
+    tmp_path, no_gate, status, body, content_type
+):
+    """Not only `invalid_body`: a wordless 403 from a proxy, a 413, another 400. Retrying WITH progress
+    would refuse every renewal until the lease is gone."""
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        rig.routes.on_heartbeat = refused_with_progress(status, body, content_type)
+        assert run_job(rig) == "finished"
+        bodies = rig.routes.bodies("heartbeat")
+        assert sum(1 for b in bodies if "progress" in b) == 1
+        first = next(i for i, b in enumerate(bodies) if "progress" in b)
+        assert "progress" not in bodies[first + 1]
+        assert rig.events("heartbeat_progress_refused")
+        assert not rig.events("lease_lost")
+    finally:
+        rig.close()
+
+
+def test_a_server_fault_on_a_progress_heartbeat_resends_plain_and_keeps_progress(tmp_path, no_gate):
+    from server import Response
+
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        state = {"faulted": False}
+
+        def answer(body, _n):
+            if "progress" in body and not state["faulted"]:
+                state["faulted"] = True
+                return Response.json_body(503, {"error": "overloaded"})
+            return None
+
+        rig.routes.on_heartbeat = answer
+        assert run_job(rig) == "finished"
+        bodies = rig.routes.bodies("heartbeat")
+        first = next(i for i, b in enumerate(bodies) if "progress" in b)
+        assert "progress" not in bodies[first + 1]  # never retried WITH progress
+        assert sum(1 for b in bodies if "progress" in b) >= 2  # a transient fault keeps it on
+        assert not rig.events("heartbeat_progress_refused")
+    finally:
+        rig.close()
+
+
+def test_a_lost_lease_on_a_progress_heartbeat_is_a_lost_lease(tmp_path, no_gate):
+    from server import Response
+
+    rig = build(tmp_path, writes_progress(PROGRESS, "time.sleep(3)\nwrite_result()\n"))
+    try:
+        rig.routes.on_heartbeat = lambda body, n: (
+            Response.json_body(409, {"error": "lease_lost"}) if "progress" in body else None
+        )
+        run_job(rig)
+        assert rig.events("lease_lost")
+        bodies = rig.routes.bodies("heartbeat")
+        first = next(i for i, b in enumerate(bodies) if "progress" in b)
+        assert len(bodies) == first + 1  # no plain resend after a lost lease
+    finally:
+        rig.close()
+
+
+def test_a_reader_that_hangs_never_delays_the_heartbeat(tmp_path, no_gate, monkeypatch):
+    """The file is read on its own thread: with that read stuck (a hung network file system, made here by
+    a read that never returns), the heartbeats go on at their interval."""
+    import threading
+
+    stuck = threading.Event()
+
+    def hang(*_args, **_kwargs):
+        stuck.wait(30)
+        return
+
+    monkeypatch.setattr(job, "read_private_file", hang)
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        assert run_job(rig) == "finished"
+        started = [b for b in rig.routes.bodies("heartbeat") if b["phase"] == "started"]
+        assert len(started) >= 4  # 1.2 s at 0.2 s, no stall
+        assert with_progress(rig) == []
+    finally:
+        stuck.set()
+        rig.close()
+
+
+def test_a_dropped_object_is_logged_once_with_a_word_and_never_its_value(tmp_path, no_gate):
+    bad = dict(PROGRESS, checkpoint="Secret-Value")
+    rig = build(tmp_path, writes_progress(bad))
+    try:
+        assert run_job(rig) == "finished"
+        dropped = rig.events("heartbeat_progress_dropped")
+        assert len(dropped) == 1
+        assert dropped[0]["reason"] == "progress.checkpoint"
+        assert "Secret-Value" not in json.dumps(rig.log_lines())
+    finally:
+        rig.close()
+
+
+def test_an_expired_token_then_a_refused_body_ends_in_a_plain_heartbeat(tmp_path, no_gate):
+    """The token renewal path (``Api._authed``) resends the same body, progress included; when the
+    Worker then refuses it, the heartbeat goes again at once without progress."""
+    from server import Response
+
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        seen = {"expired": False}
+
+        def answer(body, _n):
+            if "progress" not in body:
+                return None
+            if not seen["expired"]:
+                seen["expired"] = True
+                rig.routes.expired.add(rig.routes.tokens[-1])
+                return Response.json_body(401, {"error": "runner_token_expired"})
+            return Response.json_body(400, {"error": "invalid_body"})
+
+        rig.routes.on_heartbeat = answer
+        assert run_job(rig) == "finished"
+        bodies = rig.routes.bodies("heartbeat")
+        first = next(i for i, b in enumerate(bodies) if "progress" in b)
+        assert "progress" in bodies[first + 1]  # the renewal resent the same body
+        assert "progress" not in bodies[first + 2]  # then the plain resend
+        assert len(rig.routes.tokens) >= 2
+        assert not rig.events("lease_lost")
+    finally:
+        rig.close()
