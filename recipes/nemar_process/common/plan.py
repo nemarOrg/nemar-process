@@ -172,6 +172,13 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "rejint": "int",
         "maxrej": "int",
         "numrej": "int",
+        # AMICA's convergence stops: pAMICA's names (`min_nd`) or the binary's (`min_grad_norm`)
+        "use_min_dll": "bool",
+        "min_dll": "float",
+        "maxincs": "int",
+        "use_grad_norm": "bool",
+        "min_nd": "float",
+        "min_grad_norm": "float",
     },
     "eegprep.pop_iclabel": {"icversion": "str"},
 }

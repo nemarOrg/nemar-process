@@ -126,7 +126,7 @@ def test_the_recipe_is_one_recipe_with_two_inputs_and_the_options_the_card_names
         "--ica-engine": "pamica",
         "--ica-device": "auto",
         "--ica-threads": 1,
-        "--ica-max-iter": 2000,
+        "--ica-max-iter": 4000,
         "--time-budget-s": None,
     }
     assert RECIPE.reading("zarr").id == "nemar-ica"
@@ -362,8 +362,8 @@ def test_the_pamica_block_states_every_setting_eegprep_applies_as_the_docs_list_
         "lrate": 0.05,
         "minlrate": 1e-8,
         "maxdecs": 3,
-        "use_min_dll": False,
-        "use_grad_norm": False,
+        "use_min_dll": True,  # AMICA's own stops, on (the recipe's; eegprep's table has them off)
+        "use_grad_norm": True,
         "do_newton": True,
         "newt_start": 50,
         "newtrate": 1.0,
@@ -978,6 +978,12 @@ PAMICA_KEYS = {
     "rejstart": 2,
     "rejint": 3,
     "maxrej": 3,
+    # AMICA's convergence stops at the Fortran program's defaults, under pAMICA's names
+    "use_min_dll": True,
+    "min_dll": 1e-9,
+    "maxincs": 5,
+    "use_grad_norm": True,
+    "min_nd": 1e-7,
 }
 AMICA15_KEYS = {
     "icatype": "runamica15",
@@ -994,6 +1000,11 @@ AMICA15_KEYS = {
     "rejstart": 2,
     "rejint": 3,
     "numrej": 3,
+    # the same stops under the binary's names
+    "use_min_dll": 1,
+    "min_dll": 1e-9,
+    "use_grad_norm": 1,
+    "min_grad_norm": 1e-7,
 }
 
 
@@ -1051,8 +1062,30 @@ def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_fil
         "rejint": "3",
     }
     assert float(seen["rejsig"]) == 3.0
+    # and AMICA's convergence stops, switched on (their thresholds: the next test)
+    assert (seen["use_min_dll"].strip(), seen["use_grad_norm"].strip()) == ("1", "1")
     assert "seed" not in seen  # nothing seeds the binary: it starts from the clock
     assert seen["fix_init"].strip() == "0"  # eegprep's own default, not a setting of the recipe
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "eegprep's runamica._write_param_file writes a float outside _SCI_PARAMS with '%f', so "
+        "min_dll=1e-9 and min_grad_norm=1e-7 reach the binary as 0.000000 (an eegprep fix); "
+        "this test passes, and so fails as strict, once eegprep writes them as they are"
+    ),
+)
+def test_the_binary_reads_amicas_convergence_thresholds_as_passed(copying_binary, tmp_path):
+    options = {"ica_engine": "amica15", "ica_device": "cpu", "ica_max_iter": 7, "ica_threads": 1}
+    (recording,) = io.discover(DATASET)
+    with pytest.raises(RecordingError), determinism.pinned_threads(1):
+        outputs.produce(
+            recording, run_context(**options), tmp_path / "o", cut_fixture(), profile="a"
+        )
+    seen = dict(line.split(None, 1) for line in copying_binary.read_text("ascii").splitlines())
+    assert float(seen["min_dll"]) == 1e-9
+    assert float(seen["min_grad_norm"]) == 1e-7
 
 
 def test_pamica_is_found_by_the_search_for_the_module_and_torch(tmp_path, monkeypatch):

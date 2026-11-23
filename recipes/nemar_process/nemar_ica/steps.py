@@ -107,9 +107,19 @@ REJSIG = 3.0
 REJSTART = 2
 REJINT = 3
 NUMREJ = 3
+# AMICA's own convergence stops, on at the Fortran program's defaults (the owner's "conservative"
+# choice, 2026-11-23): a fit stops when its log-likelihood gains less than `min_dll` for more than
+# `maxincs` consecutive iterations, or when the norm of its weight update falls to `min_grad_norm`,
+# or at `DEFAULT_MAX_ITER`; eegprep's runamica15 table turns both off, so they are passed. pAMICA
+# names the norm threshold `min_nd`; the binary takes `max_incs` from its own default (5).
+USE_MIN_DLL = True
+MIN_DLL = 1e-9
+MAXINCS = 5
+USE_GRAD_NORM = True
+MIN_GRAD_NORM = 1e-7
 RANK_CAP = 64
 MIN_RANK = 2
-DEFAULT_MAX_ITER = 2000
+DEFAULT_MAX_ITER = 4000
 
 ICLABEL_FUNCTION = "eegprep.pop_iclabel"
 ICLABEL_VERSION = "default"
@@ -194,6 +204,11 @@ def pamica_call(max_iter: int, device: str, threads: int, rank: int) -> dict[str
         "rejstart": REJSTART,
         "rejint": REJINT,
         "maxrej": NUMREJ,
+        "use_min_dll": USE_MIN_DLL,
+        "min_dll": MIN_DLL,
+        "maxincs": MAXINCS,
+        "use_grad_norm": USE_GRAD_NORM,
+        "min_nd": MIN_GRAD_NORM,
     }
 
 
@@ -218,4 +233,8 @@ def amica15_call(
         "rejstart": REJSTART,
         "rejint": REJINT,
         "numrej": NUMREJ,
+        "use_min_dll": int(USE_MIN_DLL),
+        "min_dll": MIN_DLL,
+        "use_grad_norm": int(USE_GRAD_NORM),
+        "min_grad_norm": MIN_GRAD_NORM,
     }

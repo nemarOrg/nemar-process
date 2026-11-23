@@ -1,7 +1,7 @@
 """``nemar-ica``'s command-line options (``--ica-engine``, ``--ica-device``, ``--ica-threads``,
 ``--ica-max-iter``) and the settings a run takes from them.
 
-Only the registry's invocation is dispatched by the platform: ``pamica``, 2000 iterations, one
+Only the registry's invocation is dispatched by the platform: ``pamica``, up to 4000 iterations, one
 thread, device ``auto``. The options that change values (engine, iterations, threads) are for
 manual and test runs, and every one of them is recorded.
 """
@@ -55,7 +55,8 @@ MAX_ITER = Option(
     "--ica-max-iter",
     positive_int,
     steps.DEFAULT_MAX_ITER,
-    "iterations of the decomposition, recorded (a short test product says so)",
+    "the most iterations of the decomposition, recorded (AMICA's own stops may end it earlier; a "
+    "short test product says so)",
 )
 
 OPTIONS = (ENGINE, DEVICE, THREADS, MAX_ITER, TIME_BUDGET_S)
