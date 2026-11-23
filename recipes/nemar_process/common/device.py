@@ -1,9 +1,9 @@
 """Which device a decomposition runs on, and the device facts a record states.
 
 The only module under ``recipes/`` that imports torch, and it never does numerics with it: it asks
-whether a GPU is usable, reads the GPU's name, its memory and the versions torch reports, caps the
-share of the GPU's memory this process may take, recognizes torch's CUDA out-of-memory error by its
-class and hands the GPU memory torch keeps cached back to the driver. The numerics are eegprep's
+whether a GPU is usable, reads the GPU's name, its memory and the versions torch reports, limits
+how much of the GPU's memory torch's allocator may reserve in this process, recognizes torch's CUDA
+out-of-memory error by its class and hands the GPU memory torch keeps cached back to the driver. The numerics are eegprep's
 (and pAMICA's, through eegprep); ``tests/recipes/test_upstream_first.py`` allows torch in this file
 and nowhere else.
 
@@ -14,11 +14,13 @@ device that runs, with the reason and whether it was a fallback. Outside a runne
 set, and a visible GPU is used, else the CPU. The device never enters the engine stamp, so a GPU run
 and a CPU run of one recipe carry the same stamp.
 
-After the resolution, a job on the GPU protects the people who share it: its memory is capped at
-``NEMAR_GPU_MEMORY_MB`` before its first fit (``start_gpu``), and a CUDA out-of-memory error or
-another process taking memory on the GPU moves it to the CPU for the rest of the job
-(``next_device`` is the rule, ``contended`` the reading). The move is the run's state, which
-``nemar_ica/tally.py`` keeps; nothing here moves a job by itself.
+After the resolution, a job on the GPU protects the people who share it. Before its first fit,
+torch's allocator in this process is limited to ``min(NEMAR_GPU_MEMORY_MB, the GPU's memory)``
+(``start_gpu``); the CUDA context and the memory the CUDA libraries take for themselves are outside
+the allocator and come on top of that limit. A CUDA out-of-memory error, or growth of the GPU memory
+outside this process's allocator (``contended``: other processes, and the job's own CUDA libraries),
+moves the job to the CPU for the rest of it (``next_device`` is the rule). The move is the run's
+state, which ``nemar_ica/tally.py`` keeps; nothing here moves a job by itself.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ CUDA_OOM = "cuda_oom"
 GPU_CONTENDED = "gpu_contended"
 EVENTS = (START, OK, CUDA_OOM, GPU_CONTENDED)
 MOVES = frozenset({CUDA_OOM, GPU_CONTENDED})
-# Other processes holding more than this much more of the GPU's memory than when the job first
+# GPU memory outside this process's torch allocator grown by more than this since the job first
 # initialized CUDA is contention. A constant, which the dataset record states (``gpu_contention_mib``).
 CONTENTION_MIB = 256
 
@@ -208,9 +210,10 @@ def resolve(
 def next_device(current: str, event: str) -> str:
     """The device a job runs on after ``event``, from the device it ran on: the rule of the moves.
 
-    From ``cuda``, ``cuda_oom`` (a fit ran out of the GPU's memory) and ``gpu_contended`` (another
-    process took memory on the GPU) move the job to ``cpu`` for the rest of it; ``start`` and ``ok``
-    leave it where it is. ``cpu`` never moves: nothing returns a job to the GPU.
+    From ``cuda``, ``cuda_oom`` (a fit ran out of the GPU's memory) and ``gpu_contended`` (the GPU
+    memory outside the job's allocator grew past ``CONTENTION_MIB``, ``contended``) move the job to
+    ``cpu`` for the rest of it; ``start`` and ``ok`` leave it where it is. ``cpu`` never moves:
+    nothing returns a job to the GPU.
     """
     if current not in RUNNING:
         raise ValueError("a job runs on one of {}".format(", ".join(RUNNING)))
@@ -244,9 +247,26 @@ def memory_fraction(cap_mb: int, total_bytes: int) -> float:
     return min(1.0, cap_mb * MIB / total_bytes)
 
 
+def allocator_limit_mb(cap_mb: int | None, total_bytes: int) -> int:
+    """The most torch's allocator may reserve in this process, in whole mebibytes (rounded down):
+    ``min(cap, the GPU's memory)``, or the GPU's memory when no cap was passed. The CUDA context and
+    the CUDA libraries' own memory are not in it."""
+    whole = total_bytes // MIB
+    return whole if cap_mb is None else min(cap_mb, whole)
+
+
+def as_mib(count: int) -> float:
+    """A measured number of bytes in mebibytes, to three decimals, as a record states it."""
+    return round(count / MIB, 3)
+
+
 def contended(baseline: int, now: int) -> bool:
-    """Whether other processes now hold more than ``CONTENTION_MIB`` more of the GPU's memory, in
-    bytes, than they held when this job first initialized CUDA (``baseline``)."""
+    """Whether the GPU memory outside this process's torch allocator (``others_bytes``) has grown by
+    more than ``CONTENTION_MIB``, in bytes, since the job first initialized CUDA (``baseline``).
+
+    What grows is mostly other processes' memory, but it can include the job's own: the kernels and
+    library workspaces the CUDA libraries load for themselves after the first fit count too.
+    """
     return now - baseline > CONTENTION_MIB * MIB
 
 
@@ -275,18 +295,22 @@ def holds_cuda_out_of_memory(error: BaseException) -> bool:
 class GpuStart:
     """What a job set and read when it first initialized CUDA, before its first fit there.
 
-    ``cap_mb`` is the cap applied (None: none was passed, and torch may use the whole GPU) and
-    ``baseline`` the memory, in bytes, that other processes held on the GPU then.
+    ``cap_mb`` is the cap the launcher passed (None: none was passed), ``limit_mb`` the most torch's
+    allocator may reserve in this process (``allocator_limit_mb``), and ``baseline`` the GPU memory,
+    in bytes, outside this process's allocator then (``others_bytes``: other processes and this
+    process's CUDA context).
     """
 
     cap_mb: int | None
+    limit_mb: int
     baseline: int
 
 
 def others_bytes() -> int:
     """The GPU memory, in bytes, that is neither free nor reserved by torch's allocator in this
-    process: what other processes hold, and what this one holds outside the allocator (its CUDA
-    context, and memory the CUDA libraries take for themselves)."""
+    process: ``total - free - torch.cuda.memory_reserved(0)`` from ``torch.cuda.mem_get_info(0)``.
+    That is what other processes hold, and what this one holds outside the allocator (its CUDA
+    context, and the memory the CUDA libraries take for themselves)."""
     import torch
 
     free, total = torch.cuda.mem_get_info(0)
@@ -294,15 +318,17 @@ def others_bytes() -> int:
 
 
 def start_gpu(cap_mb: int | None) -> GpuStart:
-    """Initialize CUDA for the job, cap its memory at ``cap_mb`` when one was passed, and read what
-    other processes hold. Called once per job, before its first fit on the GPU, so that torch never
-    grows past the cap: an allocation beyond it raises torch's out-of-memory error instead."""
+    """Initialize CUDA for the job, limit torch's allocator to ``min(cap_mb, the GPU's memory)`` when
+    a cap was passed, and read the memory outside the allocator. Called once per job, before its
+    first fit on the GPU, so that the allocator never reserves more than that limit: an allocation
+    beyond it raises torch's out-of-memory error instead. The CUDA context and the CUDA libraries'
+    own memory are outside the allocator and come on top of the limit."""
     import torch
 
     _, total = torch.cuda.mem_get_info(0)  # the job's first CUDA initialization
     if cap_mb is not None:
         torch.cuda.set_per_process_memory_fraction(memory_fraction(cap_mb, int(total)), 0)
-    return GpuStart(cap_mb, others_bytes())
+    return GpuStart(cap_mb, allocator_limit_mb(cap_mb, int(total)), others_bytes())
 
 
 def release_cached_memory() -> None:
@@ -332,12 +358,19 @@ def bit_reproducible(engine: str, device: str, threads: int) -> bool | None:
 
 
 def facts(
-    resolution: Resolution, *, threads: int, gpu_memory_cap_mb: int | None = None
+    resolution: Resolution,
+    *,
+    threads: int,
+    gpu_memory_cap_mb: int | None = None,
+    gpu_allocator_limit_mb: int | None = None,
 ) -> dict[str, Any]:
     """The device facts of one recording's record, as the record and ``_ica.json`` state them.
 
-    ``gpu_memory_cap_mb`` is the cap the job's GPU memory was held to (``GpuStart.cap_mb``), None
-    when none was passed or the job never initialized CUDA.
+    ``gpu_memory_cap_mb`` is the cap the launcher passed (``NEMAR_GPU_MEMORY_MB``) as the job read
+    it when it first initialized CUDA, and ``gpu_allocator_limit_mb`` the most torch's allocator
+    could then reserve in this process, ``min(cap, the GPU's memory)`` (``GpuStart``); the CUDA
+    context and the CUDA libraries' own memory come on top of it. Both are None when the job never
+    initialized CUDA, and the cap is None too when none was passed.
     """
     torch_version, torch_cuda = torch_facts()
     return {
@@ -346,6 +379,7 @@ def facts(
         "device_reason": resolution.reason,
         "fallback": resolution.fallback,
         "gpu_memory_cap_mb": gpu_memory_cap_mb,
+        "gpu_allocator_limit_mb": gpu_allocator_limit_mb,
         "gpu_name": gpu_name() if resolution.device == "cuda" else None,
         "torch_version": torch_version,
         "torch_cuda": torch_cuda,

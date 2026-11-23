@@ -11,9 +11,12 @@ product directories (``aggregate``) runs no recording and has neither: its recor
 
 The moves (docs/recipes.md, ``nemar-ica``): under ``--ica-device auto``, a job on the GPU moves to
 the CPU for the rest of the job when a fit runs out of the GPU's memory (``after_failure``: that
-recording is fitted again on the CPU, with every setting the same) or when other processes took
-memory on the GPU since the job first initialized CUDA (``before_fit``: that recording and every
-later one). The rule is ``device.next_device``; the move is
+recording is fitted again on the CPU, with every setting the same) or when the GPU memory outside
+this process's torch allocator grew by more than ``device.CONTENTION_MIB`` since the job first
+initialized CUDA (``before_fit``: that recording and every later one). That memory is mostly other
+processes', but it can include the job's own CUDA libraries, so a ``gpu_contended`` move lists what
+was measured (``baseline_mib``, ``others_mib``). Both moves hand the memory torch cached back to the
+driver; the CUDA context stays until the job ends. The rule is ``device.next_device``; the move is
 the run's state because every recording resolves its device alike (``device.resolve``), and it
 overrides the resolution of every later one. A move is listed when it is made, so a recording that
 then fails keeps it in ``fallbacks``. An explicit ``--ica-device cuda`` is never answered with
@@ -56,26 +59,32 @@ def begin(resolution: Resolution) -> Resolution:
     return resolution
 
 
-def _move(path: str, resolution: Resolution, event: str) -> Resolution | None:
-    """Move the job by ``event`` when the rule says so, and list the move; None when it stays (an
-    explicit device, or the CPU)."""
+def _move(
+    path: str,
+    resolution: Resolution,
+    event: str,
+    measured: dict[str, float] | None = None,
+) -> Resolution | None:
+    """Move the job by ``event`` when the rule says so, and list the move with what was measured;
+    None when it stays (an explicit device, or the CPU)."""
     if resolution.requested != "auto":
         return None
     target = device.next_device(resolution.device, event)
     if target == resolution.device:
         return None
     _RUN.moved = event
-    _RUN.fallbacks.append({"event": event, "path": path})
+    _RUN.fallbacks.append({"event": event, "path": path, **(measured or {})})
     return Resolution(resolution.requested, target, event)
 
 
 def before_fit(path: str, resolution: Resolution) -> Resolution:
     """The device the recording's fit runs on, decided right before it.
 
-    On the GPU, the job's first fit there initializes CUDA, caps the job's memory at the launcher's
-    ``NEMAR_GPU_MEMORY_MB`` and reads what other processes hold; before every later fit there, other
-    processes holding more than ``device.CONTENTION_MIB`` more than then is contention, which under
-    ``auto`` moves this recording and every later one to the CPU. A fit already running is never
+    On the GPU, the job's first fit there initializes CUDA, limits torch's allocator to the
+    launcher's ``NEMAR_GPU_MEMORY_MB`` (``device.start_gpu``) and reads the memory outside the
+    allocator; before every later fit there, growth of that memory by more than
+    ``device.CONTENTION_MIB`` is contention, which under ``auto`` moves this recording and every later
+    one to the CPU, lists both readings and hands torch's cache back. A fit already running is never
     interrupted. On the CPU nothing is read.
     """
     if resolution.device != "cuda":
@@ -83,13 +92,26 @@ def before_fit(path: str, resolution: Resolution) -> Resolution:
     if _RUN.gpu is None:
         _RUN.gpu = device.start_gpu(device.memory_cap_mb())
         return resolution
-    if resolution.requested == "auto" and device.contended(
-        _RUN.gpu.baseline, device.others_bytes()
-    ):
-        moved = _move(path, resolution, device.GPU_CONTENDED)
-        if moved is not None:
-            return moved
-    return resolution
+    if resolution.requested != "auto":
+        return resolution  # an explicit device never moves: nothing to read
+    moved = contention_move(path, resolution, _RUN.gpu.baseline, device.others_bytes())
+    if moved is None:
+        return resolution
+    device.release_cached_memory()
+    return moved
+
+
+def contention_move(
+    path: str, resolution: Resolution, baseline: int, now: int
+) -> Resolution | None:
+    """The move a contention reading makes, from the two readings in bytes (``device.others_bytes``
+    when the job first initialized CUDA, and now): ``gpu_contended`` under ``auto`` on the GPU when
+    the growth is above ``device.CONTENTION_MIB``, listed with both readings in mebibytes; None
+    otherwise."""
+    if not device.contended(baseline, now):
+        return None
+    measured = {"baseline_mib": device.as_mib(baseline), "others_mib": device.as_mib(now)}
+    return _move(path, resolution, device.GPU_CONTENDED, measured)
 
 
 def after_failure(path: str, resolution: Resolution, error: BaseException) -> Resolution | None:
@@ -98,7 +120,8 @@ def after_failure(path: str, resolution: Resolution, error: BaseException) -> Re
 
     Only torch's CUDA out-of-memory error, found by its class in the error's chain, under ``auto``
     on the GPU, moves the job (``_move`` and the rule): the recording is fitted again on the CPU,
-    with every setting the same, and so is every later one. Any other error, an explicit device or a fit on the CPU gives None.
+    with every setting the same, and so is every later one (the caller hands torch's cache back
+    first). Any other error, an explicit device or a fit on the CPU gives None.
     """
     if not device.holds_cuda_out_of_memory(error):
         return None
@@ -116,11 +139,19 @@ def devices() -> dict[str, int]:
 
 
 def fallbacks() -> list[dict[str, Any]]:
-    """Every move of the run, in the order made: its event and the recording it was made in."""
+    """Every move of the run, in the order made: its event, the recording it was made in and, for
+    contention, the two readings it was decided on."""
     return [dict(entry) for entry in _RUN.fallbacks]
 
 
 def gpu_memory_cap_mb() -> int | None:
-    """The cap the job's GPU memory was held to, in mebibytes; None when no cap was passed or the
-    job never initialized CUDA."""
+    """The cap the launcher passed, as the job read it when it first initialized CUDA; None when
+    none was passed or the job never initialized CUDA."""
     return None if _RUN.gpu is None else _RUN.gpu.cap_mb
+
+
+def gpu_allocator_limit_mb() -> int | None:
+    """The most torch's allocator could reserve in this process, ``min(cap, the GPU's memory)`` in
+    whole mebibytes (the CUDA context and the libraries' own memory come on top); None when the job
+    never initialized CUDA."""
+    return None if _RUN.gpu is None else _RUN.gpu.limit_mb

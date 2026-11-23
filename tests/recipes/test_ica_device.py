@@ -182,6 +182,27 @@ def test_the_cap_is_its_share_of_the_gpus_memory_and_never_more_than_all(cap_mb,
 
 
 @pytest.mark.parametrize(
+    ("cap_mb", "total", "expected"),
+    [
+        (64, 16384 * MIB, 64),
+        (32768, 16384 * MIB, 16384),  # never more than the GPU has
+        (None, 16384 * MIB, 16384),  # no cap: the whole GPU
+        (None, 16384 * MIB + MIB - 1, 16384),  # whole mebibytes, rounded down
+    ],
+)
+def test_the_allocator_limit_is_the_cap_or_the_gpus_memory_whichever_is_less(
+    cap_mb, total, expected
+):
+    assert device.allocator_limit_mb(cap_mb, total) == expected
+
+
+def test_a_measured_count_of_bytes_is_stated_in_mebibytes_to_three_decimals():
+    assert device.as_mib(300 * MIB) == 300.0
+    assert device.as_mib(MIB + 1024) == 1.001
+    assert device.as_mib(0) == 0.0
+
+
+@pytest.mark.parametrize(
     ("environ", "expected"),
     [({}, None), ({"NEMAR_GPU_MEMORY_MB": ""}, None), ({"NEMAR_GPU_MEMORY_MB": "8192"}, 8192)],
 )
@@ -229,8 +250,26 @@ def test_an_out_of_memory_under_auto_moves_that_recording_and_the_rest_of_the_jo
     # the CPU never moves: no second move, no contention reading, no GPU touched
     assert tally.after_failure(second, later, out_of_memory()) is None
     assert tally.before_fit(second, later) == later
+    assert tally.contention_move(second, later, 0, 1024 * MIB) is None
     assert len(tally.fallbacks()) == 1
     assert tally.gpu_memory_cap_mb() is None  # this job never initialized CUDA
+    assert tally.gpu_allocator_limit_mb() is None
+
+
+def test_contention_under_auto_moves_the_job_and_lists_both_readings(fresh_tally):
+    path = "sub-02/eeg/sub-02_task-rest_eeg.set"
+    assert tally.contention_move(path, GPU_IDLE, 400 * MIB, 656 * MIB) is None  # exactly 256 MiB
+    explicit = Resolution("cuda", "cuda", device.REQUESTED)
+    assert tally.contention_move(path, explicit, 400 * MIB, 4096 * MIB) is None
+    assert tally.fallbacks() == []
+    moved = tally.contention_move(path, GPU_IDLE, 400 * MIB, 656 * MIB + 1)
+    assert moved is not None
+    assert (moved.device, moved.reason, moved.fallback) == ("cpu", "gpu_contended", True)
+    assert tally.fallbacks() == [
+        {"event": "gpu_contended", "path": path, "baseline_mib": 400.0, "others_mib": 656.0}
+    ]
+    later = tally.begin(GPU_IDLE)
+    assert (later.device, later.reason) == ("cpu", "gpu_contended")
 
 
 def test_nothing_but_torchs_error_under_auto_on_the_gpu_moves_a_job(fresh_tally):
@@ -367,6 +406,7 @@ def test_a_runners_cpu_decision_is_stated_in_every_record_and_the_stamp_is_the_c
             block["fallback"],
         ) == ("auto", "cpu", "gpu_reserved", True)
         assert block["gpu_memory_cap_mb"] is None  # no cap applies on the CPU
+        assert block["gpu_allocator_limit_mb"] is None
         assert block["gpu_name"] is None
         assert block["bit_reproducible"] is True
     (row,) = table_of(reserved)

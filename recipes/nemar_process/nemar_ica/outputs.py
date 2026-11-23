@@ -149,7 +149,10 @@ def facts(fit: pipeline.Decomposition, profile: str) -> dict[str, Any]:
         "iclabel": fit.iclabel,
         "input_profile": profile,
         **device.facts(
-            resolution, threads=settings.threads, gpu_memory_cap_mb=tally.gpu_memory_cap_mb()
+            resolution,
+            threads=settings.threads,
+            gpu_memory_cap_mb=tally.gpu_memory_cap_mb(),
+            gpu_allocator_limit_mb=tally.gpu_allocator_limit_mb(),
         ),
     }
     if settings.native:
