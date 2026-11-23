@@ -133,6 +133,7 @@ def table_lines(base: str, relative: Sequence[str]) -> Generator[str, None, None
     try:
         pending = b""
         total = 0
+        empty = 0
         while True:
             chunk = os.read(fd, 1024 * 1024)
             if not chunk:
@@ -148,9 +149,18 @@ def table_lines(base: str, relative: Sequence[str]) -> Generator[str, None, None
                 if len(raw) > TABLE_LINE_MAX_BYTES:
                     raise Unusable("line_too_long")
                 try:
-                    yield raw.decode("utf-8").rstrip("\r")
+                    line = raw.decode("utf-8").rstrip("\r")
                 except UnicodeDecodeError:
                     raise Unusable("not_text") from None
+                # empty lines are held back and given only when a line follows them: trailing ones
+                # are dropped, as nemar-cli's parser drops them
+                if line == "":
+                    empty += 1
+                    continue
+                for _ in range(empty):
+                    yield ""
+                empty = 0
+                yield line
     finally:
         with contextlib.suppress(OSError):
             os.close(fd)

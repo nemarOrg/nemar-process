@@ -387,3 +387,15 @@ def test_a_table_past_the_total_cap_is_refused(outputs, monkeypatch):
     with pytest.raises(progress.Unusable) as caught:
         progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "too_large"
+
+
+def test_trailing_empty_lines_are_not_rows(outputs):
+    """Header, one row and empty lines after it: one row, as nemar-cli's parser reads it; an empty line
+    between rows is still a row of the wrong width."""
+    write_run(outputs, recipe_file(1), [row("a.set"), "\n", "\r\n"])
+    document = progress.Source(str(outputs.parent)).build()
+    assert document["counts"]["import"] == {"passed": 1, "failed": 0, "skipped": 0, "total": 1}
+    write_run(outputs, recipe_file(2), [row("a.set"), "\n", row("b.set")])
+    with pytest.raises(progress.Unusable) as caught:
+        progress.Source(str(outputs.parent)).build()
+    assert caught.value.word == "table_row_width"
