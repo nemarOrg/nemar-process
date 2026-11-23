@@ -606,7 +606,9 @@ The chain is the same on both inputs, and the record says what the fit was given
                    {"step": "asr", "function": "eegprep.clean_asr"},
                    {"step": "asr", "function": "eegprep.clean_artifacts"}, ...],
  "store": {"path": "...", "group": "...", "content_sha256": "..."},
- "channels": ["Fp1", ...], "reference": "average", "unit": "uV"}
+ "channels": ["Fp1", ...],
+ "channel_types": [["Fp1", "EEG"], ..., ["ECG", "ECG"]], "channel_types_sha256": "...",
+ "reference": "average", "unit": "uV"}
 ```
 
 `preprocessing` names, in the order they ran, the steps of the plan whose functions changed the data the fit received (the channel selection, the flatline and bad-channel removals, the drift high-pass, each line-noise band-stop, ASR and the cut of its bursts, and the average reference); their parameters are those steps'.
@@ -615,6 +617,8 @@ The bursts ASR finds are cut from the fit's input, and the record says where, in
 The cut is eegprep's (`clean_artifacts` marks a sample whose repair changed it, and a retained run shorter than 5 samples, and removes them with `eeg_eegrej`); its ASR call has the same data and settings as the call whose state `_asr.json` holds, so that state is the repair that decided the cut (the test checks the two repairs bit for bit).
 ASR changes the last few tenths of a second of a recording at its edge, so a span at the very end is common.
 `channels` are the decomposition's channels, the columns of `_unmixing.tsv`, in the recording's order, which on the Zarr input is store row order.
+`channel_types` is every row of the loaded recording as `[label, type]`, the type as the loader gave it for that row (null for an untyped row), and `channel_types_sha256` its digest, which the `ica` step's parameters carry under `rules`, so a correction of a type changes the plan hash.
+The floor's signal channels are chosen row by row: a row typed `EEG` or untyped is a signal channel, a row of any other stated type is not, whatever the other rows state, so a known non-EEG row is never decomposed.
 `store` is there on the Zarr input only: the store's source path, the channel group read and its content digest, the dataset record's `stores_content` row.
 On the Zarr input the kept channels must be the store's rows they name, in store order, else the recording fails (`internal_error`, `serving_rows_mismatch`).
 
@@ -636,7 +640,7 @@ Legacy NEMAR's EEGLAB pipeline (`eeg_nemar_preprocess.m` of sccn/NEMAR-pipeline,
 
 | Step | Legacy NEMAR | nemar-ica |
 |---|---|---|
-| Channels | removes the non-EEG types, keeps `EEG` | keeps `EEG` and untyped (on the Zarr input every channel is untyped until sccn/eegprep#668) |
+| Channels | removes the non-EEG types, keeps `EEG` | keeps `EEG` and untyped, row by row; on the Zarr input nemar-ica types each row from the store's group metadata (an interim until sccn/eegprep#669) |
 | Offset | `pop_rmbase` | none (the high-pass removes it) |
 | High-pass | `pop_eegfiltnew(locutoff=0.5)` | the same call (the floor itself keeps `clean_drifts`, 0.25 to 0.75 Hz) |
 | Line noise | none removed (`LineNoiseCriterion=4` flags channels) | a band-stop at 50 or 60 Hz when its excess is at least 10 dB, until eegprep has ZapLine-plus (being ported upstream, sccn/eegprep#534); nemar-ica moves to it then |
@@ -793,7 +797,9 @@ A change of the pamica pin, of the CUDA flavor's torch (`2.12.1+cu129`) or of th
 
 ## Known limits
 
-- On the Zarr input every channel is untyped, because eegprep-lean's `to_eeg` does not carry the channel types a store's group states, so a channel such as an electrocardiogram that the archive types and leaves out is a signal channel there, judged by the floor and, when kept, decomposed with the EEG (sccn/eegprep#668 sets the types; nothing here works around it until the pin moves).
+- eegprep-lean's `to_eeg` at the pin does not carry the channel types a store's group states (sccn/eegprep#668; the open fix, sccn/eegprep#669, still admits a known electrocardiogram lead when another row has no type, so the pin stays).
+  Until it is fixed and pinned, nemar-ica's Zarr read reads the group's metadata once more and types each row of `chanlocs` with the `channel_type` the store states for that row (`ZarrSource.load(channel_types=True)`): a row that states no type stays untyped, and no row's type comes from another row, so an electrocardiogram the store types is never decomposed.
+  The floor's own Zarr input still reads every row untyped, so there a channel such as an electrocardiogram is a signal channel the floor judges.
 - A recording in which every channel has a flat portion fails (`all_channels_flat`, step `flatline`), and the cost is that a pause every channel shares fails the whole recording.
   eegprep's `clean_flatlines` removes nothing in that case and says so only through a log warning, so there is no mask to read and any figure for the recording would call every channel good.
   The floor listens to that warning for the length of the call (`common/capture.py`), because the command silences logging for the whole run.
