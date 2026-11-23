@@ -314,6 +314,8 @@ uv run pytest tests/images --cov=recipes --cov=scripts   # syncs the lock's runt
 To move a base image, look up the new digest from the registry (for example `docker buildx imagetools inspect python:3.12-slim`, or the registry's manifest endpoint), hash the manifest bytes to confirm it, and change the digest and the tag named in the Dockerfile's comment together.
 The `python:3.12-slim` digest is written twice, in the builder and in the final stage; change both (a test requires them equal).
 When the lock gains a package that is built from source, or `setuptools` moves in the lock, `tests/images/test_dependencies.py` says what to update.
-To move `uv`, change the version in `images/nemar-python/Dockerfile`, `.github/workflows/ci.yml` and `.github/workflows/image-nemar-python.yml` together; a test compares the three.
+To move `uv`, change every pin together: the `ghcr.io/astral-sh/uv` image (version and digest) and its comment in `images/nemar-python/Dockerfile` and `images/nemar-python/Dockerfile.cuda`, and `UV_VERSION` in `.github/workflows/ci.yml`, `image-nemar-python.yml`, `release-gate.yml`, `lint.yml` and `runner-release.yml`.
+The tests compare all but one with `ci.yml`: `tests/images/test_dockerfile.py` checks the Dockerfile's uv version against `ci.yml` and `image-nemar-python.yml` and requires the CUDA Dockerfile's instructions to equal the CPU one's, `tests/images/test_workflow.py` checks `image-nemar-python.yml` against `ci.yml`, and `tests/release/test_workflows.py` checks `release-gate.yml` and `lint.yml` against `ci.yml`.
+No test compares `runner-release.yml`, so check it by hand (`grep -rn 'UV_VERSION' .github/workflows`).
 To move the signalJourney release, see [upstream.md](upstream.md).
 The version of the image is never edited: it is the tag, and the tag must equal the version the release process put in `pyproject.toml`.

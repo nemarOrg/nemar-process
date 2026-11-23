@@ -6,6 +6,7 @@ events start a workflow, which permission a job holds and which action a step tr
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import shutil
@@ -892,20 +893,128 @@ def test_the_tools_a_release_gate_runs_are_the_versions_ci_runs():
         assert gate[key] == ci[key], key
 
 
+SUITES_WITHOUT_THE_RUNNER_STACK = ("tests/release", "tests/images", "tests/recipes")
+
+
+SHELL_WORD = re.compile(r""""[^"]*"|'[^']*'|\S+""")
+SHELL_SEPARATORS = {"&&", "||", ";", "|"}
+
+
+def marker_deselects_the_runner_stack(expression: str) -> bool:
+    """Whether a `-m` expression is a plain conjunction with `not runner_stack` as one of its terms."""
+    if not (len(expression) >= 2 and expression[0] == expression[-1] and expression[0] in "\"'"):
+        return False
+    terms = [t.strip() for t in expression[1:-1].split(" and ")]
+    if any(" or " in t or "(" in t or ")" in t for t in terms):
+        return False
+    return "not runner_stack" in terms
+
+
+def pytest_run_leaves_out_the_runner_stack(words: list[str]) -> bool:
+    """One pytest command (the words after `pytest`), read so that anything unexpected fails."""
+    paths, deselected = [], False
+    rest = iter(words)
+    for word in rest:
+        if word in ("-m", "-k"):
+            value = next(rest, "")
+            if word == "-m":
+                deselected = marker_deselects_the_runner_stack(value)
+        elif not word.startswith("-"):
+            paths.append(word)
+    for path in paths:
+        if path[0] in "\"'" or path.startswith(("./", "/")) or ".." in path:
+            return False
+    if deselected:
+        return True
+    if not paths:
+        return False
+    for path in paths:
+        if path in SUITES_WITHOUT_THE_RUNNER_STACK or path.startswith(
+            tuple(p + "/" for p in SUITES_WITHOUT_THE_RUNNER_STACK)
+        ):
+            continue
+        if path.endswith(".py") and not path.endswith("test_runner_stack.py"):
+            continue
+        return False
+    return True
+
+
+def gate_line_leaves_out_the_runner_stack(line: str) -> bool:
+    """A pytest line of the gate either cannot collect `runner_stack` or deselects it, and fails closed.
+
+    Every word after `pytest` that is not an option or the value of `-m` or `-k` is a path. A command is
+    safe when its marker expression is a conjunction holding `not runner_stack`, or when every path is
+    one of the suites without the runner stack or a single test file that is not the runner stack's.
+    Paths that are quoted, relative to `.`, absolute or hold `..`, and a line continued with a
+    backslash, are refused.
+    """
+    if "pytest" not in line:
+        return True
+    if line.rstrip().endswith("\\"):
+        return False
+    commands, current = [], []
+    for word in SHELL_WORD.findall(line):
+        if word in SHELL_SEPARATORS:
+            commands.append(current)
+            current = []
+        else:
+            current.append(word)
+    commands.append(current)
+    for command in commands:
+        if "pytest" in command:
+            after = command[command.index("pytest") + 1 :]
+            if not pytest_run_leaves_out_the_runner_stack(after):
+                return False
+        elif any("pytest" in w for w in command):
+            return False  # pytest under another name (`python -m pytest`, a path): read it by hand
+    return True
+
+
 def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_container_tests():
     job = load("release-gate.yml")["jobs"]["release-gate"]
-    commands = "\n".join(s.get("run", "") for s in job["steps"])
+    commands = "\n".join(s.get("run", "") for s in job["steps"]) + "\n"
     for needed in (
         "uv lock --check",
         "actionlint -color=false .github/workflows/*.yml",
         "uv run pytest tests/release -q",
         # the suites as ci.yml splits them: one pytest over the whole tree cannot collect
-        "uv run pytest -q --ignore=tests/images",
+        # with ci.yml's markers: the runner stack needs a nemar-cli checkout, bun and the tiny-recipe
+        # SIF, so it runs only in ci.yml's launcher leg on 3.12, never in the gate
+        'uv run pytest -q --ignore=tests/images -m "not docker and not runner_stack"\n',
         "uv run pytest -q tests/images",
         "uv run --frozen --group runtime --extra cpu pytest -q tests/recipes",
-        'uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer"',
+        "uv run --frozen --group runtime --extra cpu pytest -q tests/e2e "
+        '-m "not apptainer and not docker and not runner_stack"\n',
+        # the docker tests run in no required check of ci.yml (its docker job is not required), so the
+        # gate runs them in a step of their own, where a missing daemon fails instead of skipping
+        "uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker\n",
     ):
         assert needed in commands, needed
+    (docker,) = [s for s in job["steps"] if "test_docker_launch.py" in s.get("run", "")]
+    assert docker["run"] == "uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker"
+    assert docker["env"] == {"NEMAR_REQUIRE_DOCKER": "1"}
+    assert "continue-on-error" not in docker
+    assert "if" not in docker
+    ci = (
+        "\n".join(s.get("run", "") for job in load("ci.yml")["jobs"].values() for s in job["steps"])
+        + "\n"
+    )
+    assert '--ignore=tests/images -m "not docker and not runner_stack"\n' in ci
+    assert 'tests/e2e -m "not apptainer and not docker and not runner_stack"\n' in ci
+    for line in commands.splitlines():
+        assert gate_line_leaves_out_the_runner_stack(line), line
+    for unsafe in (
+        "uv run pytest -q tests",
+        "uv run pytest -q",
+        "uv run pytest tests/e2e -m docker",
+        "uv run pytest -q tests/release ./tests/e2e",
+        "uv run pytest -q tests/release/../e2e",
+        'uv run pytest -q tests/release "tests/e2e"',
+        "uv run pytest -q tests/release \\",
+        'uv run pytest -q tests -m "runner_stack or not runner_stack"',
+        "uv run pytest tests/release -q && uv run pytest -q tests",
+    ):
+        assert not gate_line_leaves_out_the_runner_stack(unsafe), unsafe
     assert not re.search(r"uv run pytest -q\s*$", commands, re.M)  # the unsplit run that fails
     recipes = next(s for s in job["steps"] if "tests/recipes" in s.get("run", ""))
     assert recipes["env"]["NEMAR_REQUIRE_RUNTIME"] == "1"
@@ -1470,14 +1579,102 @@ def test_the_bot_head_job_holds_no_token_and_no_write():
     assert condition == GUARD.replace("!=", "==")
 
 
-def test_the_scripts_and_workflows_the_bot_runs_have_code_owners():
+def codeowners_rules(text: str) -> list[tuple[str, list[str]]]:
+    """The CODEOWNERS rules in file order, as (pattern, owners); comments and blank lines dropped."""
+    rules = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            pattern, *owners = line.split()
+            rules.append((pattern, owners))
+    return rules
+
+
+def codeowners_segments_match(pattern: list[str], path: list[str]) -> bool:
+    """Segment by segment: `**` takes zero or more segments, anything else one segment (fnmatch)."""
+    if not pattern:
+        return not path
+    if pattern[0] == "**":
+        return any(codeowners_segments_match(pattern[1:], path[i:]) for i in range(len(path) + 1))
+    return (
+        bool(path)
+        and fnmatch.fnmatchcase(path[0], pattern[0])
+        and codeowners_segments_match(pattern[1:], path[1:])
+    )
+
+
+def codeowners_pattern_covers(pattern: str, path: str) -> bool:
+    """Whether a CODEOWNERS pattern covers a repository path (no leading slash), GitHub CODEOWNERS style.
+
+    A pattern with a leading or inner `/` is anchored at the root, one without matches at any depth; a
+    trailing `/` covers what is inside the directory; a matched directory covers everything under it,
+    except that a last segment of a bare `*` (`docs/*`) covers only the files directly in the directory;
+    `**` matches zero or more directories.
+    """
+    anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
+    segments = pattern.strip("/").split("/")
+    if not anchored:
+        segments = ["**", *segments]
+    directory_only = pattern.endswith("/")
+    direct_files_only = segments[-1] == "*"
+    parts = path.split("/")
+    for end in range(1, len(parts) + 1):
+        if not codeowners_segments_match(segments, parts[:end]):
+            continue
+        if end == len(parts) and not directory_only:
+            return True  # the path itself
+        if end < len(parts) and not direct_files_only:
+            return True  # a directory above the path
+    return False
+
+
+def owners_of(path: str, text: str) -> list[str]:
+    """The owners of `path`: those of the LAST rule that covers it, as GitHub reads the file."""
+    found: list[str] = []
+    for pattern, owners in codeowners_rules(text):
+        if codeowners_pattern_covers(pattern, path):
+            found = owners
+    return found
+
+
+PROTECTED_BY_CODE_OWNERS = (
+    # the scripts and workflows the bot runs with its token
+    ".github/workflows/auto-tag.yml",
+    ".github/CODEOWNERS",
+    "scripts/bump_version.py",
+    "scripts/sync_dev_merge.py",
+    # what a runner bundle builds and installs
+    "scripts/build_runner_bundle.py",
+    "deploy/runner/boot.py",
+    "deploy/runner/nemar-runner.service",
+    "runner/nemar_runner/install.py",
+)
+
+
+@pytest.mark.parametrize("path", PROTECTED_BY_CODE_OWNERS)
+def test_the_last_codeowners_rule_for_each_protected_path_names_the_admins(path):
     owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
-    for path in (
-        "/.github/workflows/",
-        "/scripts/bump_version.py",
-        "/scripts/sync_dev_merge.py",
-    ):
-        assert re.search(rf"^{re.escape(path)}\s+@\S+", owners, re.M), path
+    assert (ROOT / path).exists(), path
+    assert owners_of(path, owners) == ["@nemarOrg/admins"], path
+
+
+def test_a_later_codeowners_rule_overrides_an_earlier_one():
+    owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    mutated = owners + "/runner/ @someone\n"
+    assert owners_of("runner/nemar_runner/install.py", mutated) == ["@someone"]
+    assert owners_of("runner/nemar_runner/install.py", owners + "* @someone\n") == ["@someone"]
+    assert owners_of("deploy/runner/boot.py", owners + "boot.py @someone\n") == ["@someone"]
+    assert owners_of("scripts/bump_version.py", owners + "/runner/ @someone\n") == [
+        "@nemarOrg/admins"
+    ]
+    # GitHub's `docs/*` covers the files directly in docs/ only, and `/**/` zero or more directories
+    flat = owners.replace("/deploy/runner/ @nemarOrg/admins", "/deploy/* @nemarOrg/admins")
+    assert flat != owners
+    assert owners_of("deploy/runner/boot.py", flat) == []
+    assert owners_of("deploy/x.py", "/deploy/* @a\n") == ["@a"]
+    assert owners_of("runner/install.py", "/runner/**/install.py @a\n") == ["@a"]
+    assert owners_of("runner/nemar_runner/install.py", "/runner/**/install.py @a\n") == ["@a"]
+    assert owners_of("deploy/runner/boot.py", "* @a\n") == ["@a"]
 
 
 def test_the_dev_bump_checks_out_the_pushed_commit_and_pushes_it_to_dev():
