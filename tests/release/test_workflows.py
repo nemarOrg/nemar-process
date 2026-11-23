@@ -896,19 +896,36 @@ def test_the_tools_a_release_gate_runs_are_the_versions_ci_runs():
 SUITES_WITHOUT_THE_RUNNER_STACK = ("tests/release", "tests/images", "tests/recipes")
 
 
-def gate_line_leaves_out_the_runner_stack(line: str) -> bool:
-    """A pytest line of the gate either cannot collect `runner_stack` or deselects it.
+SHELL_WORD = re.compile(r""""[^"]*"|'[^']*'|\S+""")
+SHELL_SEPARATORS = {"&&", "||", ";", "|"}
 
-    It cannot collect it when every path it names is one of the suites without it, or a single test
-    file that is not the runner stack's; with no path, or a directory that holds tests/e2e, it must carry
-    `not runner_stack`.
-    """
-    if "pytest" not in line:
+
+def marker_deselects_the_runner_stack(expression: str) -> bool:
+    """Whether a `-m` expression is a plain conjunction with `not runner_stack` as one of its terms."""
+    if not (len(expression) >= 2 and expression[0] == expression[-1] and expression[0] in "\"'"):
+        return False
+    terms = [t.strip() for t in expression[1:-1].split(" and ")]
+    if any(" or " in t or "(" in t or ")" in t for t in terms):
+        return False
+    return "not runner_stack" in terms
+
+
+def pytest_run_leaves_out_the_runner_stack(words: list[str]) -> bool:
+    """One pytest command (the words after `pytest`), read so that anything unexpected fails."""
+    paths, deselected = [], False
+    rest = iter(words)
+    for word in rest:
+        if word in ("-m", "-k"):
+            value = next(rest, "")
+            if word == "-m":
+                deselected = marker_deselects_the_runner_stack(value)
+        elif not word.startswith("-"):
+            paths.append(word)
+    for path in paths:
+        if path[0] in "\"'" or path.startswith(("./", "/")) or ".." in path:
+            return False
+    if deselected:
         return True
-    if "not runner_stack" in line:
-        return True
-    words = line.split("pytest", 1)[1].split()
-    paths = [w for w in words if w.startswith("tests")]
     if not paths:
         return False
     for path in paths:
@@ -919,6 +936,37 @@ def gate_line_leaves_out_the_runner_stack(line: str) -> bool:
         if path.endswith(".py") and not path.endswith("test_runner_stack.py"):
             continue
         return False
+    return True
+
+
+def gate_line_leaves_out_the_runner_stack(line: str) -> bool:
+    """A pytest line of the gate either cannot collect `runner_stack` or deselects it, and fails closed.
+
+    Every word after `pytest` that is not an option or the value of `-m` or `-k` is a path. A command is
+    safe when its marker expression is a conjunction holding `not runner_stack`, or when every path is
+    one of the suites without the runner stack or a single test file that is not the runner stack's.
+    Paths that are quoted, relative to `.`, absolute or hold `..`, and a line continued with a
+    backslash, are refused.
+    """
+    if "pytest" not in line:
+        return True
+    if line.rstrip().endswith("\\"):
+        return False
+    commands, current = [], []
+    for word in SHELL_WORD.findall(line):
+        if word in SHELL_SEPARATORS:
+            commands.append(current)
+            current = []
+        else:
+            current.append(word)
+    commands.append(current)
+    for command in commands:
+        if "pytest" in command:
+            after = command[command.index("pytest") + 1 :]
+            if not pytest_run_leaves_out_the_runner_stack(after):
+                return False
+        elif any("pytest" in w for w in command):
+            return False  # pytest under another name (`python -m pytest`, a path): read it by hand
     return True
 
 
@@ -943,6 +991,7 @@ def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_conta
     ):
         assert needed in commands, needed
     (docker,) = [s for s in job["steps"] if "test_docker_launch.py" in s.get("run", "")]
+    assert docker["run"] == "uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker"
     assert docker["env"] == {"NEMAR_REQUIRE_DOCKER": "1"}
     assert "continue-on-error" not in docker
     assert "if" not in docker
@@ -958,6 +1007,12 @@ def test_the_release_gate_runs_what_the_card_says_and_forbids_skipping_the_conta
         "uv run pytest -q tests",
         "uv run pytest -q",
         "uv run pytest tests/e2e -m docker",
+        "uv run pytest -q tests/release ./tests/e2e",
+        "uv run pytest -q tests/release/../e2e",
+        'uv run pytest -q tests/release "tests/e2e"',
+        "uv run pytest -q tests/release \\",
+        'uv run pytest -q tests -m "runner_stack or not runner_stack"',
+        "uv run pytest tests/release -q && uv run pytest -q tests",
     ):
         assert not gate_line_leaves_out_the_runner_stack(unsafe), unsafe
     assert not re.search(r"uv run pytest -q\s*$", commands, re.M)  # the unsplit run that fails
