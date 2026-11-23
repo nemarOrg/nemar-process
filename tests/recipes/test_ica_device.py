@@ -15,12 +15,14 @@ import dataclasses
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
-from nemar_process.common import device, errors
+from nemar_process import cli as command
+from nemar_process.common import determinism, device, errors
 from nemar_process.common.device import Resolution
 from nemar_process.common.errors import RecordingError, guarded
-from nemar_process.nemar_ica import RECIPE, pipeline, tally
+from nemar_process.nemar_ica import RECIPE, outputs, pipeline, tally
 from nemar_process.nemar_ica import recipe as ica_recipe
 from nemar_process.nemar_ica.options import Settings
 from recipe_support import loaded_fixture, make_context, write_set
@@ -142,11 +144,26 @@ def test_an_out_of_memory_message_without_the_class_is_not_recognized():
     assert (ended.value.code, ended.value.detail) == ("step_failed", "RuntimeError")
 
 
+@pytest.mark.timeout(10)  # a walk without its guard would loop forever: it fails here instead
 def test_a_chain_that_loops_ends_the_search():
     first, second = RuntimeError("first"), RuntimeError("second")
     first.__context__, second.__context__ = second, first
     assert not device.holds_cuda_out_of_memory(first)
     assert not errors.is_cuda_out_of_memory(first)
+
+
+def test_the_command_records_a_chained_cuda_out_of_memory_outside_a_step_as_the_gpus():
+    """Outside a step boundary the command classifies what a recording ended with; the CUDA check
+    comes before the ``OSError`` one, so a disk error raised from torch's error is the GPU's."""
+    for raised in (wrapped(out_of_memory(), OSError), in_context(out_of_memory())):
+        assert command.outcome_of(raised) == ("failed", "out_of_memory", None, "cuda")
+    assert command.outcome_of(OSError("disk")) == ("failed", "disk_error", None, "OSError")
+    assert command.outcome_of(wrapped(ValueError("x"))) == (
+        "failed",
+        "internal_error",
+        None,
+        "RuntimeError",
+    )
 
 
 # ---- the reading of contention, the cap ----------------------------------------------------------
@@ -311,6 +328,37 @@ def test_the_dataset_record_lists_every_move_and_states_the_contention_threshold
     tally.reset()
     assert tally.fallbacks() == []
     assert tally.begin(GPU_IDLE) == GPU_IDLE
+
+
+def cut_loaded():
+    """The fixture recording cut to 8 channels and 60 seconds in memory, as ``test_nemar_ica.py``
+    hands it to the recipe."""
+    loaded = loaded_fixture()
+    eeg = loaded.eeg
+    samples = round(CUT_SECONDS * eeg["srate"])
+    eeg["data"] = np.ascontiguousarray(eeg["data"][CUT_CHANNELS, :samples])
+    eeg["nbchan"] = len(CUT_CHANNELS)
+    eeg["pnts"] = samples
+    eeg["xmax"] = (samples - 1) / eeg["srate"]
+    eeg["chanlocs"] = [eeg["chanlocs"][index] for index in CUT_CHANNELS]
+    return loaded
+
+
+def test_the_cap_and_the_allocator_limit_each_reach_their_own_field(fresh_tally):
+    settings = Settings.from_options(RECIPE.option_values({"ica_max_iter": 5}))
+    with determinism.pinned_threads(), command.quiet():
+        fit = pipeline.process(cut_loaded(), settings, device.resolve("cpu"))
+    # the run's state after a job initialized CUDA (a real GpuStart, not a reading of torch): with
+    # no cap passed, and with a cap above a GPU of 16384 MiB, the cap and the limit differ
+    for start, cap, limit in (
+        (device.GpuStart(None, 16384, 0), None, 16384),
+        (device.GpuStart(32768, 16384, 0), 32768, 16384),
+    ):
+        tally._RUN.gpu = start
+        assert (tally.gpu_memory_cap_mb(), tally.gpu_allocator_limit_mb()) == (cap, limit)
+        block = outputs.facts(fit, "archive")
+        assert (block["gpu_memory_cap_mb"], block["gpu_allocator_limit_mb"]) == (cap, limit)
+        assert block["device"] == "cpu"
 
 
 def test_the_refit_on_the_cpu_passes_every_setting_the_fit_on_the_gpu_passed():
