@@ -255,8 +255,16 @@ def write_product(
     summary_extra: Mapping[str, Any] | None = None,
     nemar_extra: Mapping[str, Any] | None = None,
     profile: str | None = None,
+    extra_segments: Sequence[tuple[int, int, str, str]] = (),
+    extra_segments_step: str | None = None,
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
+
+    ``extra_segments`` are spans an embedding recipe removed itself (nemar-ica's burst spans), as
+    ``(start, stop, label, reason)`` sample indices of the samples the floor read, stop exclusive:
+    they are rows of ``_badsegments.tsv`` and ``_samplemask.tsv`` beside the floor's, in time order,
+    and when the window step was skipped they are the files' only rows, belonging to
+    ``extra_segments_step``. The floor passes none.
 
     The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the
     floor's files (four, five when the window step ran) are then named with its label, stamped with its name and version and described by its
@@ -294,29 +302,40 @@ def write_product(
             lambda path: files.write_tsv(path, CHANNEL_COLUMNS, channel_rows(result)),
         )
     ]
-    if result.sample_mask is not None:
+    if result.sample_mask is not None or extra_segments:
         mask = result.sample_mask
+        windows = mask_rows(mask) if mask is not None else []
+        spans = sorted(
+            [list(row) for row in windows]
+            + [
+                [int(start), int(stop), label, reason]
+                for start, stop, label, reason in extra_segments
+            ],
+            key=lambda row: (row[0], row[1], row[2]),
+        )
+        rate = result.srate_hz
+        seconds = [
+            [start / rate, (stop - start) / rate, label, why] for start, stop, label, why in spans
+        ]
+        owner = "bad_windows" if mask is not None else str(extra_segments_step)
         jobs.append(
             Product(
                 "badsegments",
                 "tsv",
-                "bad_windows",
-                "Bad segments found by clean_windows",
-                lambda path: files.write_tsv(
-                    path,
-                    SEGMENT_COLUMNS,
-                    segment_rows(mask, result.srate_hz),
-                    SEGMENT_DECIMALS,
-                ),
+                owner,
+                "Bad segments found by clean_windows"
+                + (" and the spans the recipe removed" if extra_segments else ""),
+                lambda path: files.write_tsv(path, SEGMENT_COLUMNS, seconds, SEGMENT_DECIMALS),
             )
         )
         jobs.append(
             Product(
                 "samplemask",
                 "tsv",
-                "bad_windows",
-                "Bad windows as sample indices of the samples read, stop exclusive",
-                lambda path: files.write_tsv(path, MASK_COLUMNS, mask_rows(mask)),
+                owner,
+                "Bad windows as sample indices of the samples read, stop exclusive"
+                + (", and the spans the recipe removed" if extra_segments else ""),
+                lambda path: files.write_tsv(path, MASK_COLUMNS, spans),
             )
         )
     jobs += [
