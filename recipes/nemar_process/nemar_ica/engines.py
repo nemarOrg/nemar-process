@@ -10,7 +10,8 @@
   it (``--ica-engine amica15``).
 
 A setting that is not valid, an engine and a device that do not go together, or a runner variable
-that is not a device or a word, is a usage error (exit 2).
+that is not a device, a word or a whole number of mebibytes (the GPU memory cap), is a usage error
+(exit 2).
 """
 
 from __future__ import annotations
@@ -83,6 +84,8 @@ def preflight(options: Mapping[str, Any]) -> None:
         )
     unavailable: EngineUnavailable | None = None
     try:
+        if not settings.native:
+            device.memory_cap_mb()  # read before the first fit on the GPU, checked now
         device.resolve("cpu" if settings.native else settings.device)
     except device.DeviceUsageError as error:
         usage_error(str(error))

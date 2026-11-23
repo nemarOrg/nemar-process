@@ -7,7 +7,9 @@ record's first steps; the bad channels it found are already removed from its wor
 asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``. A step that raises ends the
 recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
 and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
-ends so writes nothing.
+ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-device auto``, that runs
+out of the GPU's memory: it is fitted again on the CPU with every setting the same (``decompose``;
+the run's state decides, ``tally``).
 
 eegprep is imported where it is used, so that this module (and the command, which registers the
 recipe) import on any eegprep that has the floor's steps.
@@ -41,7 +43,7 @@ from nemar_process.common.io import Loaded
 from nemar_process.common.params import signature_defaults
 from nemar_process.nemar_floor import pipeline as floor
 from nemar_process.nemar_floor import steps as floor_steps
-from nemar_process.nemar_ica import engines, steps
+from nemar_process.nemar_ica import engines, steps, tally
 from nemar_process.nemar_ica.options import Settings
 
 # eegprep's ICLabel network, the file the classification reads (hashed into the record).
@@ -223,6 +225,36 @@ def run_decomposition(
     return fitted, dict(fitted["etc"]["pamica"])
 
 
+def decompose(
+    eeg: dict[str, Any],
+    settings: Settings,
+    resolution: device.Resolution,
+    rank: int,
+    slot: tally.Slot | None,
+) -> tuple[dict[str, Any], dict[str, Any], device.Resolution]:
+    """The fit on ``resolution``'s device; the decomposed EEG, the engine's account and the device
+    that ran it.
+
+    When the run decides that the error the fit raised is a move to the CPU (``tally.after_failure``:
+    torch's CUDA out-of-memory error, under ``auto``), the GPU memory torch cached is handed back and
+    the same data are fitted again on the CPU, with every setting but the device the same
+    (``decomposition_call``). Every other error ends the recording as it would have. ``pop_runica``
+    fits a copy, so the data of the second fit are those of the first. Without a ``slot`` (a caller
+    outside a run) nothing is moved.
+    """
+    try:
+        fitted, fit = run_decomposition(eeg, settings, resolution, rank)
+        return fitted, fit, resolution
+    except Exception as error:
+        refit = None if slot is None else tally.after_failure(slot, resolution, error)
+        if refit is None:
+            raise
+    # after the handler, so that nothing still holds the failed fit's memory on the GPU
+    device.release_cached_memory()
+    fitted, fit = run_decomposition(eeg, settings, refit, rank)
+    return fitted, fit, refit
+
+
 def component_variance(eeg: dict[str, Any], rank: int) -> list[float]:
     """The percent of the data's variance each component accounts for on its own, by eegprep's
     ``eeg_pvaf``, to four decimals."""
@@ -244,11 +276,19 @@ def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray
     return labeled, [str(name) for name in found["classes"]], np.asarray(found["classifications"])
 
 
-def process(loaded: Loaded, settings: Settings, resolution: device.Resolution) -> Decomposition:
+def process(
+    loaded: Loaded,
+    settings: Settings,
+    resolution: device.Resolution,
+    slot: tally.Slot | None = None,
+) -> Decomposition:
     """Run the recipe on a loaded recording. Consumes ``loaded.eeg``.
 
-    ``resolution`` is the device the run resolved to (``device.resolve``): the call states it, and
-    pAMICA's torch engine runs on it.
+    ``resolution`` is the device the recording starts on (``device.resolve``, then ``tally.begin``).
+    With the recording's ``slot`` in the run, the run decides right before the fit where it runs
+    (``tally.before_fit``: the cap on the job's GPU memory, contention) and whether a failed fit is
+    fitted again on the CPU (``decompose``); the call, the record and the count state the device that
+    ran it (``Decomposition.resolution``).
     """
     result = floor.process(loaded, recipe_id=steps.RECIPE_ID, recipe_version=steps.RECIPE_VERSION)
     plan = result.plan
@@ -314,10 +354,12 @@ def process(loaded: Loaded, settings: Settings, resolution: device.Resolution) -
             quality={"reference": steps.REREF_REFERENCE, "nChannels": int(eeg["nbchan"])},
         )
 
-    # the decomposition
+    # the decomposition, on the device the run holds right before it
     with guarded("ica"):
+        if slot is not None:
+            resolution = tally.before_fit(slot, resolution)
+        eeg, fit, resolution = decompose(eeg, settings, resolution, rank, slot)
         call = decomposition_call(settings, resolution, rank)
-        eeg, fit = run_decomposition(eeg, settings, resolution, rank)
         variance = component_variance(eeg, rank)
         plan.add_step(
             "ica",
