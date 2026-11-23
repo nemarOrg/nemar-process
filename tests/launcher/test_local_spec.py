@@ -146,3 +146,25 @@ def test_unique_items_is_implemented_not_ignored():
     assert spec.validate([{"a": 1}, {"a": 2}], schema) == []
     assert spec.validate([{"a": 1}, {"a": 1}], schema) == ["/: uniqueItems"]
     assert spec.validate([1, True], schema) == []  # a boolean is not a number
+
+
+def test_a_list_past_max_items_is_refused_without_comparing_its_items():
+    """The review's probe: a 64 KiB specification with thousands of distinct dataset names. maxItems
+    refuses it; the pairwise uniqueItems comparison is not run (it would take seconds)."""
+    import time
+
+    document: dict = copy.deepcopy(GOOD)
+    document["datasets"] = []
+    n = 0
+    while True:
+        document["datasets"].append({"name": "d{}".format(n)})
+        if len(text(document)) > spec.MAX_SPEC_BYTES:
+            document["datasets"].pop()
+            break
+        n += 1
+    schema = {"type": "array", "maxItems": 20, "uniqueItems": True}
+    started = time.monotonic()
+    assert spec.validate(document["datasets"], schema) == ["/: maxItems"]
+    with pytest.raises(spec.SpecError):
+        spec.parse_local_text(text(document))
+    assert time.monotonic() - started < 1.0

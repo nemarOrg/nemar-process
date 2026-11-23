@@ -213,8 +213,13 @@ def _walk(schema: Any, value: Any, path: str, errors: list[str]) -> None:
         if "items" in schema:
             for index, item in enumerate(value):
                 _walk(schema["items"], item, "{}/{}".format(path, index), errors)
-        if schema.get("uniqueItems") is True and any(
-            _equal(value[i], value[j]) for i in range(len(value)) for j in range(i)
+        # pairwise, so only once the length is within maxItems: a 64 KiB document of thousands of
+        # items is refused by maxItems alone, never compared item by item
+        too_many = "maxItems" in schema and len(value) > schema["maxItems"]
+        if (
+            schema.get("uniqueItems") is True
+            and not too_many
+            and any(_equal(value[i], value[j]) for i in range(len(value)) for j in range(i))
         ):
             errors.append("{}: uniqueItems".format(here))
         if "contains" in schema and not any(_valid(schema["contains"], item) for item in value):
