@@ -62,14 +62,16 @@ DESCRIPTIONS = {
     "iclabel": "Classify the components with ICLabel",
 }
 
-# ASR: eegprep's defaults but one. The memory budget is fixed and recorded because a smaller or
+# ASR: eegprep's defaults but two. The memory budget is fixed and recorded because a smaller or
 # missing one makes asr_process replace it with half of the machine's free memory, and the cleaned
 # data then depend on the machine (sccn/eegprep#621): 1024 MB covers 64 channels up to a lookahead
-# of about 10000 samples (channels * channels * lookahead samples * 24 bytes).
+# of about 10000 samples (channels * channels * lookahead samples * 24 bytes). The cutoff (the
+# standard deviations a burst must pass, clean_rawdata's BurstCriterion) is the owner's 30, not
+# eegprep's 5 (2026-11-23; legacy NEMAR passed 20: docs/recipes.md).
 ASR_FUNCTION = "eegprep.clean_asr"
 ASR_MAXMEM_MB = 1024
+ASR_CUTOFF = 30.0
 ASR_APPLIED = (
-    "cutoff",
     "window_len",
     "step_size",
     "max_dims",

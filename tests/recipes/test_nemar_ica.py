@@ -427,6 +427,10 @@ def test_the_asr_state_is_canonical_json_that_names_its_channels_and_its_memory_
     asr = next(s for s in product.record["processingSteps"] if s["stepId"] == "asr")
     assert asr["parameters"]["maxmem"] == 1024
     assert asr["parameters"]["return_state"] is True
+    # the owner's cutoff, passed, hashed, and the one ASR calibrated with (eegprep's default is 5)
+    assert (
+        asr["parameters"]["cutoff"] == 30.0 == state["cutoff"] == block_of(product)["asr"]["cutoff"]
+    )
 
 
 def test_a_state_that_cannot_reproduce_its_data_fails_the_recording_and_writes_nothing(

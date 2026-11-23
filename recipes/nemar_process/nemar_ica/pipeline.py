@@ -3,7 +3,7 @@ and ICLabel. Every numerical step is an eegprep call, and no file is read or wri
 
 The chain (docs/recipes.md): the floor's own chain with its parameters (its decisions are this
 record's first steps; the bad channels it found are already removed from its working copy);
-``clean_asr`` with its state kept; ``pop_reref`` to the average; ``pop_runica`` with the engine
+``clean_asr`` with its state kept and the owner's cutoff of 30; ``pop_reref`` to the average; ``pop_runica`` with the engine
 asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``. A step that raises ends the
 recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
 and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
@@ -108,6 +108,7 @@ def asr_parameters() -> dict[str, Any]:
 
     return {
         **signature_defaults(clean_asr, steps.ASR_APPLIED),
+        "cutoff": steps.ASR_CUTOFF,
         "maxmem": steps.ASR_MAXMEM_MB,
         "return_state": True,
     }
@@ -170,7 +171,9 @@ def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        repaired, state = clean_asr(eeg, return_state=True, maxmem=steps.ASR_MAXMEM_MB)
+        repaired, state = clean_asr(
+            eeg, cutoff=steps.ASR_CUTOFF, return_state=True, maxmem=steps.ASR_MAXMEM_MB
+        )
     if any(
         issubclass(item.category, UserWarning) and str(item.message).startswith("maxmem=")
         for item in caught
