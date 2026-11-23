@@ -101,8 +101,17 @@ def ts_words(source: str, name: str) -> tuple:
 # ---- the copies and the pin ---------------------------------------------------------------------------
 
 # Every file this repository copies from nemar-cli at this pin: the progress schema and vectors (the
-# launcher's), the plugin manifest schema and the neuroschema bundle (the recipes', ADR 0134 Phase 5).
-COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle")
+# launcher's), the plugin manifest schema and the neuroschema bundle (the recipes', ADR 0134 Phase 5), and
+# the three standalone contracts (the launcher's standalone entry, ADR 0134 decision 8, Phase 6).
+STANDALONE = {
+    "local_launch": ("compute-local-launch", "launcher/schema/compute-local-launch.v1.json"),
+    "recipe_progress": (
+        "compute-recipe-progress",
+        "launcher/schema/compute-recipe-progress.v1.json",
+    ),
+    "results_report": ("compute-results-report", "launcher/schema/compute-results-report.v1.json"),
+}
+COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle", *STANDALONE)
 
 
 def test_the_pin_names_a_full_commit_and_both_files():
@@ -122,6 +131,9 @@ def test_the_pin_names_a_full_commit_and_both_files():
         == "recipes/nemar_process/common/contract/neuroschema.bundle.json"
     )
     assert PIN["neuroschema_bundle"]["source"] == "shared/contract/neuroschema/dataset.bundle.json"
+    for part, (name, copy) in STANDALONE.items():
+        assert PIN[part]["source"] == "shared/contract/{}.schema.json".format(name)
+        assert PIN[part]["copy"] == copy
 
 
 @pytest.mark.parametrize("part", COPIES)
@@ -142,6 +154,77 @@ def test_the_runner_pin_names_the_same_commit():
     """The runner schema ``$ref``s the progress schema's ``$id``: both copies come from one commit."""
     runner = json.loads((ROOT / "tests" / "contract" / "nemar-cli-runner-pin.json").read_text())
     assert runner["ref"] == PIN["ref"]
+
+
+# ---- the standalone contracts (ADR 0134 decision 8) --------------------------------------------------------
+
+
+def copied(part: str) -> dict:
+    return json.loads((ROOT / PIN[part]["copy"]).read_text(encoding="utf-8"))
+
+
+# What the local launch specification shares with the launch specification, value for value: every member a
+# job runs with, and the rules between them. The launch specification's copy is pinned by its own pin
+# (tests/contract/nemar-cli-pin.json), so this holds the two pins to each other.
+SHARED_MEMBERS = ("runtime", "entry", "command", "args", "bundle", "image", "env", "resources")
+
+
+def test_the_local_launch_shares_the_launch_specifications_members_and_rules():
+    local = copied("local_launch")
+    launch = json.loads((ROOT / "launcher" / "schema" / "launch-spec.v1.json").read_text())
+    for name in SHARED_MEMBERS:
+        assert local["properties"][name] == launch["properties"][name], name
+    for rule in ("oneOf", "if", "then"):
+        assert local[rule] == launch[rule], rule
+    # what only NEMAR's service gives is not there, and each document has a key the other refuses
+    for name in ("job_id", "api_base", "job_token", "limits"):
+        assert name not in local["properties"], name
+    assert "format" not in launch["properties"]
+    assert local["additionalProperties"] is False
+    assert launch["additionalProperties"] is False
+    assert "format" in local["required"]
+    assert "job_token" in launch["required"]
+
+
+def test_the_format_words_are_the_schemas_and_nemar_clis():
+    from nemar_launch import progress
+
+    local = copied("local_launch")
+    recipe = copied("recipe_progress")["$defs"]["RecipeProgress"]
+    report = copied("results_report")["$defs"]["ResultsReport"]
+    assert local["properties"]["format"]["const"] == ts_string(
+        ts_source("local_launch_contract"), "LOCAL_LAUNCH_FORMAT"
+    )
+    contract = ts_source("recipe_progress_contract")
+    assert recipe["properties"]["format"]["const"] == progress.RECIPE_PROGRESS_FORMAT
+    assert ts_string(contract, "RECIPE_PROGRESS_FORMAT") == progress.RECIPE_PROGRESS_FORMAT
+    assert ts_string(contract, "RECIPE_PROGRESS_DIRECTORY") == progress.RECIPE_PROGRESS_DIR
+    assert ts_string(contract, "RECIPE_PROGRESS_FILE") == progress.RECIPE_PROGRESS_FILE
+    assert ts_number(contract, "RECIPE_PROGRESS_MAX_BYTES") == progress.PROGRESS_FILE_MAX_BYTES
+    assert report["properties"]["format"]["const"] == ts_string(
+        ts_source("results_report_contract"), "RESULTS_REPORT_FORMAT"
+    )
+
+
+def test_the_recipe_progress_schema_is_what_the_launchers_reader_bounds():
+    from nemar_launch import checkpoints as rules
+    from nemar_launch import progress
+
+    defs = copied("recipe_progress")["$defs"]
+    assert defs["CheckpointName"]["pattern"] == rules.CHECKPOINT_RE.pattern
+    assert defs["StepId"]["pattern"] == rules.STEP_RE.pattern
+    assert defs["Count"]["maximum"] == rules.PROGRESS_MAX_RECORDINGS
+    assert defs["CheckpointMap"]["maxItems"] == rules.PROGRESS_MAX_CHECKPOINTS
+    running = defs["RecipeProgress"]["properties"]["running"]["items"]["properties"]["path"]
+    assert running["maxLength"] == progress._RUNNING_PATH_MAX
+
+
+def test_the_plugin_steps_and_their_column_are_nemar_clis():
+    from nemar_launch import checkpoints as rules
+
+    assert ts_words(ts_source("recipes"), "RECIPE_PLUGIN_STEPS") == rules.RECIPE_PLUGIN_STEPS
+    counting = ts_source("checkpoint_rules")
+    assert ts_string(counting, "SKIPPED_STEPS_COLUMN") == rules.SKIPPED_STEPS_COLUMN
 
 
 # ---- the launcher's words and numbers are the schema's and nemar-cli's ---------------------------------
