@@ -17,7 +17,7 @@ Pure, standard library only, Python 3.9.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Optional
 
 # ---- the contract's words and numbers ------------------------------------------------------------------
@@ -78,29 +78,27 @@ def _na_to_none(value: str) -> str | None:
     return None if value in (NA, "") else value
 
 
-def parse_recordings_table(text: str) -> list[Row]:
-    """Read a recordings table (tab-separated, a header, ``n/a`` for an empty cell; CRLF tolerated).
-
-    Refused, as nemar-cli refuses it: no header (``empty_table``), a missing column
+def parse_recordings_lines(lines: Iterable[str]) -> list[Row]:
+    """Read a recordings table given as lines (tab-separated, a header first, ``n/a`` for an empty cell,
+    no line ending). Refused, as nemar-cli refuses it: no header (``empty_table``), a missing column
     (``missing_column``), more rows than ``PROGRESS_MAX_RECORDINGS`` (``too_many_rows``), a row of the
     wrong width (``row_width``), a status that is not one of the three (``bad_status``), and a failed or
-    skipped row with no code (``missing_code``).
-    """
-    lines = text.replace("\r\n", "\n").split("\n")
-    while lines and lines[-1] == "":
-        lines.pop()
-    if not lines:
+    skipped row with no code (``missing_code``). Only the four columns the rules read are kept, and the
+    lines are consumed one at a time, so a caller can stream a large table."""
+    iterator = iter(lines)
+    header_line = next(iterator, None)
+    if header_line is None or header_line == "":
         raise TableUnreadable("empty_table")
-    header = lines[0].split("\t")
+    header = header_line.split("\t")
     index = {}
     for column in RECORDINGS_TABLE_COLUMNS:
         if column not in header:
             raise TableUnreadable("missing_column")
         index[column] = header.index(column)
-    if len(lines) - 1 > PROGRESS_MAX_RECORDINGS:
-        raise TableUnreadable("too_many_rows")
     rows: list[Row] = []
-    for line in lines[1:]:
+    for line in iterator:
+        if len(rows) >= PROGRESS_MAX_RECORDINGS:
+            raise TableUnreadable("too_many_rows")
         cells = line.split("\t")
         if len(cells) != len(header):
             raise TableUnreadable("row_width")
@@ -119,6 +117,15 @@ def parse_recordings_table(text: str) -> list[Row]:
             }
         )
     return rows
+
+
+def parse_recordings_table(text: str) -> list[Row]:
+    """Read a recordings table given as text (CRLF tolerated, trailing empty lines ignored): the rules of
+    ``parse_recordings_lines``."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return parse_recordings_lines(lines)
 
 
 def _fit(value: str | None, pattern: re.Pattern) -> str | None:

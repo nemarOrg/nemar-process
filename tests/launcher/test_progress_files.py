@@ -337,3 +337,36 @@ def test_an_outputs_replaced_by_a_link_after_the_last_read_is_refused_too(output
     with pytest.raises(progress.Unusable) as caught:
         source.build()  # the cached progress file is not a way around the walk
     assert caught.value.word == "not_readable"
+
+
+def test_the_table_is_streamed_and_refused_past_the_row_cap(outputs, monkeypatch):
+    """No byte cap on the table: it is read line by line, only four columns kept, and refused once it holds
+    more rows than the contract allows (``PROGRESS_MAX_RECORDINGS``, made small here)."""
+    monkeypatch.setattr(rules, "PROGRESS_MAX_RECORDINGS", 3)
+    write_run(outputs, recipe_file(3), [row("a.set"), row("b.set"), row("c.set")])
+    assert progress.Source(str(outputs.parent)).build()["counts"]["import"]["passed"] == 3
+    write_run(outputs, recipe_file(3), [row(p) for p in ("a.set", "b.set", "c.set", "d.set")])
+    with pytest.raises(progress.Unusable) as caught:
+        progress.Source(str(outputs.parent)).build()
+    assert caught.value.word == "table_too_many_rows"
+
+
+def test_a_table_line_longer_than_its_cap_or_not_text_is_refused(outputs):
+    write_run(outputs, recipe_file(1), [row("a" * (progress.TABLE_LINE_MAX_BYTES + 1))])
+    with pytest.raises(progress.Unusable) as caught:
+        progress.Source(str(outputs.parent)).build()
+    assert caught.value.word == "line_too_long"
+    write_run(outputs, recipe_file(1), [])
+    with open(str(outputs / TABLE), "ab") as handle:
+        handle.write(b"\xff.set\teeg\tsucceeded\tn/a\tn/a\tn/a\n")
+    with pytest.raises(progress.Unusable) as caught:
+        progress.Source(str(outputs.parent)).build()
+    assert caught.value.word == "not_text"
+
+
+def test_long_rows_under_the_line_cap_are_read(outputs):
+    """The limits are the line cap and the row cap, not the file's size."""
+    long = "sub-01/" + "x" * 60000
+    write_run(outputs, recipe_file(2), [row(long + "1.set"), row(long + "2.set")])
+    document = progress.Source(str(outputs.parent)).build()
+    assert document["counts"]["import"] == {"passed": 2, "failed": 0, "skipped": 0, "total": 2}

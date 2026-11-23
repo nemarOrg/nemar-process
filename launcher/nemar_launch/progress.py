@@ -10,8 +10,8 @@ returns the object, or nothing.
 Both files are written by the container, so neither is trusted. Each is opened by walking its path one
 component at a time with ``O_NOFOLLOW``, from the launcher's own ``work`` directory and through
 ``outputs`` (a link anywhere, ``outputs`` included, is refused), the last one without blocking (a
-FIFO is refused, never waited on), and must be a regular file under its cap: 64 KiB for the progress
-file, 64 MiB for the table. JSON is read strictly (no duplicate key, no NaN). The progress file's shape is
+FIFO is refused, never waited on), and must be a regular file: the progress file at most 64 KiB, the
+table streamed line by line (a line at most 64 KiB, at most 1,000,000 rows, only four columns kept). JSON is read strictly (no duplicate key, no NaN). The progress file's shape is
 checked, and only the table's complete lines are read. Nothing read from either file is ever logged, and
 nothing reaches the object but what the contract's patterns accept: a recording path the contract cannot
 carry is left out of the failures (and still counted). Before it is written or sent, the object must pass
@@ -30,14 +30,13 @@ Standard library only, Python 3.9.
 from __future__ import annotations
 
 import contextlib
-import functools
 import itertools
 import json
 import os
 import re
 import stat
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from typing import Any
 
 from . import checkpoints as rules
@@ -48,7 +47,7 @@ RECIPE_PROGRESS_DIR = ".nemar-progress"
 RECIPE_PROGRESS_FILE = "progress.json"
 LAUNCHER_PROGRESS_FILE = "progress.json"  # in the launcher's own directory, beside result.json
 PROGRESS_FILE_MAX_BYTES = 64 * 1024
-TABLE_MAX_BYTES = 64 * 1024 * 1024
+TABLE_LINE_MAX_BYTES = 64 * 1024  # a table row is a path, a few words and numbers
 SCHEMA_FILE = "compute-progress.v1.json"
 
 _RECIPE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}" + rules.END)
@@ -72,12 +71,12 @@ class Unusable(Exception):
 # ---- reading files the container wrote ----------------------------------------------------------------
 
 
-def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
-    """The bytes of ``base/<relative...>``, read without following any link and without blocking.
+def open_inside(base: str, relative: Sequence[str]) -> int:
+    """A descriptor for ``base/<relative...>``, opened without following any link and without blocking.
 
     Refused (``Unusable``): a component that is a link or not a directory, a last component that is not a
-    regular file (a FIFO, a device, a directory), more than ``limit`` bytes, or any error opening it
-    (``missing`` when it does not exist).
+    regular file (a FIFO, a device, a directory), or any error opening it (``missing`` when it does not
+    exist). The caller closes the descriptor.
     """
     fds: list[int] = []
     try:
@@ -88,15 +87,25 @@ def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
                 fd = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
                 fds.append(fd)
             fd = os.open(relative[-1], os.O_RDONLY | _NOFOLLOW | _NONBLOCK, dir_fd=fd)
-            fds.append(fd)
         except FileNotFoundError:
             raise Unusable("missing") from None
         except OSError:
             raise Unusable("not_readable") from None
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
             raise Unusable("not_a_file")
-        if info.st_size > limit:
+        return fd
+    finally:
+        for opened in reversed(fds):
+            with contextlib.suppress(OSError):
+                os.close(opened)
+
+
+def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
+    """The bytes of ``base/<relative...>`` (``open_inside``), at most ``limit`` of them (``too_large``)."""
+    fd = open_inside(base, relative)
+    try:
+        if os.fstat(fd).st_size > limit:
             raise Unusable("too_large")
         chunks = []
         size = 0
@@ -110,9 +119,35 @@ def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
             chunks.append(chunk)
         return b"".join(chunks)
     finally:
-        for opened in reversed(fds):
-            with contextlib.suppress(OSError):
-                os.close(opened)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def table_lines(base: str, relative: Sequence[str]) -> Generator[str, None, None]:
+    """The complete lines of a recordings table, streamed: a row being written (no newline yet) is left
+    for the next read, a line longer than ``TABLE_LINE_MAX_BYTES`` or not UTF-8 is refused. The size of the
+    file is not capped: the parser stops at ``PROGRESS_MAX_RECORDINGS`` rows."""
+    fd = open_inside(base, relative)
+    try:
+        pending = b""
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            pending += chunk
+            *complete, pending = pending.split(b"\n")
+            if len(pending) > TABLE_LINE_MAX_BYTES:
+                raise Unusable("line_too_long")
+            for raw in complete:
+                if len(raw) > TABLE_LINE_MAX_BYTES:
+                    raise Unusable("line_too_long")
+                try:
+                    yield raw.decode("utf-8").rstrip("\r")
+                except UnicodeDecodeError:
+                    raise Unusable("not_text") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _strict_json(data: bytes) -> Any:
@@ -124,6 +159,11 @@ def _strict_json(data: bytes) -> Any:
         )
     except (ValueError, RecursionError):
         raise Unusable("not_json") from None
+
+
+def _chain(first: str, rest: Iterator[str]) -> Iterator[str]:
+    yield first
+    yield from rest
 
 
 def _is_int(value: Any, low: int, high: int) -> bool:
@@ -208,19 +248,6 @@ def check_recipe_progress(document: Any) -> dict[str, Any]:
     }
 
 
-def complete_lines(data: bytes) -> str:
-    """The table's text up to its last newline: a row being written is left for the next read."""
-    end = data.rfind(b"\n")
-    try:
-        return data[: end + 1].decode("utf-8") if end >= 0 else ""
-    except UnicodeDecodeError:
-        raise Unusable("not_text") from None
-
-
-# ---- the object ----------------------------------------------------------------------------------------
-
-
-@functools.lru_cache(maxsize=1)
 def progress_schema() -> dict[str, Any]:
     """The ``Progress`` member of the byte copy of nemar-cli's schema, its references inlined."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -310,13 +337,14 @@ class Source:
                 raise
             # the recipe removed its directory as the run ended: go on from the last file read
         assert self._state is not None
-        text = complete_lines(
-            read_inside(self.work, [OUTPUTS, *self._state["table"]], TABLE_MAX_BYTES)
-        )
+        lines = table_lines(self.work, [OUTPUTS, *self._state["table"]])
         try:
-            rows = rules.parse_recordings_table(text) if text else []
+            first = next(lines, None)
+            rows = [] if first is None else rules.parse_recordings_lines(_chain(first, lines))
         except rules.TableUnreadable as problem:
             raise Unusable("table_" + problem.reason) from None
+        finally:
+            lines.close()
         return build_object(self._state, rows)
 
 
