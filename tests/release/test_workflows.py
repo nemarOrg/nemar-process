@@ -6,6 +6,7 @@ events start a workflow, which permission a job holds and which action a step tr
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import shutil
@@ -1523,25 +1524,77 @@ def test_the_bot_head_job_holds_no_token_and_no_write():
     assert condition == GUARD.replace("!=", "==")
 
 
-def test_the_scripts_and_workflows_the_bot_runs_have_code_owners():
-    owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
-    for path in (
-        "/.github/workflows/",
-        "/scripts/bump_version.py",
-        "/scripts/sync_dev_merge.py",
-    ):
-        assert re.search(rf"^{re.escape(path)}\s+@\S+", owners, re.M), path
+def codeowners_rules(text: str) -> list[tuple[str, list[str]]]:
+    """The CODEOWNERS rules in file order, as (pattern, owners); comments and blank lines dropped."""
+    rules = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            pattern, *owners = line.split()
+            rules.append((pattern, owners))
+    return rules
 
 
-def test_what_a_runner_bundle_builds_and_installs_has_code_owners():
+def codeowners_pattern_covers(pattern: str, path: str) -> bool:
+    """Whether a CODEOWNERS pattern covers a repository path (no leading slash), gitignore style."""
+    anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
+    body = pattern.strip("/")
+    directory_only = pattern.endswith("/")
+    parts = path.split("/")
+    starts = [0] if anchored else range(len(parts))
+    size = len(body.split("/"))
+    for start in starts:
+        for end in range(start + size, len(parts) + 1) if "**" in body else [start + size]:
+            if end > len(parts):
+                continue
+            candidate = "/".join(parts[start:end])
+            if not fnmatch.fnmatchcase(candidate, body):
+                continue
+            if directory_only and end == len(parts):
+                continue  # a pattern ending in `/` covers what is inside the directory, not a file
+            return True
+    return False
+
+
+def owners_of(path: str, text: str) -> list[str]:
+    """The owners of `path`: those of the LAST rule that covers it, as GitHub reads the file."""
+    found: list[str] = []
+    for pattern, owners in codeowners_rules(text):
+        if codeowners_pattern_covers(pattern, path):
+            found = owners
+    return found
+
+
+PROTECTED_BY_CODE_OWNERS = (
+    # the scripts and workflows the bot runs with its token
+    ".github/workflows/auto-tag.yml",
+    ".github/CODEOWNERS",
+    "scripts/bump_version.py",
+    "scripts/sync_dev_merge.py",
+    # what a runner bundle builds and installs
+    "scripts/build_runner_bundle.py",
+    "deploy/runner/boot.py",
+    "deploy/runner/nemar-runner.service",
+    "runner/nemar_runner/install.py",
+)
+
+
+@pytest.mark.parametrize("path", PROTECTED_BY_CODE_OWNERS)
+def test_the_last_codeowners_rule_for_each_protected_path_names_the_admins(path):
     owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
-    for path in (
-        "/scripts/build_runner_bundle.py",
-        "/deploy/runner/",
-        "/runner/nemar_runner/install.py",
-    ):
-        assert (ROOT / path.lstrip("/")).exists(), path
-        assert re.search(rf"^{re.escape(path)}\s+@nemarOrg/admins\s*$", owners, re.M), path
+    assert (ROOT / path).exists(), path
+    assert owners_of(path, owners) == ["@nemarOrg/admins"], path
+
+
+def test_a_later_codeowners_rule_overrides_an_earlier_one():
+    owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    mutated = owners + "/runner/ @someone\n"
+    assert owners_of("runner/nemar_runner/install.py", mutated) == ["@someone"]
+    assert owners_of("runner/nemar_runner/install.py", owners + "* @someone\n") == ["@someone"]
+    assert owners_of("deploy/runner/boot.py", owners + "boot.py @someone\n") == ["@someone"]
+    assert owners_of("scripts/bump_version.py", owners + "/runner/ @someone\n") == [
+        "@nemarOrg/admins"
+    ]
 
 
 def test_the_dev_bump_checks_out_the_pushed_commit_and_pushes_it_to_dev():
