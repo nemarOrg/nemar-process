@@ -60,7 +60,7 @@ def test_a_run_in_progress_gives_the_live_object(outputs):
         recipe_file(5, running=[{"path": "sub-03/eeg/c.set", "step": "bad_channels"}]),
         [row("sub-01/eeg/a.set"), row("sub-02/eeg/b.edf", "failed", "load_failed", "load")],
     )
-    document = progress.Source(str(outputs)).build()
+    document = progress.Source(str(outputs.parent)).build()
     assert document == {
         "format": "nemar.progress.v1",
         "checkpoint": "preprocess",
@@ -98,20 +98,20 @@ def test_the_checkpoint_is_the_running_steps(outputs, running, rows, expected):
         recipe_file(2, running=running),
         [row("sub-0{}/a.set".format(i)) for i in range(rows)],
     )
-    assert progress.Source(str(outputs)).build()["checkpoint"] == expected
+    assert progress.Source(str(outputs.parent)).build()["checkpoint"] == expected
 
 
 def test_a_torn_last_row_is_left_for_the_next_read(outputs):
     write_run(outputs, recipe_file(2), [row("a.set")])
     with open(str(outputs / TABLE), "a") as handle:
         handle.write("b.set\teeg\tfail")  # the writer is half way through the row
-    document = progress.Source(str(outputs)).build()
+    document = progress.Source(str(outputs.parent)).build()
     assert document["counts"]["import"] == {"passed": 1, "failed": 0, "skipped": 0, "total": 2}
 
 
 def test_after_the_recipe_removes_its_directory_the_last_file_read_is_used(outputs):
     write_run(outputs, recipe_file(2), [row("a.set")])
-    source = progress.Source(str(outputs))
+    source = progress.Source(str(outputs.parent))
     source.build()
     (outputs / ".nemar-progress" / "progress.json").unlink()
     (outputs / ".nemar-progress").rmdir()
@@ -121,14 +121,14 @@ def test_after_the_recipe_removes_its_directory_the_last_file_read_is_used(outpu
 
 def test_with_no_progress_file_ever_there_is_no_report(outputs):
     with pytest.raises(progress.Unusable) as caught:
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "missing"
 
 
 def test_twelve_failures_report_the_ten_most_recent_and_count_all(outputs):
     rows = [row("sub-{:02d}/a.set".format(i), "failed", "load_failed", "load") for i in range(12)]
     write_run(outputs, recipe_file(12), rows)
-    document = progress.Source(str(outputs)).build()
+    document = progress.Source(str(outputs.parent)).build()
     assert [f["path"] for f in document["failures"]] == [
         "sub-{:02d}/a.set".format(i) for i in range(2, 12)
     ]
@@ -141,17 +141,17 @@ def test_a_path_the_contract_cannot_carry_is_left_out_and_counted(outputs):
         row("é.set", "failed", "load_failed"),
     ]
     write_run(outputs, recipe_file(2), rows)
-    document = progress.Source(str(outputs)).build()
+    document = progress.Source(str(outputs.parent)).build()
     assert document["failures"] == []
     assert document["counts"]["import"]["failed"] == 2
 
 
 def test_more_recordings_than_the_contract_counts_is_no_report(outputs):
     write_run(outputs, recipe_file(rules.PROGRESS_MAX_RECORDINGS), [])
-    progress.Source(str(outputs)).build()  # the cap itself is fine
+    progress.Source(str(outputs.parent)).build()  # the cap itself is fine
     write_run(outputs, recipe_file(rules.PROGRESS_MAX_RECORDINGS + 1), [])
     with pytest.raises(progress.Unusable):
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
 
 
 def largest_state_and_rows():
@@ -209,7 +209,7 @@ def test_an_object_over_the_cap_loses_its_oldest_failures_first(monkeypatch):
 def test_a_progress_file_the_launcher_does_not_trust_is_refused(outputs, change):
     write_run(outputs, recipe_file(2, **change), [])
     with pytest.raises(progress.Unusable) as caught:
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "bad_progress_file"
 
 
@@ -218,10 +218,10 @@ def test_duplicate_keys_and_nan_are_refused(outputs):
     path = outputs / ".nemar-progress" / "progress.json"
     path.write_text('{"format": "nemar.recipe-progress.v1", "format": "x"}')
     with pytest.raises(progress.Unusable):
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     path.write_text(json.dumps(recipe_file(2)).replace('"discovered": 2', '"discovered": NaN'))
     with pytest.raises(progress.Unusable):
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
 
 
 def test_a_link_as_the_file_is_never_followed(outputs, tmp_path):
@@ -230,7 +230,7 @@ def test_a_link_as_the_file_is_never_followed(outputs, tmp_path):
     (outputs / ".nemar-progress").mkdir()
     os.symlink(str(secret), str(outputs / ".nemar-progress" / "progress.json"))
     with pytest.raises(progress.Unusable) as caught:
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "not_readable"
 
 
@@ -240,7 +240,7 @@ def test_a_link_as_a_directory_on_the_way_is_never_followed(outputs, tmp_path):
     (elsewhere / "progress.json").write_text(json.dumps(recipe_file(2)))
     os.symlink(str(elsewhere), str(outputs / ".nemar-progress"))
     with pytest.raises(progress.Unusable) as caught:
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "not_readable"
 
 
@@ -251,7 +251,7 @@ def test_a_link_as_the_table_is_never_followed(outputs, tmp_path):
     outside.write_text(HEADER + row("a.set"))
     os.symlink(str(outside), str(outputs / TABLE))
     with pytest.raises(progress.Unusable):
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
 
 
 def test_a_fifo_is_refused_and_never_waited_on(outputs):
@@ -261,7 +261,7 @@ def test_a_fifo_is_refused_and_never_waited_on(outputs):
 
     def attempt():
         with pytest.raises(progress.Unusable) as caught:
-            progress.Source(str(outputs)).build()
+            progress.Source(str(outputs.parent)).build()
         done.append(caught.value.word)
 
     worker = threading.Thread(target=attempt, daemon=True)
@@ -273,7 +273,7 @@ def test_a_fifo_is_refused_and_never_waited_on(outputs):
 def test_a_directory_in_place_of_the_file_is_refused(outputs):
     (outputs / ".nemar-progress" / "progress.json").mkdir(parents=True)
     with pytest.raises(progress.Unusable) as caught:
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "not_a_file"
 
 
@@ -283,7 +283,7 @@ def test_an_oversized_file_is_refused(outputs):
         b" " * (progress.PROGRESS_FILE_MAX_BYTES + 1)
     )
     with pytest.raises(progress.Unusable) as caught:
-        progress.Source(str(outputs)).build()
+        progress.Source(str(outputs.parent)).build()
     assert caught.value.word == "too_large"
 
 
@@ -312,3 +312,28 @@ def test_an_object_the_schema_refuses_is_never_reported():
     with pytest.raises(progress.Unusable) as caught:
         progress.build_object(state, [])
     assert caught.value.word == "schema_refused"
+
+
+def test_an_outputs_replaced_by_a_link_is_never_followed(outputs, tmp_path):
+    """The container can replace ``work/outputs`` (it is inside the mount) with a link to anything the
+    launcher can read: the walk starts at ``work`` and refuses ``outputs`` as a link."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    write_run(elsewhere, recipe_file(2), [row("a.set")])
+    outputs.rmdir()
+    os.symlink(str(elsewhere), str(outputs))
+    with pytest.raises(progress.Unusable) as caught:
+        progress.Source(str(outputs.parent)).build()
+    assert caught.value.word == "not_readable"
+
+
+def test_an_outputs_replaced_by_a_link_after_the_last_read_is_refused_too(outputs, tmp_path):
+    write_run(outputs, recipe_file(2), [row("a.set")])
+    source = progress.Source(str(outputs.parent))
+    source.build()
+    elsewhere = tmp_path / "elsewhere"
+    outputs.rename(elsewhere)
+    os.symlink(str(elsewhere), str(outputs))
+    with pytest.raises(progress.Unusable) as caught:
+        source.build()  # the cached progress file is not a way around the walk
+    assert caught.value.word == "not_readable"

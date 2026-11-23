@@ -8,7 +8,8 @@ both, applies nemar-cli's counting rules (``checkpoints``, a port that replays n
 returns the object, or nothing.
 
 Both files are written by the container, so neither is trusted. Each is opened by walking its path one
-component at a time with ``O_NOFOLLOW`` (a link anywhere is refused), the last one without blocking (a
+component at a time with ``O_NOFOLLOW``, from the launcher's own ``work`` directory and through
+``outputs`` (a link anywhere, ``outputs`` included, is refused), the last one without blocking (a
 FIFO is refused, never waited on), and must be a regular file under its cap: 64 KiB for the progress
 file, 64 MiB for the table. JSON is read strictly (no duplicate key, no NaN). The progress file's shape is
 checked, and only the table's complete lines are read. Nothing read from either file is ever logged, and
@@ -81,7 +82,7 @@ def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
     fds: list[int] = []
     try:
         try:
-            fd = os.open(base, os.O_RDONLY | _DIRECTORY)
+            fd = os.open(base, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
             fds.append(fd)
             for part in relative[:-1]:
                 fd = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
@@ -277,21 +278,31 @@ def build_object(state: Mapping[str, Any], rows: Sequence[rules.Row]) -> dict[st
     return document
 
 
+OUTPUTS = "outputs"  # the host's NEMAR_OUT, inside the launcher's `work`
+
+
 class Source:
-    """Builds the progress object from the files under ``outputs`` (the host's ``NEMAR_OUT``).
+    """Builds the progress object from the files under ``work/outputs`` (the host's ``NEMAR_OUT``).
+
+    The walk starts at ``work``, which the launcher created and mounts: the container can change anything
+    under it, ``outputs`` included, but not ``work`` itself. ``outputs`` is then opened with
+    ``O_NOFOLLOW`` like every other component, so an ``outputs`` the container replaced with a link is
+    refused (``not_readable``), on the first read and on every later one, the table's included.
 
     The last good progress file is kept in memory, so reports go on after the recipe removes its
     directory at the end of the run (its finalize can take a while).
     """
 
-    def __init__(self, outputs: str) -> None:
-        self.outputs = outputs
+    def __init__(self, work: str) -> None:
+        self.work = work
         self._state: dict[str, Any] | None = None
 
     def build(self) -> dict[str, Any]:
         try:
             data = read_inside(
-                self.outputs, [RECIPE_PROGRESS_DIR, RECIPE_PROGRESS_FILE], PROGRESS_FILE_MAX_BYTES
+                self.work,
+                [OUTPUTS, RECIPE_PROGRESS_DIR, RECIPE_PROGRESS_FILE],
+                PROGRESS_FILE_MAX_BYTES,
             )
             self._state = check_recipe_progress(_strict_json(data))
         except Unusable as problem:
@@ -299,7 +310,9 @@ class Source:
                 raise
             # the recipe removed its directory as the run ended: go on from the last file read
         assert self._state is not None
-        text = complete_lines(read_inside(self.outputs, self._state["table"], TABLE_MAX_BYTES))
+        text = complete_lines(
+            read_inside(self.work, [OUTPUTS, *self._state["table"]], TABLE_MAX_BYTES)
+        )
         try:
             rows = rules.parse_recordings_table(text) if text else []
         except rules.TableUnreadable as problem:

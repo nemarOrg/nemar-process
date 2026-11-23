@@ -82,7 +82,9 @@ def reporter_for(tmp_path: Path, base_url: str, log: Lines, post: bool = True):
     launcher.mkdir()
     write_run(outputs)
     poster = progress.poster(base_url, JOB_ID, TOKEN) if post else None
-    return progress.Reporter(progress.Source(str(outputs)), str(launcher), poster, log), launcher
+    return progress.Reporter(
+        progress.Source(str(outputs.parent)), str(launcher), poster, log
+    ), launcher
 
 
 def run_for(reporter, seconds: float) -> None:
@@ -223,7 +225,7 @@ def test_before_the_recipe_writes_its_file_the_reporter_retries_soon(tmp_path, r
     launcher.mkdir()
     log = Lines()
     reporter = progress.Reporter(
-        progress.Source(str(outputs)),
+        progress.Source(str(outputs.parent)),
         str(launcher),
         progress.poster(server.base_url, JOB_ID, TOKEN),
         log,

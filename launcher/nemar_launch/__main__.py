@@ -259,7 +259,7 @@ def _do_work(
         # runner reads it for its heartbeat, and on Tapis (no lease) posted to the job-token route.
         # It never touches the container and never fails the job.
         reporter = progress.Reporter(
-            progress.Source(state.layout.outputs),
+            progress.Source(state.layout.work),
             state.layout.launcher,
             None
             if state.lease is not None
