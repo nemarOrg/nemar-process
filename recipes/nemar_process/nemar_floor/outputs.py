@@ -163,6 +163,23 @@ def _strongest_line(result: FloorResult) -> tuple[int | None, float | None, floa
     return best, measured[best], result.line_after.get(best)
 
 
+# The summary metric names the floor writes (``summary_metrics``); a plugin's headline metric may not
+# take one (``plugins.reserved_metric_names``).
+SUMMARY_KEYS = (
+    "nChannelsInput",
+    "nSignalChannels",
+    "nGoodChannels",
+    "nNoiseOnlyChannels",
+    "nNotAssessedChannels",
+    "percentGoodChannels",
+    "percentGoodSamples",
+    "durationS",
+    "samplingRateHz",
+    "lineNoiseBeforeDb",
+    "lineNoiseAfterDb",
+)
+
+
 def summary_metrics(result: FloorResult) -> dict[str, Any]:
     channels, samples = result.metrics["channels"], result.metrics["samples"]
     return {
