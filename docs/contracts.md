@@ -124,17 +124,24 @@ The commit is on nemar-cli's pipeline progress epic branch (`feature/issue-2324-
   In CI the `launcher` job checks out exactly the pinned commit (sparse, `shared/` and the job-token callbacks) and sets `NEMAR_REQUIRE_PROGRESS_DRIFT=1`, which turns that skip into a failure.
 - An advisory CI job, `nemar-cli-progress-latest` (in `nemar-cli-drift.yml`), warns without failing when nemar-cli's epic branch has changed the schema, the vectors, the counting rules, the recipe checkpoint maps or the runner schema since the pinned commit (or when the comparison cannot be made).
 
-To bump the progress pin:
+### Bumping the progress pin
+
+The progress pin and the runner pin move together: the runner schema refers to the progress schema by its `$id`, and `test_the_runner_pin_names_the_same_commit` fails when their `ref`s differ.
+So a bump copies the runner schema too, even when only the progress contract changed:
 
 ```bash
 NEMAR_CLI=/path/to/nemar-cli          # a checkout that contains the new commit
 REF=<the new nemar-cli commit, 40 hex digits>
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress.schema.json" > launcher/schema/compute-progress.v1.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress-vectors.json" > tests/contract/compute-progress-vectors.json
-shasum -a 256 launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json
-wc -c < launcher/schema/compute-progress.v1.json; wc -c < tests/contract/compute-progress-vectors.json
-# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of both copies
-NEMAR_CLI_PROGRESS_DIR="$NEMAR_CLI" NEMAR_REQUIRE_PROGRESS_DRIFT=1 uv run pytest tests/contract
+git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-runner.schema.json" > runner/schema/compute-runner.v1.json
+shasum -a 256 launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json
+wc -c launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json
+# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of the schema and the vectors
+# edit tests/contract/nemar-cli-runner-pin.json: the same ref, and the sha256 and bytes of the runner schema
+NEMAR_CLI_PROGRESS_DIR="$NEMAR_CLI" NEMAR_REQUIRE_PROGRESS_DRIFT=1 \
+NEMAR_CLI_RUNNER_DIR="$NEMAR_CLI" NEMAR_REQUIRE_RUNNER_DRIFT=1 \
+  uv run pytest tests/contract
 ```
 
 Use `${REF}` with braces: in zsh, `"$REF:shared"` reads `:s` as a history modifier.

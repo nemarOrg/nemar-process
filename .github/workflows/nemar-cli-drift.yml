@@ -128,7 +128,7 @@ jobs:
           fi
           changed=$(printf '%s\n' "$files" | grep -E '^(shared/contract/compute-progress(\.schema\.json|-vectors\.json|\.ts)$|shared/contract/compute-runner\.schema\.json$|shared/compute-checkpoints\.ts$|shared/compute-recipes\.ts$)' || true)
           if [ -n "$changed" ]; then
-            echo "::warning title=nemar-cli's progress contract moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Copy them (docs/contracts.md, Bumping the progress pin), then bump the pin in tests/contract/nemar-cli-progress-pin.json."
+            echo "::warning title=nemar-cli's progress contract moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Copy them (docs/contracts.md, The live progress contract, Bumping the progress pin), then bump tests/contract/nemar-cli-progress-pin.json and tests/contract/nemar-cli-runner-pin.json to the same ref."
           else
             echo "the progress contract files are unchanged since the pin"
           fi
