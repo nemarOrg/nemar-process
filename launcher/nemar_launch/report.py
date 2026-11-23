@@ -69,10 +69,11 @@ def report_schema() -> dict[str, Any]:
 def problem(report: Mapping[str, Any]) -> str | None:
     """Why ``report`` is not one to write, as a fixed word, or None: the schema, then the rules a schema
     cannot state (nemar-cli's ``refineResultsReport`` and ``refineResultsCheckpoints``)."""
+    # first, so it is named for itself (the schema's oneOf refuses the same case less precisely)
+    if (report.get("checkpoints") is None) == (report.get("checkpoints_reason") is None):
+        return "reason_differs"
     if spec.validate(report, report_schema()):
         return "schema_refused"
-    if (report["checkpoints"] is None) == (report["checkpoints_reason"] is None):
-        return "reason_differs"
     for key in ("inputs", "launcher_files"):
         names = [item["name"] for item in report[key]]
         if len(names) != len(set(names)):

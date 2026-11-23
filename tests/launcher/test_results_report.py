@@ -261,9 +261,12 @@ def _failures_key_missing(d):
     del d["checkpoints"]["failures"]["ica"]
 
 
-def _failure_moved(d):
+def _failure_misplaced(d):
+    """One failure moved under another checkpoint's key: every key is still there, and the counts
+    still hold (a failure is counted against the checkpoint it names, not the key)."""
     failures = d["checkpoints"]["failures"]
-    failures["ica"].append(dict(failures["preprocess"][0]))
+    moved = failures["preprocess"].pop(0)
+    failures["ica"].append(moved)
 
 
 def _nine(d):
@@ -274,8 +277,8 @@ def _counts(d):
     d["checkpoints"]["counts"]["import"]["passed"] += 100
 
 
-def _reason_too(d):
-    d["checkpoints_reason"] = "no_progress_file"
+def _no_counts_and_no_reason(d):
+    d["checkpoints"] = None
 
 
 def _names_twice(d):
@@ -287,13 +290,22 @@ def _time(d):
 
 
 @pytest.mark.parametrize(
-    "change",
-    [_uri, _failures_key_missing, _failure_moved, _nine, _counts, _reason_too, _names_twice, _time],
+    ("change", "word"),
+    [
+        (_uri, "image_differs"),
+        (_failures_key_missing, "failures_differ"),
+        (_failure_misplaced, "failure_misplaced"),
+        (_nine, "schema_refused"),
+        (_counts, "counts_refused"),
+        (_no_counts_and_no_reason, "reason_differs"),
+        (_names_twice, "name_twice"),
+        (_time, "finished_before_started"),
+    ],
 )
-def test_each_rule_refuses(tmp_path, change):
+def test_each_rule_refuses_with_its_own_word(tmp_path, change, word):
     built = copy.deepcopy(good(tmp_path))
     change(built)
-    assert report.problem(built) is not None
+    assert report.problem(built) == word
 
 
 def test_a_report_that_breaks_a_rule_is_written_without_its_counts(tmp_path):
