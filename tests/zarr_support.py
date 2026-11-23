@@ -168,17 +168,21 @@ def write_group(
     modality: str,
     unit: str,
     data,
-    scale: float = 0.5,
+    scale: float | tuple[float, ...] = 0.5,
     labels: tuple[str, ...] | None = None,
     units: tuple[str, ...] | None = None,
+    offset: float | tuple[float, ...] = 0.0,
+    dtype: str = "int16",
 ) -> None:
     """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization.
 
     The labels and units are the stand-in's own (``LABELS``, ``unit``) unless a test gives each
-    channel's, as a store that states a label or a unit for some channels only would."""
-    import numpy as np
-
+    channel's, as a store that states a label or a unit for some channels only would. ``scale`` and
+    ``offset`` are one value for every channel or one per channel; ``dtype`` is level 0's (int16 is
+    the contract's: another is a store the contract does not describe)."""
     channels, _samples = data.shape
+    scales = list(scale) if isinstance(scale, tuple) else [scale] * channels
+    offsets = list(offset) if isinstance(offset, tuple) else [offset] * channels
     group = root.create_group(name)
     group.attrs.update(
         {
@@ -203,14 +207,14 @@ def write_group(
         }
     )
     array = group.create_array(
-        "0", shape=data.shape, dtype="int16", chunks=(channels, 125), shards=(channels, 2500)
+        "0", shape=data.shape, dtype=dtype, chunks=(channels, 125), shards=(channels, 2500)
     )
-    array[:] = data.astype(np.int16)
+    array[:] = data.astype(dtype)
     array.attrs.update(
         {
             "physical_formula": "physical = digital * scale + offset",
-            "scale": [scale] * channels,
-            "offset": [0.0] * channels,
+            "scale": scales,
+            "offset": offsets,
             "level": 0,
             "rate": RATE,
             "source_rate_hz": 500.0,
@@ -436,11 +440,14 @@ def add_store(
     labels: tuple[str, ...] | None = None,
     unit: str = "uV",
     attributes: Mapping[str, Any] | None = None,
+    scale: float | tuple[float, ...] = 0.5,
+    offset: float | tuple[float, ...] = 0.0,
+    dtype: str = "int16",
 ) -> None:
     """One more EEG store under a running stand-in's root, listed in its index (rewritten, so the
     index's digest changes): one channel group of ``data``'s channels and samples, with the labels given
-    (``LABELS`` for eight channels, else ``C1``, ``C2``, ...) and the root attributes given
-    (``root_attributes``; none by default)."""
+    (``LABELS`` for eight channels, else ``C1``, ``C2``, ...), the root attributes given
+    (``root_attributes``; none by default) and level 0's conversion and dtype (``write_group``)."""
     import zarr
     from zarr.storage import LocalStore
 
@@ -448,7 +455,17 @@ def add_store(
     root = zarr.create_group(store=LocalStore(base / zarr_name(path)), overwrite=True)
     if attributes:
         root.attrs.update(dict(attributes))
-    write_group(root, "eeg_250hz", modality="EEG", unit=unit, data=data, labels=labels)
+    write_group(
+        root,
+        "eeg_250hz",
+        modality="EEG",
+        unit=unit,
+        data=data,
+        labels=labels,
+        scale=scale,
+        offset=offset,
+        dtype=dtype,
+    )
     document = json.loads(served.index_bytes)
     channels, samples = data.shape
     group = group_entry("eeg_250hz", "EEG", RATE, channels, samples)
