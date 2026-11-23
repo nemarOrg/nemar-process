@@ -80,6 +80,14 @@ None of this has been observed on the node's runtime, which may be a commercial 
 - The Tapis application and system definitions and the observer are written and validated in CI (see the last section), but nothing is registered with a tenant and nothing has run on a node.
 - A symlink or special file that cannot be unlinked even after the directory's permissions are widened, a directory that cannot be listed even after the same, and an entry that vanishes between the directory listing and its `lstat`, have no test: an unprivileged test cannot make any of them on demand (the walk records each as `outputs_unreadable` or skips it, and the code paths are read, not run).
 
+## The standalone entry (`nemar-launch-local`)
+
+- **macOS Docker Desktop** is not verified: the entry is tested on Linux with Apptainer and with rootful Docker (CI), and with the stand-in runtimes on a developer's machine.
+- **The audit events the fence relies on** (`socket.*`, `urllib.Request`, `subprocess.Popen`, `os.system`, `os.exec`, `os.spawn`, `os.posix_spawn`) are confirmed by `tests/launcher/test_fence.py` on Python 3.9 and 3.12; an interpreter that raises them differently would weaken the fence, not the container's isolation.
+- **What a child process sends is outside the fence**: cosign talks to the registry and to Sigstore, `apptainer pull` to the registry, and the Docker daemon pulls nothing in this mode (`--pull=never`) but is a separate process.
+- **`apptainer pull oras://...@sha256:<manifest>`** on a person's machine is exercised by CI's Apptainer leg against the public registry (`tests/e2e/test_local_pull_real.py` verifies the manifest and its layer; the runner's test pulls the file); other Apptainer versions are not.
+- **A public address is not tied to the name looked up**: inside the `--pull` window under Apptainer the launcher may connect to any public address on port 443 after it has looked up the registry's host, and to nothing else.
+
 ## The runtime image (nemar-python)
 
 [images.md](images.md) says what the image is and how a consumer refers to it.

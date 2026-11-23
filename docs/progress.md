@@ -2,7 +2,7 @@
 
 **Built** (epic nemarOrg/nemar-cli#2324, Phase 3): each recipe declares its checkpoint map beside `STEP_ORDER` and `nemar-recipe version` prints it; the recipe layer writes a local progress file ([recipes.md](recipes.md), "The local progress file"); the launcher builds the live progress object and reports it ([launcher.md](launcher.md), "Live progress"); the runner carries it on its heartbeat ([runner.md](runner.md)).
 The contract is pinned at nemar-cli's Phase 2 commit ([contracts.md](contracts.md), "The live progress contract").
-The standalone mode of the launcher (decision 8, a person's own machine with no NEMAR service) is still planned (nemarOrg/nemar-process#67).
+The standalone mode of the launcher (decision 8, a person's own machine with no NEMAR service) is built ([standalone.md](standalone.md), nemarOrg/nemar-process#67): it writes the same live progress object to `launcher/progress.json` and a results report with the reconciled counts.
 Where this page and the implementation disagree, the implementation and its tests win and this page is corrected.
 
 Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), artifact subspace reconstruction (ASR), quality control (QC).
@@ -54,9 +54,11 @@ From `STEP_ORDER` and `PRE_CHECKS` in `recipes/nemar_process/nemar_floor/steps.p
 | the floor's `flatline` to `qc`, then `ica_eligibility`, `iclabel_locations`, `asr`, `reref` | `preprocess` |
 | `ica` | `ica` |
 | `iclabel` | `iclabel` |
+| the quality plugin `nemar-quality` | `quality` |
 
 The floor's steps that `nemar-ica` re-runs, its `qc` included, are preparation for the decomposition here, and so are ASR and the average reference;
-all of them count as `preprocess`, so `nemar-ica` has no `quality` checkpoint (the quality metrics of the decomposition are not built yet; [plugins.md](plugins.md)).
+all of them count as `preprocess`.
+Its `quality` checkpoint is its quality plugin's, `nemar-quality` (nemar-cli's map for this version; the recipe runs the plugin once Phase 5 wires it in, [plugins.md](plugins.md)), a step of the recordings table and of the record that `STEP_ORDER` does not list (nemar-cli's `RECIPE_PLUGIN_STEPS`): a plugin that failed and was absorbed is named in a succeeded row's `skipped_steps` column, and that recording counts as skipped at `quality` only (`checkpoints.py`, replaying nemar-cli's vectors).
 
 A pre-check is a check or a measurement made early, under its own step id, so a recording it refuses is counted where it stopped: the floor's `qc_amplitude` (the robust amplitude, measured before bad channels go) and nemar-ica's `ica_eligibility` (the rank) and `iclabel_locations` (a scalp map is possible), both before ASR.
 Each counts at `preprocess`, and none is a step of the record: they are `PRE_CHECKS` beside `STEP_ORDER` in the recipe's `steps.py`, not part of it, so a recording that ends at one never counts as having passed `quality`, `ica` or `iclabel`.
@@ -113,7 +115,7 @@ nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, r
 A researcher or a partner site runs a job on the platform by following the same contract NEMAR's recipes follow:
 
 1. Build on a nemar-process image, or an image built from one ([images.md](images.md)).
-2. Run it under the launcher with a launch specification ([launcher.md](launcher.md)), or on a person's own machine with a local launch specification without a job token in the standalone mode (planned).
+2. Run it under the launcher with a launch specification ([launcher.md](launcher.md)), or on a person's own machine with a local launch specification without a job token in the standalone mode ([standalone.md](standalone.md)).
 3. Declare the job's checkpoints, mapping each step to one, and write a recordings table and signalJourney records as the recipes do ([recipes.md](recipes.md)).
 4. Add metrics and figures as plugins against the manifest ([plugins.md](plugins.md)).
 
