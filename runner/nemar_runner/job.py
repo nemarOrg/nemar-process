@@ -275,6 +275,8 @@ class Heartbeat(threading.Thread):
         self._progress_sent_at: float | None = None
         self._snapshot: dict[str, Any] | None = None
         self._snapshot_lock = threading.Lock()
+        self._reader_halt = threading.Event()  # set when the job ends or progress goes off
+        self._reader_thread: threading.Thread | None = None
         self._drop_said = False
 
     def uploading(self) -> None:
@@ -288,9 +290,15 @@ class Heartbeat(threading.Thread):
 
     def finish(self) -> None:
         self._done.set()
+        self._reader_halt.set()
         self._wake.set()
         if self.is_alive():
             self.join(self._tuning.http_timeout_seconds + 5)
+        reader = self._reader_thread
+        if reader is not None and reader.is_alive():
+            reader.join(
+                1.0
+            )  # bounded: a read stuck on a network file system is a daemon left behind
 
     def _read_progress(self) -> None:
         """Refresh the snapshot from the job's ``launcher/progress.json``: read, parsed strictly and
@@ -321,14 +329,14 @@ class Heartbeat(threading.Thread):
             self._snapshot = value
 
     def _reader(self) -> None:
-        while not self._done.is_set() and not self._progress_off:
+        while not self._reader_halt.is_set():
             try:
                 self._read_progress()
             except Exception as error:  # noqa: BLE001 - a reader fault only means no progress
                 self._log.error(
                     "progress_reader_error", job=self._job.id, error=type(error).__name__
                 )
-            self._done.wait(min(PROGRESS_READ_SECONDS, self._tuning.heartbeat_seconds))
+            self._reader_halt.wait(min(PROGRESS_READ_SECONDS, self._tuning.heartbeat_seconds))
 
     def _progress(self, phase: str) -> dict[str, Any] | None:
         """The last checked snapshot to carry on this heartbeat, or None. No I/O: it never blocks."""
@@ -355,6 +363,7 @@ class Heartbeat(threading.Thread):
                 raise
             if not error.transient:
                 self._progress_off = True
+                self._reader_halt.set()
                 self._log.warn("heartbeat_progress_refused", job=self._job.id, **error.fields())
             return self._api.heartbeat(self._job.id, self._job.lease_id, phase)
         if progress is not None:
@@ -363,10 +372,12 @@ class Heartbeat(threading.Thread):
 
     def run(self) -> None:
         if self._out_dir is not None:
+            reader = threading.Thread(
+                target=self._reader, name="progress-" + self._job.id, daemon=True
+            )
             try:
-                threading.Thread(
-                    target=self._reader, name="progress-" + self._job.id, daemon=True
-                ).start()
+                reader.start()
+                self._reader_thread = reader
             except RuntimeError:  # no thread to be had: the heartbeat goes on, without progress
                 self._progress_off = True
                 self._log.warn("progress_reader_not_started", job=self._job.id)

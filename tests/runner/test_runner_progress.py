@@ -1,10 +1,13 @@
 """The runner carries the launcher's live progress on its heartbeat (ADR 0134).
 
-The heartbeat renews the lease, so nothing about progress may cost it: the object is read from the
-job's own ``launcher/progress.json`` without following a link, checked by ``contract.check_progress``
-(a mirror of the Worker's strict schema) before it is attached, carried only on a ``started`` heartbeat
-and at most once in 50 seconds, and when the Worker still refuses the body (``invalid_body``) the same
-heartbeat is sent again at once without it and progress stays off for the job. Python 3.9.
+The heartbeat renews the lease, so nothing about progress may cost it. A reader thread per job reads the
+job's own ``launcher/progress.json`` without following a link or blocking, parses it strictly and checks
+it with ``contract.check_progress`` (a mirror of the Worker's strict schema) into an in-memory snapshot;
+the heartbeat attaches that snapshot (no I/O of its own), only on a ``started`` heartbeat and at most once
+in 50 seconds. When a heartbeat that carried progress fails with anything but a lease, fatal or drain word,
+the same heartbeat is sent again at once without it; a refusal that will not change (below 500, not 429)
+also turns progress off for the job and stops the reader. The reader also stops when the job ends.
+Python 3.9.
 
 The stand-in routes check every heartbeat body against the pinned schema, which follows the ``$id``
 reference into the progress schema copy, so each test that reads a body also proves it valid.
@@ -17,7 +20,7 @@ import os
 
 import pytest
 from nemar_runner import contract, job
-from runner_support import SIF, Rig, check_def, claim_job, claimed, make_launcher
+from runner_support import SIF, Rig, check_def, claim_job, claimed, job_id, make_launcher
 
 PROGRESS = {
     "format": "nemar.progress.v1",
@@ -379,5 +382,78 @@ def test_a_reader_thread_that_cannot_start_leaves_the_heartbeat_renewing(
         assert len(started) >= 4
         assert with_progress(rig) == []
         assert not rig.events("lease_lost")
+    finally:
+        rig.close()
+
+
+def progress_threads(job_id: str) -> list:
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "progress-" + job_id and t.is_alive()]
+
+
+@pytest.mark.parametrize(
+    ("status", "word"),
+    [
+        (401, "runner_credential_not_accepted"),
+        (426, "runner_outdated"),
+        (426, "protocol_unsupported"),
+    ],
+)
+def test_a_fatal_or_drain_word_on_a_progress_heartbeat_is_not_resent_plain(
+    tmp_path, no_gate, status, word
+):
+    """Those words are about the runner, not the body: no plain resend, progress stays on, and the
+    runner acts on the word as on any heartbeat."""
+    from server import Response
+
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        state = {"answered": False}
+
+        def answer(body, _n):
+            if "progress" in body and not state["answered"]:
+                state["answered"] = True
+                return Response.json_body(status, {"error": word})
+            return None
+
+        rig.routes.on_heartbeat = answer
+        run_job(rig)
+        bodies = rig.routes.bodies("heartbeat")
+        first = next(i for i, b in enumerate(bodies) if "progress" in b)
+        assert len(bodies) > first + 1
+        assert "progress" in bodies[first + 1]  # the next cycle, not a plain resend
+        assert not rig.events("heartbeat_progress_refused")
+    finally:
+        rig.close()
+
+
+def test_no_reader_thread_outlives_the_job(tmp_path, no_gate):
+    rig = build(tmp_path, writes_progress(PROGRESS))
+    try:
+        assert run_job(rig) == "finished"
+        assert progress_threads(job_id(1)) == []
+    finally:
+        rig.close()
+
+
+def test_the_reader_stops_once_progress_is_off(tmp_path, no_gate):
+    from server import Response
+
+    rig = build(tmp_path, writes_progress(PROGRESS, "time.sleep(2)\nwrite_result()\n"))
+    try:
+        seen: dict[str, list] = {"alive": []}
+
+        def answer(body, _n):
+            if "progress" in body:
+                return Response.json_body(413, {"error": "too large"})
+            if rig.events("heartbeat_progress_refused"):
+                seen["alive"].append(bool(progress_threads(job_id(1))))
+            return None
+
+        rig.routes.on_heartbeat = answer
+        assert run_job(rig) == "finished"
+        assert seen["alive"], "no heartbeat after progress went off"
+        assert seen["alive"][-1] is False
     finally:
         rig.close()
