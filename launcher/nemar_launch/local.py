@@ -3,7 +3,7 @@ local launch specification file and local directories, with no NEMAR service inv
 
     nemar-launch-local --spec FILE --out DIR [--data NAME=DIR ...] [--code BUNDLE.tar.gz]
         [--engine apptainer|docker] [--sif-root DIR] [--cpus N] [--memory-mb N] [--scratch DIR]
-        [--time-limit-s N] [--allow-registry HOST ...]
+        [--time-limit-s N] [--allow-registry HOST ...] [--pull [--cosign PATH]]
 
 It never reads a NEMAR launch specification (``NEMAR_LAUNCH_SPEC``), a lease or a job token, and calls no
 NEMAR route: host paths come from the command line only, and the launcher's environment is built from an
@@ -13,7 +13,8 @@ through ``settings.read_settings`` exactly as a runner's do. ``NEMAR_LAUNCH_SPEC
 never read. The container phase is the service's own (``__main__._do_work``, ``run``, ``runtime``,
 ``finalize_outputs``, the live progress reporter with no poster), so the isolation is identical; the
 differences are the inputs (``Steps``): the code from ``--code`` (``bundle.from_file``), each dataset bound
-read-only, whole, at ``/data/<name>``, an image that is never pulled (Docker runs with ``--pull=never``; a
+read-only, whole, at ``/data/<name>``, an image that is never pulled except with ``--pull``, inside the
+fence's one window, after cosign verified it (``LocalImage``; Docker always runs with ``--pull=never``; a
 random ``rnr_<24 hex>`` runner label per run), SIGINT and SIGHUP stopping the job as SIGTERM does, and
 the fence (``fence.py``) closed for the whole run.
 
@@ -41,7 +42,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import __main__ as service
-from . import bundle, fence, progress, report, run, runtime, spec, stage
+from . import bundle, fence, progress, report, run, runtime, spec, stage, verify
 from .codes import (
     ENV_ALLOWED_REGISTRIES,
     ENV_CONTAINER_RUNTIME,
@@ -110,6 +111,12 @@ def parser() -> argparse.ArgumentParser:
         metavar="HOST",
         help="a registry a Docker image may come from (default ghcr.io; repeat)",
     )
+    made.add_argument(
+        "--pull",
+        action="store_true",
+        help="verify NEMAR's signed image with cosign and pull it if it is missing",
+    )
+    made.add_argument("--cosign", help="the cosign binary for --pull (default: cosign on PATH)")
     return made
 
 
@@ -127,6 +134,8 @@ class Options:
         self.scratch: str | None = None if args.scratch is None else os.path.abspath(args.scratch)
         self.time_limit_s: int | None = args.time_limit_s
         self.registries: list[str] = list(args.allow_registry)
+        self.pull: bool = args.pull
+        self.cosign: str | None = args.cosign
         self.data: dict[str, str] = {}
         for item in args.data:
             name, sep, directory = item.partition("=")
@@ -147,6 +156,8 @@ class Options:
             raise Usage("--allow-registry is for --engine docker")
         if any(_REGISTRY_HOST.fullmatch(r) is None for r in self.registries):
             raise Usage("--allow-registry takes a registry host")
+        if self.cosign is not None and not self.pull:
+            raise Usage("--cosign is for --pull")
 
 
 def environment(options: Options, environ: Mapping[bytes, bytes]) -> Env:
@@ -239,11 +250,26 @@ def count_input(directory: str) -> dict[str, int]:
 
 
 class LocalImage(service.Image):
-    """The standalone entry's image: never pulled. Apptainer runs ``<sif-root>/<hex>.sif``; under
-    Docker an absent image is ``image_missing`` (``ensure_image(pull=False)``)."""
+    """The standalone entry's image. Without ``--pull`` nothing is pulled or verified: Apptainer runs
+    ``<sif-root>/<hex>.sif`` and under Docker an absent image is ``image_missing``
+    (``ensure_image(pull=False)``). With ``--pull`` the image must be NEMAR's own
+    (``verify.check_reference``, before anything starts), and the fence's window opens around the
+    verification and the pull only (``_pull_image``, ``_pull_sif``); a failed verification is
+    ``runtime_error``, ``image_unverified`` (exit 13), with the reason word in the log."""
 
-    def __init__(self) -> None:
+    def __init__(self, pull: bool = False, cosign: str | None = None, fenced: Any = None) -> None:
+        self.pull = pull
+        self.cosign = cosign
+        self.fenced = fenced
         self.verification: dict[str, Any] | None = None
+
+    def locate(self, job: spec.Job, env: Env) -> str:
+        if not self.pull:
+            return run.resolve_sif(job, env)
+        root = env.get(ENV_SIF_ROOT)
+        if not root or not os.path.isdir(root):
+            raise Failure("runtime_error", "image_missing", "the image directory is missing")
+        return os.path.join(root, job.image["sif"])  # verified, or pulled, by acquire
 
     def acquire(
         self,
@@ -257,9 +283,126 @@ class LocalImage(service.Image):
         terminator: run.Terminator,
         log: Log,
     ) -> str:
-        if engine != runtime.APPTAINER:
-            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
+        if not self.pull:
+            if engine != runtime.APPTAINER:
+                runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
+            return sif
+        digest_hex = job.image["digest"].split(":", 1)[1]
+        path = env.get("PATH", "") or ""
+        try:
+            bare = verify.check_reference(job.image["uri"], digest_hex)
+            cosign = verify.find_cosign(self.cosign, path)
+            home = verify.cosign_home(scratch)
+            if engine == runtime.APPTAINER:
+                self._pull_sif(
+                    runtime_path, sif, digest_hex, cosign, path, home, env, scratch, terminator
+                )
+            else:
+                self._pull_image(
+                    runtime_path, bare, digest_hex, cosign, path, home, env, terminator, log
+                )
+        except verify.Unverified as unverified:
+            log.error(
+                "image_unverified reason={}{}".format(
+                    unverified.reason, " ({})".format(unverified.why) if unverified.why else ""
+                )
+            )
+            raise Failure(
+                "runtime_error", "image_unverified", "the image is not the signed one"
+            ) from None
+        log.info(
+            "image: verified by cosign ({})".format(self.verification and self.verification["kind"])
+        )
+        if engine == runtime.APPTAINER:
+            return run.resolve_sif(job, env)
+        runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
         return sif
+
+    def _pull_image(
+        self,
+        docker: str,
+        bare: str,
+        digest_hex: str,
+        cosign: str,
+        path: str,
+        home: str,
+        env: Env,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> None:
+        """Docker: cosign verifies the digest (every entry names it), then the image is pulled by that
+        digest only if it is absent; the window allows exactly those three command lines."""
+        stop = terminator.stop
+        inspect = [docker, "image", "inspect", "--format", "{{json .Config.Volumes}}", bare]
+        allowed = [
+            verify.version_argv(cosign),
+            verify.verify_argv(cosign, bare),
+            verify.docker_pull_argv(docker, digest_hex),
+        ]
+        with self.fenced.window(allowed):
+            present, _ = runtime._run(inspect, env, runtime.INSPECT_SECONDS, stop, capture=True)
+            version = verify.cosign_version(cosign, path, home, stop)
+            out = verify.run_cosign(cosign, bare, path, home, stop)
+            verify.verified_digests(out, "sha256:" + digest_hex)
+            if present != 0:
+                log.info("image: pulling the verified digest")
+                pulled, _ = runtime._run(allowed[2], env, runtime.PULL_SECONDS, stop)
+                if pulled != 0:
+                    raise Failure("runtime_error", "image_missing", "the image could not be pulled")
+        self.verification = {"by": "cosign", "kind": "image", "cosign_version": version}
+
+    def _pull_sif(
+        self,
+        apptainer: str,
+        sif: str,
+        digest_hex: str,
+        cosign: str,
+        path: str,
+        home: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+    ) -> None:
+        """Apptainer: cosign verifies the SIF artifact found by its tag; the launcher reads that
+        artifact's manifest by the digest cosign named from the registry, and a missing file is pulled
+        by that digest into a part file and hashed against the manifest's one layer before it is renamed;
+        a file already there is hashed against it too. The window allows the two cosign command lines,
+        the registry's host and its token and manifest addresses, and (once cosign has passed) the
+        pull."""
+        stop = terminator.stop
+        tag = verify.sif_tag(digest_hex)
+        base = verify.REGISTRY_BASE
+        allowed = [verify.version_argv(cosign), verify.verify_argv(cosign, tag)]
+        with self.fenced.window(allowed, fence.Registry(base)):
+            version = verify.cosign_version(cosign, path, home, stop)
+            digests = verify.parse_digests(verify.run_cosign(cosign, tag, path, home, stop))
+            manifest = digests[0]
+            if verify._DIGEST_RE.fullmatch(manifest) is None or any(d != manifest for d in digests):
+                raise verify.Unverified("digest_mismatch")
+            self.fenced.allow_url(verify.token_url(base))
+            token = verify.fetch_token(base, stop)
+            self.fenced.allow_url(verify.manifest_url(base, manifest))
+            proof = verify.SifProof(manifest, verify.fetch_layer(base, manifest, token, stop))
+            if os.path.isfile(sif):
+                verify.checked_sif(sif, proof, stop)
+            else:
+                verify.pull_sif(
+                    apptainer,
+                    os.path.dirname(sif),
+                    digest_hex,
+                    proof,
+                    path,
+                    scratch,
+                    stop,
+                    self.fenced.allow,
+                )
+        self.verification = {
+            "by": "cosign",
+            "kind": "sif",
+            "cosign_version": version,
+            "sif_manifest": proof.manifest,
+            "sif_layer": proof.layer,
+        }
 
 
 # ---- one run ----------------------------------------------------------------------------------------------
@@ -299,7 +442,7 @@ def main(
     state = service.Run(options.out, layout, log, docs)
     terminator = run.Terminator()
     terminator.install(SIGNALS)
-    image = LocalImage()
+    image = LocalImage(options.pull, options.cosign, fenced)
     inputs: list[dict[str, Any]] = []
     try:
         with fenced.run():

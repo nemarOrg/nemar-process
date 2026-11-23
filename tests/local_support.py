@@ -27,6 +27,62 @@ IMAGE_URI = "ghcr.io/example/runtime@" + IMAGE_DIGEST
 DOCKER_REFERENCE = IMAGE_URI
 
 
+FAKE_COSIGN = """#!@PYTHON@
+import json, os, subprocess, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+argv = sys.argv[1:]
+with open(os.path.join(here, "cosign.jsonl"), "a") as handle:
+    handle.write(json.dumps({"argv": argv, "env": dict(os.environ), "pid": os.getpid()}) + "\\n")
+control_path = os.path.join(here, "cosign.order")
+if os.path.exists(control_path):
+    with open(open(control_path).read().strip(), "a") as handle:
+        handle.write(json.dumps(["cosign", argv[0]]) + "\\n")
+
+
+def control(name):
+    path = os.path.join(here, "cosign." + name)
+    return open(path).read() if os.path.exists(path) else None
+
+
+if argv[:1] == ["version"]:
+    sys.stdout.write(control("version") or '{"gitVersion": "v3.1.4"}')
+    sys.exit(0)
+pause = control("sleep")
+if pause:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    with open(os.path.join(here, "cosign.child"), "w") as handle:
+        handle.write(str(child.pid))
+    time.sleep(float(pause))
+code = int(control("exit") or "0")
+if code:
+    sys.exit(code)
+answer = control("answer")
+if answer is None:
+    reference = argv[1]
+    digest = reference.rsplit("@", 1)[1] if "@" in reference else control("tag_digest")
+    answer = json.dumps([{"critical": {"image": {"docker-manifest-digest": digest}}}])
+sys.stdout.write(answer)
+"""
+
+
+def install_cosign(directory: Path) -> str:
+    path = directory / "cosign"
+    path.write_text(FAKE_COSIGN.replace("@PYTHON@", sys.executable), encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def calls(directory: Path) -> list:
+    path = directory / "cosign.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def control(directory: Path, name: str, text: str) -> None:
+    (directory / ("cosign." + name)).write_text(text, encoding="utf-8")
+
+
 class Honeypot:
     """Answers everything: a request here is a request the standalone entry should never make."""
 
