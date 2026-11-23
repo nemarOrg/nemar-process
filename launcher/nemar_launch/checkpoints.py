@@ -110,13 +110,19 @@ def parse_recordings_lines(lines: Iterable[str]) -> list[Row]:
             raise TableUnreadable("missing_code")
         rows.append(
             {
-                "path": cells[index["path"]],
+                # a path the contract cannot carry is not kept (the row still counts): memory stays
+                # bounded by the row cap, whatever the table holds
+                "path": _carried_path(cells[index["path"]]),
                 "status": status,
                 "code": None if status == "succeeded" else code,
                 "step": _na_to_none(cells[index["step"]]),
             }
         )
     return rows
+
+
+def _carried_path(path: str) -> str | None:
+    return path if len(path) <= PROGRESS_PATH_MAX else None
 
 
 def parse_recordings_table(text: str) -> list[Row]:
@@ -209,7 +215,8 @@ def live_counts(
 def first_failure(row: Row, checkpoints: Checkpoints) -> dict[str, Any] | None:
     """The failure entry of a failed or skipped row at the checkpoint it first did not pass, or None (a
     succeeded row, a path the contract cannot carry, or a code its pattern refuses)."""
-    if row["status"] == "succeeded" or not PATH_RE.search(str(row["path"])):
+    path = row["path"]
+    if row["status"] == "succeeded" or path is None or not PATH_RE.search(path):
         return None
     for (name, _steps), outcome in zip(checkpoints, recording_outcomes(row, checkpoints)):
         if outcome["status"] != "passed":

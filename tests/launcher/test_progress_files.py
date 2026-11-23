@@ -364,9 +364,26 @@ def test_a_table_line_longer_than_its_cap_or_not_text_is_refused(outputs):
     assert caught.value.word == "not_text"
 
 
-def test_long_rows_under_the_line_cap_are_read(outputs):
-    """The limits are the line cap and the row cap, not the file's size."""
+def test_long_paths_are_counted_but_not_kept(outputs):
+    """A row whose path the contract cannot carry (over 256 characters, under the line cap) counts, but its
+    path is never held: memory stays bounded by the row cap, and no failure entry names it."""
     long = "sub-01/" + "x" * 60000
-    write_run(outputs, recipe_file(2), [row(long + "1.set"), row(long + "2.set")])
+    rows = [
+        row(long + "1.set"),
+        row(long + "2.set", "failed", "load_failed", "load"),
+        row("sub-02/b.set", "failed", "load_failed", "load"),
+    ]
+    write_run(outputs, recipe_file(3), rows)
     document = progress.Source(str(outputs.parent)).build()
-    assert document["counts"]["import"] == {"passed": 2, "failed": 0, "skipped": 0, "total": 2}
+    assert document["counts"]["import"] == {"passed": 1, "failed": 2, "skipped": 0, "total": 3}
+    assert [f["path"] for f in document["failures"]] == ["sub-02/b.set"]
+    parsed = rules.parse_recordings_table(HEADER + "".join(rows))
+    assert [r["path"] for r in parsed] == [None, None, "sub-02/b.set"]
+
+
+def test_a_table_past_the_total_cap_is_refused(outputs, monkeypatch):
+    monkeypatch.setattr(progress, "TABLE_MAX_BYTES", 1024)
+    write_run(outputs, recipe_file(40), [row("sub-01/{:03d}.set".format(i)) for i in range(40)])
+    with pytest.raises(progress.Unusable) as caught:
+        progress.Source(str(outputs.parent)).build()
+    assert caught.value.word == "too_large"

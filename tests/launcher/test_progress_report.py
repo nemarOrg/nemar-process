@@ -369,3 +369,27 @@ def test_a_reporter_that_cannot_start_leaves_the_launch_to_finish(rig, fast, mon
     assert launch.exit == 0, launch.log
     assert "progress_reporter_not_started" in launch.log
     assert rig.callbacks.progress_reports == []
+
+
+class StoppedWhileBuilding(progress.Source):
+    """A build that outlives the container: the reporter is stopped while it reads."""
+
+    reporter: progress.Reporter | None = None
+
+    def build(self):
+        document = super().build()
+        assert self.reporter is not None
+        self.reporter.stop()
+        return document
+
+
+def test_a_report_built_after_stop_is_never_posted(tmp_path, routes, fast):
+    callbacks, server = routes
+    _unused, launcher = reporter_for(tmp_path, server.base_url, Lines())  # writes the run's files
+    source = StoppedWhileBuilding(str(tmp_path))
+    poster = progress.poster(server.base_url, JOB_ID, TOKEN)
+    reporter = progress.Reporter(source, str(launcher), poster, Lines())
+    source.reporter = reporter
+    reporter.tick()
+    assert callbacks.progress_requests == []
+    assert (launcher / "progress.json").exists()  # the file is still written for a runner

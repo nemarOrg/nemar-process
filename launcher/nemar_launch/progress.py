@@ -48,6 +48,7 @@ RECIPE_PROGRESS_FILE = "progress.json"
 LAUNCHER_PROGRESS_FILE = "progress.json"  # in the launcher's own directory, beside result.json
 PROGRESS_FILE_MAX_BYTES = 64 * 1024
 TABLE_LINE_MAX_BYTES = 64 * 1024  # a table row is a path, a few words and numbers
+TABLE_MAX_BYTES = 256 * 1024 * 1024  # 1,000,000 rows of about 268 bytes: a bound on each read
 SCHEMA_FILE = "compute-progress.v1.json"
 
 _RECIPE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}" + rules.END)
@@ -125,15 +126,20 @@ def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
 
 def table_lines(base: str, relative: Sequence[str]) -> Generator[str, None, None]:
     """The complete lines of a recordings table, streamed: a row being written (no newline yet) is left
-    for the next read, a line longer than ``TABLE_LINE_MAX_BYTES`` or not UTF-8 is refused. The size of the
-    file is not capped: the parser stops at ``PROGRESS_MAX_RECORDINGS`` rows."""
+    for the next read; a line longer than ``TABLE_LINE_MAX_BYTES`` or not UTF-8 is refused, and so is a
+    table past ``TABLE_MAX_BYTES`` read (``too_large``). The parser also stops at
+    ``PROGRESS_MAX_RECORDINGS`` rows and keeps no path longer than the contract carries."""
     fd = open_inside(base, relative)
     try:
         pending = b""
+        total = 0
         while True:
             chunk = os.read(fd, 1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if total > TABLE_MAX_BYTES:
+                raise Unusable("too_large")
             pending += chunk
             *complete, pending = pending.split(b"\n")
             if len(pending) > TABLE_LINE_MAX_BYTES:
@@ -457,6 +463,8 @@ class Reporter(threading.Thread):
             except OSError as error:
                 self._say("not_written " + type(error).__name__)
         if not self._posting or self._post is None:
+            return REPORT_SECONDS
+        if self._halt.is_set():  # stopped while building: the container has exited, post nothing
             return REPORT_SECONDS
         try:
             self._post(document)
