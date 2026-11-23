@@ -193,6 +193,7 @@ BIDS_RECIPE = Recipe(
     options=(INPUT_OPTION, *options.OPTIONS),
     preflight=engines.preflight,
     dataset_extras=dataset_extras,
+    checkpoints=steps.CHECKPOINTS,
 )
 """``nemar-ica`` on a dataset directory."""
 

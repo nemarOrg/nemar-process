@@ -22,6 +22,32 @@ RECIPE_VERSION = "1.0.0-b1"
 
 STEP_ORDER = ("asr", "reref", "ica", "iclabel")
 
+# The checkpoints nemar-ica reports progress at (ADR 0134 decision 2), over the whole run: the floor's
+# steps it re-runs first, then its own. The floor's `qc`, re-run here as preparation for the
+# decomposition, is `preprocess`; so are ASR and the re-reference. A literal, like the floor's:
+# nemar-cli's registry holds the same map, and tests/contract/test_checkpoint_maps.py compares this text
+# with the pinned vectors.
+CHECKPOINTS = (
+    ("import", ("load", "signal_channels")),
+    (
+        "preprocess",
+        (
+            "flatline",
+            "drift",
+            "line_noise_measure",
+            "line_noise_50",
+            "line_noise_60",
+            "bad_channels",
+            "bad_windows",
+            "qc",
+            "asr",
+            "reref",
+        ),
+    ),
+    ("ica", ("ica",)),
+    ("iclabel", ("iclabel",)),
+)
+
 DESCRIPTIONS = {
     "asr": "Repair bursts with artifact subspace reconstruction, keeping its calibration state",
     "reref": "Re-reference to the average of the good channels",
