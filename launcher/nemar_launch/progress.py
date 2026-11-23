@@ -1,0 +1,323 @@
+"""Live progress (ADR 0134 decision 3): the closed ``nemar.progress.v1`` object, built from what the
+recipe writes, and reported while the container runs.
+
+The recipe writes two things under ``NEMAR_OUT`` (the host's ``work/outputs``): its recordings table (a
+row when a recording ends) and a small progress file, ``.nemar-progress/progress.json`` (how many
+recordings it found, the checkpoint map, which recording runs and in which step). ``Source.build`` reads
+both, applies nemar-cli's counting rules (``checkpoints``, a port that replays nemar-cli's vectors) and
+returns the object, or nothing.
+
+Both files are written by the container, so neither is trusted. Each is opened by walking its path one
+component at a time with ``O_NOFOLLOW`` (a link anywhere is refused), the last one without blocking (a
+FIFO is refused, never waited on), and must be a regular file under its cap: 64 KiB for the progress
+file, 64 MiB for the table. JSON is read strictly (no duplicate key, no NaN). The progress file's shape is
+checked, and only the table's complete lines are read. Nothing read from either file is ever logged, and
+nothing reaches the object but what the contract's patterns accept: a recording path the contract cannot
+carry is left out of the failures (and still counted). Before it is written or sent, the object must pass
+the schema (the byte copy of nemar-cli's, ``launcher/schema/compute-progress.v1.json``) and the rules a
+schema cannot state (``checkpoints.progress_problem``); otherwise there is no report, and one fixed word
+is logged.
+
+``Reporter`` (a thread the launcher runs beside the container) builds the object once a minute, writes it
+to ``launcher/progress.json`` (where a runner reads it for its heartbeat), and, on Tapis (no lease), posts
+it to ``POST /compute/jobs/<id>/progress`` with the job token. A report never fails the job: every
+fault is caught and logged as a fixed word, and a refusal that will not change stops the reports.
+
+Standard library only, Python 3.9.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import functools
+import itertools
+import json
+import os
+import re
+import stat
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from . import checkpoints as rules
+from . import spec
+
+RECIPE_PROGRESS_FORMAT = "nemar.recipe-progress.v1"
+RECIPE_PROGRESS_DIR = ".nemar-progress"
+RECIPE_PROGRESS_FILE = "progress.json"
+LAUNCHER_PROGRESS_FILE = "progress.json"  # in the launcher's own directory, beside result.json
+PROGRESS_FILE_MAX_BYTES = 64 * 1024
+TABLE_MAX_BYTES = 64 * 1024 * 1024
+SCHEMA_FILE = "compute-progress.v1.json"
+
+_RECIPE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}" + rules.END)
+_VERSION = re.compile(r"^[0-9A-Za-z.+-]{1,64}" + rules.END)
+_TABLE_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}" + rules.END)
+_TABLE_MAX_PARTS = 8
+_RUNNING_PATH_MAX = 4096
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+class Unusable(Exception):
+    """A file the launcher will not read, or a document it will not report. ``word`` is fixed."""
+
+    def __init__(self, word: str) -> None:
+        super().__init__(word)
+        self.word = word
+
+
+# ---- reading files the container wrote ----------------------------------------------------------------
+
+
+def read_inside(base: str, relative: Sequence[str], limit: int) -> bytes:
+    """The bytes of ``base/<relative...>``, read without following any link and without blocking.
+
+    Refused (``Unusable``): a component that is a link or not a directory, a last component that is not a
+    regular file (a FIFO, a device, a directory), more than ``limit`` bytes, or any error opening it
+    (``missing`` when it does not exist).
+    """
+    fds: list[int] = []
+    try:
+        try:
+            fd = os.open(base, os.O_RDONLY | _DIRECTORY)
+            fds.append(fd)
+            for part in relative[:-1]:
+                fd = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+                fds.append(fd)
+            fd = os.open(relative[-1], os.O_RDONLY | _NOFOLLOW | _NONBLOCK, dir_fd=fd)
+            fds.append(fd)
+        except FileNotFoundError:
+            raise Unusable("missing") from None
+        except OSError:
+            raise Unusable("not_readable") from None
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Unusable("not_a_file")
+        if info.st_size > limit:
+            raise Unusable("too_large")
+        chunks = []
+        size = 0
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                raise Unusable("too_large")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        for opened in reversed(fds):
+            with contextlib.suppress(OSError):
+                os.close(opened)
+
+
+def _strict_json(data: bytes) -> Any:
+    try:
+        return json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=spec._no_duplicates,
+            parse_constant=spec._refuse_constant,
+        )
+    except (ValueError, RecursionError):
+        raise Unusable("not_json") from None
+
+
+def _is_int(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def check_recipe_progress(document: Any) -> dict[str, Any]:
+    """The recipe's progress file, checked: its format word, a recipe id and version, a checkpoint map
+    the contract can carry, a recordings table path inside ``NEMAR_OUT``, a count, and at most one running
+    recording. Anything else is ``Unusable("bad_progress_file")``."""
+    bad = Unusable("bad_progress_file")
+    if not isinstance(document, dict) or document.get("format") != RECIPE_PROGRESS_FORMAT:
+        raise bad
+    if set(document) != {"format", "recipe", "checkpoints", "table", "discovered", "running"}:
+        raise bad
+    recipe = document["recipe"]
+    if (
+        not isinstance(recipe, dict)
+        or set(recipe) != {"id", "version"}
+        or not isinstance(recipe["id"], str)
+        or not _RECIPE_ID.search(recipe["id"])
+        or not isinstance(recipe["version"], str)
+        or not _VERSION.search(recipe["version"])
+    ):
+        raise bad
+    raw = document["checkpoints"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= rules.PROGRESS_MAX_CHECKPOINTS:
+        raise bad
+    mapping: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {"checkpoint", "steps"}:
+            raise bad
+        name, steps = item["checkpoint"], item["steps"]
+        if (
+            not isinstance(name, str)
+            or not rules.CHECKPOINT_RE.search(name)
+            or name == rules.STORED_CHECKPOINT
+            or name in {n for n, _s in mapping}
+            or not isinstance(steps, list)
+            or not 1 <= len(steps) <= 64
+        ):
+            raise bad
+        for step in steps:
+            if not isinstance(step, str) or not rules.STEP_RE.search(step) or step in seen:
+                raise bad
+            seen.add(step)
+        mapping.append((name, tuple(steps)))
+    table = document["table"]
+    if not isinstance(table, str):
+        raise bad
+    parts = table.split("/")
+    if (
+        not 1 <= len(parts) <= _TABLE_MAX_PARTS
+        or not all(_TABLE_PART.search(part) for part in parts)
+        or not parts[-1].endswith("_recordings.tsv")
+    ):
+        raise bad
+    if not _is_int(document["discovered"], 0, rules.PROGRESS_MAX_RECORDINGS):
+        raise bad
+    running = document["running"]
+    if not isinstance(running, list) or len(running) > 1:
+        raise bad
+    for item in running:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "step"}
+            or not isinstance(item["path"], str)
+            or len(item["path"]) > _RUNNING_PATH_MAX
+            or not (
+                item["step"] is None
+                or (isinstance(item["step"], str) and rules.STEP_RE.search(item["step"]))
+            )
+        ):
+            raise bad
+    return {
+        "checkpoints": mapping,
+        "table": parts,
+        "discovered": document["discovered"],
+        "step": running[0]["step"] if running else None,
+        "running": bool(running),
+    }
+
+
+def complete_lines(data: bytes) -> str:
+    """The table's text up to its last newline: a row being written is left for the next read."""
+    end = data.rfind(b"\n")
+    try:
+        return data[: end + 1].decode("utf-8") if end >= 0 else ""
+    except UnicodeDecodeError:
+        raise Unusable("not_text") from None
+
+
+# ---- the object ----------------------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def progress_schema() -> dict[str, Any]:
+    """The ``Progress`` member of the byte copy of nemar-cli's schema, its references inlined."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, os.pardir, "schema", SCHEMA_FILE)
+    with open(path, "rb") as handle:
+        root = json.loads(handle.read().decode("utf-8"))
+    return spec.inline_refs(root["$defs"]["Progress"], root)
+
+
+def compact(document: Mapping[str, Any]) -> bytes:
+    return json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def current_checkpoint(state: Mapping[str, Any], ended: int, total: int) -> str:
+    """The checkpoint the run is at: the running step's (``record`` is the last one); the first while a
+    recording runs with no step yet, or one with an unknown step, runs; the last once every recording
+    has ended, else the first."""
+    mapping = state["checkpoints"]
+    names = [name for name, _steps in mapping]
+    step = state["step"]
+    if state["running"]:
+        if step == rules.RECORD_STEP:
+            return names[-1]
+        for name, steps in mapping:
+            if step in steps:
+                return name
+        return names[0]
+    return names[-1] if total > 0 and ended >= total else names[0]
+
+
+def build_object(state: Mapping[str, Any], rows: Sequence[rules.Row]) -> dict[str, Any]:
+    """The live progress object of a run, checked against the schema and the rules, or ``Unusable``."""
+    mapping = state["checkpoints"]
+    total = max(state["discovered"], len(rows))
+    if total > rules.PROGRESS_MAX_RECORDINGS:
+        raise Unusable("too_many_recordings")
+    if not 1 <= len(mapping) <= rules.PROGRESS_MAX_CHECKPOINTS:
+        raise Unusable("bad_checkpoints")
+    counts = rules.live_counts(rows, mapping, state["discovered"])
+    failures = rules.recent_failures(rows, mapping)
+    document = {
+        "format": rules.PROGRESS_FORMAT,
+        "checkpoint": current_checkpoint(state, len(rows), total),
+        "counts": {name: counts[name] for name, _steps in mapping},
+        "failures": failures,
+    }
+    while len(compact(document)) > rules.PROGRESS_MAX_BYTES and document["failures"]:
+        document["failures"] = document["failures"][1:]  # the oldest goes first
+    if len(compact(document)) > rules.PROGRESS_MAX_BYTES:
+        raise Unusable("too_large")
+    if spec.validate(document, progress_schema()):
+        raise Unusable("schema_refused")
+    if rules.progress_problem(document, mapping) is not None:
+        raise Unusable("rules_refused")
+    return document
+
+
+class Source:
+    """Builds the progress object from the files under ``outputs`` (the host's ``NEMAR_OUT``).
+
+    The last good progress file is kept in memory, so reports go on after the recipe removes its
+    directory at the end of the run (its finalize can take a while).
+    """
+
+    def __init__(self, outputs: str) -> None:
+        self.outputs = outputs
+        self._state: dict[str, Any] | None = None
+
+    def build(self) -> dict[str, Any]:
+        try:
+            data = read_inside(
+                self.outputs, [RECIPE_PROGRESS_DIR, RECIPE_PROGRESS_FILE], PROGRESS_FILE_MAX_BYTES
+            )
+            self._state = check_recipe_progress(_strict_json(data))
+        except Unusable as problem:
+            if self._state is None or problem.word != "missing":
+                raise
+            # the recipe removed its directory as the run ended: go on from the last file read
+        assert self._state is not None
+        text = complete_lines(read_inside(self.outputs, self._state["table"], TABLE_MAX_BYTES))
+        try:
+            rows = rules.parse_recordings_table(text) if text else []
+        except rules.TableUnreadable as problem:
+            raise Unusable("table_" + problem.reason) from None
+        return build_object(self._state, rows)
+
+
+def write_report(directory: str, document: Mapping[str, Any], counter: itertools.count) -> None:
+    """``directory/progress.json``: written to a temporary file and moved into place, so a runner reading
+    it for its heartbeat sees the old object or the new one, never half of one."""
+    final = os.path.join(directory, LAUNCHER_PROGRESS_FILE)
+    temporary = "{}.{}.{}.tmp".format(final, os.getpid(), next(counter))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
+    try:
+        fd = os.open(temporary, flags, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(compact(document))
+        os.replace(temporary, final)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise

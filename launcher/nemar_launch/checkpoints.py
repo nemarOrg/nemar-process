@@ -74,7 +74,7 @@ class TableUnreadable(Exception):
         self.reason = reason
 
 
-def _na_to_none(value: str) -> Optional[str]:
+def _na_to_none(value: str) -> str | None:
     return None if value in (NA, "") else value
 
 
@@ -121,7 +121,7 @@ def parse_recordings_table(text: str) -> list[Row]:
     return rows
 
 
-def _fit(value: Optional[str], pattern: re.Pattern) -> Optional[str]:
+def _fit(value: str | None, pattern: re.Pattern) -> str | None:
     return value if value is not None and pattern.search(value) else None
 
 
@@ -164,7 +164,7 @@ def _zero(total: int) -> Counts:
 
 
 def count_recordings(
-    rows: Sequence[Row], checkpoints: Checkpoints, total: Optional[int] = None
+    rows: Sequence[Row], checkpoints: Checkpoints, total: int | None = None
 ) -> dict[str, Counts]:
     """Counts per checkpoint over ``rows`` (nemar-cli's ``countRecordings``, used to reconcile a run).
 
@@ -199,7 +199,7 @@ def live_counts(
     return counts
 
 
-def first_failure(row: Row, checkpoints: Checkpoints) -> Optional[dict[str, Any]]:
+def first_failure(row: Row, checkpoints: Checkpoints) -> dict[str, Any] | None:
     """The failure entry of a failed or skipped row at the checkpoint it first did not pass, or None (a
     succeeded row, a path the contract cannot carry, or a code its pattern refuses)."""
     if row["status"] == "succeeded" or not PATH_RE.search(str(row["path"])):
@@ -237,7 +237,7 @@ def recent_failures(rows: Sequence[Row], checkpoints: Checkpoints) -> list[dict[
     return entries[-PROGRESS_MAX_FAILURES:]
 
 
-def progress_problem(progress: dict[str, Any], checkpoints: Checkpoints) -> Optional[str]:
+def progress_problem(progress: dict[str, Any], checkpoints: Checkpoints) -> str | None:
     """The rules of a progress object no schema can state, against the checkpoints (nemar-cli's
     ``progressProblem``): the counts name exactly the declared checkpoints; no column counts more than
     its total; every column has the same total; ``checkpoint`` is one of them; each failure names one

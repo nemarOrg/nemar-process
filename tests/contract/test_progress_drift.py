@@ -189,5 +189,5 @@ def test_the_recipes_standard_checkpoints_are_nemar_clis():
     from nemar_launch import checkpoints as rules
     from nemar_process.common import recipe
 
-    assert recipe.STANDARD_CHECKPOINTS + (recipe.STORED_CHECKPOINT,) == rules.STANDARD_CHECKPOINTS
+    assert (*recipe.STANDARD_CHECKPOINTS, recipe.STORED_CHECKPOINT) == rules.STANDARD_CHECKPOINTS
     assert recipe.MAX_CHECKPOINTS == rules.PROGRESS_MAX_CHECKPOINTS

@@ -113,7 +113,7 @@ HEADER = "path\tdatatype\tstatus\tcode\tstep\tdetail"
 
 
 def table(*rows: str) -> str:
-    return "\n".join((HEADER,) + rows) + "\n"
+    return "\n".join((HEADER, *rows)) + "\n"
 
 
 def test_the_table_is_read_with_n_a_as_none_and_crlf_tolerated():
