@@ -449,10 +449,16 @@ def test_the_archive_input_is_the_floor_copy_after_asr_and_its_matrix_is_matched
                 shaped.append({"step": "asr", "function": "eegprep.clean_artifacts"})
     assert [entry["step"] for entry in shaped][-3:] == ["asr", "asr", "reref"]
     assert {"step": "drift", "function": "eegprep.pop_eegfiltnew"} in shaped
+    typed = [
+        [name, kind]
+        for name, kind in zip(fit.floor_result.all_names, fit.floor_result.all_types, strict=True)
+    ]
     expected = {
         "source": "archive",
         "preprocessing": shaped,
         "channels": fit.good_channels,
+        "channel_types": typed,
+        "channel_types_sha256": pipeline.types_sha256(typed),
         "reference": "average",
         "unit": "uV",
     }

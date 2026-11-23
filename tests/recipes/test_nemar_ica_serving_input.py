@@ -52,7 +52,7 @@ import pytest
 import zarr_support as z
 from nemar_process import cli as command
 from nemar_process import sj
-from nemar_process.common import determinism, device, naming, records, zarr_hosts, zarr_input
+from nemar_process.common import determinism, device, io, naming, records, zarr_hosts, zarr_input
 from nemar_process.common import plan as plans
 from nemar_process.common.errors import RecordingError
 from nemar_process.common.recipe import RecordingProduct, RunContext
@@ -62,6 +62,9 @@ from recipe_support import make_context, read_matrix_tsv
 
 STORE = "sub-30/eeg/sub-30_task-rest_eeg.edf"  # microvolts, with the micro sign
 STORE_MV = "sub-31/eeg/sub-31_task-rest_eeg.edf"  # millivolts: the factor to microvolts is 1000
+TYPED = "sub-32/eeg/sub-32_task-rest_eeg.edf"  # one ECG row, one row that states no type
+# the types TYPED states, row by row in ORDER: E5 is an electrocardiogram, E3 states none
+TYPES = ("EEG", None, "EEG", "EEG", "EEG", "EEG", "EEG", "ECG")
 # the store's rows are not in label order, so a matrix in label order is not in store order
 ORDER = ("E8", "E3", "E1", "E6", "E2", "E7", "E4", "E5")
 FLAT = "E6"  # a constant channel: the floor's flatline step removes it
@@ -125,6 +128,17 @@ def stand_in(tmp_path_factory):
             scale=scale,
             offset=offset,
         )
+    z.add_store(
+        served,
+        TYPED,
+        counts_of(13),
+        labels=ORDER,
+        unit="uV",
+        attributes=located,
+        scale=SCALE,
+        offset=OFFSET,
+        types=TYPES,
+    )
     yield served
     served.close()
 
@@ -226,7 +240,7 @@ class Run:
 def decompose(served, path: str, directory: Path) -> Run:
     """Read the store as nemar-ica's Zarr input reads it, process it and write its product."""
     source = opened(served, path)
-    loaded = source.load(path)
+    loaded = source.load(path, channel_types=True)  # as nemar-ica's Zarr input reads it
     context = run_context(source)
     settings = Settings.from_options(context.options)
     recording = source.recording(source.index.store(path))
@@ -269,7 +283,7 @@ def backends():
 def runs(stand_in, tmp_path_factory, no_fence_module, backends):
     return {
         path: decompose(stand_in, path, tmp_path_factory.mktemp("product"))
-        for path in (STORE, STORE_MV)
+        for path in (STORE, STORE_MV, TYPED)
     }
 
 
@@ -387,6 +401,8 @@ def test_the_record_names_the_input_its_store_and_the_browsers_matrix(runs, stan
         "preprocessing": shaped,
         "store": {"path": path, "group": GROUP, "content_sha256": row["content_sha256"]},
         "channels": run.fit.good_channels,
+        "channel_types": [[label, "EEG"] for label in ORDER],
+        "channel_types_sha256": pipeline.types_sha256([[label, "EEG"] for label in ORDER]),
         "reference": "average",
         "unit": "uV",
     }
@@ -483,7 +499,7 @@ def test_amica_rejection_is_on_at_amicas_defaults_and_hashed(runs):
 
 def test_the_rejection_settings_reach_pamicas_backend_which_rejects(runs, backends):
     """The backend pAMICA built for each fit got AMICA's settings and made its three passes."""
-    assert len(backends) == len(runs)
+    assert len(backends) == len(runs)  # one fit per store
     for backend, given in backends:
         assert {key: given[key] for key in ("do_reject", "rejsig", "rejstart", "rejint")} == {
             "do_reject": True,
@@ -534,6 +550,62 @@ def test_a_record_never_pairs_a_profile_with_the_other_input(runs, tmp_path):
             [],
             profile=steps.INPUT_PROFILES["bids"],
         )
+
+
+# ---- the channel types -------------------------------------------------------------------------
+
+
+def test_a_known_non_eeg_row_is_never_decomposed_whatever_the_other_rows_state(runs):
+    """TYPED states ECG for E5 and no type for E3: E5 stays out of the floor's signal channels and of
+    the decomposition, E3 is a signal channel like the EEG rows, and no row takes another's type."""
+    run = runs[TYPED]
+    result = run.fit.floor_result
+    assert "E5" not in result.signal_names
+    assert "E3" in result.signal_names
+    assert "E5" not in run.fit.good_channels
+    header, _ = matrix_of(run, "unmixing.tsv")
+    assert "E5" not in header
+    assert "E5" not in block_of(run)["browser_transform"]["columns"]
+    signal = step_of(run.product.record, "signal_channels")
+    assert signal["qualityMetrics"]["excludedChannels"] == ["E5"]
+    typed = [[label, kind] for label, kind in zip(ORDER, TYPES, strict=True)]
+    given = block_of(run)["decomposition_input"]
+    assert given["channel_types"] == typed  # E3 stays untyped: nothing is taken from another row
+    assert given["channel_types_sha256"] == pipeline.types_sha256(typed)
+
+
+def test_the_types_digest_is_hashed_in_the_plan(runs):
+    record = runs[TYPED].product.record
+    digest = block_of(runs[TYPED])["decomposition_input"]["channel_types_sha256"]
+    assert step_of(record, "ica")["parameters"]["rules"] == {"channel_types_sha256": digest}
+    assert digest != block_of(runs[STORE])["decomposition_input"]["channel_types_sha256"]
+    stored = record["extensions"]["nemar"]["plan_hash"]
+    changed = copy.deepcopy(plans.resolved_plan(record))
+    (ica,) = [entry for entry in changed["steps"] if entry["step_id"] == "ica"]
+    ica["parameters"]["rules"]["channel_types_sha256"] = "0" * 64
+    assert plans.plan_hash(changed) != stored
+
+
+def test_the_floors_own_read_leaves_the_rows_untyped(stand_in, no_fence_module):
+    """Only nemar-ica's read types the rows (an interim until sccn/eegprep#669); the floor's is
+    unchanged."""
+    loaded = opened(stand_in, TYPED).load(TYPED)
+    assert all("type" not in chanloc for chanloc in loaded.eeg["chanlocs"])
+
+
+def test_signal_channels_are_chosen_row_by_row():
+    """The floor's rule, row by row: EEG and untyped rows are signal, any other stated type is not,
+    whatever the neighboring rows state."""
+    eeg = {
+        "chanlocs": [
+            {"labels": "A", "type": "EEG"},
+            {"labels": "B", "type": "ECG"},
+            {"labels": "C"},
+            {"labels": "D", "type": "n/a"},
+            {"labels": "E", "type": "EOG"},
+        ]
+    }
+    assert io.signal_channel_indices(eeg) == [0, 2, 3]
 
 
 # ---- the bursts --------------------------------------------------------------------------------
@@ -727,6 +799,8 @@ def commanded(stand_in, tmp_path_factory):
                     "10",
                     "--recording",
                     STORE,
+                    "--recording",
+                    TYPED,
                 ]
             )
     finally:
@@ -737,7 +811,14 @@ def commanded(stand_in, tmp_path_factory):
 def test_the_command_writes_the_browsers_matrix_on_the_zarr_input(commanded):
     code, line, out = commanded
     assert code == 0
-    assert line["counts"] == {"discovered": 1, "failed": 0, "skipped": 0, "succeeded": 1}
+    assert line["counts"] == {"discovered": 2, "failed": 0, "skipped": 0, "succeeded": 2}
+    # the command's own read types the rows: the ECG row of TYPED is not decomposed
+    typed = json.loads(
+        (
+            out / "{}_desc-nemarica_signalJourney.json".format(TYPED.removesuffix("_eeg.edf"))
+        ).read_text(encoding="utf-8")
+    )
+    assert "E5" not in typed["extensions"]["nemar"]["ica"]["decomposition_input"]["channels"]
     stem = STORE.removesuffix("_eeg.edf")
     record = json.loads(
         (out / "{}_desc-nemarica_signalJourney.json".format(stem)).read_text(encoding="utf-8")

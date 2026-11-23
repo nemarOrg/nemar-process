@@ -269,6 +269,18 @@ def kept_rows(result: floor.FloorResult) -> list[int]:
     ]
 
 
+def channel_types(result: floor.FloorResult) -> list[list[str | None]]:
+    """Each row of the loaded recording as ``[label, type]``, in order, the type as the loader gave
+    it for that row (None for an untyped row): what decided, row by row, which rows were signal
+    channels the floor and the decomposition could take."""
+    return [[name, kind] for name, kind in zip(result.all_names, result.all_types, strict=True)]
+
+
+def types_sha256(typed: list[list[str | None]]) -> str:
+    """The SHA-256 of the rows' labels and types as canonical JSON (``canonical_text``)."""
+    return hashlib.sha256(canonical_text({"channel_types": typed}).encode("utf-8")).hexdigest()
+
+
 def decomposition_input(
     plan: Plan, good: list[str], result: floor.FloorResult, serving: ServingStore | None
 ) -> dict[str, Any]:
@@ -292,10 +304,13 @@ def decomposition_input(
             shaped.append({"step": step.step_id, "function": step.function})
             if step.function == steps.ASR_FUNCTION and "burst_rejection" in step.parameters:
                 shaped.append({"step": step.step_id, "function": steps.BURST_FUNCTION})
+    typed = channel_types(result)
     block: dict[str, Any] = {
         "source": steps.ARCHIVE_SOURCE if serving is None else steps.SERVING_SOURCE,
         "preprocessing": shaped,
         "channels": list(good),
+        "channel_types": typed,
+        "channel_types_sha256": types_sha256(typed),
         "reference": steps.REREF_REFERENCE,
         "unit": steps.INPUT_UNIT,
     }
@@ -518,7 +533,7 @@ def process(
         plan.add_step(
             "ica",
             steps.ICA_FUNCTION,
-            call,
+            {**call, "rules": {"channel_types_sha256": given["channel_types_sha256"]}},
             description=steps.DESCRIPTIONS["ica"],
             quality={
                 "engine": settings.engine,

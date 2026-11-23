@@ -172,12 +172,14 @@ def write_group(
     labels: tuple[str, ...] | None = None,
     units: tuple[str, ...] | None = None,
     offset: float | tuple[float, ...] = 0.0,
+    types: tuple[str | None, ...] | None = None,
 ) -> None:
     """One channel group in the contract's layout: level 0 as sharded int16, with its dequantization.
 
     The labels and units are the stand-in's own (``LABELS``, ``unit``) unless a test gives each
     channel's, as a store that states a label or a unit for some channels only would. ``scale`` and
-    ``offset`` are one value for every channel or one per channel."""
+    ``offset`` are one value for every channel or one per channel. ``types`` is each channel's
+    ``channel_type`` (None leaves the key out for that channel); the group's modality by default."""
     import numpy as np
 
     channels, _samples = data.shape
@@ -196,7 +198,11 @@ def write_group(
                     if labels is not None
                     else (LABELS[i] if channels == N_CHANNELS else "C{}".format(i + 1)),
                     "unit": units[i] if units is not None else unit,
-                    "channel_type": modality,
+                    **(
+                        {"channel_type": modality}
+                        if types is None
+                        else ({} if types[i] is None else {"channel_type": types[i]})
+                    ),
                     "row_index": i,
                     "original_rate": 500.0,
                     "target_rate": RATE,
@@ -442,11 +448,13 @@ def add_store(
     attributes: Mapping[str, Any] | None = None,
     scale: float | tuple[float, ...] = 0.5,
     offset: float | tuple[float, ...] = 0.0,
+    types: tuple[str | None, ...] | None = None,
 ) -> None:
     """One more EEG store under a running stand-in's root, listed in its index (rewritten, so the
     index's digest changes): one channel group of ``data``'s channels and samples, with the labels given
     (``LABELS`` for eight channels, else ``C1``, ``C2``, ...), the root attributes given
-    (``root_attributes``; none by default) and level 0's conversion (``write_group``)."""
+    (``root_attributes``; none by default), level 0's conversion and each channel's type
+    (``write_group``)."""
     import zarr
     from zarr.storage import LocalStore
 
@@ -463,6 +471,7 @@ def add_store(
         labels=labels,
         scale=scale,
         offset=offset,
+        types=types,
     )
     document = json.loads(served.index_bytes)
     channels, samples = data.shape

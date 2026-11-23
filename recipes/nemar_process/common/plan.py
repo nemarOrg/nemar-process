@@ -180,6 +180,9 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "num_mix_comps": "int",
         "max_threads": "int",
         "amica_binary": "str",
+        # what decided the decomposition's channels and is not an argument: the types of the input's
+        # rows, as their digest (``decomposition_input.channel_types``)
+        "rules": {"channel_types_sha256": "str"},
         # AMICA's sample rejection: pAMICA's names (`maxrej`) or the binary's (`numrej`)
         "do_reject": "bool",
         "rejsig": "float",

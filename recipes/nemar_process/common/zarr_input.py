@@ -868,6 +868,23 @@ class ServingStore(NamedTuple):
     labels: tuple[str, ...]
 
 
+CHANNEL_TYPES_MISMATCH = "channel_types_mismatch"
+
+
+def apply_types(eeg: dict[str, Any], stated: Sequence[tuple[str, str | None]]) -> None:
+    """Give each channel of ``eeg`` the type stated for its row, row by row: a row stated with no type
+    keeps none, and a row's type never comes from another row. A row whose label is not the stated
+    label is ``convert_failed`` (``channel_types_mismatch``)."""
+    chanlocs = eeg["chanlocs"]
+    if len(stated) != len(chanlocs):
+        raise RecordingError(CONVERT_FAILED, "load", CHANNEL_TYPES_MISMATCH)
+    for chanloc, (label, kind) in zip(chanlocs, stated, strict=True):
+        if str(chanloc.get("labels", "")) != label:
+            raise RecordingError(CONVERT_FAILED, "load", CHANNEL_TYPES_MISMATCH)
+        if kind is not None:
+            chanloc["type"] = kind
+
+
 def location_source(located: int) -> str:
     """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
     BIDS route's words (``io._location_source``). The converter embeds the positions of the
@@ -1068,7 +1085,7 @@ class ZarrSource:
 
     # -- the reads
 
-    def load(self, path: str) -> io.Loaded:
+    def load(self, path: str, *, channel_types: bool = False) -> io.Loaded:
         """Read one whole recording (level 0, physical units) as a loaded EEGLAB dictionary.
 
         A store whose read would pass ``max_bytes`` is skipped as ``too_large`` before any signal
@@ -1083,6 +1100,12 @@ class ZarrSource:
         has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
         from inside a data file), and the count is the BIDS route's (``qc.count_located``). The loaded
         recording names its store (``Loaded.serving``, a ``ServingStore``).
+
+        With ``channel_types`` (nemar-ica's read, an interim measure until eegprep-lean's ``to_eeg``
+        types the channels, sccn/eegprep#669) the group's metadata is read once more and each row of
+        ``chanlocs`` takes the ``channel_type`` the store states for that row, row by row: a row with
+        no stated type stays untyped, and no row's type is ever taken from another row. A row whose
+        label is not the window's is ``convert_failed`` (``channel_types_mismatch``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -1105,6 +1128,7 @@ class ZarrSource:
                     transport=self.transport,
                     index=self.index,
                 )
+                stated = self._stated_types(store, window) if channel_types else None
             except MemoryError as error:
                 raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
             except Exception as error:
@@ -1137,6 +1161,8 @@ class ZarrSource:
             reader_locations = copy.deepcopy(eeg["etc"]["nemar"].get("locations"))
             eeg = eeg_checkset(eeg)
             eeg, notes = io.normalize(eeg)
+            if stated is not None:
+                apply_types(eeg, stated)
             located = qc.count_located(eeg["chanlocs"])
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
@@ -1158,6 +1184,24 @@ class ZarrSource:
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
             serving=serving,
         )
+
+    def _stated_types(self, store: Any, window: Any) -> list[tuple[str, str | None]]:
+        """Each row's label and the ``channel_type`` its group states (None when it states none or
+        an empty one), from the group's metadata, row by row in the window's order."""
+        from eegprep_lean import read_group_metadata
+
+        group = store.group(window.group_name)
+        metadata = asyncio.run(
+            read_group_metadata(self.index, store, group, transport=self.transport)
+        )
+        by_row = {channel.row_index: channel for channel in metadata.channels}
+        stated = []
+        for row in window.channels:
+            channel = by_row.get(row)
+            label = "" if channel is None else channel.label
+            kind = None if channel is None or not channel.channel_type else channel.channel_type
+            stated.append((label, kind))
+        return stated
 
     # -- what the records say
 
