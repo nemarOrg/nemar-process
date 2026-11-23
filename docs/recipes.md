@@ -455,7 +455,7 @@ A published image that predates the change (`0.1.0-cpu`) still has the old name 
   The unit is passed to eegprep-lean's `to_eeg` as the serving copy states it (`uV`, and the micro sign and the Greek mu that real indexes use, which eegprep-lean accepts from sccn/eegprep#616's commit 14ba46e8); a unit that is not a voltage makes the store `convert_failed`.
 - **Which stores.** Every store whose group is EEG, in index order, or exactly the stores `--recording` names (by source path or by store path; a name that is not an EEG store of the index is exit 2, before anything is created).
   Stores with no EEG group are counted in `ignored_datatypes` by modality.
-  A store whose whole read would exceed eegprep-lean's `max_bytes` (2 GiB of peak memory, 24 bytes per channel-sample) is skipped as `too_large` before any signal is requested; a read that fails is `failed` with `read_failed` and the exception's class name; a read that succeeds and cannot be turned into the dictionary the floor takes (the unit, `eeg_checkset`, the loader's own checks) is `failed` with `convert_failed` and the class name or the loader's word; running out of memory in either is `out_of_memory`.
+  A store whose whole read would exceed eegprep-lean's `max_bytes` (2 GiB of peak memory, 24 bytes per channel-sample; 26 for `nemar-ica`, whose read keeps the level-0 counts: "The decomposition input" below) is skipped as `too_large` before any signal is requested; a read that fails is `failed` with `read_failed` and the exception's class name; a read that succeeds and cannot be turned into the dictionary the floor takes (the unit, `eeg_checkset`, the loader's own checks) is `failed` with `convert_failed` and the class name or the loader's word; running out of memory in either is `out_of_memory`.
   Every store is a row of the recordings table, and the final JSON line counts them so that nothing is left out: `processed`, `too_large`, `read_failed`, `convert_failed` and `other` (the floor's own failures and skips, and `out_of_memory`) add up to the stores found.
   A store path is refused (the whole index, exit 6) when any of its segments is empty or starts with a dot (`.partial`, `..`) or when it holds `?`, `#`, `%` or a backslash, and so is a `zarr` path; the first would let a product land in the work directory the run later deletes.
   An EEG store whose path cannot be given product names (no directory, or a file name that is not `<stem>_eeg.<ext>`, such as an EEG group in a `meg` store or a stem that would collide with the dataset's own files) is a skipped row with `unsupported_format`, counted in `other`, with nothing read and nothing written for it.
@@ -543,7 +543,7 @@ uv run --frozen --group runtime --extra cpu pytest tests/recipes/test_floor_inpu
 
 ## `nemar-ica` 1.0.0-b1: the decomposition
 
-`nemar-recipe run nemar-ica` decomposes every recording of a dataset into independent components, on the floor's cleaned data, and writes the decomposition, ASR's state and ICLabel's classification as files with a signalJourney record that names every setting, version, digest and fact that decides what the numbers are.
+`nemar-recipe run nemar-ica` decomposes every recording of a dataset into independent components (on the floor's cleaned data on a dataset directory, and on the serving copy as stored on the Zarr input: "The decomposition input" below), and writes the decomposition, ASR's state and ICLabel's classification as files with a signalJourney record that names every setting, version, digest and fact that decides what the numbers are.
 It is one recipe with two inputs, as the floor is (`--input bids`, the default, or `--input zarr`; the Zarr input block of every record is written by the same common code as the floor's), and the product label is `nemarica`.
 
 **The decomposition is pAMICA's.**
@@ -558,9 +558,9 @@ Then, each an eegprep call:
 
 | # | Step id | eegprep function | Parameters (passed, then what eegprep applies) | Notes |
 |---|---|---|---|---|
-| 10 | `asr` | `eegprep.clean_asr` | `return_state=True`, `maxmem=1024`; applied `cutoff=5.0`, `window_len`, `step_size`, `max_dims=0.66`, `ref_maxbadchannels=0.075`, `ref_tolerances=(-3.5, 5.5)`, `ref_wndlen=1.0`, `use_gpu=False`, `useriemannian=None` | on the working copy with its `chanlocs`, so the state names its channels; the state is written as `_asr.json` |
+| 10 | `asr` | `eegprep.clean_asr` | `return_state=True`, `maxmem=1024`; applied `cutoff=5.0`, `window_len`, `step_size`, `max_dims=0.66`, `ref_maxbadchannels=0.075`, `ref_tolerances=(-3.5, 5.5)`, `ref_wndlen=1.0`, `use_gpu=False`, `useriemannian=None` | on the working copy with its `chanlocs`, so the state names its channels; the state is written as `_asr.json`; on the Zarr input a skip with the reason `serving_input`, and no state is written |
 | 11 | `reref` | `eegprep.pop_reref` | `ref=[]` (the average reference) | |
-| 12 | `ica` | `eegprep.pop_runica` | pAMICA: `icatype='pamica'`, `reorder='on'`, `n_models=1`, `n_mix=3`, `max_iter`, `block_size=131072`, `seed=5489`, `device`, `threads`, `pcakeep`; the binary: `icatype='runamica15'`, `reorder='on'`, `num_models=1`, `num_mix_comps=3`, `max_iter`, `pcakeep`, `max_threads`, `amica_binary` | ICA fits the ASR-repaired, re-referenced copy; rank `pcakeep = min(N_good - 1, 64)`, where `N_good` is the channel count after the floor's removal (the average reference takes one dimension) |
+| 12 | `ica` | `eegprep.pop_runica` | pAMICA: `icatype='pamica'`, `reorder='on'`, `n_models=1`, `n_mix=3`, `max_iter`, `block_size=131072`, `seed=5489`, `device`, `threads`, `pcakeep`; the binary: `icatype='runamica15'`, `reorder='on'`, `num_models=1`, `num_mix_comps=3`, `max_iter`, `pcakeep`, `max_threads`, `amica_binary` | ICA fits the ASR-repaired, re-referenced copy (on the Zarr input, the serving copy's good channels, re-referenced); rank `pcakeep = min(N_good - 1, 64)`, where `N_good` is the channel count after the floor's removal (the average reference takes one dimension) |
 | 13 | `iclabel` | `eegprep.pop_iclabel` | `icversion='default'` | eegprep's one network, `netICL.mat` |
 
 ASR's memory budget is fixed and recorded because a smaller or missing one makes `asr_process` replace it with half of the machine's free memory, and the cleaned data then depend on the machine: 1024 MB covers 64 channels up to a lookahead of about 10,000 samples (channels times channels times lookahead samples times 24 bytes).
@@ -586,6 +586,22 @@ pAMICA's own settings that eegprep does not pass are eegprep's `runamica15` tabl
 Whether eegprep's table matches EEGLAB's `runamica15.m` or the binary pAMICA ships is the pAMICA parity workstream's question (sccn/eegprep#619), and this recipe sets and tunes no engine default.
 With `use_min_dll` and `use_grad_norm` off, a 2000-iteration fit always stops on `max_iter`, so `did_converge` is false by construction at these settings, and `stop_reason` is the field to read.
 `did_converge` is eegprep's (`stop_reason != 'max_iter'`) and never pAMICA's own `converged_`.
+
+### The decomposition input
+
+The two inputs give the fit different data, and the record says which (`extensions.nemar.ica.decomposition_input`).
+
+- **A dataset directory (`archive`).** The floor's working copy: its drift high-pass and any line-noise band-stop applied, its bad channels removed, then repaired by ASR (`clean_asr`, its state kept) and re-referenced to the average.
+  The block is `{"source": "archive", "asr": true, "filters": [...]}`, where `filters` names each filter of the floor that ran on that copy, in the order it ran, as `{"step", "function"}` (the drift high-pass first, then each `line_noise_<Hz>` band-stop the plan holds as a step); their parameters are those steps'.
+- **The Zarr serving copy (`serving_copy`).** The floor runs for its decisions only (the good channels, the bad windows), and the fit is given the store's own values of the floor's good channels: rebuilt from the store's level-0 counts in store row order as `nemar.store-content.v1` defines them (`digital * scale`, then `+ offset`, two roundings, by eegprep-lean's own `to_physical`), converted to microvolts by `to_eeg`'s factor, and re-referenced to the average by the same `pop_reref`.
+  There is no ASR (the step is a skip with the reason `serving_input`, so the plan hash says which input was fitted), no filter and no repair of bad windows, and the fit uses every sample.
+  The block is `{"source": "serving_copy", "store": {"path", "group", "content_sha256"}, "channels": "floor_good_channels", "reference": "average", "unit": "uV", "asr": false, "filters": []}`; `content_sha256` is the store's `stores_content` row, the digest of the values the rows are rebuilt from.
+  The serving copy cannot reproduce the archive's filters or ASR, so its decomposition removes the bad channels only and says so (the owner's decision, nemarOrg/nemar-process#79): in this block, and in the descriptions of its `ica` step and of its pipeline.
+
+The serving copy's rows are what a viewer can compute again from the store alone: the unmixing matrix times the store's values of its column channels, average-referenced, is the activation of the decomposition's input (`nemar.ic-activity.v1` without its high-pass), to within 1e-12 of each component's largest value, and the rows themselves are the store's values bit for bit (`tests/recipes/test_nemar_ica_serving_input.py`).
+To build them the Zarr input's read keeps the level-0 counts (`ZarrSource.load(keep_counts=True)`): the array itself, int16 and read-only, 2 bytes per channel-sample, with the array's conversion, beside the dictionary the floor takes, which is the floor's own read's value for value.
+The bound counts them (26 bytes per channel-sample instead of 24), and a store whose level 0 is not int16 is `read_failed` with the detail `level0_not_int16`, found from the array's metadata before any of its signal is read; one more small request (that metadata) is counted in `bytes_read`.
+The floor's own Zarr read keeps nothing and is unchanged.
 
 ### Options
 
@@ -649,7 +665,7 @@ The device changes only under `auto`, by the rules above, and is always recorded
 ```text
 sub-<id>/[ses-<id>/]eeg/<entities>_desc-nemarica_
   channels.tsv  badsegments.tsv  samplemask.tsv  filters.json  qc.json     the floor's files, under this label
-  asr.json         ASR's state, canonical JSON
+  asr.json         ASR's state, canonical JSON (not on the Zarr input, where ASR does not run)
   unmixing.tsv     icaweights times icasphere, components by channels
   weights.tsv      icaweights, components by principal components
   sphere.tsv       icasphere, principal components by channels
@@ -676,7 +692,8 @@ The recordings table has the columns `path`, `datatype`, `status`, `code`, `step
 - for the binary, what eegprep reads of its output (`iterations`, `final_ll`, `best_ll`, `best_iter` from its log-likelihood file; `stop_reason` and `did_converge` are null, because nothing reads a stop reason from the binary) and the binary's SHA-256 under `amica15`;
 - `bit_reproducible`: true for pAMICA on the CPU with one thread (pAMICA's promise, above); null for pAMICA on a GPU or with more than one thread (eegprep does not state it, and pAMICA's statement for CUDA float64 is unmeasured); false for the binary, which starts from the clock because the recipe writes it no `seed`;
 - `dtype` (`float64`) and `engine_input_dtype`: the binary reads the 32-bit data file eegprep writes for it, so it sees the data rounded to float32 (about 1e-7 relative), which the float32-stored EEGLAB sample of the informational comparison does not show;
-- ASR's `maxmem_mb`, the digest of its state (of the `_asr.json` bytes), the window and step it applied and the channels it names;
+- ASR's `maxmem_mb`, the digest of its state (of the `_asr.json` bytes), the window and step it applied and the channels it names (`asr` is null on the Zarr input, where ASR does not run);
+- `decomposition_input`, what the fit was given ("The decomposition input" above);
 - the good-channel set and its count, ICLabel's version and the SHA-256 of its network file, and the input profile (`archive` for a dataset directory, `serving` for the Zarr serving copy);
 - the device facts: `device_requested`, `device` (the one that ran), `device_reason` (the resolution's reason, or `cuda_oom` or `gpu_contended` after a move), `fallback` (true exactly when `device_requested` is `auto` and the CPU ran), `gpu_memory_cap_mb` (the cap passed in `NEMAR_GPU_MEMORY_MB`, as the job read it when it first initialized CUDA; null when none was passed or the job never initialized CUDA), `gpu_allocator_limit_mb` (the most torch's allocator could reserve in the job's process, `min(cap, the GPU's memory)` in whole mebibytes, the GPU's memory when no cap was passed; null when the job never initialized CUDA; the CUDA context and the libraries' own memory come on top of it), `gpu_name` (CUDA only), `torch_version`, `torch_cuda`, `threads` and `image_flavor` (from `/opt/nemar/flavor`, null outside an image); `bit_reproducible` follows the device that ran the recording, so a refit on the CPU with one thread states true.
 
@@ -694,6 +711,8 @@ A merge of product directories (`aggregate`) ran no recording and states none of
 | `skipped` | `ica_ineligible` | `rank_too_low` (step `ica_eligibility`) | fewer than two components could be fitted (`min(N_good - 1, 64) < 2`) |
 | `failed` | `step_failed` | `iclabel_no_locations` (step `iclabel_locations`), found right after the floor and before ASR and the fit | no channel has a location eegprep can map, so ICLabel could not draw a scalp map (below) |
 | `failed` | `step_failed` | the exception's class (step `iclabel`) | ICLabel raised after the fit |
+| `failed` | `read_failed` | `level0_not_int16` (step `load`) | on the Zarr input, a store whose level 0 is not int16, found before its signal is read ("The decomposition input") |
+| `failed` | `internal_error` | `serving_rows_mismatch` (step `reref`) | on the Zarr input, the kept rows are not the floor's good channels: a fault of the recipe, never of the data |
 
 `asr_maxmem` and `ica_degenerate` are deterministic failures; the transient ones (`out_of_memory`, `internal_error`, `disk_error`, `time_budget`) name only transient failures.
 A recording that fails writes nothing.
@@ -722,7 +741,7 @@ Declared positions only: no template is applied, so a store without positions fa
 ### What a change stands for
 
 The derivative key names eegprep alone (the engine stamp's `<package>@<version>`), so the recipe's version is what tells two products apart.
-A change of the pamica pin, of the CUDA flavor's torch (`2.12.1+cu129`) or of the `amica15` binary (`ada316d3...`) is a new `RECIPE_VERSION`; `tests/recipes/test_nemar_ica.py` fails when `uv.lock` or the Dockerfiles differ from the constants in `nemar_ica/steps.py`.
+A change of the pamica pin, of the CUDA flavor's torch (`2.12.1+cu129`) or of the `amica15` binary (`ada316d3...`) is a new `RECIPE_VERSION`, and so is a change of what a published image's decomposition is given; the Zarr input's move to the serving copy as stored (nemarOrg/nemar-process#79) kept `1.0.0-b1` because no published image ran the earlier Zarr input (the one image in the registry, `0.1.0-cpu`, predates `nemar-ica`: docs/images.md); `tests/recipes/test_nemar_ica.py` fails when `uv.lock` or the Dockerfiles differ from the constants in `nemar_ica/steps.py`.
 
 ## Known limits
 
