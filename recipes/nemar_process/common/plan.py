@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any
 
+import numpy as np
+
 # sccn/eegprep#537: the design function is reachable only through a private module of eegprep.
 from eegprep.plugins.firfilt._filtering import design_eegfiltnew
 
@@ -235,6 +237,21 @@ def recorded_band_stop(srate: float, frequency: int) -> dict[str, Any]:
         "order": int(meta["filtorder"]),
         "transitionHz": rounded(meta["df"], 6),
         "cutoffHz": [rounded(value, 6) for value in meta["cutoff"]],
+    }
+
+
+def recorded_highpass(srate: float, passband_hz: float) -> dict[str, Any]:
+    """The FIR high-pass eegprep designs for ``pop_eegfiltnew(locutoff=passband_hz)``, as recorded:
+    the order, the transition width, the -6 dB cutoff and the kernel's length and SHA-256, read
+    from eegprep's own design function called with the same arguments (sccn/eegprep#537)."""
+    kernel, meta = design_eegfiltnew(float(srate), locutoff=float(passband_hz))
+    values = np.asarray(kernel, dtype="<f8")
+    return {
+        "order": int(meta["filtorder"]),
+        "transitionHz": rounded(meta["df"], 6),
+        "cutoffHz": [rounded(value, 6) for value in meta["cutoff"]],
+        "kernelLength": int(values.size),
+        "kernelSha256": hashlib.sha256(values.tobytes()).hexdigest(),
     }
 
 

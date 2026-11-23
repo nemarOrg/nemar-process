@@ -9,6 +9,7 @@ The values are the issue's and the plan's (docs/recipes.md has the table with th
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from eegprep import clean_flatlines, clean_windows
@@ -92,6 +93,9 @@ FLATLINE_LOGGER = clean_flatlines.__module__
 
 DRIFT_FUNCTION = "eegprep.clean_drifts"
 DRIFT_CALL: dict[str, Any] = {"transition": (0.25, 0.75), "attenuation": 80.0, "method": "fft"}
+# The FIR high-pass a recipe that embeds the floor may take in place of clean_drifts (``Embedding``):
+# pop_eegfiltnew with only its lower passband edge, legacy NEMAR's call, eegprep's default design.
+HIGHPASS_FUNCTION = "eegprep.pop_eegfiltnew"
 
 # A fixed band-stop: eegprep has no adaptive line-noise removal (sccn/eegprep#534 asks for ZapLine).
 BAND_STOP_FUNCTION = "eegprep.pop_eegfiltnew"
@@ -180,10 +184,49 @@ def bad_channel_rules() -> dict[str, Any]:
     }
 
 
-def ransac_parameters() -> dict[str, Any]:
+@dataclass(frozen=True)
+class Embedding:
+    """Two of the floor's values a recipe that embeds the floor may set in place of its own.
+
+    ``highpass_hz`` replaces the drift step's ``clean_drifts`` by a FIR high-pass with that lower
+    passband edge (``pop_eegfiltnew``, the step id stays ``drift``); ``corr_threshold`` replaces
+    RANSAC's correlation threshold. The floor itself runs with ``FLOOR``, its own values, and its
+    products and golden decisions do not depend on this class. nemar-ica passes legacy NEMAR's.
+    """
+
+    highpass_hz: float | None = None
+    corr_threshold: float = RANSAC_CALL["corr_threshold"]
+
+
+FLOOR = Embedding()
+
+
+def highpass_call(passband_hz: float) -> dict[str, Any]:
+    """The FIR high-pass's arguments: the lower passband edge only, eegprep choosing the order."""
+    return {"locutoff": passband_hz, "hicutoff": None, "revfilt": False, "gui": False}
+
+
+def drift_step(embedding: Embedding = FLOOR) -> tuple[str, dict[str, Any]]:
+    """The drift step's function and recorded parameters: the floor's ``clean_drifts``, or the
+    embedding's FIR high-pass (what pop_eegfiltnew applies, then the call)."""
+    if embedding.highpass_hz is None:
+        return DRIFT_FUNCTION, dict(DRIFT_CALL)
+    return HIGHPASS_FUNCTION, {**BAND_STOP_APPLIED, **highpass_call(embedding.highpass_hz)}
+
+
+def ransac_call(embedding: Embedding = FLOOR) -> dict[str, Any]:
+    """RANSAC's call, with the embedding's correlation threshold."""
+    return {**RANSAC_CALL, "corr_threshold": embedding.corr_threshold}
+
+
+def ransac_parameters(embedding: Embedding = FLOOR) -> dict[str, Any]:
     """The RANSAC branch's parameters: the call, the seed eegprep fixes inside (no argument) and
     the rules that decided to run it."""
-    return {**RANSAC_CALL, "rng_seed": SEEDS["clean_channels.ransac"], "rules": bad_channel_rules()}
+    return {
+        **ransac_call(embedding),
+        "rng_seed": SEEDS["clean_channels.ransac"],
+        "rules": bad_channel_rules(),
+    }
 
 
 def nolocs_parameters() -> dict[str, Any]:
