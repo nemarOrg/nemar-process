@@ -151,6 +151,7 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
             "mixing.tsv",
             "qc.json",
             "samplemask.tsv",
+            "servingunmixing.tsv",
             "signalJourney.json",
             "sphere.tsv",
             "unmixing.tsv",
@@ -433,20 +434,21 @@ def test_the_asr_state_is_canonical_json_that_names_its_channels_and_its_memory_
     )
 
 
-def test_the_archive_input_is_the_floor_copy_after_asr_and_has_no_browser_matrix(tiny):
+def test_the_archive_input_is_the_floor_copy_after_asr_and_its_matrix_is_matched_by_label(tiny):
     """On a dataset directory the record states what the fit was given (the steps that shaped it, the
-    channels, the unit, the reference; no store) and there is no browser matrix, because no store of
-    the serving copy was read. The serving copy's block is in
-    ``test_nemar_ica_serving_input.py``."""
+    channels, the unit, the reference; no store), and the browser's matrix is in microvolts with its
+    columns matched to the serving copy by label, which the caption says was not checked against
+    the fit's input. The serving copy's block is in ``test_nemar_ica_serving_input.py``."""
     directory, fit, product, _ = tiny
     ran = product.record["processingSteps"]
-    shaped = [
-        {"step": step["stepId"], "function": step["name"]}
-        for step in ran
-        if step["name"] in steps.PREPROCESSING_FUNCTIONS
-    ]
-    assert [entry["step"] for entry in shaped][-2:] == ["asr", "reref"]
-    assert "drift" in [entry["step"] for entry in shaped]
+    shaped = []
+    for step in ran:
+        if step["name"] in steps.PREPROCESSING_FUNCTIONS:
+            shaped.append({"step": step["stepId"], "function": step["name"]})
+            if step["stepId"] == "asr":
+                shaped.append({"step": "asr", "function": "eegprep.clean_artifacts"})
+    assert [entry["step"] for entry in shaped][-3:] == ["asr", "asr", "reref"]
+    assert {"step": "drift", "function": "eegprep.pop_eegfiltnew"} in shaped
     expected = {
         "source": "archive",
         "preprocessing": shaped,
@@ -455,8 +457,15 @@ def test_the_archive_input_is_the_floor_copy_after_asr_and_has_no_browser_matrix
         "unit": "uV",
     }
     assert block_of(product)["decomposition_input"] == expected == fit.decomposition_input
-    assert block_of(product)["browser_transform"] is None
-    assert not list(directory.rglob("*_servingunmixing.tsv"))
+    header, weights = read_matrix(named(directory, "servingunmixing.tsv"))
+    _, unmixing = read_matrix(named(directory, "unmixing.tsv"))
+    assert header == fit.good_channels
+    assert np.array_equal(weights, unmixing - unmixing.mean(axis=1, keepdims=True))  # microvolts
+    transform = block_of(product)["browser_transform"]
+    assert (transform["match"], transform["rows"], transform["unit"]) == ("label", None, "uV")
+    assert transform["columns"] == fit.good_channels
+    assert transform["caption"] == "not checked against the decomposition input"
+    assert "refuses an unknown unit" in transform["applies_to"]
 
 
 def test_the_rank_is_one_less_than_the_good_channels_and_the_inputs_numerical_rank(tiny):

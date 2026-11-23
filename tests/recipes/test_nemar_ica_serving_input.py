@@ -1,9 +1,10 @@
 """``nemar-ica --input zarr``: the full chain on the serving copy, and the browser's matrix
 (nemarOrg/nemar-process#79).
 
-The decomposition gets the same preprocessing on both inputs (the floor's channel removal, drift
-high-pass and line-noise band-stop, ASR with the owner's cutoff of 30, the average reference), and
-pAMICA runs with AMICA's sample rejection on. On the serving copy the product adds the browser's
+The decomposition gets the same preprocessing on both inputs (the floor's channel removal with
+RANSAC at 0.85, a 0.5 Hz FIR high-pass and the line-noise band-stop, ASR with the owner's cutoff of 30
+whose bursts are cut, the average reference), and pAMICA runs with AMICA's sample rejection and its
+convergence stops on. On the serving copy the product adds the browser's
 matrix, ``_servingunmixing.tsv``: the unmixing with the average reference over the kept channels and
 the store unit's factor to microvolts folded in, so that the browser multiplies the store's physical
 values of the kept channels by it and applies no preprocessing.
@@ -22,7 +23,13 @@ only the two external hosts):
   channels, the unit, the reference) and ``browser_transform``;
 * the chain on the serving copy: ASR runs with its state, the line-noise band-stop runs, no step is
   skipped for the input; the plan hash follows the ASR cutoff and the rejection switch;
-* the rejection settings reach pAMICA's backend, which makes its rejection passes;
+* the rejection settings and the convergence stops reach pAMICA's backend, which makes its
+  rejection passes;
+* the bursts ASR finds are cut from the fit's input by eegprep's ``clean_artifacts``, whose repair
+  is the one the recorded state makes, and the spans are rows of ``_badsegments.tsv`` and
+  ``_samplemask.tsv`` and of the record;
+* the floor runs with nemar-ica's 0.5 Hz FIR high-pass and RANSAC's 0.85, and the floor itself keeps
+  its own;
 * the rank: the decomposition keeps one component fewer than the kept channels, which is the
   numerical rank of its input after the average reference.
 """
@@ -63,6 +70,7 @@ SCALE = tuple(0.0375 + 0.00731 * row for row in range(len(ORDER)))
 OFFSET = tuple(-63.72354566764059 + 17.30117 * row for row in range(len(ORDER)))
 MICROVOLTS_PER = {z.MICRO_SIGN: 1.0, "uV": 1.0, "mV": 1e3, "V": 1e6}
 RELATIVE = 1e-12
+STOPS = {"use_min_dll": True, "min_dll": 1e-9, "maxincs": 5, "use_grad_norm": True, "min_nd": 1e-7}
 GROUP = "eeg_250hz"
 ITERATIONS = 20  # past AMICA's three rejection passes (iterations 2, 5 and 8)
 ARGS = [
@@ -79,12 +87,17 @@ ARGS = [
 ]
 
 
+BURST = (int(30 * z.RATE), int(30.6 * z.RATE))  # 0.6 s of a large 7 Hz burst on three channels
+
+
 def counts_of(seed: int) -> np.ndarray:
-    """Eight correlated channels in counts, in ``ORDER``, with ``FLAT`` constant and a 50 Hz line on
-    every channel, strong enough for the floor's band-stop."""
+    """Eight correlated channels in counts, in ``ORDER``, with ``FLAT`` constant, a 50 Hz line on
+    every channel, strong enough for the floor's band-stop, and a burst ASR's cutoff of 30 finds."""
     counts = z._signal(seed) * 4
     time = np.arange(z.N_SAMPLES) / z.RATE
     counts = counts + np.round(600 * np.sin(2 * np.pi * 50 * time)).astype(int)
+    span = slice(*BURST)
+    counts[[0, 1, 4], span] += np.round(6000 * np.sin(2 * np.pi * 7 * time[span])).astype(int)
     counts[ORDER.index(FLAT)] = 12
     return counts
 
@@ -363,11 +376,12 @@ def test_the_record_names_the_input_its_store_and_the_browsers_matrix(runs, stan
     block = block_of(run)
     rows = run.source.dataset_extras()["input"]["stores_content"]
     (row,) = [row for row in rows if row["path"] == path]
-    shaped = [
-        {"step": step["stepId"], "function": step["name"]}
-        for step in record["processingSteps"]
-        if step["name"] in steps.PREPROCESSING_FUNCTIONS
-    ]
+    shaped = []
+    for step in record["processingSteps"]:
+        if step["name"] in steps.PREPROCESSING_FUNCTIONS:
+            shaped.append({"step": step["stepId"], "function": step["name"]})
+            if step["stepId"] == "asr":  # ASR's bursts are cut by clean_artifacts in the same step
+                shaped.append({"step": "asr", "function": "eegprep.clean_artifacts"})
     assert block["decomposition_input"] == {
         "source": "serving_copy",
         "preprocessing": shaped,
@@ -379,10 +393,23 @@ def test_the_record_names_the_input_its_store_and_the_browsers_matrix(runs, stan
     assert row["content_sha256"] == reference_content_sha256(stand_in, path)
     assert row["content_sha256"] == record["extensions"]["nemar"]["input"]["content_sha256"]
     matrix = naming.product_path(path, outputs.LABEL, "servingunmixing", "tsv")
+    unit = "mV" if path == STORE_MV else z.MICRO_SIGN
     assert block["browser_transform"] == {
         "matrix": matrix,
         "applies_to": "serving_copy channels listed, physical unit",
         "note": "no preprocessing; activations approximate the decomposition input",
+        "match": "store_row",
+        "rows": [ORDER.index(label) for label in run.fit.good_channels],
+        "columns": run.fit.good_channels,
+        "unit": unit,
+        "caption": None,
+        "shaded": {
+            "label": "burst",
+            "files": [
+                naming.product_path(path, outputs.LABEL, "badsegments", "tsv"),
+                naming.product_path(path, outputs.LABEL, "samplemask", "tsv"),
+            ],
+        },
     }
     assert (run.directory / matrix).is_file()
     assert matrix in [entry["location"] for entry in record["extensions"]["nemar"]["outputs"]]
@@ -414,10 +441,14 @@ def test_the_serving_copy_gets_the_full_chain(runs):
     assert not [entry for entry in skipped if entry["reason"] == "serving_input"]
     assert named(run.directory, "asr.json").is_file()
     preprocessing = block_of(run)["decomposition_input"]["preprocessing"]
-    assert [entry["step"] for entry in preprocessing] == [
-        step_id
-        for step_id in ids
-        if step_id in ("flatline", "drift", "line_noise_50", "bad_channels", "asr", "reref")
+    assert [(entry["step"], entry["function"]) for entry in preprocessing] == [
+        ("flatline", "eegprep.clean_flatlines"),
+        ("drift", "eegprep.pop_eegfiltnew"),
+        ("line_noise_50", "eegprep.pop_eegfiltnew"),
+        ("bad_channels", "eegprep.clean_channels"),
+        ("asr", "eegprep.clean_asr"),
+        ("asr", "eegprep.clean_artifacts"),
+        ("reref", "eegprep.pop_reref"),
     ]
 
 
@@ -462,6 +493,8 @@ def test_the_rejection_settings_reach_pamicas_backend_which_rejects(runs, backen
         }
         assert given["maxrej"] == 3
         assert backend.numrej == 3  # passes at iterations 2, 5 and 8
+        # AMICA's convergence stops, at the Fortran program's defaults
+        assert {key: given[key] for key in STOPS} == STOPS
         assert backend.good_idx is not None
 
 
@@ -501,6 +534,167 @@ def test_a_record_never_pairs_a_profile_with_the_other_input(runs, tmp_path):
             [],
             profile=steps.INPUT_PROFILES["bids"],
         )
+
+
+# ---- the bursts --------------------------------------------------------------------------------
+
+
+def rows_of(path: Path) -> list[dict[str, str]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    names = lines[0].split("\t")
+    return [dict(zip(names, line.split("\t"), strict=True)) for line in lines[1:]]
+
+
+def test_the_bursts_are_cut_from_the_fits_input_and_listed_in_the_floors_tables(runs):
+    run = runs[STORE]
+    record = run.product.record
+    bursts = block_of(run)["burst_rejection"]
+    spans = bursts["spans"]
+    assert any(start <= BURST[0] and BURST[1] <= stop for start, stop in spans)
+    removed = sum(stop - start for start, stop in spans)
+    assert bursts["n_samples"] == z.N_SAMPLES
+    assert bursts["n_kept"] == z.N_SAMPLES - removed == int(run.fit.eeg["pnts"])
+    assert bursts["kept_share"] == round(bursts["n_kept"] / z.N_SAMPLES, 6) < 1.0
+    asr = step_of(record, "asr")
+    assert asr["qualityMetrics"]["nBurstSpans"] == len(spans)
+    assert asr["qualityMetrics"]["keptShare"] == bursts["kept_share"]
+    assert asr["parameters"]["burst_rejection"] == {
+        "function": "eegprep.clean_artifacts",
+        "FlatlineCriterion": "off",
+        "Highpass": "off",
+        "ChannelCriterion": "off",
+        "LineNoiseCriterion": "off",
+        "WindowCriterion": "off",
+        "BurstCriterion": 30.0,
+        "BurstCriterionRefMaxBadChns": 0.075,
+        "BurstCriterionRefTolerances": [-3.5, 5.5],
+        "BurstRejection": True,
+        "MaxMem": 1024,
+        "Distance": "euclidian",
+    }
+    masked = [
+        row for row in rows_of(named(run.directory, "samplemask.tsv")) if row["label"] == "burst"
+    ]
+    assert [[int(row["start_sample"]), int(row["stop_sample"])] for row in masked] == spans
+    assert {row["nemar_reason"] for row in masked} == {"asr_burst_rejection"}
+    segments = [
+        row for row in rows_of(named(run.directory, "badsegments.tsv")) if row["label"] == "burst"
+    ]
+    assert [
+        [
+            round(float(row["onset"]) * z.RATE),
+            round((float(row["onset"]) + float(row["duration"])) * z.RATE),
+        ]
+        for row in segments
+    ] == spans
+    # the floor's own windows are still there, beside the bursts
+    assert [
+        row for row in rows_of(named(run.directory, "samplemask.tsv")) if row["label"] != "burst"
+    ]
+
+
+def test_the_cuts_asr_settings_are_the_states():
+    """clean_artifacts passes ASR these settings and leaves the rest at clean_asr's defaults, as the
+    state's own call does: a cut whose ASR differed would cut what the state does not describe, even
+    on data where the two calibrations happen to agree."""
+    asr = pipeline.asr_parameters()
+    call = pipeline.burst_call()
+    assert (
+        call["BurstCriterion"],
+        call["BurstCriterionRefMaxBadChns"],
+        list(call["BurstCriterionRefTolerances"]),
+        call["MaxMem"],
+    ) == (asr["cutoff"], asr["ref_maxbadchannels"], list(asr["ref_tolerances"]), asr["maxmem"])
+    assert (call["Distance"], asr["useriemannian"], asr["use_gpu"]) == ("euclidian", None, False)
+    assert asr["burst_rejection"] == {"function": "eegprep.clean_artifacts", **call}
+
+
+def test_the_cut_is_eegpreps_and_its_repair_is_the_one_the_state_records(stand_in, no_fence_module):
+    """clean_artifacts repairs exactly as the recorded clean_asr call does, so the state describes the
+    repair that decided the cut, and every sample that repair changed is cut."""
+    from eegprep import clean_artifacts
+    from nemar_process.common import qc
+    from nemar_process.nemar_floor import pipeline as floor
+
+    source = opened(stand_in, STORE)
+    loaded = source.load(STORE)
+    with determinism.pinned_threads(1), command.quiet():
+        result = floor.process(
+            loaded,
+            recipe_id=steps.RECIPE_ID,
+            recipe_version=steps.RECIPE_VERSION,
+            embedding=pipeline.FLOOR_EMBEDDING,
+        )
+        eeg = result.work
+        repaired, _state = pipeline.asr_repair(eeg)
+        given = {**eeg, "etc": {k: v for k, v in eeg["etc"].items() if k != "clean_sample_mask"}}
+        cut, _highpassed, bur, _removed = clean_artifacts(given, **pipeline.burst_call())
+        recipe_cut, bursts = pipeline.cut_bursts(eeg)
+    assert np.array_equal(repaired["data"], bur["data"])
+    kept = np.asarray(cut["etc"]["clean_sample_mask"], dtype=bool)
+    changed = np.sum(np.abs(np.asarray(eeg["data"]) - repaired["data"]), axis=0) >= 1e-8
+    assert changed.any()
+    assert not np.any(kept & changed)
+    assert bursts["spans"] == [[start, start + length] for start, length in qc.runs(kept)]
+    assert np.array_equal(recipe_cut["data"], cut["data"])
+    assert np.array_equal(recipe_cut["data"], np.asarray(eeg["data"])[:, kept])  # kept as it was
+
+
+# ---- the floor's values ------------------------------------------------------------------------
+
+
+def test_the_floor_runs_with_a_half_hertz_fir_high_pass_and_ransac_at_085(runs):
+    run = runs[STORE]
+    record = run.product.record
+    drift = step_of(record, "drift")
+    assert drift["name"] == "eegprep.pop_eegfiltnew"
+    assert {key: drift["parameters"][key] for key in ("locutoff", "hicutoff", "revfilt")} == {
+        "locutoff": 0.5,
+        "hicutoff": None,
+        "revfilt": False,
+    }
+    # eegprep's own design at 250 Hz: a 0.5 Hz transition band, -6 dB at 0.25 Hz, order 1650
+    quality = drift["qualityMetrics"]
+    assert (quality["order"], quality["transitionHz"], quality["cutoffHz"]) == (1650, 0.5, [0.25])
+    written = json.loads(named(run.directory, "filters.json").read_text(encoding="utf-8"))
+    assert written["drift"]["function"] == "eegprep.pop_eegfiltnew"
+    assert written["drift"]["passbandHz"] == 0.5
+    assert written["drift"]["order"] == 1650
+    bad = step_of(record, "bad_channels")
+    assert bad["parameters"]["corr_threshold"] == 0.85
+
+
+def test_the_floor_itself_keeps_its_own_high_pass_and_threshold():
+    from nemar_process.nemar_floor import recipe as floor_recipe
+
+    floor_steps = {step.step_id: step for step in floor_recipe.dataset_steps()}
+    assert floor_steps["drift"].function == "eegprep.clean_drifts"
+    assert floor_steps["bad_channels"].parameters["corr_threshold"] == 0.8
+    ica_steps = {step.step_id: step for step in RECIPE.dataset_steps()}
+    assert ica_steps["drift"].function == "eegprep.pop_eegfiltnew"
+    assert ica_steps["drift"].parameters["locutoff"] == 0.5
+    assert ica_steps["bad_channels"].parameters["corr_threshold"] == 0.85
+
+
+# ---- AMICA's convergence ------------------------------------------------------------------------
+
+
+def test_amica_stops_at_convergence_or_after_4000_iterations_and_says_which(runs):
+    assert RECIPE.option_values({})["ica_max_iter"] == 4000
+    run = runs[STORE]
+    record = run.product.record
+    parameters = step_of(record, "ica")["parameters"]
+    assert {key: parameters[key] for key in STOPS} == STOPS
+    block = block_of(run)
+    assert {key: block["pamica"][key] for key in STOPS} == STOPS  # eegprep's own account
+    assert block["stop_reason"] in ("max_iter", "min_dll", "grad_norm")
+    assert block["iterations"] <= ITERATIONS
+    assert block["did_converge"] is (block["stop_reason"] != "max_iter")
+    stored = record["extensions"]["nemar"]["plan_hash"]
+    changed = copy.deepcopy(plans.resolved_plan(record))
+    (ica,) = [entry for entry in changed["steps"] if entry["step_id"] == "ica"]
+    ica["parameters"]["use_min_dll"] = False
+    assert plans.plan_hash(changed) != stored
 
 
 # ---- the command -------------------------------------------------------------------------------
