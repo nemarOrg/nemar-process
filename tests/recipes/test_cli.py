@@ -519,11 +519,20 @@ def test_the_version_is_one_json_line(cli, image_files):
         "nemar-ica": PINNED_ICA_RECIPE_VERSION,
     }
     assert document["inputs"] == {"nemar-floor": ["bids", "zarr"], "nemar-ica": ["bids", "zarr"]}
+    pinned = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "contract" / "compute-progress-vectors.json"
+        ).read_text()
+    )
+    assert document["checkpoints"] == {
+        name: pinned["maps"][name]["checkpoints"] for name in ("nemar-floor", "nemar-ica")
+    }
     assert document["eegprep"] == PINNED_EEGPREP_TEXT  # with the commit it was installed from
     assert document["common"] == PINNED_COMMON_VERSION
     assert set(document) == {
         "recipes",
         "inputs",
+        "checkpoints",
         "common",
         "eegprep",
         "python",

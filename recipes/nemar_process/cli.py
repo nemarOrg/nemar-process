@@ -1154,6 +1154,15 @@ def version_command() -> int:
     document = {
         "recipes": {key: REGISTRY[key].version for key in sorted(REGISTRY)},
         "inputs": {key: list(REGISTRY[key].inputs) for key in sorted(REGISTRY)},
+        # each recipe's checkpoints and their steps (ADR 0134): the map nemar-cli's registry holds for
+        # the same recipe version, in the shape of its RecipeCheckpoint
+        "checkpoints": {
+            key: [
+                {"checkpoint": name, "steps": list(steps)}
+                for name, steps in REGISTRY[key].checkpoints
+            ]
+            for key in sorted(REGISTRY)
+        },
         "common": COMMON_VERSION,
         # with the commit it was installed from, as the engine stamp and every step name it
         "eegprep": versions.distribution_version("eegprep"),
