@@ -30,6 +30,7 @@ Standard library only, Python 3.9.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import itertools
 import os
 import re
@@ -60,6 +61,10 @@ from .codes import (
 )
 from .provenance import Documents, Log
 from .settings import read_settings
+
+# imported before any fence closes: inside one, only the prctl lookup is allowed (run.py)
+with contextlib.suppress(ImportError):  # a Python built without ctypes has no prctl to look up
+    import ctypes  # noqa: F401
 
 PROGRAM = "nemar-launch-local"
 ENGINES = ("apptainer", "docker")

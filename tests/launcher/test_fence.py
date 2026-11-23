@@ -9,6 +9,7 @@ events it relies on exist and fire there.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import subprocess
@@ -262,3 +263,131 @@ def test_a_run_cannot_be_opened_twice(fenced):
     with fenced.run(), pytest.raises(fence.FenceError), fenced.run():
         pass
     assert not fenced.closed
+
+
+# ---- the review's probes (sec-pr78), as tests ------------------------------------------------------------
+
+
+def test_an_executable_other_than_argv0_is_refused_closed_and_in_the_window(fenced, tmp_path):
+    """``subprocess.run(["docker", "rm", x], executable="/usr/bin/touch")`` shows a runtime verb and runs
+    another program: refused, before and inside the window."""
+    docker = program(tmp_path, "docker")
+    other = program(tmp_path, "touch-like")
+    cosign = program(tmp_path, "cosign")
+    exact = [cosign, "version", "--json"]
+    with fenced.run():
+        with pytest.raises(fence.Refused):
+            subprocess.run([docker, "rm", "x"], executable=other, check=False)
+        assert starts([docker, "rm", "x"])  # the same vector with no override starts
+        with fenced.window([exact]):
+            with pytest.raises(fence.Refused):
+                subprocess.run(exact, executable=other, check=False)
+            assert starts(exact)
+    assert fenced.refusals.count("process_refused") == 2
+
+
+def test_a_shell_is_refused(fenced):
+    with fenced.run(), pytest.raises(fence.Refused):
+        subprocess.run("docker info", shell=True, check=False)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["apptainer", "exec", "docker://alpine:latest", "true"],
+        ["apptainer", "exec", "oras://ghcr.io/x/y:latest", "true"],
+        ["singularity", "exec", "library://alpine", "true"],
+        ["apptainer", "exec", "image.sif", "curl", "https://example.org"],
+    ],
+)
+def test_an_apptainer_uri_is_refused_while_closed(argv):
+    assert not fence.runtime_verb_allowed(argv)
+
+
+def test_the_window_still_allows_the_exact_pull_with_its_uri(fenced, tmp_path):
+    apptainer = program(tmp_path, "apptainer")
+    pull = [
+        apptainer,
+        "pull",
+        "x.part",
+        "oras://ghcr.io/nemarorg/nemar-python-sif@sha256:" + "a" * 64,
+    ]
+    with fenced.run(), fenced.window([pull]):
+        assert starts(pull)
+        assert not starts([apptainer, "exec", "docker://alpine", "true"])
+
+
+def test_fork_forkpty_ctypes_symbols_and_process_pools_are_refused(fenced):
+    import ctypes
+    import importlib
+
+    with fenced.run():
+        with pytest.raises(fence.Refused):
+            os.fork()
+        if hasattr(os, "forkpty"):
+            with pytest.raises(fence.Refused):
+                os.forkpty()
+        libc = ctypes.CDLL(None)
+        with pytest.raises(fence.Refused):
+            libc.system  # noqa: B018 - the lookup is what is refused
+        for name in ("multiprocessing", "concurrent.futures.process"):
+            saved = {k: v for k, v in sys.modules.items() if k == name or k.startswith(name + ".")}
+            for k in saved:
+                del sys.modules[k]
+            try:
+                with pytest.raises(fence.Refused):
+                    importlib.import_module(name)
+            finally:
+                sys.modules.update(saved)
+    assert {"process_refused", "symbol_refused", "import_refused"} <= set(fenced.refusals)
+
+
+def test_the_prctl_lookup_is_allowed(fenced):
+    import ctypes
+
+    # not Linux: no such symbol, but the fence let the lookup through
+    with fenced.run(), contextlib.suppress(AttributeError):
+        ctypes.CDLL(None).prctl  # noqa: B018
+    assert "symbol_refused" not in fenced.refusals
+
+
+def test_the_window_allows_only_ip_stream_sockets_and_text_addresses(fenced):
+    server = StandinServer(Registry()).start()
+    try:
+        registry = fence.Registry(server.base_url)
+        with fenced.run(), fenced.window([], registry):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
+            for family, kind in (
+                (socket.AF_UNIX, socket.SOCK_STREAM),
+                (socket.AF_INET, socket.SOCK_DGRAM),
+            ):
+                with pytest.raises(fence.Refused):
+                    socket.socket(family, kind)
+    finally:
+        server.stop()
+    named = fence.Registry("https://ghcr.io")
+    run = fence._Run()
+    run.looked_up = True
+    assert not fence.Fence._connect_allowed(named, run, (134744072, 443))  # 8.8.8.8 as an integer
+    assert fence.Fence._connect_allowed(named, run, ("8.8.8.8", 443))
+
+
+def test_posix_spawn_is_judged_like_popen(fenced, tmp_path, monkeypatch):
+    """subprocess takes os.posix_spawn on some platforms (3.13 on macOS, close_fds=False on Linux): an
+    allowed runtime verb must still start that way, and anything else must still be refused."""
+    if not hasattr(os, "posix_spawn"):
+        pytest.skip("no os.posix_spawn here")
+    monkeypatch.setattr(subprocess, "_USE_POSIX_SPAWN", True)
+    docker = program(tmp_path, "docker")
+    other = program(tmp_path, "curl")
+    with fenced.run():
+        done = subprocess.run(
+            [docker, "--version"], stdin=subprocess.DEVNULL, capture_output=True, close_fds=False
+        )
+        assert done.returncode == 0
+        with pytest.raises(fence.Refused):
+            subprocess.run([other], stdin=subprocess.DEVNULL, capture_output=True, close_fds=False)
+        with pytest.raises(fence.Refused):
+            os.posix_spawn(docker, [other, "--version"], dict(os.environ))  # path is not argv[0]
+        pid = os.posix_spawn(docker, [docker, "--version"], dict(os.environ))
+        os.waitpid(pid, 0)

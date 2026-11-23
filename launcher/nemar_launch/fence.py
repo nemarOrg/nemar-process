@@ -15,8 +15,13 @@ included), it refuses:
 * every program but the container runtime: ``subprocess.Popen`` is allowed only for a program named
   ``apptainer``, ``singularity`` or ``docker`` and only with the verbs the launcher uses (``--version``,
   ``buildcfg``, ``exec``, ``info``, ``image inspect``, ``container inspect``, ``rm``, and ``run``
-  carrying ``--pull=never`` and no other ``--pull``); ``os.system``, ``os.exec*``, ``os.spawn*`` and
-  ``os.posix_spawn`` are refused outright.
+  carrying ``--pull=never`` and no other ``--pull``), never an Apptainer argument holding ``://``, and
+  only when the program run is the vector's own ``argv[0]`` (an ``executable=`` naming another program is
+  refused); ``os.posix_spawn`` is judged by the same rules (subprocess takes it on some platforms);
+  ``os.system``, ``os.exec*``, ``os.spawn*``, ``os.fork`` and ``os.forkpty`` are refused outright;
+* ``ctypes`` symbol lookups other than ``prctl`` (``run.parent_death_hook``), and importing
+  ``multiprocessing`` or ``concurrent.futures.process`` (each starts interpreters no hook of this process
+  sees).
 
 THE WINDOW. Only with ``--pull``, once per run, around the image step and nothing else (after the
 scratch directory, the engine and its preflight, before the bundle, the PID namespace probe, the
@@ -24,7 +29,8 @@ datasets and any user code), the fence also allows exactly the argument vectors 
 ``cosign version --json``, ``cosign verify`` with the signing policy, ``docker pull --quiet`` of the
 pinned digest, and (added once cosign has passed) ``apptainer pull`` of the signed SIF artifact into
 its part file. For Apptainer it also allows, in this process, a lookup of exactly the registry's host
-(``verify.REGISTRY_BASE``), connections only to public addresses after that lookup (or, for a base that
+(``verify.REGISTRY_BASE``), IPv4 and IPv6 stream sockets only, connections only to public addresses
+(written as text, never an integer) after that lookup (or, for a base that
 is an IP literal, as the tests' loopback registry is, to exactly that address and port), and
 ``urllib.request.Request`` only for the anonymous token address and the manifest address of the signed
 artifact. A second window in one run is refused; the window closes when its block ends, however it
@@ -45,6 +51,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import os
+import socket
 import sys
 import threading
 import urllib.parse
@@ -67,7 +74,14 @@ _LOOKUP_EVENTS = (
     "socket.getservbyname",
     "socket.getservbyport",
 )
-_PROCESS_EVENTS = ("os.system", "os.exec", "os.spawn", "os.posix_spawn")
+_PROCESS_EVENTS = ("os.system", "os.exec", "os.spawn", "os.fork", "os.forkpty")
+# The process launches judged by their argument vector: subprocess's own event, and os.posix_spawn,
+# which subprocess itself takes on some platforms and Pythons (3.13 on macOS among them).
+_SPAWN_EVENTS = ("subprocess.Popen", "os.posix_spawn", "os.posix_spawnp")
+# The only symbol the launcher looks up through ctypes (run.parent_death_hook, Linux).
+_CTYPES_SYMBOLS = ("prctl",)
+# Modules that start interpreters of their own, which no audit hook of this process would see.
+_REFUSED_IMPORTS = ("multiprocessing", "concurrent.futures.process")
 PUBLIC_PORT = 443
 
 
@@ -88,6 +102,9 @@ def runtime_verb_allowed(argv: Sequence[str]) -> bool:
         return False
     rest = [str(a) for a in argv[1:]]
     if name in ("apptainer", "singularity"):
+        # no URI anywhere: an `exec docker://...` or `exec oras://...` would make the runtime fetch
+        if any("://" in a for a in rest):
+            return False
         return rest[:1] in (["--version"], ["buildcfg"], ["exec"])
     if rest[:1] in (["--version"], ["info"], ["rm"]):
         return True
@@ -149,14 +166,25 @@ class Fence:
         current = self._run
         if current is None:
             return
-        if event == "subprocess.Popen":
-            argv = args[1]
-            argv = [argv] if isinstance(argv, (str, bytes)) else [str(a) for a in argv]
+        if event in _SPAWN_EVENTS:
+            # (executable or path, argv, ...): what runs must be argv[0], so an `executable=` that
+            # names another program than the argument vector shows is refused
+            program, argv = args[0], args[1]
+            argv = [argv] if isinstance(argv, (str, bytes)) else [os.fsdecode(a) for a in argv]
+            if program is not None and (not argv or os.fsdecode(program) != argv[0]):
+                self._refuse("process_refused")
             if runtime_verb_allowed(argv):
                 return
             if current.window and argv in current.argvs:
                 return
             self._refuse("process_refused")
+        elif event in ("ctypes.dlsym", "ctypes.dlsym/handle"):
+            if args[1] not in _CTYPES_SYMBOLS:
+                self._refuse("symbol_refused")
+        elif event == "import":
+            module = args[0]
+            if any(module == m or module.startswith(m + ".") for m in _REFUSED_IMPORTS):
+                self._refuse("import_refused")
         elif event in _PROCESS_EVENTS:
             self._refuse("process_refused")
         elif event in _LOOKUP_EVENTS:
@@ -168,7 +196,7 @@ class Fence:
         elif event in _SOCKET_EVENTS:
             registry = current.registry if current.window else None
             if registry is not None:
-                if event == "socket.__new__":
+                if event == "socket.__new__" and self._stream_allowed(args[1], args[2]):
                     return
                 if event == "socket.connect" and self._connect_allowed(registry, current, args[1]):
                     return
@@ -179,8 +207,17 @@ class Fence:
             self._refuse("request_refused")
 
     @staticmethod
+    def _stream_allowed(family: Any, kind: Any) -> bool:
+        """Inside the window: an IPv4 or IPv6 stream socket and nothing else (no UNIX, raw or datagram
+        socket). The type may carry flags (SOCK_CLOEXEC, SOCK_NONBLOCK) besides SOCK_STREAM."""
+        if family not in (socket.AF_INET, socket.AF_INET6) or not isinstance(kind, int):
+            return False
+        flags = getattr(socket, "SOCK_CLOEXEC", 0) | getattr(socket, "SOCK_NONBLOCK", 0)
+        return kind & ~flags == socket.SOCK_STREAM
+
+    @staticmethod
     def _connect_allowed(registry: Registry, current: _Run, address: Any) -> bool:
-        if not isinstance(address, tuple) or len(address) < 2:
+        if not isinstance(address, tuple) or len(address) < 2 or not isinstance(address[0], str):
             return False
         try:
             ip = ipaddress.ip_address(address[0])
