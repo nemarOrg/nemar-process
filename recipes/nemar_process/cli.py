@@ -17,7 +17,10 @@ name and one label. A name that was a recipe of its own (``nemar-floor-zarr``) i
 with the command that replaces it.
 
 The command is an argument vector, so a launch specification names it without a shell. It reads only
-``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``). It opens no
+``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``), and, when
+``--out`` is inside ``$NEMAR_OUT``, a small progress file at ``$NEMAR_OUT/.nemar-progress/`` that the
+launcher reports live progress from and that is removed when the run ends (``common/progress.py``,
+ADR 0134). It opens no
 network connection, with one exception: a recipe run with ``--input zarr`` (``nemar-floor``)
 reads the dataset's Zarr serving copy over HTTPS from the hosts in the allowlist of
 ``common/zarr_hosts.py`` only (the Zarr host and, after one redirect, the data bucket), refuses
@@ -90,6 +93,7 @@ from nemar_process.common import (
     files,
     io,
     naming,
+    progress,
     records,
     table,
     versions,
@@ -758,27 +762,41 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
                 )
                 return EXIT_DATASET_UNREADABLE
         seen: set[str] = set()
+        table_path = out / naming.dataset_path(recipe.label, "recordings", "tsv")
+        # the local progress file the launcher reports live progress from (ADR 0134); removed only
+        # after the dataset record is written, so a long finalize does not read as stalled
+        tracker = progress.begin(recipe, out, table_path)
         try:
-            with table.TableWriter(
-                out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
-            ) as writer:
-                for counter, (path, target) in enumerate(items):
-                    row = run_one(recipe, target, path, context, out, counter, seen, budget)
-                    writer.append(row)
-                    report(path, row)
-        except OSError as error:
-            print("the table cannot be written: {}".format(type(error).__name__), file=sys.stderr)
-            return EXIT_OUTPUT_UNUSABLE
+            try:
+                with table.TableWriter(table_path, recipe.columns) as writer:
+                    if tracker is not None:
+                        tracker.discovered(len(items))  # every item gets exactly one row
+                    for counter, (path, target) in enumerate(items):
+                        if tracker is not None:
+                            tracker.started(path)
+                        row = run_one(recipe, target, path, context, out, counter, seen, budget)
+                        writer.append(row)
+                        if tracker is not None:
+                            tracker.ended()
+                        report(path, row)
+            except OSError as error:
+                print(
+                    "the table cannot be written: {}".format(type(error).__name__),
+                    file=sys.stderr,
+                )
+                return EXIT_OUTPUT_UNUSABLE
+            finally:
+                shutil.rmtree(out / PARTIAL, ignore_errors=True)
+            try:
+                record, unsupported, unfinished = finalize(recipe, out, context, ignored, started)
+            except OSError as error:
+                print(
+                    "the dataset record cannot be written: {}".format(type(error).__name__),
+                    file=sys.stderr,
+                )
+                return EXIT_OUTPUT_UNUSABLE
         finally:
-            shutil.rmtree(out / PARTIAL, ignore_errors=True)
-        try:
-            record, unsupported, unfinished = finalize(recipe, out, context, ignored, started)
-        except OSError as error:
-            print(
-                "the dataset record cannot be written: {}".format(type(error).__name__),
-                file=sys.stderr,
-            )
-            return EXIT_OUTPUT_UNUSABLE
+            progress.end()
     code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported, unfinished)
     extra = None
     if source is not None:
