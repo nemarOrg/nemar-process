@@ -148,7 +148,12 @@ def facts(fit: pipeline.Decomposition, profile: str) -> dict[str, Any]:
         "n_good_channels": len(fit.good_channels),
         "iclabel": fit.iclabel,
         "input_profile": profile,
-        **device.facts(resolution, threads=settings.threads),
+        **device.facts(
+            resolution,
+            threads=settings.threads,
+            gpu_memory_cap_mb=tally.gpu_memory_cap_mb(),
+            gpu_allocator_limit_mb=tally.gpu_allocator_limit_mb(),
+        ),
     }
     if settings.native:
         block["amica15"] = {"binary_sha256": account["binary_sha256"]}
@@ -333,15 +338,17 @@ def produce(
     input's own load (``recipe.py``).
 
     The device is resolved here from the run's options (a function of the option, the runner's two
-    variables and torch's view of the GPU, none of which a run changes), and the recording says
-    which one ran.
+    variables and torch's view of the GPU, none of which a run changes); the run's state applies a
+    move to the CPU an earlier recording made (``tally.begin``) and may make one during this
+    recording's fit (``pipeline.process``). The recording says which device ran it and why, and is
+    counted on that device only once its product is written.
     """
     settings = Settings.from_options(context.options)
-    resolution = device.resolve("cpu" if settings.native else settings.device)
+    resolution = tally.begin(device.resolve("cpu" if settings.native else settings.device))
     inputs = loaded.inputs
-    fit = pipeline.process(loaded, settings, resolution)
+    fit = pipeline.process(loaded, settings, resolution, recording.path)
     product = write_product(
         recording, context, directory, fit, inputs, profile=profile, nemar_extra=nemar_extra
     )
-    tally.note(resolution.device)
+    tally.note(fit.resolution.device)
     return product

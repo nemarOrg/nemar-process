@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from nemar_process.common import io, zarr_input
+from nemar_process.common import device, io, zarr_input
 from nemar_process.common.recipe import (
     INPUT_OPTION,
     Column,
@@ -149,16 +149,20 @@ def zarr_run_recording(
 
 
 def run_facts(context: RunContext) -> dict[str, Any]:
-    """What the dataset record says of the run: its settings and, per device, its products.
+    """What the dataset record says of the run: its settings, per device its products, every move
+    of the job to the CPU (``fallbacks``) and the growth of the GPU memory outside this process's
+    torch allocator that counts as contention (``gpu_contention_mib``).
 
     A merge of product directories (``aggregate``) has no options and ran no recording: it states
-    neither, and each row of the table still says the device its recording ran on.
+    none of them, and each row of the table still says the device its recording ran on.
     """
     if "ica_engine" not in context.options:
         return {}
     settings = Settings.from_options(context.options)
     return {
         "devices": tally.devices(),
+        "fallbacks": tally.fallbacks(),
+        "gpu_contention_mib": device.CONTENTION_MIB,
         "ica_run": {
             "engine": settings.engine,
             "device_requested": settings.device,
