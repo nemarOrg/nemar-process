@@ -328,3 +328,24 @@ def test_the_scratch_case_has_its_own_message(tmp_path):
     assert caught.value.message == "a dataset contains the scratch"
     ((name, held),) = local.bind_data(job, options, str(tmp_path / "elsewhere"))
     assert (name, held.source) == ("ds1", os.path.realpath(data))
+
+
+def test_only_absolute_path_entries_are_searched(lrig, monkeypatch):
+    """An empty or relative PATH entry would find a program named like the runtime in the directory the
+    person started from: they are dropped, so the stand-in there is never run."""
+    rogue = lrig.tmp / "cwd"
+    rogue.mkdir()
+    (rogue / "apptainer").write_text("#!/bin/sh\ntouch {}\nexit 0\n".format(lrig.tmp / "rogue-ran"))
+    (rogue / "apptainer").chmod(0o755)
+    monkeypatch.chdir(rogue)
+    lrig.write_spec(lrig.script_spec("true"))
+    environ = lrig.environ()
+    environ[b"PATH"] = b"::.:" + environ[b"PATH"]
+    launch = lrig.run(lrig.argv(), environ)
+    assert launch.exit == 0, launch.log
+    assert not (lrig.tmp / "rogue-ran").exists()
+    from nemar_launch import local
+
+    options = local.Options(local.parser().parse_args(lrig.argv()))
+    built = local.environment(options, environ)
+    assert built.get("PATH") == str(lrig.bin_dir)
