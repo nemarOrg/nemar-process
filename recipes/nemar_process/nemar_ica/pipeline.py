@@ -3,8 +3,11 @@ and ICLabel. Every numerical step is an eegprep call, and no file is read or wri
 
 The chain (docs/recipes.md): the floor's own chain with its parameters (its decisions are this
 record's first steps; the bad channels it found are already removed from its working copy);
-``clean_asr`` with its state kept and the owner's cutoff of 30; ``pop_reref`` to the average; ``pop_runica`` with the engine
-asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``. A step that raises ends the
+``clean_asr`` with its state kept and the owner's cutoff of 30; ``pop_reref`` to the average;
+``pop_runica`` with the engine asked for and AMICA's sample rejection on, on the ASR-repaired,
+re-referenced copy; ``pop_iclabel``. The chain is the same on both inputs, and the record states what
+the fit was given (``decomposition_input``: the steps that shaped it, the channels, the unit and the
+reference, and on the Zarr serving copy the store it was read from). A step that raises ends the
 recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
 and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
 ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-device auto``, that runs
@@ -23,7 +26,7 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -45,6 +48,10 @@ from nemar_process.nemar_floor import pipeline as floor
 from nemar_process.nemar_floor import steps as floor_steps
 from nemar_process.nemar_ica import engines, steps, tally
 from nemar_process.nemar_ica.options import Settings
+
+if TYPE_CHECKING:
+    from nemar_process.common.plan import Plan
+    from nemar_process.common.zarr_input import ServingStore
 
 # eegprep's ICLabel network, the file the classification reads (hashed into the record).
 ICLABEL_WEIGHTS = "netICL.mat"
@@ -75,6 +82,10 @@ class Decomposition:
     classes: list[str]
     probabilities: np.ndarray
     variance_pct: list[float]
+    # what the fit was given (``decomposition_input``), and the store a serving-copy recording was read
+    # from (None on a dataset directory)
+    decomposition_input: dict[str, Any]
+    serving: ServingStore | None
     iclabel: dict[str, Any] = field(default_factory=dict)
 
 
@@ -180,6 +191,50 @@ def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
     ):
         raise RecordingError(STEP_FAILED, "asr", steps.ASR_MAXMEM_DETAIL)
     return repaired, canonical_text(state_to_json(state))
+
+
+def decomposition_input(
+    plan: Plan, good: list[str], result: floor.FloorResult, serving: ServingStore | None
+) -> dict[str, Any]:
+    """What the fit was given, as the record states it (``extensions.nemar.ica.decomposition_input``).
+
+    ``preprocessing`` names, in the order they ran, the steps of the plan that changed the data the fit
+    received (the functions of ``steps.PREPROCESSING_FUNCTIONS``: channel selection and removal, the
+    drift high-pass, each line-noise band-stop, ASR, the average reference); their parameters are those
+    steps'. ``channels`` are the decomposition's channels, the columns of its unmixing, in the order
+    of the recording (on the serving copy, store row order).
+
+    On the serving copy the block also names the store (its source path, the channel group read and
+    its content digest, the record's ``stores_content`` row), and the kept channels must be the
+    store's rows they name, in store order: the signal channels the floor kept, each at its row of the
+    store, else the recording fails (``internal_error``, ``serving_rows_mismatch``), because the
+    browser's matrix (``outputs``) is applied to those rows.
+    """
+    block: dict[str, Any] = {
+        "source": steps.ARCHIVE_SOURCE if serving is None else steps.SERVING_SOURCE,
+        "preprocessing": [
+            {"step": step.step_id, "function": step.function}
+            for step in plan.steps
+            if step.function in steps.PREPROCESSING_FUNCTIONS
+        ],
+        "channels": list(good),
+        "reference": steps.REREF_REFERENCE,
+        "unit": steps.INPUT_UNIT,
+    }
+    if serving is not None:
+        rows = [
+            row
+            for row, kept in zip(result.signal_indices, result.kept_final, strict=True)
+            if bool(kept)
+        ]
+        if rows != sorted(rows) or [serving.labels[row] for row in rows] != list(good):
+            raise RecordingError(INTERNAL_ERROR, "reref", steps.SERVING_ROWS_MISMATCH)
+        block["store"] = {
+            "path": serving.path,
+            "group": serving.group,
+            "content_sha256": serving.content_sha256,
+        }
+    return block
 
 
 def amica15_account(eeg: dict[str, Any]) -> dict[str, Any]:
@@ -294,7 +349,8 @@ def process(
     resolution: device.Resolution,
     path: str | None = None,
 ) -> Decomposition:
-    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``.
+    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``; ``loaded.serving`` names the
+    store of a recording of the serving copy (``decomposition_input``).
 
     ``resolution`` is the device the recording starts on (``device.resolve``, then ``tally.begin``).
     With the recording's ``path`` in the run, the run decides right before the fit where it runs
@@ -302,6 +358,7 @@ def process(
     fitted again on the CPU (``decompose``); the call, the record and the count state the device that
     ran it (``Decomposition.resolution``).
     """
+    serving = loaded.serving
     result = floor.process(loaded, recipe_id=steps.RECIPE_ID, recipe_version=steps.RECIPE_VERSION)
     plan = result.plan
     # the floor's decisions have the hash they would have had as the floor's own plan
@@ -367,6 +424,7 @@ def process(
             description=steps.DESCRIPTIONS["reref"],
             quality={"reference": steps.REREF_REFERENCE, "nChannels": int(eeg["nbchan"])},
         )
+        given = decomposition_input(plan, good, result, serving)
 
     # the decomposition, on the device the run holds right before it
     with guarded("ica"):
@@ -416,5 +474,7 @@ def process(
         classes=classes,
         probabilities=probabilities,
         variance_pct=variance,
+        decomposition_input=given,
+        serving=serving,
         iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
     )

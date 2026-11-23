@@ -433,6 +433,43 @@ def test_the_asr_state_is_canonical_json_that_names_its_channels_and_its_memory_
     )
 
 
+def test_the_archive_input_is_the_floor_copy_after_asr_and_has_no_browser_matrix(tiny):
+    """On a dataset directory the record states what the fit was given (the steps that shaped it, the
+    channels, the unit, the reference; no store) and there is no browser matrix, because no store of
+    the serving copy was read. The serving copy's block is in
+    ``test_nemar_ica_serving_input.py``."""
+    directory, fit, product, _ = tiny
+    ran = product.record["processingSteps"]
+    shaped = [
+        {"step": step["stepId"], "function": step["name"]}
+        for step in ran
+        if step["name"] in steps.PREPROCESSING_FUNCTIONS
+    ]
+    assert [entry["step"] for entry in shaped][-2:] == ["asr", "reref"]
+    assert "drift" in [entry["step"] for entry in shaped]
+    expected = {
+        "source": "archive",
+        "preprocessing": shaped,
+        "channels": fit.good_channels,
+        "reference": "average",
+        "unit": "uV",
+    }
+    assert block_of(product)["decomposition_input"] == expected == fit.decomposition_input
+    assert block_of(product)["browser_transform"] is None
+    assert not list(directory.rglob("*_servingunmixing.tsv"))
+
+
+def test_the_rank_is_one_less_than_the_good_channels_and_the_inputs_numerical_rank(tiny):
+    """The average reference takes one dimension, ASR repairs without lowering the rank and no channel
+    is interpolated, so the decomposition keeps N_good - 1 components: the numerical rank of its
+    input. One more would fit a component the data do not hold."""
+    _, fit, product, _ = tiny
+    data = np.asarray(fit.eeg["data"], dtype=np.float64)
+    n_good = len(fit.good_channels)
+    assert fit.rank == steps.rank_of(n_good) == n_good - 1 == np.linalg.matrix_rank(data)
+    assert block_of(product)["pcakeep"] == fit.rank
+
+
 def test_a_state_that_cannot_reproduce_its_data_fails_the_recording_and_writes_nothing(
     cli, tmp_path, monkeypatch
 ):

@@ -854,6 +854,20 @@ def input_digest_v2(rows: Iterable[Mapping[str, str]]) -> str:
 # ---- the source -------------------------------------------------------------------------------
 
 
+class ServingStore(NamedTuple):
+    """What a recording read from the serving copy is, for a record that names the store it was
+    computed from (nemar-ica's ``decomposition_input`` and its browser weights): the store's source
+    path, the channel group read and its content digest (the record's ``stores_content`` row), the unit
+    its channels share as the store states it (None when they share none) and its labels in store row
+    order."""
+
+    path: str
+    group: str
+    content_sha256: str
+    unit: str | None
+    labels: tuple[str, ...]
+
+
 def location_source(located: int) -> str:
     """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
     BIDS route's words (``io._location_source``). The converter embeds the positions of the
@@ -1067,7 +1081,8 @@ class ZarrSource:
         from them, or refuses them with a reason it records); no template is ever applied. The load
         reports ``electrodes.tsv`` as the location source when at least one channel of the dictionary
         has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
-        from inside a data file), and the count is the BIDS route's (``qc.count_located``).
+        from inside a data file), and the count is the BIDS route's (``qc.count_located``). The loaded
+        recording names its store (``Loaded.serving``, a ``ServingStore``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -1112,6 +1127,9 @@ class ZarrSource:
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
         self.contents[path] = content
+        serving = ServingStore(
+            path, content.group, content.sha256, window.unit, window.labels or ()
+        )
         try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
@@ -1138,6 +1156,7 @@ class ZarrSource:
             n_channels_with_locations=located,
             power_line_hz_declared=self.declared_power_line(path),
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
+            serving=serving,
         )
 
     # -- what the records say

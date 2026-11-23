@@ -6,15 +6,18 @@ window step ran, ``_filters.json``, ``_qc.json``, the decisions this record's fi
 the recipe's: ``_asr.json`` (ASR's state as canonical JSON), ``_unmixing.tsv`` (``icaweights``
 times ``icasphere``, components by channels), ``_weights.tsv``, ``_sphere.tsv``, ``_mixing.tsv``
 (``icawinv``), ``_components.tsv`` (variance and ICLabel's probabilities), ``_ica.json`` (what the
-record says of the run, below) and the signalJourney record. Every matrix is ``format(x, ".17g")`` text, so a
+record says of the run, below), on the Zarr serving copy ``_servingunmixing.tsv`` (the browser's
+matrix, ``serving_unmixing``) and the signalJourney record. Every matrix is ``format(x, ".17g")`` text, so a
 float64 reads back exactly; ``LLt`` is never stored. Everything is TSV and JSON: nothing that
 carries samples is written.
 
 What the record says is one block, ``extensions.nemar.ica``, and ``_ica.json`` is the same block
 under the recipe's name and version (``facts``): the engine, pAMICA's own account of the run copied
 whole under its names, the settings, the start, whether the run repeats bit for bit, the device facts,
-ASR's state digest, the good channels, ICLabel's version and the digest of its network, and the
-input profile. Nothing in it says the decomposition agrees with EEGLAB's AMICA: it is pAMICA's.
+ASR's state digest, the good channels, ICLabel's version and the digest of its network, the
+input profile, what the fit was given (``decomposition_input``) and, on the serving copy, the
+browser's matrix (``browser_transform``; null on a dataset directory). Nothing in it says the
+decomposition agrees with EEGLAB's AMICA: it is pAMICA's.
 """
 
 from __future__ import annotations
@@ -87,7 +90,37 @@ def class_column(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
-def facts(fit: pipeline.Decomposition, profile: str) -> dict[str, Any]:
+def serving_unmixing(unmixing: np.ndarray, unit: str | None) -> np.ndarray:
+    """The browser's matrix: ``unmixing`` (components by kept channels, from microvolts) times the
+    average reference over those channels, times the factor from the store's ``unit`` to microvolts.
+
+    ``unmixing @ (I - J/n)`` is the unmixing less each row's mean, so the browser's activations,
+    this matrix times the store's physical values of the kept channels, are ``unmixing`` times the
+    average-referenced values in microvolts, with no step of its own. The factor is eegprep-lean's
+    (``microvolts_per``, the one ``to_eeg`` applied when the store was read).
+    """
+    from eegprep_lean.eeg import microvolts_per
+
+    values = np.asarray(unmixing, dtype=np.float64)
+    referenced = values - values.mean(axis=1, keepdims=True)
+    return referenced * microvolts_per(unit)
+
+
+def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict[str, Any] | None:
+    """What the record says of the browser's matrix: its file, what it applies to and the caveat;
+    None on a dataset directory, whose store was not read."""
+    if fit.serving is None:
+        return None
+    return {
+        "matrix": naming.product_path(recording.path, LABEL, steps.SERVING_UNMIXING, "tsv"),
+        "applies_to": steps.BROWSER_APPLIES_TO,
+        "note": steps.BROWSER_NOTE,
+    }
+
+
+def facts(
+    fit: pipeline.Decomposition, profile: str, browser: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """The block ``extensions.nemar.ica`` and ``_ica.json`` hold.
 
     For pAMICA the settings and the account of the fit are ``EEG['etc']['pamica']`` as eegprep wrote
@@ -148,6 +181,8 @@ def facts(fit: pipeline.Decomposition, profile: str) -> dict[str, Any]:
         "n_good_channels": len(fit.good_channels),
         "iclabel": fit.iclabel,
         "input_profile": profile,
+        "decomposition_input": copy.deepcopy(fit.decomposition_input),
+        "browser_transform": None if browser is None else dict(browser),
         **device.facts(
             resolution,
             threads=settings.threads,
@@ -253,6 +288,27 @@ def products(fit: pipeline.Decomposition, block: Mapping[str, Any]) -> list[floo
             "What the run says of its decomposition: engine, settings, start, device",
             lambda path: files.write_json(path, {**stamp, **block}),
         ),
+        *serving_products(fit, unmixing, components, channels),
+    ]
+
+
+def serving_products(
+    fit: pipeline.Decomposition, unmixing: np.ndarray, components: list[str], channels: list[str]
+) -> list[floor_outputs.Product]:
+    """On the serving copy, the browser's matrix (``serving_unmixing``); nothing on a dataset
+    directory."""
+    if fit.serving is None:
+        return []
+    weights = serving_unmixing(unmixing, fit.serving.unit)
+    return [
+        floor_outputs.Product(
+            steps.SERVING_UNMIXING,
+            "tsv",
+            "ica",
+            "Unmixing for the serving copy: components by the kept channels in store row order, "
+            "from the store's physical unit, with the average reference folded in",
+            lambda path: write_matrix(path, weights, components, channels),
+        )
     ]
 
 
@@ -303,8 +359,18 @@ def write_product(
     profile: str,
     nemar_extra: Mapping[str, Any] | None = None,
 ) -> RecordingProduct:
-    """Write the recording's files and record into ``directory``; return what was written."""
-    block = facts(fit, profile)
+    """Write the recording's files and record into ``directory``; return what was written.
+
+    The profile and the decomposition's input must agree (``archive`` with a dataset directory,
+    ``serving`` with a store of the serving copy): a record that says it read one and names the other
+    is never written (``ValueError``).
+    """
+    source = fit.decomposition_input.get("source")
+    if steps.SOURCES.get(str(source)) != profile:
+        raise ValueError(
+            "the decomposition input {!r} is not the input profile {!r}'s".format(source, profile)
+        )
+    block = facts(fit, profile, browser_transform(recording, fit))
     values = (block["rank"], block["iterations"], block["final_ll"], block["did_converge"])
     summary = dict(zip(SUMMARY_METRICS, values, strict=True))
     product = floor_outputs.write_product(

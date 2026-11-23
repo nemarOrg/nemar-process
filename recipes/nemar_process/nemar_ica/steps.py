@@ -131,6 +131,37 @@ ASR_MAXMEM_DETAIL = "asr_maxmem"
 ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 
+# What the decomposition was given (docs/recipes.md, "The decomposition input"), stated in the record's
+# `extensions.nemar.ica.decomposition_input`: the same chain on both inputs (the floor's channel
+# selection, flatline and bad-channel removal, drift high-pass and line-noise band-stops, then ASR and
+# the average reference), named by the steps of the plan whose functions change the data the fit gets.
+ARCHIVE_SOURCE = "archive"
+SERVING_SOURCE = "serving_copy"
+SOURCES = {ARCHIVE_SOURCE: INPUT_PROFILES["bids"], SERVING_SOURCE: INPUT_PROFILES["zarr"]}
+INPUT_UNIT = "uV"  # eegprep's unit: both loaders hand it microvolts
+PREPROCESSING_FUNCTIONS = (
+    "eegprep.pop_select",
+    "eegprep.clean_flatlines",
+    "eegprep.clean_drifts",
+    "eegprep.pop_eegfiltnew",
+    "eegprep.clean_channels",
+    "eegprep.clean_channels_nolocs",
+    ASR_FUNCTION,
+    "eegprep.pop_reref",
+)
+# A recording of the serving copy whose kept channels are not the store's rows they name (a fault of
+# the recipe, never of the data).
+SERVING_ROWS_MISMATCH = "serving_rows_mismatch"
+
+# The browser's matrix (docs/recipes.md, "The browser weights"): on the serving copy only, the unmixing
+# with the average reference over the kept channels and the store unit's factor to microvolts folded
+# in, so that the browser multiplies the store's physical values of the kept channels by it and
+# applies no preprocessing. Its activations approximate the decomposition input's, which was filtered
+# and repaired.
+SERVING_UNMIXING = "servingunmixing"
+BROWSER_APPLIES_TO = "serving_copy channels listed, physical unit"
+BROWSER_NOTE = "no preprocessing; activations approximate the decomposition input"
+
 
 def rank_of(n_good: int) -> int:
     """The rank of the decomposition: one less than the good channels (the average reference takes
