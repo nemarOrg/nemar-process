@@ -36,8 +36,8 @@ import stat
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, NamedTuple
 
 from . import bundle, net, progress, provenance, run, runtime, spec, stage, upload
 from .codes import (
@@ -85,6 +85,8 @@ class Run:
         self.outputs_blocked = False
         # The runner's lease on the job, sent with its bundle, outputs and complete calls.
         self.lease: str | None = None
+        # Where live progress is read from while the container runs (set when it is about to start).
+        self.progress_source: progress.Source | None = None
 
     def fail(self, failure: Failure) -> None:
         """Record a failure unless one already stands: the first failure wins."""
@@ -129,6 +131,74 @@ class Run:
         )
 
 
+class Image:
+    """How the job's image is made available, the service's way: under Apptainer the image file named
+    by the digest under ``NEMAR_SIF_ROOT`` (``locate``, before the runtime is asked its version), and
+    under an engine ``runtime.ensure_image``, which pulls a missing image (``acquire``, after the
+    preflight and before anything is fetched). The standalone entry gives its own (``local.py``)."""
+
+    def locate(self, job: spec.Job, env: Env) -> str:
+        return run.resolve_sif(job, env)
+
+    def acquire(
+        self,
+        engine: str,
+        runtime_path: str,
+        job: spec.Job,
+        reference: str,
+        sif: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> str:
+        """The image file to run (``sif``, unchanged here); under an engine the image is present."""
+        if engine != runtime.APPTAINER:
+            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
+        return sif
+
+
+class Steps(NamedTuple):
+    """What ``_do_work`` gets its inputs from, injected so the standalone entry (``local.py``) can give
+    its own while the container phase stays one piece of code: the code (``scratch`` -> the code
+    directory and the archive's SHA-256, or None and None without a bundle), the datasets (``scratch``
+    -> the staged directories, in the order of ``job.data_names``), the image, where live progress is
+    posted (None: only written to ``launcher/progress.json``) and the reporter's cadence (None: the
+    module's constants). ``service_steps`` gives the service's."""
+
+    code: Callable[[str], tuple[str | None, str | None]]
+    data: Callable[[str], list[stage.Staged]]
+    image: Image
+    post: Callable[[dict[str, Any]], None] | None
+    first_seconds: float | None = None
+    report_seconds: float | None = None
+
+
+def service_steps(
+    state: Run, job: spec.Spec, env: Env, terminator: run.Terminator, sleep: net.Sleep
+) -> Steps:
+    """The service's inputs: the bundle from the Worker, the datasets from the data plane, the image
+    as ``Image`` finds it, and on Tapis (no lease) live progress posted to the job-token route."""
+    log = state.log
+
+    def code(scratch: str) -> tuple[str | None, str | None]:
+        if job.bundle is None:
+            return None, None
+        return bundle.fetch(
+            job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
+        )
+
+    def data(scratch: str) -> list[stage.Staged]:
+        return stage.stage_all(job, env, scratch, sleep=sleep, log=log, stop=terminator.stop)
+
+    post = (
+        None
+        if state.lease is not None
+        else progress.poster(job.api_base, job.job_id, job.job_token)
+    )
+    return Steps(code, data, Image(), post)
+
+
 def _inside(child: str, parent: str) -> bool:
     child, parent = os.path.realpath(child), os.path.realpath(parent)
     return os.path.commonpath([child, parent]) == parent
@@ -136,13 +206,16 @@ def _inside(child: str, parent: str) -> bool:
 
 def _do_work(
     state: Run,
-    job: spec.Spec,
+    job: spec.Job,
     env: Env,
     settings: Settings,
     terminator: run.Terminator,
-    sleep: net.Sleep,
+    steps: Steps,
 ) -> None:
     """Fetch, stage and run. Raises ``Failure`` (or ``Stopped``) at the first phase that fails.
+
+    ``steps`` gives the code, the datasets, the image and where progress goes (``service_steps`` for
+    NEMAR's service, ``local.py`` for the standalone entry); everything else is one path for both.
 
     Cheap refusals come first, so nothing is downloaded for a job that cannot run: the runtime and
     the image, then the bundle and the entry, then the PID namespace check, then the datasets.
@@ -172,7 +245,7 @@ def _do_work(
         sif = ""
         if engine == runtime.APPTAINER:
             runtime_name, runtime_path = run.find_runtime(env)
-            sif = run.resolve_sif(job, env)
+            sif = steps.image.locate(job, env)
         else:  # Docker or Podman: the image comes from the registry, there is no image file
             runtime_name, runtime_path = run.find_runtime(env, (engine,))
         state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
@@ -184,15 +257,16 @@ def _do_work(
             engine_found = runtime.preflight(
                 engine, runtime_path, settings.limits, env, terminator.stop, log
             )
-            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
+        sif = steps.image.acquire(
+            engine, runtime_path, job, reference, sif, env, scratch, terminator, log
+        )
 
         code_dir: str | None = None
         started = time.monotonic()
         try:
-            if job.bundle is not None:
-                code_dir, state.bundle_digest = bundle.fetch(
-                    job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
-                )
+            code_dir, digest = steps.code(scratch)
+            if digest is not None:
+                state.bundle_digest = digest
         finally:
             state.phase("code_fetch", started)
 
@@ -208,7 +282,7 @@ def _do_work(
 
         started = time.monotonic()
         try:
-            staged = stage.stage_all(job, env, scratch, sleep=sleep, log=log, stop=terminator.stop)
+            staged = steps.data(scratch)
             state.staging = [item.record for item in staged]
         finally:
             state.phase("staging", started)
@@ -258,13 +332,9 @@ def _do_work(
         # live progress (ADR 0134) beside the container: written to launcher/progress.json, where a
         # runner reads it for its heartbeat, and on Tapis (no lease) posted to the job-token route.
         # It never touches the container and never fails the job.
+        state.progress_source = progress.Source(state.layout.work)
         reporter: progress.Reporter | None = progress.Reporter(
-            progress.Source(state.layout.work),
-            state.layout.launcher,
-            None
-            if state.lease is not None
-            else progress.poster(job.api_base, job.job_id, job.job_token),
-            log,
+            state.progress_source, state.layout.launcher, steps.post, log
         )
         started = time.monotonic()
         try:
@@ -425,7 +495,14 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         if job is not None and refused is None and settings.problem is None:
             log.info("job {}: runtime {}".format(job.job_id, job.runtime))
             try:
-                _do_work(state, job, env, settings, terminator, sleep)
+                _do_work(
+                    state,
+                    job,
+                    env,
+                    settings,
+                    terminator,
+                    service_steps(state, job, env, terminator, sleep),
+                )
             except Failure as failure:
                 state.fail(failure)
             except Stopped:
@@ -444,6 +521,14 @@ def _finish(
 ) -> None:
     """Read back the outputs, write the documents, upload: each under its own error handling, so
     ``result.json`` is written and the launcher-only upload happens whatever goes wrong."""
+    _finalize(state, env, terminator)
+    if job is not None:
+        _upload(state, job, sleep, env, terminator)
+
+
+def _finalize(state: Run, env: Env, terminator: run.Terminator) -> None:
+    """Read back the outputs and write the documents, each under its own error handling, so
+    ``result.json`` is written whatever goes wrong. Never raises."""
     log = state.log
     if state.layout is not None:
         started = time.monotonic()
@@ -482,8 +567,6 @@ def _finish(
             state.write_result()
         except Exception:  # noqa: BLE001
             log.error("result.json could not be built")
-    if job is not None:
-        _upload(state, job, sleep, env, terminator)
 
 
 if __name__ == "__main__":
