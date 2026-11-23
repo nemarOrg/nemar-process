@@ -47,10 +47,12 @@ def test_the_floors_map_is_its_step_order_and_its_pre_check():
 
 
 def test_the_ica_map_is_the_floors_steps_then_its_own():
-    assert (
-        without_pre_checks(ica_steps.CHECKPOINTS, ica_steps.PRE_CHECKS)
-        == floor_steps.STEP_ORDER + ica_steps.STEP_ORDER
-    )
+    """Then its quality plugin, a step of the table and the record that STEP_ORDER does not list."""
+    from nemar_launch.checkpoints import RECIPE_PLUGIN_STEPS
+
+    mapped = without_pre_checks(ica_steps.CHECKPOINTS, ica_steps.PRE_CHECKS)
+    assert mapped == floor_steps.STEP_ORDER + ica_steps.STEP_ORDER + RECIPE_PLUGIN_STEPS
+    assert dict(ica_steps.CHECKPOINTS)["quality"] == RECIPE_PLUGIN_STEPS
     assert set(ica_steps.PRE_CHECKS) <= set(dict(ica_steps.CHECKPOINTS)["preprocess"])
     preprocess = dict(ica_steps.CHECKPOINTS)["preprocess"]
     assert "qc" in preprocess  # the floor's qc, re-run as preparation, is not ica's quality

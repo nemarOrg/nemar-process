@@ -1,0 +1,500 @@
+"""The standalone entry, end to end in this process with the stand-in runtime (``nemar_launch.local``).
+
+What a person gets: the job runs on their directories, everything lands in ``<out>/launcher/``, nothing is
+uploaded and nothing reaches NEMAR (a honeypot on loopback, and the person's own ``NEMAR_LAUNCH_SPEC`` and
+lease pointing at it, get no request), and the fence refuses nothing in a normal run. Python 3.9
+compatible.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import threading
+from pathlib import Path
+
+import pytest
+from harness import encode_spec
+from local_support import LocalRig
+from nemar_launch import checkpoints as rules
+from nemar_launch import fence
+
+FLOOR_MAP = json.loads(
+    (
+        Path(__file__).resolve().parents[2] / "tests" / "contract" / "compute-progress-vectors.json"
+    ).read_text()
+)["maps"]["nemar-floor"]["checkpoints"]
+
+RECIPE_SCRIPT = """
+set -e
+out="$NEMAR_OUT"
+mkdir -p "$out/.nemar-progress" "$out/product"
+cat > "$out/.nemar-progress/progress.json" <<'EOF'
+{"format":"nemar.recipe-progress.v1","recipe":{"id":"nemar-floor","version":"1.0.0-b1"},
+ "checkpoints":@MAP@,"table":"product/desc-nemarfloor_recordings.tsv","discovered":2,
+ "running":[{"path":"sub-02/eeg/b.set","step":"drift"}]}
+EOF
+printf 'path\\tstatus\\tcode\\tstep\\n' > "$out/product/desc-nemarfloor_recordings.tsv"
+printf 'sub-01/eeg/a.set\\tsucceeded\\tn/a\\tn/a\\n' >> "$out/product/desc-nemarfloor_recordings.tsv"
+printf 'sub-02/eeg/b.set\\tfailed\\tstep_failed\\tdrift\\n' >> "$out/product/desc-nemarfloor_recordings.tsv"
+echo '{}' > "$out/product/desc-nemarfloor_signalJourney.json"
+cp "$1/a.txt" "$out/copied.txt"
+sleep 0.5  # the reporter reads the progress file at least once
+rm -r "$out/.nemar-progress"
+"""
+
+
+@pytest.fixture
+def lrig(tmp_path):
+    made = LocalRig(tmp_path)
+    yield made
+    made.close()
+
+
+def recipe(lrig):
+    data = lrig.dataset("ds1")
+    lrig.write_spec(
+        lrig.script_spec(RECIPE_SCRIPT.replace("@MAP@", json.dumps(FLOOR_MAP)), datasets=("ds1",))
+    )
+    return data
+
+
+def test_a_standalone_run_leaves_every_document_and_reaches_nothing(lrig):
+    data = recipe(lrig)
+    # the person's shell holds a launch specification, a lease and a device decision pointing at
+    # NEMAR's API (the honeypot): none of it is read
+    honey = lrig.honeypot.base_url
+    service_spec = {
+        "job_id": "job_" + "1" * 24,
+        "runtime": "image",
+        "command": ["true"],
+        "args": [],
+        "datasets": [],
+        "api_base": honey,
+        "image": {"uri": "x", "digest": "y", "sif": "z"},
+        "env": {},
+        "resources": {"gpus": 0},
+        "limits": {"max_files": 1, "max_total_bytes": 1},
+        "job_token": "t" * 40,
+    }
+    environ = lrig.environ(
+        NEMAR_LAUNCH_SPEC=encode_spec(service_spec).decode(),
+        NEMAR_LEASE_ID="0" * 32,
+        NEMAR_DEVICE="cuda",
+        _tapisExecSystemOutputDir=str(lrig.tmp / "tapis"),
+        SLURM_JOB_ID="1",
+        NEMAR_LOCAL_DATASETS_ROOT=str(lrig.tmp),
+    )
+    fenced = fence.Fence()
+    launch = lrig.run(lrig.argv({"ds1": data}), environ, fenced)
+    assert launch.exit == 0, launch.log
+    assert launch.result["failure_code"] is None
+    assert launch.result["job_id"] == "job_" + "0" * 24
+    assert launch.provenance["staging"] == []
+    assert launch.provenance["slurm_job_id"] is None
+    assert lrig.honeypot.requests == []
+    assert not (lrig.tmp / "tapis").exists()
+    assert fenced.refusals == []
+    assert "fence: refusals none" in launch.log
+    assert (lrig.out / "work" / "outputs" / "copied.txt").read_text() == "a"
+    # the container got the data read-only at /data/ds1 and the environment it always gets
+    (call,) = lrig.calls()
+    assert "{}:/data/ds1:ro".format(os.path.realpath(data)) in call["argv"]
+    assert "NEMAR_LAUNCH_SPEC" not in call["environ"]
+    assert "NEMAR_LEASE_ID" not in call["environ"]
+    # live progress: rebuilt after the run, nothing running, at the last checkpoint
+    mapping = [(c["checkpoint"], tuple(c["steps"])) for c in FLOOR_MAP]
+    table = rules.parse_recordings_table(
+        (lrig.out / "work" / "outputs" / "product" / "desc-nemarfloor_recordings.tsv").read_text()
+    )
+    counts = rules.count_recordings(table, mapping, 2)
+    assert launch.progress["counts"] == counts
+    assert launch.progress["checkpoint"] == mapping[-1][0]
+    report = launch.report
+    assert report["checkpoints"]["counts"] == counts
+    assert report["checkpoints"]["failures"] == rules.failures_by_checkpoint(table, mapping)
+    assert report["inputs"] == [{"name": "ds1", "files": 1, "bytes": 1}]
+    assert report["result"] == launch.result
+    assert report["bundle_sha256"] == json.loads(lrig.spec_path.read_text())["bundle"]["sha256"]
+    assert [f["name"] for f in report["launcher_files"]] == [
+        "result.json",
+        "provenance.json",
+        "manifest.json",
+        "progress.json",
+    ]
+    assert str(lrig.tmp) not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    ("datasets", "detail"),
+    [
+        ({}, "invalid_spec"),
+        ({"ds1": "MISSING"}, "dataset_not_found"),
+        ({"ds1": "OUT"}, "bind_source_unsafe"),
+    ],
+)
+def test_the_data_directories_are_the_specifications_real_and_apart(lrig, datasets, detail):
+    data = recipe(lrig)
+    given = {}
+    for name, where in datasets.items():
+        given[name] = {"MISSING": str(lrig.tmp / "nothing"), "OUT": str(lrig.out)}.get(
+            where, str(data)
+        )
+    launch = lrig.run(lrig.argv(given))
+    assert launch.result["detail"] == detail
+    assert lrig.calls() == []  # nothing ran
+
+
+def test_an_existing_output_is_refused(lrig):
+    data = recipe(lrig)
+    (lrig.out / "launcher").mkdir(parents=True)
+    launch = lrig.run(lrig.argv({"ds1": data}))
+    assert launch.exit == 13
+    assert lrig.calls() == []
+    assert list((lrig.out / "launcher").iterdir()) == []  # nothing is written into it
+
+
+def test_a_refused_specification_is_invalid_spec(lrig):
+    lrig.spec_path.write_bytes(b'{"format":"nemar.local-launch.v1"}')
+    launch = lrig.run(lrig.argv())
+    assert (launch.exit, launch.result["detail"]) == (13, "invalid_spec")
+    assert launch.report is None  # no image to name: the report is not written, the log says so
+    assert "results report not written (no_specification)" in launch.log
+
+
+def test_a_missing_image_file_is_image_missing(lrig):
+    data = recipe(lrig)
+    os.unlink(lrig.sif_root / os.listdir(lrig.sif_root)[0])
+    launch = lrig.run(lrig.argv({"ds1": data}))
+    assert (launch.exit, launch.result["detail"]) == (13, "image_missing")
+    assert launch.report["checkpoints_reason"] == "no_progress_file"
+
+
+def test_a_code_archive_that_is_not_the_named_one_is_code_fetch_failed(lrig):
+    data = recipe(lrig)
+    lrig.code_path.write_bytes(b"other")
+    launch = lrig.run(lrig.argv({"ds1": data}))
+    assert (launch.exit, launch.result["failure_code"]) == (10, "code_fetch_failed")
+
+
+def test_a_failing_entry_is_entry_failed_and_still_reported(lrig):
+    lrig.write_spec(lrig.script_spec("exit 3"))
+    launch = lrig.run(lrig.argv())
+    assert (launch.exit, launch.result["detail"], launch.result["entry_exit_code"]) == (
+        13,
+        "entry_failed",
+        3,
+    )
+    assert launch.report["result"] == launch.result
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT])
+def test_ctrl_c_a_closed_terminal_or_sigterm_stop_the_job(lrig, signum):
+    lrig.write_spec(lrig.script_spec("sleep 30"))
+    timer = threading.Timer(1.5, os.kill, (os.getpid(), signum))
+    timer.start()
+    launch = lrig.run(lrig.argv())
+    timer.join()
+    assert (launch.exit, launch.result["detail"]) == (13, "terminated")
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_the_time_limit_ends_the_job_as_time_limit(lrig):
+    lrig.write_spec(lrig.script_spec("sleep 30"))
+    launch = lrig.run(lrig.argv(None, "--time-limit-s", "1"))
+    assert (launch.exit, launch.result["failure_code"]) == (15, "time_limit")
+
+
+def test_docker_runs_with_pull_never_and_a_label_of_its_own(tmp_path):
+    lrig = LocalRig(tmp_path, "docker")
+    try:
+        lrig.write_spec(lrig.script_spec("echo hi > $NEMAR_OUT/x.txt"))
+        launch = lrig.run(lrig.argv())
+        assert launch.exit == 0, launch.log
+        (call,) = lrig.calls()
+        argv = call["argv"]
+        assert "--pull=never" in argv
+        assert "--pull=missing" not in argv
+        labels = [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
+        assert labels[0] == "nemar.job=job_" + "0" * 24
+        assert labels[1].startswith("nemar.runner=rnr_")
+        assert len(labels[1]) == len("nemar.runner=rnr_") + 24
+        assert lrig.calls(".pulls") == []
+    finally:
+        lrig.close()
+
+
+def test_docker_never_pulls_an_absent_image(tmp_path):
+    lrig = LocalRig(tmp_path, "docker")
+    try:
+        lrig.write_spec(
+            lrig.script_spec(
+                "true",
+                image={
+                    "uri": "ghcr.io/example/runtime@sha256:" + "c" * 64,
+                    "digest": "sha256:" + "c" * 64,
+                    "sif": "c" * 64 + ".sif",
+                },
+            )
+        )
+        launch = lrig.run(lrig.argv())
+        assert (launch.exit, launch.result["detail"]) == (13, "image_missing")
+        assert lrig.calls(".pulls") == []
+        assert lrig.calls() == []
+    finally:
+        lrig.close()
+
+
+def test_ctrl_c_near_the_time_limit_is_terminated_not_time_limit(lrig):
+    """A person's signal is never the time limit, however close to the end time it comes: only the
+    launcher's own stop at the end time is (with --time-limit-s 60, the whole run is within the
+    service path's 120 s margin)."""
+    lrig.write_spec(lrig.script_spec("sleep 30"))
+    timer = threading.Timer(1.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    launch = lrig.run(lrig.argv(None, "--time-limit-s", "60"))
+    timer.join()
+    assert (launch.exit, launch.result["failure_code"], launch.result["detail"]) == (
+        13,
+        "runtime_error",
+        "terminated",
+    )
+
+
+@pytest.mark.parametrize(
+    ("where", "refused"),
+    [("holds_scratch", True), ("is_scratch", True), ("inside_scratch", False)],
+)
+def test_a_dataset_may_sit_in_the_scratch_but_not_hold_it(tmp_path, where, refused):
+    lrig = LocalRig(tmp_path)
+    try:
+        if where == "holds_scratch":
+            data, scratch = lrig.data_root, lrig.data_root / "scratch"
+        elif where == "is_scratch":
+            data = scratch = lrig.data_root
+        else:
+            scratch, data = lrig.data_root, lrig.data_root / "ds1"
+        scratch.mkdir(exist_ok=True)
+        data.mkdir(exist_ok=True)
+        (data / "a.txt").write_text("a")
+        lrig.write_spec(lrig.script_spec("true", datasets=("ds1",)))
+        argv = lrig.argv({"ds1": str(data)})
+        argv[argv.index("--scratch") + 1] = str(scratch)
+        launch = lrig.run(argv)
+        if refused:
+            assert launch.result["detail"] == "bind_source_unsafe"
+            assert lrig.calls() == []
+        else:
+            assert launch.exit == 0, launch.log
+    finally:
+        lrig.close()
+
+
+def test_the_scratch_case_has_its_own_message(tmp_path):
+    from nemar_launch import local, spec
+    from nemar_launch.codes import Failure
+
+    data = tmp_path / "data"
+    (data / "scratch").mkdir(parents=True)
+    job = spec.LocalSpec(
+        {
+            "runtime": "image",
+            "command": ["true"],
+            "args": [],
+            "image": {},
+            "env": {},
+            "resources": {"gpus": 0},
+            "datasets": [{"name": "ds1"}],
+        },
+        "0" * 64,
+    )
+    options = local.Options(
+        local.parser().parse_args(
+            [
+                "--spec",
+                "s",
+                "--out",
+                str(tmp_path / "out"),
+                "--sif-root",
+                "x",
+                "--data",
+                "ds1=" + str(data),
+            ]
+        )
+    )
+    with pytest.raises(Failure) as caught:
+        local.bind_data(job, options, str(data / "scratch"))
+    assert caught.value.message == "a dataset contains the scratch"
+    ((name, held),) = local.bind_data(job, options, str(tmp_path / "elsewhere"))
+    assert (name, held.source) == ("ds1", os.path.realpath(data))
+
+
+def test_only_absolute_path_entries_are_searched(lrig, monkeypatch):
+    """An empty or relative PATH entry would find a program named like the runtime in the directory the
+    person started from: they are dropped, so the stand-in there is never run."""
+    rogue = lrig.tmp / "cwd"
+    rogue.mkdir()
+    (rogue / "apptainer").write_text("#!/bin/sh\ntouch {}\nexit 0\n".format(lrig.tmp / "rogue-ran"))
+    (rogue / "apptainer").chmod(0o755)
+    monkeypatch.chdir(rogue)
+    lrig.write_spec(lrig.script_spec("true"))
+    environ = lrig.environ()
+    environ[b"PATH"] = b"::.:" + environ[b"PATH"]
+    launch = lrig.run(lrig.argv(), environ)
+    assert launch.exit == 0, launch.log
+    assert not (lrig.tmp / "rogue-ran").exists()
+    from nemar_launch import local
+
+    options = local.Options(local.parser().parse_args(lrig.argv()))
+    built = local.environment(options, environ)
+    assert built.get("PATH") == str(lrig.bin_dir)
+
+
+def mount_holder():
+    """A small directory of this machine that holds a mount point (Linux: /sys/fs; macOS:
+    /System/Volumes), or None."""
+    for candidate in ("/sys/fs", "/System/Volumes"):
+        try:
+            device = os.lstat(candidate).st_dev
+            for name in os.listdir(candidate):
+                child = os.path.join(candidate, name)
+                if (
+                    not os.path.islink(child)
+                    and os.path.isdir(child)
+                    and os.lstat(child).st_dev != device
+                ):
+                    return candidate
+        except OSError:
+            continue
+    return None
+
+
+def test_a_dataset_holding_a_mount_point_is_refused(tmp_path):
+    from nemar_launch import local
+    from nemar_launch.codes import Failure
+
+    holder = mount_holder()
+    if holder is None:
+        pytest.skip("no small directory holding a mount point on this machine")
+    with pytest.raises(Failure) as caught:
+        local.count_input(holder)
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "bind_source_unsafe")
+    plain = tmp_path / "plain"
+    (plain / "sub").mkdir(parents=True)
+    (plain / "sub" / "a").write_text("abc")
+    assert local.count_input(str(plain)) == {"files": 1, "bytes": 3}
+
+
+def test_a_signal_ignored_at_start_stays_ignored(lrig):
+    """Under ``nohup`` SIGHUP is ignored when the launcher starts: a closed terminal must not stop the
+    job, and the launcher leaves the disposition as it found it."""
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        lrig.write_spec(lrig.script_spec("sleep 2; echo done > $NEMAR_OUT/done.txt"))
+        timer = threading.Timer(0.8, os.kill, (os.getpid(), signal.SIGHUP))
+        timer.start()
+        launch = lrig.run(lrig.argv())
+        timer.join()
+        assert launch.exit == 0, launch.log
+        assert (lrig.out / "work" / "outputs" / "done.txt").exists()
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+def test_a_fault_in_the_final_progress_build_is_one_line_and_never_the_exit(lrig):
+    """A real fault (the launcher directory cannot be written when the final progress.json goes in)
+    costs that file only: one line naming the error's class, and the job's exit is unchanged."""
+    from nemar_launch import __main__ as service
+    from nemar_launch import local, progress, run
+    from nemar_launch.provenance import Documents, Log
+
+    out = lrig.tmp / "fault"
+    out.mkdir()
+    layout = run.prepare_layout(str(out))
+    outputs = out / "work" / "outputs"
+    (outputs / ".nemar-progress").mkdir()
+    (outputs / "product").mkdir()
+    (outputs / ".nemar-progress" / "progress.json").write_text(
+        json.dumps(
+            {
+                "format": "nemar.recipe-progress.v1",
+                "recipe": {"id": "nemar-floor", "version": "1.0.0-b1"},
+                "checkpoints": FLOOR_MAP,
+                "table": "product/t_recordings.tsv",
+                "discovered": 1,
+                "running": [],
+            }
+        )
+    )
+    (outputs / "product" / "t_recordings.tsv").write_text(
+        "path\tstatus\tcode\tstep\na.set\tsucceeded\tn/a\tn/a\n"
+    )
+    log = Log(layout.log_path)
+    state = service.Run(str(out), layout, log, Documents(layout.launcher, log))
+    state.progress_source = progress.Source(layout.work)
+    state.progress_source.build()  # the reporter's read
+    os.chmod(layout.launcher, 0o500)  # a real fault: the final file cannot be written
+    try:
+        local._final_progress(state, layout, log)  # never raises
+    finally:
+        os.chmod(layout.launcher, 0o700)
+    log.close()
+    text = (out / "launcher" / "launcher.log").read_text()
+    assert "progress: final report not written PermissionError" in text
+    assert not (out / "launcher" / "progress.json").exists()
+
+
+def test_a_job_argument_holding_a_url_runs(lrig):
+    """The job's own arguments are free text (a DOI link): only the runtime's options and the image
+    position may hold no URI."""
+    lrig.write_spec(
+        lrig.script_spec('echo "$1" > $NEMAR_OUT/arg.txt', args=["https://doi.org/10.1/x"])
+    )
+    fenced = fence.Fence()
+    launch = lrig.run(lrig.argv(), fenced=fenced)
+    assert launch.exit == 0, launch.log
+    assert (lrig.out / "work" / "outputs" / "arg.txt").read_text() == "https://doi.org/10.1/x\n"
+    assert fenced.refusals == []
+
+
+@pytest.mark.parametrize("path", [b"bin:.", b"", None, b"::", b"/nonexistent::."])
+def test_no_lookup_ever_falls_back_to_the_working_directory(lrig, monkeypatch, path):
+    """The reviewer's cases: a PATH of relative entries only, an empty one, none at all. The runtime and
+    cosign are never found in the directory the run started from; with no absolute entry the fixed
+    default is used, and the log says so."""
+    from nemar_launch import local, run, verify
+    from nemar_launch.codes import Failure
+
+    work = lrig.tmp / "cwd"
+    work.mkdir()
+    for name in ("apptainer", "cosign"):
+        (work / name).write_text("#!/bin/sh\nexit 0\n")
+        (work / name).chmod(0o755)
+    monkeypatch.chdir(work)
+    environ = lrig.environ()
+    if path is None:
+        del environ[b"PATH"]
+    else:
+        environ[b"PATH"] = path
+    options = local.Options(local.parser().parse_args(lrig.argv()))
+    env = local.environment(options, environ)
+    entries = (env.get("PATH") or "").split(":")
+    assert all(entry.startswith("/") for entry in entries)
+    if path in (None, b"", b"bin:.", b"::"):
+        assert env.get("PATH") == local.DEFAULT_PATH.decode()
+    try:
+        found = run.find_runtime(env)[1]
+    except Failure:
+        found = None
+    assert found is None or not found.startswith(str(work))
+    try:
+        cosign = verify.find_cosign(None, env.get("PATH") or "")
+    except verify.Unverified:
+        cosign = None
+    assert cosign is None or not cosign.startswith(str(work))
+    lrig.write_spec(lrig.script_spec("true"))
+    launch = lrig.run(lrig.argv(), environ)
+    if path in (None, b"", b"bin:.", b"::"):
+        assert "PATH: no absolute directory given; using /usr/local/sbin" in launch.log

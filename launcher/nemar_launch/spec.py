@@ -56,6 +56,8 @@ _PRINTABLE_BYTES = bytes(range(0x20, 0x7F))  # space to tilde: the only bytes a 
 _TO_STANDARD = bytes.maketrans(b"-_", b"+/")
 _TO_URLSAFE = bytes.maketrans(b"+/", b"-_")
 SCHEMA_FILE = "launch-spec.v1.json"
+LOCAL_SCHEMA_FILE = "compute-local-launch.v1.json"
+LOCAL_FORMAT = "nemar.local-launch.v1"
 PLACEHOLDER_JOB_ID = "job_" + "0" * 24
 _JOB_ID = re.compile(r"^job_[0-9a-f]{24}$")
 
@@ -95,6 +97,7 @@ _LEAF = {
     "maxProperties",
     "minProperties",
     "required",
+    "uniqueItems",
 }
 _SUBSCHEMA = {
     "items",
@@ -210,6 +213,15 @@ def _walk(schema: Any, value: Any, path: str, errors: list[str]) -> None:
         if "items" in schema:
             for index, item in enumerate(value):
                 _walk(schema["items"], item, "{}/{}".format(path, index), errors)
+        # pairwise, so only once the length is within maxItems: a 64 KiB document of thousands of
+        # items is refused by maxItems alone, never compared item by item
+        too_many = "maxItems" in schema and len(value) > schema["maxItems"]
+        if (
+            schema.get("uniqueItems") is True
+            and not too_many
+            and any(_equal(value[i], value[j]) for i in range(len(value)) for j in range(i))
+        ):
+            errors.append("{}: uniqueItems".format(here))
         if "contains" in schema and not any(_valid(schema["contains"], item) for item in value):
             errors.append("{}: contains".format(here))
     if isinstance(value, dict):
@@ -313,14 +325,24 @@ def _refuse_float(_text: str) -> Any:
     raise ValueError("a float is not part of this document")
 
 
-@functools.lru_cache(maxsize=1)
-def load_schema() -> dict[str, Any]:
+def _load(name: str) -> dict[str, Any]:
     here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, os.pardir, "schema", SCHEMA_FILE)
+    path = os.path.join(here, os.pardir, "schema", name)
     with open(path, "rb") as handle:
         schema = json.loads(handle.read().decode("utf-8"))
     check_schema_keywords(schema)
     return schema
+
+
+@functools.lru_cache(maxsize=1)
+def load_schema() -> dict[str, Any]:
+    return _load(SCHEMA_FILE)
+
+
+@functools.lru_cache(maxsize=1)
+def load_local_schema() -> dict[str, Any]:
+    """The local launch specification's schema (the byte copy of nemar-cli's)."""
+    return _load(LOCAL_SCHEMA_FILE)
 
 
 def schema_def(name: str) -> dict[str, Any]:
@@ -414,32 +436,56 @@ def recover_job_id(text: bytes) -> str:
     return PLACEHOLDER_JOB_ID
 
 
-class Spec:
-    """A validated launch specification. The token is never in its representation."""
+class Job:
+    """What the container phase needs of a job, and nothing else: the runtime, the entry or command,
+    the bundle's digest and size, the image, the environment, the GPUs and the names the datasets are
+    mounted under (``/data/<name>``). ``run`` and ``runtime`` take a ``Job``; only a ``Spec`` (a launch
+    from NEMAR's service) carries an API address, a job token and limits, and the functions that need
+    them (``bundle.fetch``, ``stage.stage_all``, ``upload``, ``progress.poster``) take a ``Spec``, so
+    the type checker proves a job that is not one cannot reach them."""
 
-    def __init__(self, document: dict[str, Any], digest: str) -> None:
-        self.job_id: str = document["job_id"]
+    def __init__(self, document: dict[str, Any], digest: str, job_id: str) -> None:
+        self.job_id: str = job_id
         self.runtime: str = document["runtime"]
         self.entry: str | None = document.get("entry")
         self.command: list[str] | None = document.get("command")
         self.args: list[str] = list(document["args"])
         self.bundle: dict[str, Any] | None = document.get("bundle")
-        self.datasets: list[dict[str, Any]] = list(document["datasets"])
-        self.api_base: str = document["api_base"]
         self.image: dict[str, str] = document["image"]
         self.env: dict[str, str] = dict(document["env"])
         self.gpus: int = document["resources"]["gpus"]
-        self.max_files: int = document["limits"]["max_files"]
-        self.max_total_bytes: int = document["limits"]["max_total_bytes"]
-        self.job_token: str = document["job_token"]
+        self.data_names: list[str] = []
         self.digest: str = digest
 
     def __repr__(self) -> str:
-        return "Spec(job_id={!r}, runtime={!r}, digest={}...)".format(
-            self.job_id, self.runtime, self.digest[:12]
+        return "{}(job_id={!r}, runtime={!r}, digest={}...)".format(
+            type(self).__name__, self.job_id, self.runtime, self.digest[:12]
         )
 
     __str__ = __repr__
+
+
+class LocalSpec(Job):
+    """A validated local launch specification (``nemar.local-launch.v1``), for the standalone entry: a
+    ``Job`` and nothing more. It has no job id (the documents name ``PLACEHOLDER_JOB_ID``), no API
+    address, no token and no limits, so it cannot be handed to anything that talks to NEMAR."""
+
+    def __init__(self, document: dict[str, Any], digest: str) -> None:
+        super().__init__(document, digest, PLACEHOLDER_JOB_ID)
+        self.data_names = [dataset["name"] for dataset in document["datasets"]]
+
+
+class Spec(Job):
+    """A validated launch specification. The token is never in its representation."""
+
+    def __init__(self, document: dict[str, Any], digest: str) -> None:
+        super().__init__(document, digest, document["job_id"])
+        self.datasets: list[dict[str, Any]] = list(document["datasets"])
+        self.data_names = [dataset["id"] for dataset in self.datasets]
+        self.api_base: str = document["api_base"]
+        self.max_files: int = document["limits"]["max_files"]
+        self.max_total_bytes: int = document["limits"]["max_total_bytes"]
+        self.job_token: str = document["job_token"]
 
 
 def decode(text: bytes) -> dict[str, Any]:
@@ -496,6 +542,32 @@ def parse_text(text: bytes) -> Spec:
     if not image["uri"].endswith(image["digest"]):
         raise SpecError("invalid_spec")
     return Spec(document, digest_of(text))
+
+
+def parse_local_text(text: bytes) -> LocalSpec:
+    """Validate the bytes of a local launch specification file and return it (the standalone entry).
+
+    The launch specification's encoding rules (``decode``: at most 64 KiB, ASCII, no duplicate key, no
+    float), and in addition every byte printable (0x20 to 0x7e: no line break, no tab), as the contract
+    says; then an unsupported runtime, the copied schema (``format`` included, and datasets named once),
+    and the image rules the schema cannot state, as in ``parse_text``. The digest is the SHA-256 of the
+    file's bytes. Every refusal is ``invalid_spec`` (``unsupported_runtime`` for the runtime), as for a
+    launch specification: no new detail."""
+    if text.translate(None, _PRINTABLE_BYTES):
+        raise SpecError("invalid_spec", "not_printable")
+    document = decode(text)
+    schema = load_local_schema()
+    runtimes = schema["properties"]["runtime"]["enum"]
+    if "runtime" in document and not any(_equal(document["runtime"], r) for r in runtimes):
+        raise SpecError("unsupported_runtime")
+    if validate(document, schema):
+        raise SpecError("invalid_spec")
+    image = document["image"]
+    if image["sif"] != image["digest"].split(":", 1)[1] + ".sif":
+        raise SpecError("invalid_spec")
+    if not image["uri"].endswith(image["digest"]):
+        raise SpecError("invalid_spec")
+    return LocalSpec(document, digest_of(text))
 
 
 def parse(value: object) -> Spec:

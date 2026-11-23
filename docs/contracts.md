@@ -15,6 +15,7 @@ Abbreviations: continuous integration (CI), JavaScript Object Notation (JSON), S
 | The table of wire cases: about five hundred values of `NEMAR_LAUNCH_SPEC`, each with the answer the contract gives (every rule, every edge, the order of the rules) | nemar-cli's `decodeLaunchSpecEnv`, written out by `scripts/gen_wire_cases.ts` | `tests/launcher/fixtures/wire_cases.json`, replayed by `tests/launcher/test_wire_cases.py` |
 | The golden vectors: the JSON text and its digest, and the environment value (1022 and 842 characters, the second holding `-` and `_`) and its digest | nemar-cli's `test/compute-contract.unit.test.ts` | `tests/launcher/test_golden.py` |
 | The live progress object `nemar.progress.v1` (ADR 0134): a JSON Schema (draft 2020-12, every object closed), and the counting vectors (input rows, the outcomes and counts nemar-cli's rules give for them, and each recipe version's checkpoint map) | `shared/contract/compute-progress.schema.json`, `shared/contract/compute-progress-vectors.json` | `launcher/schema/compute-progress.v1.json`, byte for byte; `tests/contract/compute-progress-vectors.json`, byte for byte |
+| The standalone entry's documents (ADR 0134 decision 8): the local launch specification `nemar.local-launch.v1`, the recipe progress file `nemar.recipe-progress.v1` and the results report `nemar.results-report.v1` | `shared/contract/compute-local-launch.schema.json`, `shared/contract/compute-recipe-progress.schema.json`, `shared/contract/compute-results-report.schema.json` | `launcher/schema/compute-local-launch.v1.json`, `launcher/schema/compute-recipe-progress.v1.json`, `launcher/schema/compute-results-report.v1.json`, byte for byte |
 
 Never edit the schema copy here.
 Change it in nemar-cli, then bump the pin.
@@ -117,6 +118,8 @@ The schema and the counting vectors are written in nemar-cli and copied here; th
 It has its own pin, `tests/contract/nemar-cli-progress-pin.json`, apart from the launch specification's.
 It records the nemar-cli commit, and the SHA-256 and size of the schema and of the vectors.
 The same pin holds the two files the quality plugins are checked against (ADR 0134 decision 6), copied into the recipes package so they ship in the image: the plugin manifest schema (`shared/contract/plugin-manifest.schema.json`, copied to `recipes/nemar_process/common/contract/plugin-manifest.v1.json`) and the vendored neuroschema bundle (`shared/contract/neuroschema/dataset.bundle.json`, copied to `recipes/nemar_process/common/contract/neuroschema.bundle.json`).
+It also holds the three contracts of the launcher's standalone entry (ADR 0134 decision 8, [standalone.md](standalone.md)): the local launch specification (`shared/contract/compute-local-launch.schema.json`, copied to `launcher/schema/compute-local-launch.v1.json`), the recipe progress file (`shared/contract/compute-recipe-progress.schema.json`, copied to `launcher/schema/compute-recipe-progress.v1.json`) and the results report (`shared/contract/compute-results-report.schema.json`, copied to `launcher/schema/compute-results-report.v1.json`).
+`test_the_local_launch_shares_the_launch_specifications_members_and_rules` holds the local launch specification's shared members equal to the launch specification's copy, across the two pins.
 The commit is on nemar-cli's pipeline progress epic branch (`feature/issue-2324-epic-pipeline-progress`): it stays reachable once that epic is merged into `dev` with a merge commit, and the pin then moves to the `dev` commit that holds the same bytes (only `ref` changes).
 
 - `test_each_copy_is_the_pinned_bytes` needs no checkout and always runs.
@@ -138,9 +141,12 @@ git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-progress-vectors.json" 
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-runner.schema.json" > runner/schema/compute-runner.v1.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/plugin-manifest.schema.json" > recipes/nemar_process/common/contract/plugin-manifest.v1.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/neuroschema/dataset.bundle.json" > recipes/nemar_process/common/contract/neuroschema.bundle.json
-shasum -a 256 launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
-wc -c launcher/schema/compute-progress.v1.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
-# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of the schema, the vectors, the plugin manifest and the bundle
+for name in local-launch recipe-progress results-report; do
+  git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-${name}.schema.json" > "launcher/schema/compute-${name}.v1.json"
+done
+shasum -a 256 launcher/schema/*.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
+wc -c launcher/schema/*.json tests/contract/compute-progress-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
+# edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of every copy it names
 # edit tests/contract/nemar-cli-runner-pin.json: the same ref, and the sha256 and bytes of the runner schema
 NEMAR_CLI_PROGRESS_DIR="$NEMAR_CLI" NEMAR_REQUIRE_PROGRESS_DRIFT=1 \
 NEMAR_CLI_RUNNER_DIR="$NEMAR_CLI" NEMAR_REQUIRE_RUNNER_DRIFT=1 \

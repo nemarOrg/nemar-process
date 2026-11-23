@@ -49,6 +49,9 @@ CHECKPOINTS = (
     ),
     ("ica", ("ica",)),
     ("iclabel", ("iclabel",)),
+    # the quality plugin follows the decomposition (nemar-cli's RECIPE_PLUGIN_STEPS): a step of the
+    # recordings table and of the record, not of STEP_ORDER
+    ("quality", ("nemar-quality",)),
 )
 
 # Step ids that are not steps of the record but name where a recording can end (the floor's, and the two

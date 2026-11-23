@@ -1269,6 +1269,7 @@ def test_no_job_or_step_of_ci_can_hide_a_failure():
         "launcher": {
             "Build the test image": "steps.sif-cache.outputs.cache-hit != 'true'",
             "Launcher tests on 3.9": "matrix.python == '3.9'",
+            "Fence and standalone tests on 3.13": "matrix.python == '3.9'",
             "Gates": on_3_12,
             **dict.fromkeys(names_of_fold(), on_3_12),
         },
