@@ -429,25 +429,6 @@ def test_the_asr_state_is_canonical_json_that_names_its_channels_and_its_memory_
     assert asr["parameters"]["return_state"] is True
 
 
-def test_the_archive_input_is_the_floor_copy_after_asr(tiny):
-    """On a dataset directory the fit is given the floor's filtered copy after ASR, and the record says
-    so: ``asr`` true and the floor's filters that ran, in order (the drift high-pass first); the serving
-    copy's input is in ``test_nemar_ica_serving_input.py``."""
-    _, fit, product, _ = tiny
-    ran = product.record["processingSteps"]
-    filtering = [
-        {"step": step["stepId"], "function": step["name"]}
-        for step in ran
-        if step["stepId"] == "drift" or re.fullmatch(r"line_noise_\d+", step["stepId"])
-    ]
-    assert filtering[0] == {"step": "drift", "function": "eegprep.clean_drifts"}
-    expected = {"source": "archive", "asr": True, "filters": filtering}
-    assert block_of(product)["decomposition_input"] == expected == fit.decomposition_input
-    assert block_of(product)["input_profile"] == "archive"
-    assert "asr" in [step["stepId"] for step in ran]
-    assert product.record["pipelineInfo"]["description"] == outputs.INFO.pipeline_description
-
-
 def test_a_state_that_cannot_reproduce_its_data_fails_the_recording_and_writes_nothing(
     cli, tmp_path, monkeypatch
 ):

@@ -3,27 +3,23 @@
 Per recording, beside the recording (``naming.py``, label ``nemarica``): the floor's own files under
 this label (``_channels.tsv``, which defines the good-channel set, ``_badsegments.tsv`` when the
 window step ran, ``_filters.json``, ``_qc.json``, the decisions this record's first steps name), and
-the recipe's: ``_asr.json`` (ASR's state as canonical JSON; not on the serving copy, where ASR does
-not run), ``_unmixing.tsv`` (``icaweights`` times ``icasphere``, components by channels),
-``_weights.tsv``, ``_sphere.tsv``, ``_mixing.tsv`` (``icawinv``), ``_components.tsv`` (variance and
-ICLabel's probabilities), ``_ica.json`` (what the record says of the run, below) and the
-signalJourney record. Every matrix is ``format(x, ".17g")`` text, so a
+the recipe's: ``_asr.json`` (ASR's state as canonical JSON), ``_unmixing.tsv`` (``icaweights``
+times ``icasphere``, components by channels), ``_weights.tsv``, ``_sphere.tsv``, ``_mixing.tsv``
+(``icawinv``), ``_components.tsv`` (variance and ICLabel's probabilities), ``_ica.json`` (what the
+record says of the run, below) and the signalJourney record. Every matrix is ``format(x, ".17g")`` text, so a
 float64 reads back exactly; ``LLt`` is never stored. Everything is TSV and JSON: nothing that
 carries samples is written.
 
 What the record says is one block, ``extensions.nemar.ica``, and ``_ica.json`` is the same block
 under the recipe's name and version (``facts``): the engine, pAMICA's own account of the run copied
 whole under its names, the settings, the start, whether the run repeats bit for bit, the device facts,
-ASR's state digest, the good channels, ICLabel's version and the digest of its network, the
-input profile and what the fit was given (``decomposition_input``: the archive's floor copy after
-ASR, or the serving copy's rows). Nothing in it says the decomposition agrees with EEGLAB's AMICA:
-it is pAMICA's.
+ASR's state digest, the good channels, ICLabel's version and the digest of its network, and the
+input profile. Nothing in it says the decomposition agrees with EEGLAB's AMICA: it is pAMICA's.
 """
 
 from __future__ import annotations
 
 import copy
-import dataclasses
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -66,29 +62,6 @@ INFO = RecipeInfo(
     ).format(steps.RECIPE_VERSION),
     pipeline_type="ica",
 )
-
-# The same recipe on the Zarr serving copy: the same name, version and label, and descriptions that
-# say what its decomposition was given (no ASR, no filter).
-SERVING_INFO = dataclasses.replace(
-    INFO,
-    pipeline_description=(
-        "NEMAR decomposition of the Zarr serving copy: the quality floor's decisions, the floor's "
-        "good channels as stored, average-referenced, with no ASR and no filter, pAMICA's "
-        "independent components and ICLabel (eegprep)."
-    ),
-    recording_description=(
-        "nemar-ica {}: the independent-component decomposition of one EEG recording's serving "
-        "copy (the floor's good channels as stored, average-referenced, without ASR or filtering), "
-        "computed by pAMICA through eegprep (or by the AMICA binary, recorded as such), with "
-        "ICLabel's probabilities; no samples are written."
-    ).format(steps.RECIPE_VERSION),
-    dataset_pipeline_description="NEMAR decomposition of the Zarr serving copy, dataset level.",
-    dataset_description=(
-        "nemar-ica {}: dataset-level record of the decompositions of the Zarr serving copy "
-        "(aggregates and per-recording summary table)."
-    ).format(steps.RECIPE_VERSION),
-)
-INFOS = {steps.INPUT_PROFILES["bids"]: INFO, steps.INPUT_PROFILES["zarr"]: SERVING_INFO}
 
 
 def component_labels(count: int) -> list[str]:
@@ -175,7 +148,6 @@ def facts(fit: pipeline.Decomposition, profile: str) -> dict[str, Any]:
         "n_good_channels": len(fit.good_channels),
         "iclabel": fit.iclabel,
         "input_profile": profile,
-        "decomposition_input": copy.deepcopy(fit.decomposition_input),
         **device.facts(
             resolution,
             threads=settings.threads,
@@ -225,21 +197,18 @@ def products(fit: pipeline.Decomposition, block: Mapping[str, Any]) -> list[floo
     ]
     stamp = {"recipe": INFO.id, "recipeVersion": INFO.version}
 
-    state: list[floor_outputs.Product] = []
-    if fit.asr_text is not None:  # no state on the serving copy, where ASR does not run
-        text = fit.asr_text
+    def write_state(path: Path) -> dict[str, Any]:
+        files.write_text(path, fit.asr_text)
+        return {"encoding": STATE_ENCODING}
 
-        def write_state(path: Path) -> dict[str, Any]:
-            files.write_text(path, text)
-            return {"encoding": STATE_ENCODING}
-
-        state.append(
-            floor_outputs.Product(
-                "asr", "json", "asr", "ASR calibration state (canonical JSON)", write_state
-            )
-        )
     return [
-        *state,
+        floor_outputs.Product(
+            "asr",
+            "json",
+            "asr",
+            "ASR calibration state (canonical JSON)",
+            write_state,
+        ),
         floor_outputs.Product(
             "unmixing",
             "tsv",
@@ -334,17 +303,7 @@ def write_product(
     profile: str,
     nemar_extra: Mapping[str, Any] | None = None,
 ) -> RecordingProduct:
-    """Write the recording's files and record into ``directory``; return what was written.
-
-    The profile and the decomposition's input must agree (``archive`` with the floor copy after
-    ASR, ``serving`` with the serving copy's rows): a record that says it read the serving copy and
-    fitted anything else is never written (``ValueError``).
-    """
-    source = fit.decomposition_input.get("source")
-    if steps.SOURCES.get(str(source)) != profile:
-        raise ValueError(
-            "the decomposition input {!r} is not the input profile {!r}'s".format(source, profile)
-        )
+    """Write the recording's files and record into ``directory``; return what was written."""
     block = facts(fit, profile)
     values = (block["rank"], block["iterations"], block["final_ll"], block["did_converge"])
     summary = dict(zip(SUMMARY_METRICS, values, strict=True))
@@ -354,7 +313,7 @@ def write_product(
         directory,
         fit.floor_result,
         inputs,
-        info=INFOS[profile],
+        info=INFO,
         extra_products=products(fit, block),
         summary_extra=summary,
         nemar_extra={
