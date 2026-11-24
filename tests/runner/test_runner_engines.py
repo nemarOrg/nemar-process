@@ -445,6 +445,28 @@ def test_a_podman_whose_prevention_does_not_hold_is_not_run_by_the_runner(
         rig.close()
 
 
+@pytest.mark.parametrize("bad", ["a,b", 'a"b', "a\nb"])
+def test_a_podman_path_with_an_ambiguous_name_is_never_given_to_podman(
+    tmp_path, config_file, monkeypatch, bad
+):
+    import dataclasses
+
+    from nemar_runner import containers
+    from nemar_runner.config import Tuning
+
+    config = load_config(str(config_file(runtime="podman", default_job_memory_mb=512)))
+    assert containers.engine_call(config, Tuning()) is not None
+    root = tmp_path / bad
+    root.mkdir(mode=0o700)
+    assert containers.engine_call(dataclasses.replace(config, root=str(root)), Tuning()) is None
+    assert list(root.iterdir()) == []  # nothing was made
+    runtime_dir = tmp_path / ("xdg-" + bad)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+    assert containers.engine_call(config, Tuning()) is None
+
+
 def test_a_link_where_the_runners_podman_directory_goes_makes_nothing_through_it(tmp_path):
     rig = make_rig(tmp_path, "podman")
     try:

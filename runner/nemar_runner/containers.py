@@ -15,7 +15,8 @@ launcher's calls carry (docs/runner.md, "Containers (Docker and Podman)"): the g
 launcher share the account's one rootless store), the user's `XDG_RUNTIME_DIR` (only when it is a
 directory the user owns with mode 0700) and `CONTAINERS_CONF=<root>/podman/containers.conf`, an empty
 file. The file and the directory are made with mode 0600 and 0700 without following a link, and are
-checked right before each call to be the user's, not links and empty; when any of it does not hold,
+checked right before each call to be the user's, not links and empty, and none of these paths may hold
+a comma, a double quote or a line break; when any of it does not hold,
 Podman is not run (`container_cleanup_failed reason=podman_unusable`).
 """
 
@@ -45,6 +46,13 @@ PODMAN = "podman"
 PODMAN_DIR = "podman"
 PODMAN_CONF = "containers.conf"
 PODMAN_HOOKS = "hooks.d"
+# What no path Podman is given may hold (the launcher's `runtime.UNSAFE_PATH_CHARACTERS`): Podman and
+# the containers libraries read some flag and variable values as comma-separated lists or CSV records.
+UNSAFE_PATH_CHARACTERS = (",", '"', "\n", "\r")
+
+
+def _safe_path(path: str) -> bool:
+    return not any(c in path for c in UNSAFE_PATH_CHARACTERS)
 
 
 class EngineCall(NamedTuple):
@@ -87,10 +95,13 @@ def _owned(path: str, kind: int) -> os.stat_result | None:
 def _podman_prevention(root: str) -> tuple[str, str] | None:
     """`(<root>/podman/containers.conf, <root>/podman/hooks.d)`, made if absent (without following a
     link: the directory is opened with `O_NOFOLLOW` and the two are made through its descriptor) and
-    checked: the user's, not links, the file and the directory empty. None when any of it fails."""
+    checked: the user's, not links, the file and the directory empty. None when any of it fails, and
+    before anything is made when the path holds a comma, a double quote or a line break."""
     base = os.path.join(root, PODMAN_DIR)
     conf = os.path.join(base, PODMAN_CONF)
     hooks = os.path.join(base, PODMAN_HOOKS)
+    if not _safe_path(base):
+        return None
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         with contextlib.suppress(FileExistsError):
@@ -130,6 +141,8 @@ def engine_call(config: Config, tuning: Tuning) -> EngineCall | None:
     except KeyError:
         home = ""
     if prevention is None or runtime_dir is None or not os.path.isabs(home):
+        return None
+    if not (_safe_path(home) and _safe_path(runtime_dir)):
         return None
     conf, hooks = prevention
     env.update({"HOME": home, "XDG_RUNTIME_DIR": runtime_dir, "CONTAINERS_CONF": conf})
