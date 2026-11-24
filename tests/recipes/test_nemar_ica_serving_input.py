@@ -585,6 +585,50 @@ def test_the_types_digest_is_hashed_in_the_plan(runs):
     assert plans.plan_hash(changed) != stored
 
 
+def test_a_row_whose_stated_label_is_not_the_windows_fails_with_its_own_detail(
+    stand_in, no_fence_module, monkeypatch
+):
+    """The group's metadata is read a second time for the rows' types; a store whose metadata no longer
+    names the window's label for a row (here served changed between the two reads, as a live store
+    could be) is ``convert_failed`` with the detail ``channel_types_mismatch``, not a generic word.
+    The second read is eegprep-lean's real one; only the label it returns for row 2 is changed."""
+    import eegprep_lean
+
+    real = eegprep_lean.read_group_metadata
+
+    async def changed(*args, **kwargs):
+        metadata = await real(*args, **kwargs)
+        rows = [
+            dataclasses.replace(channel, label=channel.label + "-moved")
+            if channel.row_index == 2
+            else channel
+            for channel in metadata.channels
+        ]
+        return dataclasses.replace(metadata, channels=tuple(rows))
+
+    source = opened(stand_in, TYPED)
+    monkeypatch.setattr(eegprep_lean, "read_group_metadata", changed)
+    with pytest.raises(RecordingError) as caught:
+        source.load(TYPED)
+    assert (caught.value.code, caught.value.step, caught.value.detail) == (
+        "convert_failed",
+        "load",
+        zarr_input.CHANNEL_TYPES_MISMATCH,
+    )
+    assert zarr_input.CHANNEL_TYPES_MISMATCH == "channel_types_mismatch"
+
+
+def test_apply_types_refuses_a_count_or_a_label_that_is_not_the_windows():
+    eeg = {"chanlocs": [{"labels": "Fp1"}, {"labels": "ECG"}]}
+    for stated in ([("Fp1", "EEG")], [("Fp1", "EEG"), ("EKG", "ECG")]):
+        with pytest.raises(RecordingError) as caught:
+            zarr_input.apply_types(copy.deepcopy(eeg), stated)
+        assert caught.value.detail == "channel_types_mismatch"
+    typed = copy.deepcopy(eeg)
+    zarr_input.apply_types(typed, [("Fp1", None), ("ECG", "ECG")])
+    assert typed["chanlocs"] == [{"labels": "Fp1"}, {"labels": "ECG", "type": "ECG"}]
+
+
 def test_the_floors_own_read_types_the_rows_too_and_leaves_the_ecg_row_out(
     stand_in, no_fence_module
 ):

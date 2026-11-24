@@ -1161,7 +1161,6 @@ class ZarrSource:
             reader_locations = copy.deepcopy(eeg["etc"]["nemar"].get("locations"))
             eeg = eeg_checkset(eeg)
             eeg, notes = io.normalize(eeg)
-            apply_types(eeg, stated)
             located = qc.count_located(eeg["chanlocs"])
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
@@ -1170,6 +1169,9 @@ class ZarrSource:
             raise RecordingError(CONVERT_FAILED, "load", error.code) from error
         except Exception as error:
             raise RecordingError(CONVERT_FAILED, "load", type(error).__name__) from error
+        # outside the loader's checks, whose handler names the code it caught, so a row whose label is
+        # not the window's keeps its own detail (convert_failed, channel_types_mismatch)
+        apply_types(eeg, stated)
         self.reader_locations[path] = reader_locations
         return io.Loaded(
             eeg=eeg,
