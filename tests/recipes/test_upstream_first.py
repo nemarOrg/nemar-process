@@ -13,8 +13,8 @@ An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_pro
   or contains, as a whole word, one of the names of the transforms the rule keeps out;
 * an import of, or a reference to, a plotting library (matplotlib, seaborn, plotly, bokeh, Pillow,
   pyqtgraph, vispy, eegprep-lean's plotting): no file of the recipes package draws or stores a figure
-  (figures are on hold, owner direction 2026-11-23: what can be drawn in the browser from data is not
-  stored as an image). The plugins are scanned like every other file.
+  (nemar-cli ADR 0137: a plugin writes views, data a browser draws, never an image). The plugins are
+  scanned like every other file.
 
 A step id such as `bad_windows` is data (a string), not a definition, so it passes. The scanner is
 tested on snippets that must be flagged and snippets that must pass, so a scanner that stopped
@@ -314,7 +314,7 @@ def test_words_split_snake_and_camel_case():
     assert words("bad_windows") == ["bad", "windows"]
 
 
-# ---- plotting: no file of the recipes package draws a figure (figures are on hold) -------------------
+# ---- plotting: no file of the recipes package draws a figure (views are data, ADR 0137) ---------------
 
 
 def test_the_scan_covers_the_plugins_and_their_runner():
