@@ -8,7 +8,10 @@ with the upstream gap it stands for (docs/upstream.md):
   the line-noise excess and the median spectrum are arithmetic on its output;
 * the robust amplitude is a median absolute deviation, NumPy median arithmetic (sccn/eegprep#536);
 * the location guard is a rank test of the channel positions (sccn/eegprep#539: ``clean_channels`` accepts
-  degenerate locations silently).
+  degenerate locations silently);
+* the samples ASR repaired (``asr_repaired``) are found by comparing its input and its output with
+  eegprep's own rule from ``clean_artifacts`` (sccn/eegprep#684: ``clean_asr`` does not return its
+  repaired mask).
 
 The percentages are read from eegprep's own masks (``etc.clean_channel_mask`` for channels and the
 sample mask ``clean_windows`` returns), never recomputed from the data.
@@ -180,8 +183,9 @@ ASR_COMPARE_BLOCK = 65536  # samples compared at a time, so the comparison holds
 
 def asr_repaired(before: np.ndarray, after: np.ndarray) -> np.ndarray:
     """Which samples ASR's repair changed: True where the sum over the channels of
-    ``|after - before|`` reaches ``ASR_UNCHANGED_UV`` (eegprep's rule). Arithmetic on the input and on
-    eegprep's output, block by block; nothing is changed."""
+    ``|after - before|`` reaches ``ASR_UNCHANGED_UV`` (eegprep's rule in ``clean_artifacts``).
+    Arithmetic on the input and on eegprep's output, block by block; nothing is changed. It stands for
+    a mask ``clean_asr`` does not return (sccn/eegprep#684), and goes when eegprep returns one."""
     before = np.asarray(before)
     after = np.asarray(after)
     if before.shape != after.shape or before.ndim != 2:

@@ -95,6 +95,15 @@ Public wording only: "a processing pipeline wants X".
 | [sccn/eegprep#541](https://github.com/sccn/eegprep/issues/541) | the cleaning steps differ in whether they mutate their input or return a copy | every step rebinds its working copy and never relies on the answer |
 | [sccn/eegprep#561](https://github.com/sccn/eegprep/issues/561) | `pop_loadbv` and `pop_loadset` read the file a header names wherever it is: an absolute path, a `..` or a sub-directory for a BrainVision `DataFile` or `MarkerFile`, an absolute `data` or `datfile` for a set | `common/headers.py` reads the header first and refuses any recording that names a file other than its own companions, or whose files lead outside the dataset directory through a link (`load_failed`, detail `external_reference`); `tests/recipes/test_headers.py` pins what eegprep alone does, so a fix upstream shows |
 
+### Gaps found by the `nemar-ica` recipe (phase PZ, 2026-11-23)
+
+| Issue | Gap | What the recipe does meanwhile |
+|---|---|---|
+| [sccn/eegprep#669](https://github.com/sccn/eegprep/issues/669) | eegprep-lean's `to_eeg` sets no channel type, though the store states one per row (the open fix is not yet right, so the pin stays) | `common/zarr_input.py` reads the group's metadata again and types each row as the store states it, row by row (`apply_types`), on every Zarr read |
+| [sccn/eegprep#671](https://github.com/sccn/eegprep/issues/671) | `pop_runica(icatype='pamica')` does not return pAMICA's good-sample set, so a fit with sample rejection on cannot say how many samples it dropped | AMICA's rejection is off (the owner's choice), so nothing is dropped; the schedule is recorded and hashed |
+| [sccn/eegprep#680](https://github.com/sccn/eegprep/issues/680) | `runamica._write_param_file` writes a float outside its scientific-format list with `%f`, so `min_dll=1e-9` and `min_grad_norm=1e-7` reach the `amica15` binary as `0.000000` and its convergence stops are inert | the values are passed and recorded as given; a strict xfail (`test_the_binary_reads_amicas_convergence_thresholds_as_passed`) shows the day eegprep writes them as they are; the end-to-end run caps the binary's leg |
+| [sccn/eegprep#684](https://github.com/sccn/eegprep/issues/684) | `clean_asr` returns the repaired data and its state, not which samples its repair changed | `common/qc.py` (`asr_repaired`) applies eegprep's own rule from `clean_artifacts` to the data before and after: a sample whose summed change across the channels is at least 1e-8 µV; `asrBurstFraction` is the share of those samples |
+
 ### The Zarr reader (`nemar-floor --input zarr`, 2026-11-13)
 
 The recipe reads the serving copy with eegprep-lean from the `develop` merge commit of sccn/eegprep#627, which holds #626 and #616, installed from a pinned commit (see [recipes.md](recipes.md)).
