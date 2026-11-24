@@ -15,8 +15,9 @@ bounds, the plugin's name and version), validated against the bundle's own defin
 A view a plugin declares (ADR 0137) is checked against ``contract/views-registry.json``, the byte copy of
 the neuroschema view registry nemar-cli vendors (``shared/contract/neuroschema/views/registry.json``):
 its kind and version must be registered, each role must be one of the kind's roles with the registered
-dimensions, a produced role's format one the kind allows and the runner can write, and a role taken
-from the recipe one the host recipe provides (``view_problem``). A view's per-run ``parameters`` are
+dimensions, a produced role's format one the kind allows and the runner can write, a produced role of
+a generic kind with open dimensions its value unit, and a role taken from the recipe one the host
+recipe provides (``view_problem``). A view's per-run ``parameters`` are
 validated against its kind's schema in the bundle (``view_parameters_errors``).
 """
 
@@ -51,6 +52,7 @@ KIND_UNREGISTERED = "kind_unregistered"
 ROLE_UNREGISTERED = "role_unregistered"
 DIMS_UNREGISTERED = "dims_unregistered"
 FORMAT_UNWRITABLE = "format_unwritable"
+UNIT_UNDECLARED = "unit_undeclared"
 ROLE_UNPROVIDED = "role_unprovided"
 VIEW_REPEATED = "view_repeated"
 VIEW_PROBLEMS = (
@@ -58,6 +60,7 @@ VIEW_PROBLEMS = (
     ROLE_UNREGISTERED,
     DIMS_UNREGISTERED,
     FORMAT_UNWRITABLE,
+    UNIT_UNDECLARED,
     ROLE_UNPROVIDED,
 )
 
@@ -155,6 +158,26 @@ def kind_schema_id(entry: Mapping[str, Any]) -> str:
     return "nsc:/" + path[len("schema/") :]
 
 
+def needs_value_unit(entry: Mapping[str, Any], role: str) -> bool:
+    """Whether a produced role of this registered kind must state the unit of its values, as the
+    registry says it: a role of a generic kind (``base`` null) whose dimensions the registry leaves open
+    (``dims`` null: ``nemar.lines``, ``nemar.heatmap`` and ``nemar.sensor-field``'s ``values``). Such a
+    role's value columns are a measured quantity with no unit a kind's schema could fix, and the runner
+    takes a generic kind's units from the manifest only (``docs/contracts.md``). A preset's units are
+    its schema's (the spectrum's dB and Hz), a table's and a layout's columns are the kind's own, and a
+    JSON role states its unit in its content."""
+    return entry["base"] is None and entry["roles"][role]["dims"] is None
+
+
+def role_states_unit(declared: Mapping[str, Any]) -> bool:
+    """A produced role states its value unit: a role ``unit``, or ``columns`` each with a ``unit``
+    (a column's own unit overrides the role's, nemar-cli #2358)."""
+    if "unit" in declared:
+        return True
+    columns = declared.get("columns")
+    return bool(columns) and all("unit" in column for column in columns)
+
+
 def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | None:
     """The first reason a view a manifest declares cannot be written, or None (ADR 0137, C12).
 
@@ -163,8 +186,9 @@ def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | 
     role is not one of the kind's (``role_unregistered``); a produced role's dimensions differ from the
     ones the registry fixes for that role (``dims_unregistered``; a role whose registry dimensions are
     null takes any); a produced role's format is not one the kind allows for that role, or one the
-    runner cannot write (``format_unwritable``); a role taken ``{"from": "recipe"}`` is not one the host
-    recipe provides (``role_unprovided``).
+    runner cannot write (``format_unwritable``); a produced role that ``needs_value_unit`` states none
+    (``unit_undeclared``: neither a role ``unit`` nor ``columns`` with units); a role taken
+    ``{"from": "recipe"}`` is not one the host recipe provides (``role_unprovided``).
     """
     entry = kind_entry(view["kind"], view["kind_version"])
     if entry is None:
@@ -182,6 +206,8 @@ def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | 
         allowed = registered[role]["formats"]
         if declared["format"] not in allowed or declared["format"] not in WRITABLE_FORMATS:
             return FORMAT_UNWRITABLE
+        if needs_value_unit(entry, role) and not role_states_unit(declared):
+            return UNIT_UNDECLARED
     for role, declared in view["roles"].items():
         if "from" in declared and role not in provided:
             return ROLE_UNPROVIDED
