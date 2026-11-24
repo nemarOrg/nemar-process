@@ -7,7 +7,9 @@ checks the syntax and the shell.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -570,6 +572,7 @@ SIGN_BUILD_STEP = "Build the SIF from the image digest"
 SIGN_SIF_SMOKE_STEP = "Smoke test the SIF under Apptainer (SIF form)"
 SIF_TAG_STEP = "Refuse to overwrite an existing SIF tag"
 SIF_PUSH_STEP = "Push the SIF to GHCR as an OCI artifact"
+SIF_LAYER_STEP = "Refuse a pushed SIF artifact that is not the file built here"
 SIF_SIGN_STEP = "Sign the SIF artifact digest and verify the signature"
 RECORD_STEP = "Write the digest record"
 # the SIF steps of `sign`, in the order both legs run them
@@ -580,6 +583,7 @@ SIGN_SIF_STEPS = (
     SIGN_SIF_SMOKE_STEP,
     SIF_TAG_STEP,
     SIF_PUSH_STEP,
+    SIF_LAYER_STEP,
     SIF_SIGN_STEP,
     RECORD_STEP,
 )
@@ -986,6 +990,116 @@ def test_the_sign_build_prints_the_sif_and_cache_sizes_and_the_disk_after_the_bu
     # the cache exists before the build, so the reading after it cannot fail for want of it
     assert lines.index('mkdir -p "$APPTAINER_CACHEDIR"') < build
     assert lines[build + 1 :] == ['du -sh nemar-python.sif "$APPTAINER_CACHEDIR"', "df -h /"]
+
+
+def test_the_pushed_artifacts_layer_is_checked_against_the_file_built_here_before_it_is_signed():
+    steps = workflow()["jobs"]["sign"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    push, check, signature = (
+        names.index(name) for name in (SIF_PUSH_STEP, SIF_LAYER_STEP, SIF_SIGN_STEP)
+    )
+    # directly after the push and directly before the signature: nothing runs in between
+    assert check == push + 1
+    assert signature == check + 1
+    step = steps[check]
+    assert "if" not in step  # both legs
+    # it reads the digest the signature step signs, from the same output
+    assert step["env"] == {"SIF_DIGEST": "${{ steps.push-sif.outputs.digest }}"}
+    assert steps[signature]["env"] == {"SIF_DIGEST": "${{ steps.push-sif.outputs.digest }}"}
+    run = step["run"]
+    assert 'oras manifest fetch "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}"' in run
+    assert "nemar-python.sif" in run
+
+
+# A stand-in for `oras`, the external program the check calls: it records its arguments and prints the
+# manifest a test wrote, or fails as a test asks.
+STAND_IN_ORAS_MANIFEST = """#!/bin/sh
+printf '%s\n' "oras $*" >> "$CALLS"
+if [ "$ORAS_EXIT" != 0 ]; then exit "$ORAS_EXIT"; fi
+cat "$MANIFEST"
+"""
+# the SIF built here: larger than one mebibyte, so a check that hashed only a first chunk would differ
+BUILT_SIF = bytes(range(256)) * 8200
+BUILT_LAYER = "sha256:" + hashlib.sha256(BUILT_SIF).hexdigest()
+
+
+def layer(digest: str) -> dict:
+    return {"mediaType": "application/vnd.sylabs.sif.layer.v1.sif", "digest": digest, "size": 1}
+
+
+def run_layer_check(tmp_path, manifest: dict, oras_exit: int = 0):
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "oras").write_text(STAND_IN_ORAS_MANIFEST, encoding="utf-8")
+    (tools / "oras").chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "nemar-python.sif").write_bytes(BUILT_SIF)
+    (work / "smoke-sif.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    script = tmp_path / "check.sh"
+    script.write_text(the_step("sign", SIF_LAYER_STEP)["run"], encoding="utf-8")
+    done = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={
+            "PATH": "{}:{}".format(tools, os.environ["PATH"]),
+            "HOME": str(tmp_path),
+            "SIF_DIGEST": PUSHED_SIF,
+            "CALLS": str(tmp_path / "calls"),
+            "MANIFEST": str(tmp_path / "manifest.json"),
+            "ORAS_EXIT": str(oras_exit),
+        },
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    calls = (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+    return done, calls
+
+
+def manifest_of(*layers: dict) -> dict:
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.sylabs.sif.config.v1+json", "digest": "x"},
+        "layers": list(layers),
+    }
+
+
+def test_the_layer_check_passes_when_the_one_layer_is_the_file_built_here(tmp_path):
+    done, calls = run_layer_check(tmp_path, manifest_of(layer(BUILT_LAYER)))
+    assert done.returncode == 0, done.stdout + done.stderr
+    # the manifest is fetched by the digest that is signed next, never by the tag
+    assert calls == ["oras manifest fetch ghcr.io/nemarorg/nemar-python-sif@" + PUSHED_SIF]
+    assert BUILT_LAYER in done.stdout
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        manifest_of(layer("sha256:" + hashlib.sha256(b"another file").hexdigest())),
+        manifest_of(layer("sha256:" + hashlib.sha256(BUILT_SIF[: 1 << 20]).hexdigest())),
+        manifest_of(layer(BUILT_LAYER), layer(BUILT_LAYER)),
+        manifest_of(),
+        {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json"},
+        manifest_of({"mediaType": "application/vnd.sylabs.sif.layer.v1.sif"}),
+    ],
+    ids=["another-file", "first-mebibyte", "two-layers", "no-layer", "no-layers-key", "no-digest"],
+)
+def test_the_layer_check_refuses_an_artifact_that_is_not_one_layer_of_the_file_built_here(
+    tmp_path, manifest
+):
+    done, _ = run_layer_check(tmp_path, manifest)
+    assert done.returncode != 0
+    assert "::error::" in done.stdout
+
+
+def test_the_layer_check_fails_when_the_manifest_cannot_be_fetched(tmp_path):
+    done, calls = run_layer_check(tmp_path, manifest_of(layer(BUILT_LAYER)), oras_exit=1)
+    assert done.returncode != 0
+    assert calls == ["oras manifest fetch ghcr.io/nemarorg/nemar-python-sif@" + PUSHED_SIF]
 
 
 def test_the_dispatch_input_names_both_tags():

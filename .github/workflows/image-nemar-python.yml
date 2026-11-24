@@ -667,6 +667,36 @@ jobs:
           fi
           echo "digest=${sif_digest}" >> "$GITHUB_OUTPUT"
 
+      # Sign what was built: the artifact the next step signs, fetched by that digest, must be one layer
+      # whose digest is the SHA-256 of the SIF this leg built, sized and smoke-tested. Anything else
+      # under the tag between the push and the signature is refused before it is signed.
+      - name: Refuse a pushed SIF artifact that is not the file built here
+        env:
+          SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
+        run: |
+          set -euo pipefail
+          oras manifest fetch "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}" > sif-manifest.json
+          python3 - sif-manifest.json nemar-python.sif <<'PY'
+          import hashlib
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          with open(sys.argv[2], "rb") as handle:
+              built = "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+          layers = manifest.get("layers") if isinstance(manifest, dict) else None
+          if not isinstance(layers, list) or len(layers) != 1:
+              count = len(layers) if isinstance(layers, list) else "no"
+              print("::error::the pushed SIF artifact has {} layers, not exactly one".format(count))
+              sys.exit(1)
+          found = layers[0].get("digest") if isinstance(layers[0], dict) else None
+          if found != built:
+              print("::error::the pushed SIF artifact's layer is {}, not {}, the SIF built here".format(found, built))
+              sys.exit(1)
+          print("the pushed SIF artifact is one layer, {}, the SIF built here".format(built))
+          PY
+
       - name: Sign the SIF artifact digest and verify the signature
         env:
           SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
