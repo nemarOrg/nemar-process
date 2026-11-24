@@ -12,4 +12,4 @@ import os
 # eegprep's spectrum helper imports matplotlib; a recipe never draws, and a container has no display.
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-COMMON_VERSION = "1.0.0-b1"
+COMMON_VERSION = "1.0.0-b2"
