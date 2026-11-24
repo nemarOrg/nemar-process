@@ -482,10 +482,12 @@ def test_asr_runs_with_the_owners_cutoff_and_the_plan_hash_follows_it(runs):
     assert plans.plan_hash(changed) != stored
 
 
-def test_amica_rejection_is_on_at_amicas_defaults_and_hashed(runs):
+def test_amica_rejection_is_off_its_schedule_recorded_and_hashed(runs):
+    """The owner turned AMICA's rejection off (seed stability); its schedule is still passed and hashed,
+    so turning it on is a change of the plan."""
     run = runs[STORE]
     record = run.product.record
-    expected = {"do_reject": True, "rejsig": 3.0, "rejstart": 2, "rejint": 3, "maxrej": 3}
+    expected = {"do_reject": False, "rejsig": 3.0, "rejstart": 2, "rejint": 3, "maxrej": 3}
     parameters = step_of(record, "ica")["parameters"]
     assert {key: parameters[key] for key in expected} == expected
     pamica = block_of(run)["pamica"]  # eegprep's own account of the settings it ran with
@@ -493,37 +495,38 @@ def test_amica_rejection_is_on_at_amicas_defaults_and_hashed(runs):
     stored = record["extensions"]["nemar"]["plan_hash"]
     changed = copy.deepcopy(plans.resolved_plan(record))
     (ica,) = [entry for entry in changed["steps"] if entry["step_id"] == "ica"]
-    ica["parameters"]["do_reject"] = False
+    ica["parameters"]["do_reject"] = True
     assert plans.plan_hash(changed) != stored
 
 
-def test_the_rejection_settings_reach_pamicas_backend_which_rejects(runs, backends):
-    """The backend pAMICA built for each fit got AMICA's settings and made its three passes."""
+def test_the_settings_reach_pamicas_backend_which_rejects_nothing(runs, backends):
+    """The backend pAMICA built for each fit got the rejection switched off with its schedule, and
+    AMICA's convergence stops: it made no rejection pass and kept every sample."""
     assert len(backends) == len(runs)  # one fit per store
     for backend, given in backends:
         assert {key: given[key] for key in ("do_reject", "rejsig", "rejstart", "rejint")} == {
-            "do_reject": True,
+            "do_reject": False,
             "rejsig": 3.0,
             "rejstart": 2,
             "rejint": 3,
         }
         assert given["maxrej"] == 3
-        assert backend.numrej == 3  # passes at iterations 2, 5 and 8
+        assert backend.numrej == 0
+        assert backend.good_idx is None
         # AMICA's convergence stops, at the Fortran program's defaults
         assert {key: given[key] for key in STOPS} == STOPS
-        assert backend.good_idx is not None
 
 
 def test_the_amica15_call_carries_the_binarys_names_for_the_same_settings():
     call = steps.amica15_call(2000, 1, 7)
     assert {key: call[key] for key in ("do_reject", "rejsig", "rejstart", "rejint", "numrej")} == {
-        "do_reject": 1,
+        "do_reject": 0,
         "rejsig": 3.0,
         "rejstart": 2,
         "rejint": 3,
         "numrej": 3,
     }
-    assert plans.typed(steps.ICA_FUNCTION, call)["do_reject"] is True
+    assert plans.typed(steps.ICA_FUNCTION, call)["do_reject"] is False
 
 
 @pytest.mark.parametrize("path", [STORE, STORE_MV])

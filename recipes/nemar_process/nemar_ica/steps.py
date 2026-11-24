@@ -100,12 +100,13 @@ N_MODELS = 1
 N_MIX = 3
 BLOCK_SIZE = 131072
 SEED = 5489
-# AMICA's in-algorithm rejection of improbable samples, on, at AMICA's own defaults (runamica15.m and
-# the Fortran program, as eegprep's runamica table states them): a sample whose log-likelihood is
-# below the mean by more than `rejsig` standard deviations is dropped from the fit, first at
-# iteration `rejstart`, then every `rejint` iterations, `numrej` times in all. pAMICA names the count
-# `maxrej` (its own default is 1, AMICA's is 3); legacy NEMAR never reached its AMICA call.
-REJECT = True
+# AMICA's in-algorithm rejection of improbable samples, off (the owner's decision, 2026-11-23: on the
+# fixture it made the decomposition depend on the seed), its schedule still passed and hashed at AMICA's
+# own defaults (runamica15.m and the Fortran program, as eegprep's runamica table states them): were it
+# on, a sample whose log-likelihood is below the mean by more than `rejsig` standard deviations would be
+# dropped from the fit at iteration `rejstart`, then every `rejint` iterations, `numrej` times in all.
+# pAMICA names the count `maxrej` (its own default is 1, AMICA's is 3).
+REJECT = False
 REJSIG = 3.0
 REJSTART = 2
 REJINT = 3
