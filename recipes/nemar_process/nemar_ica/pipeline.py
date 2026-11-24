@@ -58,7 +58,9 @@ if TYPE_CHECKING:
 
 # The floor's values nemar-ica sets in place of the floor's own (steps.py).
 FLOOR_EMBEDDING = floor_steps.Embedding(
-    highpass_hz=steps.HIGHPASS_HZ, corr_threshold=steps.CORR_THRESHOLD
+    highpass_hz=steps.HIGHPASS_HZ,
+    corr_threshold=steps.CORR_THRESHOLD,
+    max_broken_time=steps.MAX_BROKEN_TIME,
 )
 
 # eegprep's ICLabel network, the file the classification reads (hashed into the record).

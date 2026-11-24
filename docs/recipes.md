@@ -555,7 +555,7 @@ Reproducibility is pAMICA's promise as eegprep states and tests it: the same see
 ### The steps
 
 The floor's chain comes first, and its decisions are the first steps of the record (`load` to `qc`, the bad channels already removed from its working copy, which is what the next steps receive; the record also states the hash of those first steps as a floor plan, `floor_plan_hash`).
-It runs with the floor's parameters but two, legacy NEMAR's (the owner's, 2026-11-23): the drift step is a FIR high-pass, `pop_eegfiltnew(locutoff=0.5)` with eegprep's default design (a 0.5 Hz transition band, -6 dB at 0.25 Hz, Hamming window, order 1320 at 200 Hz and 1650 at 250 Hz, recorded with the kernel's digest), in place of `clean_drifts`, and RANSAC's correlation threshold is 0.85 in place of 0.8; so `floor_plan_hash` is not a `nemar-floor` product's hash, and the floor itself keeps its own values (`nemar_floor.steps.Embedding`).
+It runs with the floor's parameters but three, legacy NEMAR's (the first two the owner's, 2026-11-23; the third set to match legacy and eegprep's default): the drift step is a FIR high-pass, `pop_eegfiltnew(locutoff=0.5)` with eegprep's default design (a 0.5 Hz transition band, -6 dB at 0.25 Hz, Hamming window, order 1320 at 200 Hz and 1650 at 250 Hz, recorded with the kernel's digest), in place of `clean_drifts`; RANSAC's correlation threshold is 0.85 in place of 0.8; and RANSAC's `max_broken_time` is 0.5 in place of 0.4 (a channel is removed when it is bad for more than half the recording: legacy's `clean_rawdata` default and eegprep's `clean_artifacts` default, `ChannelCriterionMaxBadTime`), recorded with the step's parameters and hashed; so `floor_plan_hash` is not a `nemar-floor` product's hash, and the floor itself keeps its own values (`nemar_floor.steps.Embedding`).
 Then, each an eegprep call:
 
 | # | Step id | eegprep function | Parameters (passed, then what eegprep applies) | Notes |
@@ -651,14 +651,14 @@ Legacy NEMAR's EEGLAB pipeline (`eeg_nemar_preprocess.m` of sccn/NEMAR-pipeline,
 | High-pass | `pop_eegfiltnew(locutoff=0.5)` | the same call (the floor itself keeps `clean_drifts`, 0.25 to 0.75 Hz) |
 | Line noise | none removed (`LineNoiseCriterion=4` flags channels) | a band-stop at 50 or 60 Hz when its excess is at least 10 dB, until eegprep has ZapLine-plus (being ported upstream, sccn/eegprep#534); nemar-ica moves to it then |
 | Flat channels | `FlatlineCriterion=4` s | `max_flatline_duration=5` s |
-| Bad channels | `ChannelCriterion=0.85`, `LineNoiseCriterion=4` | RANSAC `corr_threshold=0.85`, `noise_threshold=4` (or the no-locations criterion; the floor itself keeps 0.8) |
+| Bad channels | `ChannelCriterion=0.85`, `LineNoiseCriterion=4`, `ChannelCriterionMaxBadTime` at its default 0.5 | RANSAC `corr_threshold=0.85`, `noise_threshold=4`, `max_broken_time=0.5` (or the no-locations criterion, whose `max_broken_time` is already 0.5; the floor itself keeps 0.8 and 0.4) |
 | ASR | `BurstCriterion=20`, `BurstRejection='on'` (the samples ASR would repair are removed), reference tolerances `[-Inf 5.5]` | `cutoff=30` (the owner's), repair, nothing removed, the share repaired recorded (`asrBurstFraction`), reference tolerances `(-3.5, 5.5)` (`clean_asr`'s default) |
 | Bad windows | `WindowCriterion=0.25`, tolerances `[-Inf 7]`, removed | measured (`max_bad_channels=0.2`, `zthresholds=(-3.5, 5)`), not removed |
 | Reference | none on `main` (an `avg_ref` step on the `plugin` branch) | average |
 | Decomposition | extended `runica`, `lrate=1e-5`, `maxsteps=2000`, its weight-change stop (1e-6; 1e-7 above 32 channels) (the AMICA branch is never reached: `K = 4`) | pAMICA, at most 4000 iterations, AMICA's convergence stops on and its rejection off, rank `N_good - 1` |
 | Classification | ICLabel, `pop_icflag` marks muscle and eye at 0.9 or more | ICLabel, nothing flagged |
 
-The high-pass, the 0.85 threshold, the cutoff of 30 with the repair measured and not cut, AMICA's rejection off and its stops at up to 4000 iterations are the owner's (2026-11-23); the remaining differences (the offset removal, the flatline duration, the windows and bursts legacy cut, ASR's reference tolerances, ICLabel's flags) are proposals for the owner, not defaults this page changes.
+RANSAC's `max_broken_time` of 0.5 matches legacy and eegprep's default; the high-pass, the 0.85 threshold, the cutoff of 30 with the repair measured and not cut, AMICA's rejection off and its stops at up to 4000 iterations are the owner's (2026-11-23); the remaining differences (the offset removal, the flatline duration, the windows and bursts legacy cut, ASR's reference tolerances, ICLabel's flags) are proposals for the owner, not defaults this page changes.
 
 ### Options
 

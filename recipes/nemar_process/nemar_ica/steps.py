@@ -200,11 +200,14 @@ BURST_REASON = "asr_repaired"
 # dataset record has these edges.
 BURST_FRACTION_EDGES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0)
 
-# The floor's two values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
+# The floor's three values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
 # settings, 2026-11-23): a 0.5 Hz FIR high-pass (pop_eegfiltnew, legacy's call) in place of
-# clean_drifts, and RANSAC's correlation threshold of 0.85 in place of 0.8.
+# clean_drifts, RANSAC's correlation threshold of 0.85 in place of 0.8, and a channel removed when it is
+# bad for more than half the recording (0.5 in place of 0.4): legacy's clean_rawdata default and
+# eegprep's clean_artifacts default (ChannelCriterionMaxBadTime), which legacy never changed.
 HIGHPASS_HZ = 0.5
 CORR_THRESHOLD = 0.85
+MAX_BROKEN_TIME = 0.5
 
 
 def rank_of(n_good: int) -> int:

@@ -186,16 +186,19 @@ def bad_channel_rules() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class Embedding:
-    """Two of the floor's values a recipe that embeds the floor may set in place of its own.
+    """Three of the floor's values a recipe that embeds the floor may set in place of its own.
 
     ``highpass_hz`` replaces the drift step's ``clean_drifts`` by a FIR high-pass with that lower
-    passband edge (``pop_eegfiltnew``, the step id stays ``drift``); ``corr_threshold`` replaces
-    RANSAC's correlation threshold. The floor itself runs with ``FLOOR``, its own values, and its
-    products and golden decisions do not depend on this class. nemar-ica passes legacy NEMAR's.
+    passband edge (``pop_eegfiltnew``, the step id stays ``drift``); ``corr_threshold`` and
+    ``max_broken_time`` replace RANSAC's correlation threshold and the share of the recording a
+    channel may be bad in before it is removed. The floor itself runs with ``FLOOR``, its own values,
+    and its products and golden decisions do not depend on this class. nemar-ica passes legacy
+    NEMAR's.
     """
 
     highpass_hz: float | None = None
     corr_threshold: float = RANSAC_CALL["corr_threshold"]
+    max_broken_time: float = RANSAC_CALL["max_broken_time"]
 
 
 FLOOR = Embedding()
@@ -215,8 +218,12 @@ def drift_step(embedding: Embedding = FLOOR) -> tuple[str, dict[str, Any]]:
 
 
 def ransac_call(embedding: Embedding = FLOOR) -> dict[str, Any]:
-    """RANSAC's call, with the embedding's correlation threshold."""
-    return {**RANSAC_CALL, "corr_threshold": embedding.corr_threshold}
+    """RANSAC's call, with the embedding's correlation threshold and longest broken share."""
+    return {
+        **RANSAC_CALL,
+        "corr_threshold": embedding.corr_threshold,
+        "max_broken_time": embedding.max_broken_time,
+    }
 
 
 def ransac_parameters(embedding: Embedding = FLOOR) -> dict[str, Any]:

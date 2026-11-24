@@ -890,6 +890,13 @@ def test_the_floor_runs_with_a_half_hertz_fir_high_pass_and_ransac_at_085(runs):
     assert written["drift"]["order"] == 1650
     bad = step_of(record, "bad_channels")
     assert bad["parameters"]["corr_threshold"] == 0.85
+    # legacy's clean_rawdata default and eegprep's clean_artifacts default (ChannelCriterionMaxBadTime)
+    assert bad["parameters"]["max_broken_time"] == 0.5
+    stored = record["extensions"]["nemar"]["plan_hash"]
+    changed = copy.deepcopy(plans.resolved_plan(record))
+    (entry,) = [entry for entry in changed["steps"] if entry["step_id"] == "bad_channels"]
+    entry["parameters"]["max_broken_time"] = 0.4
+    assert plans.plan_hash(changed) != stored
 
 
 def test_the_floor_itself_keeps_its_own_high_pass_and_threshold():
@@ -898,10 +905,12 @@ def test_the_floor_itself_keeps_its_own_high_pass_and_threshold():
     floor_steps = {step.step_id: step for step in floor_recipe.dataset_steps()}
     assert floor_steps["drift"].function == "eegprep.clean_drifts"
     assert floor_steps["bad_channels"].parameters["corr_threshold"] == 0.8
+    assert floor_steps["bad_channels"].parameters["max_broken_time"] == 0.4
     ica_steps = {step.step_id: step for step in RECIPE.dataset_steps()}
     assert ica_steps["drift"].function == "eegprep.pop_eegfiltnew"
     assert ica_steps["drift"].parameters["locutoff"] == 0.5
     assert ica_steps["bad_channels"].parameters["corr_threshold"] == 0.85
+    assert ica_steps["bad_channels"].parameters["max_broken_time"] == 0.5
 
 
 # ---- AMICA's convergence ------------------------------------------------------------------------
