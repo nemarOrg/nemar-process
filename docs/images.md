@@ -2,7 +2,8 @@
 
 `nemar-python` is the image NEMAR's jobs run in: Python 3.12 with eegprep, MNE-Python, NumPy, SciPy, pamica, pAMICA's native `amica15` binary and the signalJourney validator.
 It comes in two flavors, `cpu` and `cuda`, which differ in the torch they carry and in nothing else (see "The two flavors").
-Each is built from the one committed lock file, pushed to the GitHub Container Registry (GHCR), signed with cosign, and smoke-tested as a container image; the CPU flavor is also turned into a Singularity Image Format (SIF) file from its digest and smoke-tested as a SIF under Apptainer.
+Each is built from the one committed lock file, pushed to the GitHub Container Registry (GHCR), signed with cosign, and smoke-tested as a container image.
+Each is also turned into a Singularity Image Format (SIF) file from its signed digest, smoke-tested as a SIF under Apptainer, pushed as an artifact and signed in turn: both flavors publish a signed SIF.
 Every consumer refers to an image by digest.
 
 Abbreviations used here: Open Container Initiative (OCI), continuous integration (CI), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), central processing unit (CPU), graphics processing unit (GPU), Compute Unified Device Architecture (CUDA), adaptive mixture independent component analysis (AMICA), GNU C Library (glibc).
@@ -64,11 +65,11 @@ The launcher does not hash the file, so only its name ties it to the digest; the
 
 GHCR names are lowercase (`nemarorg`).
 The tags `<version>-cpu` and `<version>-cuda` exist so that people can find an image; neither is ever a reference.
-Only the CPU flavor publishes a SIF.
-The CUDA flavor publishes none, and none may be built by hand: the runner runs a SIF only if it is the layer of the signed SIF artifact, so a SIF built on a host is refused.
-The CUDA flavor therefore runs under Docker or Podman, where the runner verifies its digest with cosign, and the runner refuses it under Apptainer (`image_unverified`) until CI publishes and signs a CUDA SIF artifact, which a later change must add.
+Both flavors publish a signed SIF, and none may be built by hand: the runner runs a SIF only if it is the layer of the signed SIF artifact of the image's digest, so a SIF built on a host is refused (`image_unverified`).
+The runner looks up `nemar-python-sif:sha256-<hex>` with the digest the claim names, whatever the flavor, so a job on the CUDA image runs under Apptainer from the CUDA SIF and under Docker or Podman from the image itself.
+The CUDA SIF exists from the first image release that runs this workflow; until then a job on the CUDA image ends `image_unverified` under Apptainer.
 
-### Installing the SIF (the CPU flavor)
+### Installing the SIF (either flavor)
 
 Start from the image digest, because it is what a signature names and what the launch specification carries.
 The digest file is not signed: it is a release asset that anyone with write access to the repository can replace, so nothing in it is a reason to trust a file.
@@ -90,7 +91,7 @@ The digest file is not signed: it is a release asset that anyone with write acce
 
 Whether `apptainer pull ... oras://ghcr.io/nemarorg/nemar-python-sif@sha256:<digest>` accepts a digest is unverified, and so is the name of the file `oras pull` writes (the title the artifact carries); the file is renamed to `<hex>.sif` either way.
 
-What this does not give you: nothing in the signature itself ties the SIF artifact to the image digest.
+What this does not give you, for either flavor: nothing in the signature itself ties the SIF artifact to the image digest.
 The tie is the workflow's naming (the tag `sha256-<hex>`, which it refuses to move, and the file name) and your reading of the steps above.
 A signed annotation naming the image digest would close that, and has not been tried with cosign 3.
 The launcher does not hash the file either, and `sif.file_sha256` in the digest file comes from the unsigned asset, so compare it only as a check against a corrupted copy.
@@ -101,7 +102,7 @@ A SIF build is not reproducible: the same image digest can have several SIF file
 Signatures are made by `cosign` keyless: there is no key, and the certificate names the workflow and the ref that signed.
 Verify with cosign 3 or newer, which is the version the workflow signs with:
 
-Both flavors are signed by the same workflow with the same identity, so the first command below verifies the digest of either one; the second applies to the CPU flavor's SIF only.
+Both flavors and their SIFs are signed by the same workflow with the same identity, so the first command below verifies the digest of either image, and the second the SIF artifact of either one.
 
 ```bash
 IDENTITY='^https://github\.com/nemarOrg/nemar-process/\.github/workflows/image-nemar-python\.yml@refs/(tags/image-nemar-python-v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'
@@ -131,7 +132,7 @@ The controls that would stop that are the owner's and are not yet in place (see 
 |---|---|---|
 | `test` | pull request, tag, dispatch | builds the flavor's image without pushing, as a dev build, and runs `smoke.py` inside it (the `cuda` leg with no GPU visible, see "The two flavors"); checks the built image's build file and its version, revision and build labels against the dev build it named; builds a SIF from the local image (Apptainer's temporary directory and cache on the filesystem with the most space available, `df -h` printed before Apptainer is installed and after the build, the exported archive removed after the build), refuses a SIF at or over the size gate ("The SIF's size", below), and runs `smoke.py` in it under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths` (the `cuda` leg with `--no-gpu` and without `--nv`); the `cpu` leg also runs the launch end to end in that SIF; the `cuda` leg frees disk space first and has no GitHub Actions cache |
 | `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails unless the version is the `pyproject.toml` version at the commit, a release, and the git tag `v<version>` points at the commit; fails unless the registry says `<version>-<flavor>` is absent (`scripts/check_tag_absent.py`, below); pushes `ghcr.io/nemarorg/nemar-python:<version>-<flavor>` and captures the digest, as the output `digest_<flavor>` |
-| `sign` | after `publish` | refuses an empty digest, smoke-tests the pushed digest, refuses to sign unless the pushed digest's build file and labels equal the version step's version, the run's commit and `release`, and only then signs it and verifies the signature; the `cpu` leg then builds the SIF from that digest, refuses it at or over the size gate, smoke-tests it, fails unless the registry says the SIF tag is absent (the same script), pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, and signs and verifies the artifact; each leg writes its digest file |
+| `sign` | after `publish` | refuses an empty digest, smoke-tests the pushed digest, refuses to sign unless the pushed digest's build file and labels equal the version step's version, the run's commit and `release`, and only then signs it and verifies the signature; each leg then builds the SIF from that digest, refuses it at or over the size gate, smoke-tests it (the `cuda` leg with `--no-gpu` and without `--nv`), fails unless the registry says the SIF tag is absent (the same script), pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>` and prints the push's wall time beside the SIF's size, signs and verifies the artifact, and writes its digest file |
 | `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json` to the release of the tag; an existing asset of either name is an error, never overwritten |
 
 A pull request runs `test` only: nothing on a pull request pushes, signs or releases, and it builds both flavors.
@@ -165,6 +166,7 @@ Right after each SIF build, in `test` and in `sign`, the step "Refuse a SIF at o
 That is 90% of the limit, and under it whether GB or GiB is meant.
 In `sign` the step runs before the SIF tag is checked and before anything is pushed.
 The `test` job builds a SIF of each flavor from its local image on every pull request, so each flavor's size is read, and gated, before a release.
+In `sign` the push prints `SIF push (<flavor>): <bytes> bytes in <seconds> seconds`, whether it passed or not, so the 10-minute limit is read from the log.
 `tests/images/test_workflow.py` runs the step's shell on files of the gate's size and one byte under it.
 
 ### The build a record names
@@ -194,20 +196,21 @@ No other label is read there; the flavor and the lock are checked where they alw
 ### When a run fails after the image was pushed
 
 `publish` pushes `<version>-<flavor>` before anything is signed, so a failure in `sign` or `release` leaves that tag published and unsigned.
-The likely one is the CPU flavor's SIF package, described below.
+The likely one is the SIF package, described below.
 Never use an unsigned tag: take only a digest that `cosign verify` accepted.
 
 - Do not run the whole workflow again for the same version: it stops at `publish`, at the refusal to overwrite an existing `<version>-<flavor>` tag.
 - Use "Re-run failed jobs" on the run. It re-runs the failed `sign` leg alone, with the digest that its `publish` leg recorded (the other flavor's legs are not touched).
-- The CPU `sign` leg alone can be re-run until the SIF tag `sha256-<hex>` exists, because it refuses to move an existing SIF tag. If the failure came after the SIF was pushed (for example while signing it), a re-run stops there, and the way on is to publish a new version: a new tag and a new image. The CUDA leg has no SIF step, so it can always be re-run.
+- Either `sign` leg can be re-run until its SIF tag `sha256-<hex>` exists, because each refuses to move an existing SIF tag. If the failure came after that leg's SIF was pushed (for example while signing it), a re-run of the leg stops there, and the way on is to publish a new version: a new tag and a new image.
 - If a pushed digest failed its smoke test, that image is bad, and the way on is also a new version.
 - If `sign` refused the pushed digest's build record (the step "Check the pushed digest's build record against the version step"), the pushed image is not the version, the commit or the build the run named. A re-run fails the same way, because a digest's record cannot change; the tags stay published and unsigned, and the way on is a new version once the cause is fixed.
   The other flavor's leg is independent and may already have signed its own digest for that version; the new version replaces both flavors.
 - If only `release` failed, re-run it; it fails rather than replace an existing asset.
 
 There is one digest file per flavor, `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json`, and each holds the image digest and reference, the SHA-256 of `uv.lock`, the Python, eegprep, pamica and torch versions, the native binary's SHA-256 (`amica15`) and the SHA-256 reading of the CPU fit (`cpu_fit_sha256`, see "The smoke test"), the source commit, the run's address, and `launch_image`, the `image` object of a launch specification for this release.
-The CPU file also holds the SIF's artifact digest, reference, file name and file hash.
-In the CUDA file `sif` and `launch_image` are `null` (no SIF exists for it, so no file is named, and `sif_note` says so); it instead holds `cuda`, torch's CUDA build and the GPU architectures it lists (`arch_list`).
+Each file also holds its SIF's artifact digest, reference, file name, file hash and size, and `launch_image` names that file (`<hex>.sif`, with the image digest's 64 hexadecimal digits); `scripts/make_image_digests.py` refuses a record of either flavor without a SIF.
+The CUDA file also holds `cuda`, torch's CUDA build and the GPU architectures it lists (`arch_list`).
+Each file's facts come from the smoke document of its own SIF, and the script hashes the SIF a mebibyte at a time, so a SIF of several gigabytes is never held in memory.
 
 ## The two flavors
 
@@ -273,7 +276,7 @@ The `cuda` leg runs one tiny `nemar-ica` run in its image with no GPU visible, a
 
 No release image yet.
 The image `0.1.0-cpu` in the registry is a demonstration build, published from `main` before the version step existed: it is not a release, its records name `nemar-floor` `1.0.0` and carry no `process` block, and no recipe or common version counts it (the version rule of `docs/recipes.md`).
-The first images are published from `main` (a manual dispatch, or a version tag on a commit of `main`) once the epic branch has merged, which the maintainers decide; both flavors publish and sign in that one run, and their digests are recorded here when they exist.
+The first images are published from `main` (a manual dispatch, or a version tag on a commit of `main`) once the epic branch has merged, which the maintainers decide; both flavors publish and sign their image and their SIF in that one run, and their digests are recorded here when they exist.
 
 | Version | Flavor | Image digest | SIF artifact digest | Run |
 |---|---|---|---|---|
@@ -284,13 +287,21 @@ The first images are published from `main` (a manual dispatch, or a version tag 
 - **The CUDA flavor and the native binary have run only where CI runs them.** No Docker is available where this was written, so the first build of both flavors, the `ldd` lines, the architecture list, the CUDA flavor's CPU fit with no GPU visible and both `CPUFIT` readings are those of the pull request's `test` job; this page records none of them.
 - **A workstation's driver and GPU are not read here.** Whether a workstation's NVIDIA driver runs CUDA 12.9 wheels, and what the GPU path then does, is for the operator's preflight on that machine; the CUDA flavor is proven here on the CPU only.
 - **The hosted runner's disk.** The CUDA build frees disk space first and keeps no cache; if a run still runs out of disk, a larger runner is the owner's to provide.
+  On pull request 87 (run 45436618601) the `cuda` leg of `test` read, on the root filesystem of 145G (the only large one; there was no `/mnt`): 86G available before the free-disk step and 104G after it, 69G after the image build and before Apptainer was installed, and 50G after the SIF build with the exported archive (7.5G), Apptainer's cache (7.5G) and the SIF (4.2G) still on disk.
+  The SIF build took about 6 minutes and the whole leg about 17, within its 60.
+  The `sign` leg builds from the pushed digest instead, and its disk is not measured until the first release.
+- **The CUDA SIF's size and push time.** On the same run the `test` job's SIFs were 4,458,627,072 bytes (`cuda`) and 473,722,880 bytes (`cpu`), built from the local images, both under the size gate.
+  A SIF built in `sign` from the pushed digest, its size and its push's wall time are first read in the first release's `sign` log (`SIF size (cuda)` and `SIF push (cuda)`).
+- **The registry's two limits.** 10 GB per layer and 10 minutes for an upload are GitHub's documentation, not observations; no SIF near either has been pushed, and the size gate stops one of 9,000,000,000 bytes or more before the push.
+- **Whether `--nv` finds a workstation's driver.** No hosted runner has a GPU, so no SIF has run with `--nv`; the launcher passes it only for a job the runner put on the GPU. Whether Apptainer's `--nv` binds a workstation's driver into the CUDA SIF, and whether that driver runs the CUDA 12.9 wheels, is an operator's reading on that machine.
+- **Nothing in the signature ties the CUDA SIF to its image digest either.** As for the CPU SIF ("Installing the SIF"), the tie is the workflow's naming; both legs run the one signing step, so a signed annotation, once added, covers both.
 - **The git tag the version step needs does not exist yet.** At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0, so the `publish` job refuses every version until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
 - **The sign-time build record check has not run against a pushed image.** It runs only on a tag or a dispatch. Until the first release the same script, with the same two reads, runs in every pull request's `test` job against the image built there, and `tests/images/test_image_build_check.py` runs both steps against a stand-in `docker` that serves real files; that the registry's digest answers the same two reads with the labels and the file the pushed image carries is expected, not observed.
 - **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
 - **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.
 - **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-<flavor>` tags (`<version>-cpu` and `<version>-cuda`, one per leg) and the SIF tag rely on two things that nothing has confirmed: that GHCR answers a manifest `HEAD` for an absent tag, including one in a package that does not exist yet, with exactly 404, and that its token endpoint accepts the actor and the workflow's token as basic authentication for the `pull` scope. Any other answer stops the run before anything is pushed, so the failure mode is a first release that stops at the check, not one that overwrites; if that happens the check needs a change, and it is not to be bypassed.
-- **`apptainer push` and the SIF package.** The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure; "When a run fails after the image was pushed" says what to do then.
+- **`apptainer push` and the SIF package.** Both legs push to the one package, `nemar-python-sif`. The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure; "When a run fails after the image was pushed" says what to do then.
 
 ### The owner's controls (not in place)
 
