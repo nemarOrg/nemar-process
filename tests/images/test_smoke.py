@@ -974,5 +974,7 @@ def test_the_recipe_command_must_print_the_pinned_checkpoint_maps():
     moved["recipe_command"]["version"]["checkpoints"]["nemar-floor"][0]["steps"].append("drift")
     assert any("checkpoint map of nemar-floor" in p for p in pins.check(moved, PYPROJECT, LOCK))
     bumped = copy.deepcopy(expected_document())
-    bumped["recipe_command"]["version"]["recipes"]["nemar-floor"] = "1.0.0-b2"
+    other = "1.0.0-b999"  # a version the pin's map is not for
+    assert other != PINNED_RECIPE_VERSION
+    bumped["recipe_command"]["version"]["recipes"]["nemar-floor"] = other
     assert any("bump the progress pin" in p for p in pins.check(bumped, PYPROJECT, LOCK))

@@ -1,7 +1,7 @@
 {
   "comment": "The nemar-cli commit the runner protocol schema is copied from. The schema is written in nemar-cli (shared/contract/compute-runner.schema.json) and copied here byte for byte; whichever repository merges first writes it, the other copies it. The schema refers to the live progress schema by its $id (launcher/schema/compute-progress.v1.json, pinned by tests/contract/nemar-cli-progress-pin.json at the same commit). Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_runner_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
-  "ref": "e8bf3c2d8e74805155ff5ed5e814b71a5342d773",
+  "ref": "055731fa4dc5c88d65ad85b6e3fe189f5c4a6918",
   "schema": {
     "source": "shared/contract/compute-runner.schema.json",
     "copy": "runner/schema/compute-runner.v1.json",
