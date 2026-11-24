@@ -4,7 +4,7 @@
 The loader, the runner for metric plugins, the checks of declared views and the contracts a plugin is checked against are built (Phase 5, P1 and P2); no plugin of NEMAR's ships yet, and no recipe runs plugins yet.
 Figures are gone (nemar-cli ADR 0137): a plugin writes views, data a browser draws (a spectrum, component classes, a table), never an image, and there is no `figures` checkpoint.
 Writing a view's files and checking its arrays is the next phase (P3); until then the runner checks a returned view's shape and parameters and hands it back unwritten.
-The figure sections below are the earlier plan, kept for the legacy mapping, and are superseded by ADR 0137 where they differ.
+The legacy figures are kept below as a mapping to the views that replace them.
 This page describes the plugin interface that nemar-cli ADR 0134 decides on.
 The interface is one part of a general job platform that anyone can follow, not something private to NEMAR's pipeline:
 a job that runs in a nemar-process image (or one built from it) under the launcher, declares its checkpoints and writes signalJourney records and a recordings table gets the same progress and results reports wherever it runs ([progress.md](progress.md)).
@@ -52,19 +52,19 @@ The implementation fixes them, and from then on the manifest is a public interfa
 ## What a plugin writes
 
 A plugin adds a step to the signalJourney record ([signalJourney](https://signaljourney.github.io/introduction/)), the shape `recipes/nemar_process/common/records.py` already builds for the recipes, and writes nothing in a format of its own:
-its metrics are that step's `qualityMetrics`, its headline numbers are `summaryMetrics`, and each figure is an `outputTargets` entry.
+its metrics are that step's `qualityMetrics`, its headline numbers are `summaryMetrics`, and each view's data file is an `outputTargets` entry (written by the views writer, P3).
 
 signalJourney leaves a metric's value unshaped, so the schema a plugin declares for its output is its real contract.
-Each metric it declares uses neuroschema's `dataQuality` metric definition: a value, a unit, a description, optional bounds, and the plugin's name and version.
+Each metric it declares uses neuroschema's `qualityMetric` definition: a value, a unit, a description, optional bounds, and the plugin's name and version; its name is `<plugin>:<name>`.
 
-For display, a plugin may also write figures, in PNG, SVG or WebP only, each under a size cap the implementation sets.
-A figure that draws a time series (a raw segment, component activations) is PNG or WebP only, because a vector trace stores the samples as coordinates;
-SVG is for maps, histograms and charts of computed values.
-A plugin never writes samples, as no recipe does: no arrays, no matrices of signal values, no NumPy files.
+For display, a plugin writes views (nemar-cli ADR 0137): data a browser draws, never an image.
+A view has a kind from the neuroschema view registry (a spectrum, component classes, a table, lines, a heatmap), a caption, and roles; each role is a table (TSV) or a JSON document the plugin returns, or a file the host recipe provides (`{"from": "recipe"}`), at most 4 MiB.
+The browser draws the maps, spectra and activations from these data, so no plugin stores a PNG, SVG or WebP.
+A view's data are computed values (a spectrum per sensor, class counts, mixing weights), never a recording's samples: no raw signal arrays and no NumPy files.
 
-Two of this repository's guards change for plugins, and by exactly this much:
-the product-tree assertions in `tests/recipes/test_cli.py` and `tests/recipes/test_floor_input_zarr.py`, which today fail on any file that is not TSV or JSON, accept the declared figure formats under the plugins' output directory;
-and the upstream-first scan (`tests/recipes/test_upstream_first.py`), which today bans no plotting library, extends to the plugins directory and gains a ban on plotting libraries everywhere except plugin figure code.
+The repository's guards stay as they are:
+the product-tree assertions in `tests/recipes/test_cli.py` and `tests/recipes/test_floor_input_zarr.py` keep accepting only TSV and JSON, which are the formats views are written in;
+and the upstream-first scan (`tests/recipes/test_upstream_first.py`) keeps banning plotting libraries everywhere, plugins included.
 
 ## Who writes one, and what NEMAR runs
 
@@ -76,7 +76,7 @@ NEMAR never runs an unreviewed plugin under its own identity, because the number
 
 A plugin in NEMAR's pipeline follows the recipe rule for numerics ([AGENTS.md](../AGENTS.md), [recipes.md](recipes.md)):
 every signal-processing call is an eegprep function, and one eegprep lacks is added to eegprep upstream, never written into the plugin.
-Drawing a figure from those results may use the image's plotting library.
+A plugin draws nothing: it returns data, and the browser draws the view.
 
 ## The starting set
 
@@ -96,17 +96,18 @@ The floor already measures the first three: its `qc` step's `qualityMetrics` hol
 A plugin reports a value the floor measures from the floor's output rather than computing it again.
 The dataset summary adds the legacy per-dataset bounds (lowest and highest good channels, good data and brain components), which today's QC summary does not hold.
 
-Figures, from `nemar_plugins/`:
+Figures, from `nemar_plugins/`, and the view each becomes (ADR 0137; the browser draws it from data):
 
-| Figure | Legacy source | Content |
+| Legacy figure | Legacy source | Content |
 |---|---|---|
 | Spectrum with scalp maps | `nemar_plugin_spectra.m` | the power spectrum from 1 to 70 Hz with scalp maps at 6, 10 and 22 Hz and at the stronger line frequency |
 | ICLabel component maps | `nemar_plugin_iclabel.m` | the scalp maps of the first components (the legacy figure shows up to 35) with their ICLabel classes |
 | ICLabel class histogram | `nemar_plugin_iclabel_hist.m` | the share of the data's variance each ICLabel class accounts for |
-| Component activations | `nemar_plugin_icaact.m` | a short window of component activations (PNG or WebP) |
-| Raw segment | `nemar_plugin_midraw.m` | two seconds of clean data from the middle of the recording (PNG or WebP) |
+| Component activations | `nemar_plugin_icaact.m` | a short window of component activations |
+| Raw segment | `nemar_plugin_midraw.m` | two seconds of clean data from the middle of the recording |
 
-The component figures read the decomposition, so they run after `nemar-ica`.
+As views: the spectrum is `nemar.spectrum` (written by `nemar-spectrum`), the class histogram is `nemar.ic-classes` (`nemar-quality`), and the component maps, the activations and the raw segment are `nemar.ic-maps`, `nemar.ic-activity` and `nemar.signal-window`, which `nemar-ica` declares itself; the activations and the raw segment are computed in the browser from the stored weights and the serving copy.
+The component views read the decomposition, so they come after `nemar-ica`.
 
 ## Where each schema lives
 
@@ -121,7 +122,7 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 | Links to the signalJourney records | neuroschema `signalJourney` |
 | The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |
 | The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
-| NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
+| NEMAR's rules for signalJourney records (view formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
 
 nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted today at the dataset document; its vendor script gains a record root (or validates extension objects by their `$id`), and this repository will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 
