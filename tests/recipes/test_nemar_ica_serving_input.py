@@ -661,10 +661,33 @@ def test_asr_repairs_cuts_nothing_and_the_record_states_the_share_it_repaired(ru
     assert nemar["ica"]["browser_transform"]["shaded"]["label"] == "burst"
 
 
+def test_a_sample_counts_as_repaired_from_a_summed_change_of_1e_8_uv_across_blocks():
+    """eegprep's rule in clean_artifacts, ``np.sum(np.abs(original - repaired), axis=0) < 1e-8`` for
+    an unchanged sample: the change is summed over the channels, the threshold itself counts as a
+    change, and the comparison made block by block treats a block's edge like any other sample. (On
+    the fixture no repair moves a sample by less than 1e-3 µV, so only this test tells the rule apart.)"""
+    from nemar_process.common import qc
+
+    edge = qc.ASR_COMPARE_BLOCK
+    before = np.zeros((2, edge + 10))
+    after = before.copy()
+    after[0, 3] = 1e-8  # the threshold: repaired
+    after[0, 4] = 0.99e-8  # below it: unchanged
+    after[:, 5] = 0.6e-8  # two channels that sum to 1.2e-8: repaired
+    after[1, 6] = -0.6e-8  # one of them alone, with a negative change: unchanged
+    after[1, edge - 1] = -1.0  # either side of a block's edge
+    after[0, edge] = 2.0
+    repaired = qc.asr_repaired(before, after)
+    assert np.flatnonzero(repaired).tolist() == [3, 5, edge - 1, edge]
+    assert np.array_equal(repaired, ~(np.sum(np.abs(before - after), axis=0) < 1e-8))
+    with pytest.raises(ValueError, match="the repair is not the input's shape"):
+        qc.asr_repaired(before, after[:1])  # one channel: numpy alone would broadcast it
+
+
 def test_the_share_follows_eegpreps_rule_for_what_a_repair_changed(stand_in, no_fence_module):
-    """The samples counted are those whose repair changed the data, by eegprep's own rule: every one
-    of them is a sample clean_artifacts would cut with BurstRejection, and every sample it would cut
-    is one of them or inside a retained run shorter than 5 samples (its extra rule for a cut)."""
+    """The samples counted are those whose repair changed the data, by eegprep's own rule: from them,
+    clean_artifacts' cut with BurstRejection follows exactly, once its extra rule is applied (a
+    retained run of at most 5 samples is cut too: ``e - s < 5`` on its inclusive intervals)."""
     from eegprep import clean_artifacts
     from nemar_process.common import qc
     from nemar_process.nemar_floor import pipeline as floor
@@ -699,10 +722,11 @@ def test_the_share_follows_eegpreps_rule_for_what_a_repair_changed(stand_in, no_
     flagged = qc.asr_repaired(eeg["data"], repaired["data"])
     dropped = ~np.asarray(cut["etc"]["clean_sample_mask"], dtype=bool)
     assert flagged.any()
-    assert not np.any(flagged & ~dropped)
-    extra = dropped & ~flagged
-    for _start, length in qc.runs(~extra):  # every extra sample sits in a short retained run
-        assert length < 5
+    expected = flagged.copy()
+    for start, length in qc.runs(flagged):  # the retained runs
+        if length <= 5:
+            expected[start : start + length] = True
+    assert np.array_equal(expected, dropped)
     share = pipeline.burst_share(eeg["data"], repaired["data"])
     assert share["n_repaired"] == int(flagged.sum())
 

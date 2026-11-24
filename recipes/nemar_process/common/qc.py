@@ -186,7 +186,7 @@ def asr_repaired(before: np.ndarray, after: np.ndarray) -> np.ndarray:
     after = np.asarray(after)
     if before.shape != after.shape or before.ndim != 2:
         raise ValueError("the repair is not the input's shape")
-    changed = np.empty(before.shape[1], dtype=bool)
+    changed = np.zeros(before.shape[1], dtype=bool)
     for start in range(0, before.shape[1], ASR_COMPARE_BLOCK):
         stop = start + ASR_COMPARE_BLOCK
         moved = np.sum(np.abs(after[:, start:stop] - before[:, start:stop]), axis=0)
