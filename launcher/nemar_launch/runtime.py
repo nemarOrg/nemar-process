@@ -7,16 +7,30 @@ Any other value, the empty string included, is refused as ``image_missing``.
 
 BEFORE ANYTHING RUNS (``preflight``, ``check_registry``, ``ensure_image``): the launcher is not
 root; the engine answers ``info`` (a dead daemon is ``runtime_unusable``, never ``image_missing``);
-it is not rootless Docker; it can enforce the limits asked for (Docker: the memory, CPU quota and
-pids controllers are on; Podman: cgroup v2 with the cpu, memory and pids controllers), and the CPU
+it is not rootless Docker, and Podman is rootless; it can enforce the limits asked for (Docker: the
+memory, CPU quota and pids controllers are on; Podman: cgroup v2 with the cpu, memory and pids
+controllers), and the CPU
 count is within the engine's own; the image's registry is on ``NEMAR_ALLOWED_REGISTRIES`` (default
 ``ghcr.io``); the image declares no ``VOLUME`` (an image volume is a writable mount outside the
 declared binds). Each refusal ends the launch before user code runs, and none is a charged failure.
 
+PODMAN, ONE VERIFIED PATH (``docs/launcher.md``, "Podman"). Every Podman call (``info``, ``image
+inspect``, ``pull``, ``create``, ``init``, ``container inspect``, ``unshare``, ``start``, ``rm``, and
+``--version``) is built and run through ``Engine``, which refuses one without a ``Prevention`` before
+anything runs: the global flags ``--default-mounts-file=/dev/null --hooks-dir=<scratch>/podman/hooks.d``
+(an empty directory of the launch's own), and an environment of ``run.runtime_environment``'s allowlist
+with ``HOME`` the account's home directory, the user's checked ``XDG_RUNTIME_DIR`` and
+``CONTAINERS_CONF=<scratch>/podman/containers.conf`` (an empty file), so no site or user
+``containers.conf``, no ``mounts.conf`` and no OCI hook applies. The container is not ``run``: it is
+created (the command line below, ``create`` in place of ``run``) and initialized, the OCI
+configuration the runtime was given is read and checked (``check_container``: the declared binds and
+``ENGINE_DEFAULTS`` only, no device, no hook), and only then started attached; a refusal removes it
+and ends the launch as ``runtime_unusable`` before user code ran.
+
 THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counterpart here, and
 ``tests/launcher/test_runtime_docker.py`` pins each one (``docs/launcher.md`` has the table):
 
-    run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --pull=missing --network=bridge
+    run (podman: create) --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --pull=missing --network=bridge
         --user <uid>:<gid>
         [podman: --userns=keep-id --pid=private --ipc=private --uts=private --cgroupns=private
                  --env-host=false --read-only-tmpfs=false --image-volume=ignore]
@@ -48,7 +62,8 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
   ``NEMAR_OUT``. A ``cuda`` decision for a specification whose ``resources.gpus`` is 0 is refused
   (``settings.check_device``).
 * The engine process itself is given ``run.runtime_environment``'s short allowlist, never the
-  launcher's environment (so ``DOCKER_HOST``, ``CONTAINER_HOST`` and the like are not honored).
+  launcher's environment (so ``DOCKER_HOST``, ``CONTAINER_HOST``, ``CONTAINERS_CONF_OVERRIDE`` and the
+  like are not honored); Podman's adds only what its prevention sets.
 * ``--cpu-shares 2`` (the lowest CPU weight) is added only when the engine says it can apply CPU shares
   (``Assessment.cpu_shares``: Docker's ``info`` field ``CPUShares``; Podman: cgroup v2 with the ``cpu``
   controller); otherwise the launcher's log says so and the container keeps the default weight. A
@@ -73,9 +88,13 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import pwd
+import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -125,11 +144,28 @@ DEFAULT_REGISTRIES = ("ghcr.io",)
 JOB_LABEL = "nemar.job"
 # ... and the runner that started it (`NEMAR_RUNNER_LABEL`): a sweep selects on both.
 RUNNER_LABEL = "nemar.runner"
-# Engines refused for now: Podman's site-wide containers.conf `volumes` and `devices` and its
-# mounts.conf entries reach every container, and the launcher can neither disable nor detect them.
-# The Podman code paths and their tests stay, behind this refusal; a later step lifts it once those
-# entries have been inspected on a real rootless Podman host. Empty it to run them.
-UNSUPPORTED_ENGINES = ("podman",)
+# Engines refused before any engine call (`refuse_unsupported`). Podman left it once its one verified
+# path existed (the prevention of `Prevention` and the check of `check_container`); a Podman call made
+# any other way is refused by `Engine` itself, before anything runs.
+UNSUPPORTED_ENGINES: tuple[str, ...] = ()
+PODMAN = "podman"
+# Podman's configuration, shut out on every call (docs/launcher.md, "Podman"): `CONTAINERS_CONF` names
+# an empty file the caller owns, so no `containers.conf` of the site or the user is read; the global
+# `--default-mounts-file` names an empty file, so no `mounts.conf` is read; `--hooks-dir` names an empty
+# directory the caller owns, so the built-in hooks directory is not read either.
+PREVENTION_DIR = "podman"
+PREVENTION_CONF = "containers.conf"
+PREVENTION_HOOKS = "hooks.d"
+DEFAULT_MOUNTS_FILE = "/dev/null"
+ENV_CONTAINERS_CONF = "CONTAINERS_CONF"
+ENV_HOME = "HOME"
+ENV_RUNTIME_DIR = "XDG_RUNTIME_DIR"
+# How long Podman may take to create and to initialize a container whose image is present, and the
+# most the launcher reads of `container inspect` and of the OCI configuration (`config.json`).
+CREATE_SECONDS = 120
+INIT_SECONDS = 120
+INSPECT_MAX_BYTES = 1 << 20
+OCI_CONFIG_MAX_BYTES = 1 << 20
 _SCHEME = "docker://"
 _CONTROLLERS = ("cpu", "memory", "pids")
 # The lowest CPU weight an engine takes (the kernel's own minimum): the smallest share among the
@@ -155,6 +191,168 @@ def refuse_unsupported(engine: str, log: Log | None = None) -> None:
         if log is not None:
             log.error("{}_unsupported".format(engine))
         raise _refused("runtime_unusable", "this engine is not supported yet")
+
+
+# ---- Podman: its configuration shut out ----------------------------------------------------------
+
+
+class Prevention(NamedTuple):
+    """What every Podman call is given, so that no site or user ``containers.conf``, no ``mounts.conf``
+    and no OCI hook applies: ``conf`` is the empty file ``CONTAINERS_CONF`` names, ``hooks`` the empty
+    directory ``--hooks-dir`` names (both under the caller's own ``podman`` directory), ``home`` the
+    account's home directory from the password database (never a job's ``home``: the launcher and the
+    runner share the account's one rootless store) and ``runtime_dir`` the user's checked
+    ``XDG_RUNTIME_DIR``."""
+
+    conf: str
+    hooks: str
+    home: str
+    runtime_dir: str
+
+    def flags(self) -> list[str]:
+        """The global flags, before the command: no ``mounts.conf``, no hooks directory but ours."""
+        return ["--default-mounts-file=" + DEFAULT_MOUNTS_FILE, "--hooks-dir=" + self.hooks]
+
+
+def _podman_refused(why: str) -> Failure:
+    return _refused("runtime_unusable", why)
+
+
+def _private_dir(path: str) -> bool:
+    """An absolute path to a directory (not a link) the user owns with mode 0700."""
+    if not os.path.isabs(path):
+        return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == 0o700
+    )
+
+
+def user_runtime_dir(env: Env) -> str | None:
+    """The user's ``XDG_RUNTIME_DIR`` when it is an absolute path to a directory (not a link) the user
+    owns with mode 0700, else None: Podman keeps its run state there, and the launcher and the runner
+    must find the same state."""
+    value = env.get(ENV_RUNTIME_DIR)
+    return value if value and _private_dir(value) else None
+
+
+def account_home() -> str | None:
+    """The account's home directory from the password database, or None."""
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        return None
+    return home if home and os.path.isabs(home) else None
+
+
+def _owned(path: str, kind: int) -> os.stat_result | None:
+    """``lstat`` of ``path`` when it is of ``kind`` (``stat.S_IFREG``, ``stat.S_IFDIR``), not a link,
+    the user's, and not writable by group or others; else None."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_IFMT(info.st_mode) != kind or info.st_uid != os.getuid():
+        return None
+    return None if info.st_mode & 0o022 else info
+
+
+def check_prevention(prevention: Prevention) -> None:
+    """Right before each Podman call: the ``podman`` directory, the empty file and the empty hooks
+    directory are the user's, not links, and empty, and ``XDG_RUNTIME_DIR`` is still the user's with
+    mode 0700. Anything else is ``runtime_unusable``, and nothing runs."""
+    base = os.path.dirname(prevention.conf)
+    conf = _owned(prevention.conf, stat.S_IFREG)
+    ok = (
+        _owned(base, stat.S_IFDIR) is not None
+        and conf is not None
+        and conf.st_size == 0
+        and os.path.dirname(prevention.hooks) == base
+        and _owned(prevention.hooks, stat.S_IFDIR) is not None
+        and _private_dir(prevention.runtime_dir)
+    )
+    if ok:
+        try:
+            ok = not os.listdir(prevention.hooks)
+        except OSError:
+            ok = False
+    if not ok:
+        raise _podman_refused("the engine's configuration could not be shut out")
+
+
+def prepare_prevention(directory: str, env: Env) -> Prevention:
+    """Make ``<directory>/podman/containers.conf`` (empty, mode 0600) and ``<directory>/podman/hooks.d``
+    (empty, mode 0700), without following a link: the ``podman`` directory is opened with
+    ``O_NOFOLLOW`` and must be the user's own before the two are made through its descriptor
+    (``O_CREAT | O_EXCL`` and ``mkdir`` never follow a link either); what already exists is accepted
+    only if ``check_prevention`` passes. ``HOME`` and ``XDG_RUNTIME_DIR`` are read too
+    (``account_home``, ``user_runtime_dir``). ``runtime_unusable`` when any of it cannot be had."""
+    runtime_dir = user_runtime_dir(env)
+    home = account_home()
+    if runtime_dir is None or home is None:
+        raise _podman_refused("the user's runtime directory or home cannot be used")
+    base = os.path.join(directory, PREVENTION_DIR)
+    conf = os.path.join(base, PREVENTION_CONF)
+    hooks = os.path.join(base, PREVENTION_HOOKS)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(base, 0o700)
+        directory_fd = os.open(base, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+        try:
+            if _owned(base, stat.S_IFDIR) is None:
+                raise OSError("not the user's own directory")
+            with contextlib.suppress(FileExistsError):
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+                os.close(os.open(PREVENTION_CONF, flags, 0o600, dir_fd=directory_fd))
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(PREVENTION_HOOKS, 0o700, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        raise _podman_refused("the engine's configuration could not be shut out") from None
+    prevention = Prevention(conf, hooks, home, runtime_dir)
+    check_prevention(prevention)
+    return prevention
+
+
+class Engine(NamedTuple):
+    """The engine binary and, for Podman, its prevention. Every engine call is built by ``argv`` and
+    run with ``environment``: a Podman call without a prevention is refused there, before anything
+    runs, so no Podman call can be made any other way."""
+
+    name: str
+    path: str
+    prevention: Prevention | None = None
+
+    def _prevention(self) -> Prevention | None:
+        if self.name != PODMAN:
+            return None
+        if self.prevention is None:
+            raise _podman_refused("podman runs only with its configuration shut out")
+        return self.prevention
+
+    def argv(self, *args: str) -> list[str]:
+        prevention = self._prevention()
+        return [self.path, *(prevention.flags() if prevention is not None else []), *args]
+
+    def environment(self, env: Env) -> dict[bytes, bytes]:
+        """The engine process's environment: ``run.runtime_environment``'s allowlist; for Podman,
+        checked right before the call (``check_prevention``), with ``HOME``, ``XDG_RUNTIME_DIR`` and
+        ``CONTAINERS_CONF`` set from the prevention and nothing else added."""
+        environment = runtime_environment(env)
+        prevention = self._prevention()
+        if prevention is not None:
+            check_prevention(prevention)
+            environment[ENV_HOME.encode()] = os.fsencode(prevention.home)
+            environment[ENV_RUNTIME_DIR.encode()] = os.fsencode(prevention.runtime_dir)
+            environment[ENV_CONTAINERS_CONF.encode()] = os.fsencode(prevention.conf)
+        return environment
 
 
 def image_reference(job: spec.Spec) -> str:
@@ -207,8 +405,7 @@ def mount_argument(bind: Bind) -> str:
 
 
 def build_argv(
-    engine: str,
-    engine_path: str,
+    engine: Engine,
     job: spec.Spec,
     reference: str,
     name: str,
@@ -218,7 +415,9 @@ def build_argv(
     cpu_shares: bool = False,
     device: Device | None = None,
 ) -> list[str]:
-    """The whole engine command line (see the module docstring for what each flag is for).
+    """The whole engine command line (see the module docstring for what each flag is for): Docker's
+    ``run``, or Podman's ``create`` (with the prevention's global flags first), which ``create_verified``
+    runs and ``start_argv`` starts once the container's OCI configuration has been checked.
 
     ``cpu_shares`` is what ``preflight`` found: True only when the engine can apply CPU shares, and
     then ``--cpu-shares 2`` follows ``--cpus``. ``device`` is the runner's decision for a GPU job, if
@@ -229,8 +428,7 @@ def build_argv(
     uid, gid = current_user()
     memory = "{}m".format(limits.memory_mb)
     argv = [
-        engine_path,
-        "run",
+        "create" if engine.name == PODMAN else "run",
         "--name",
         name,
         "--label",
@@ -242,7 +440,7 @@ def build_argv(
         "--user",
         "{}:{}".format(uid, gid),
     ]
-    if engine == "podman":
+    if engine.name == PODMAN:
         # Rootless Podman maps the user to a sub-user id unless told to keep it, and a sub-user
         # could not write the bind directories. The namespaces, the host environment, the tmpfs and
         # the image volumes are pinned so that the site's containers.conf cannot widen the run.
@@ -265,10 +463,10 @@ def build_argv(
         "--workdir",
         CONTAINER_WORK,
     ]
-    if engine == "docker":  # Podman's documentation does not say that an empty value resets it
+    if engine.name == "docker":  # Podman's documentation does not say that an empty value resets it
         argv += ["--entrypoint", ""]
     argv.append("--no-healthcheck")
-    if engine == "docker":
+    if engine.name == "docker":
         # No daemon-side copy of the job's standard output: without `--rm` a container whose launcher
         # was killed stays (stopped) until the runner's sweep, and its log would stay with it. The
         # attached `run` still streams the output to the launcher, and `container inspect` is unaffected.
@@ -302,26 +500,42 @@ def build_argv(
         argv += ["--env", "{}={}".format(variable, value)]
     argv.append(reference)
     argv += entry_argv(job)
-    return argv
+    return engine.argv(*argv)
 
 
 def _run(
-    argv: list[str],
+    engine: Engine,
+    args: list[str],
     env: Env,
     seconds: float,
     stop: threading.Event | None = None,
     capture: bool = False,
+    limit: int | None = None,
+) -> tuple[int | None, bytes]:
+    """Run ``<engine> args`` (``Engine.argv``, with ``Engine.environment``, which refuses a Podman
+    call without its prevention before anything runs): see ``_run_argv``."""
+    return _run_argv(engine.argv(*args), engine.environment(env), seconds, stop, capture, limit)
+
+
+def _run_argv(
+    argv: list[str],
+    environment: dict[bytes, bytes],
+    seconds: float,
+    stop: threading.Event | None = None,
+    capture: bool = False,
+    limit: int | None = None,
 ) -> tuple[int | None, bytes]:
     """Run an engine command with no input and no stderr: (exit status, standard output if asked).
 
     The status is None when the command could not start or did not finish in ``seconds`` (it is
-    killed, with its group). A set ``stop`` event kills it at once and raises ``Stopped``. The
-    engine's own words are never copied anywhere: they can hold a registry's reply."""
+    killed, with its group), and when ``limit`` is set and the output is longer. A set ``stop`` event
+    kills it at once and raises ``Stopped``. The engine's own words are never copied anywhere: they
+    can hold a registry's reply."""
     sink = tempfile.TemporaryFile() if capture else None  # noqa: SIM115
     try:
         child = subprocess.Popen(
             argv,
-            env=runtime_environment(env),
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=sink if sink is not None else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -351,7 +565,9 @@ def _run(
         output = b""
         if sink is not None and status is not None:
             sink.seek(0)
-            output = sink.read()
+            output = sink.read() if limit is None else sink.read(limit + 1)
+            if limit is not None and len(output) > limit:
+                return None, b""
         return status, output
     finally:
         if sink is not None:
@@ -377,8 +593,8 @@ class Assessment(NamedTuple):
     cpu_shares: bool = False
 
 
-def info_argv(engine: str, engine_path: str) -> list[str]:
-    return [engine_path, "info", "--format", "{{json .}}" if engine == "docker" else "json"]
+def info_args(engine: str) -> list[str]:
+    return ["info", "--format", "{{json .}}" if engine == "docker" else "json"]
 
 
 def parse_info(status: int | None, output: bytes) -> dict[str, Any] | None:
@@ -412,7 +628,9 @@ def assess(engine: str, info: dict[str, Any]) -> Assessment:
         cpus = host.get("cpus")
         swap = True
         shares = host.get("cgroupVersion") == "v2" and "cpu" in controllers
-        mode = True
+        security = host.get("security")
+        # Podman is supported rootless only (docs/launcher.md, "Podman").
+        mode = isinstance(security, dict) and security.get("rootless") is True
     count = cpus if isinstance(cpus, int) and not isinstance(cpus, bool) and cpus >= 1 else None
     return Assessment(mode, limits and count is not None, count, swap, shares)
 
@@ -422,17 +640,25 @@ def engine_preflight(engine_path: str, engine_name: str) -> tuple[bool, bool]:
     ``podman``), for a runner's ``doctor``: a thin public wrapper over what ``preflight`` checks.
 
     ``limits_enforceable`` is False for a missing controller and for an engine that does not say its
-    CPU count. ``mode_accepted`` is False for rootless Docker, Docker with user-namespace remapping
-    and a launcher running as root, the modes the launcher refuses. It never raises: an engine that cannot be run, does not answer, or answers with
-    anything but the document asked for is ``(False, False)``; so is an engine on
-    ``UNSUPPORTED_ENGINES`` (Podman, for now), which is not run at all. The only thing it runs is the engine's
-    read-only ``info``."""
+    CPU count. ``mode_accepted`` is False for rootless Docker, Docker with user-namespace remapping,
+    a Podman that is not rootless and a launcher running as root, the modes the launcher refuses. It
+    never raises: an engine that cannot be run, does not answer, or answers with anything but the
+    document asked for is ``(False, False)``; so is an engine on ``UNSUPPORTED_ENGINES``, which is not
+    run at all, and a Podman whose configuration cannot be shut out (``prepare_prevention``, in a
+    private temporary directory removed after the call), which is not run either. The only thing it
+    runs is the engine's read-only ``info``, for Podman with the prevention of every Podman call."""
     try:
         if engine_name not in ENGINE_RUNTIMES or engine_name in UNSUPPORTED_ENGINES:
             return False, False
-        status, output = _run(
-            info_argv(engine_name, engine_path), Env(), INFO_SECONDS, capture=True
-        )
+        env = Env()
+        directory = tempfile.mkdtemp(prefix="nemar-preflight-") if engine_name == PODMAN else None
+        try:
+            prevention = None if directory is None else prepare_prevention(directory, env)
+            engine = Engine(engine_name, engine_path, prevention)
+            status, output = _run(engine, info_args(engine_name), env, INFO_SECONDS, capture=True)
+        finally:
+            if directory is not None:
+                shutil.rmtree(directory, ignore_errors=True)
         info = parse_info(status, output)
         if info is None:
             return False, False
@@ -443,7 +669,7 @@ def engine_preflight(engine_path: str, engine_name: str) -> tuple[bool, bool]:
 
 
 def preflight(
-    engine: str, engine_path: str, limits: Limits, env: Env, stop: threading.Event, log: Log
+    engine: Engine, limits: Limits, env: Env, stop: threading.Event, log: Log
 ) -> Assessment:
     """Before an image is pulled or user code runs: prove this launcher and engine can enforce what
     the job needs. Every refusal is a platform detail (refunded), none is the submitter's. Returns
@@ -456,24 +682,24 @@ def preflight(
     * Docker: not rootless and without user-namespace remapping (``SecurityOptions`` names
       ``rootless`` or ``userns``: the user's sub-user cannot write the bind directories), and ``MemoryLimit``, ``CpuCfsQuota`` and ``PidsLimit`` are all true;
       without a controller the daemon drops the flag with a warning and the job runs unlimited;
-    * Podman: cgroup v2 with the ``cpu``, ``memory`` and ``pids`` controllers available to it (a
-      rootless Podman on cgroup v1 ignores the limits);
+    * Podman: rootless (``host.security.rootless``), and cgroup v2 with the ``cpu``, ``memory`` and
+      ``pids`` controllers available to it (a rootless Podman on cgroup v1 ignores the limits);
     * ``NEMAR_CPUS`` is at most the engine's CPU count (above it the engine refuses to start, which
       the user would otherwise be charged for): ``invalid_spec``.
 
     Not being able to apply CPU shares is no refusal: the job runs with the default CPU weight and the
     log says so (``--cpu-shares`` on an engine that cannot would be an error or ignored).
     """
-    refuse_unsupported(engine, log)
+    refuse_unsupported(engine.name, log)
     if current_user()[0] == 0:
         raise _refused("runtime_unusable", "the launcher is running as root")
-    status, output = _run(info_argv(engine, engine_path), env, INFO_SECONDS, stop, capture=True)
+    status, output = _run(engine, info_args(engine.name), env, INFO_SECONDS, stop, capture=True)
     info = parse_info(status, output)
     if info is None:
         raise _refused("runtime_unusable", "the engine did not answer")
-    found = assess(engine, info)
+    found = assess(engine.name, info)
     if not found.mode:
-        raise _refused("runtime_unusable", "this Docker mode is not supported")
+        raise _refused("runtime_unusable", "this engine mode is not supported")
     if not found.limits:
         raise _refused("runtime_unusable", "the engine cannot enforce the limits")
     if not found.swap:
@@ -497,9 +723,7 @@ def _volumes_declared(output: bytes) -> bool:
     return bool(volumes)
 
 
-def ensure_image(
-    engine_path: str, reference: str, env: Env, stop: threading.Event, log: Log
-) -> None:
+def ensure_image(engine: Engine, reference: str, env: Env, stop: threading.Event, log: Log) -> None:
     """Make the image present locally and prove it declares no volume.
 
     ``image inspect`` first, and only if that finds nothing a ``pull``. The engine verifies the
@@ -509,33 +733,421 @@ def ensure_image(
     a ``VOLUME`` is ``image_missing`` too: the engine would mount a writable volume that is none of
     the declared binds. A set ``stop`` event (SIGTERM) ends any of these at once with ``Stopped``.
     """
-    inspect = [engine_path, "image", "inspect", "--format", "{{json .Config.Volumes}}", reference]
-    status, output = _run(inspect, env, INSPECT_SECONDS, stop, capture=True)
+    inspect = ["image", "inspect", "--format", "{{json .Config.Volumes}}", reference]
+    status, output = _run(engine, inspect, env, INSPECT_SECONDS, stop, capture=True)
     if status == 0:
         log.info("image: present locally")
     else:
         log.info("image: pulling")
-        pulled, _ = _run([engine_path, "pull", "--quiet", reference], env, PULL_SECONDS, stop)
+        pulled, _ = _run(engine, ["pull", "--quiet", reference], env, PULL_SECONDS, stop)
         if pulled != 0:
             raise Failure("runtime_error", "image_missing", "the image could not be pulled")
         log.info("image: pulled")
-        status, output = _run(inspect, env, INSPECT_SECONDS, stop, capture=True)
+        status, output = _run(engine, inspect, env, INSPECT_SECONDS, stop, capture=True)
         if status != 0:
             raise Failure("runtime_error", "image_missing", "the image cannot be inspected")
     if _volumes_declared(output):
         raise Failure("runtime_error", "image_missing", "the image declares volumes")
 
 
-def oom_killed(engine_path: str, name: str, env: Env) -> bool:
+def oom_killed(engine: Engine, name: str, env: Env) -> bool:
     """Whether the engine says the kernel killed the (stopped, not yet removed) container for memory:
     ``State.OOMKilled``. False when the engine will not say."""
-    argv = [engine_path, "container", "inspect", "--format", "{{.State.OOMKilled}}", name]
-    status, output = _run(argv, env, CONTAINER_INSPECT_SECONDS, capture=True)
+    args = ["container", "inspect", "--format", "{{.State.OOMKilled}}", name]
+    try:
+        status, output = _run(engine, args, env, CONTAINER_INSPECT_SECONDS, capture=True)
+    except Failure:  # a Podman whose prevention no longer holds is not asked
+        return False
     return status == 0 and output.strip() == b"true"
 
 
-def remove_container(engine_path: str, name: str, env: Env) -> None:
+def remove_container(engine: Engine, name: str, env: Env) -> None:
     """After the run, however it ended: remove the named container and its anonymous volumes if it is
     still there (the container has no ``--rm``, and a client killed by SIGKILL leaves its container
-    running). Never raises; "no such container" is an answer, and is ignored."""
-    _run([engine_path, "rm", "--force", "--volumes", name], env, REMOVE_SECONDS)
+    running). Never raises; "no such container" is an answer, and is ignored. A Podman whose
+    prevention no longer holds is not asked: the runner's labeled removal is what removes it then."""
+    with contextlib.suppress(Failure):
+        _run(engine, ["rm", "--force", "--volumes", name], env, REMOVE_SECONDS)
+
+
+# ---- Podman: the OCI configuration the runtime was given, checked before the container starts -----
+
+# Every option a declared bind may carry in the OCI configuration (``ro`` exactly when read-only).
+DECLARED_BIND_OPTIONS = frozenset(
+    ("bind", "rbind", "rprivate", "private", "ro", "rw", "nosuid", "nodev", "noexec")
+)
+# The source rules of the allowlist that are not a literal: a regular file directly in one of the
+# container's own directories (``StaticDir``, or the run directory that holds ``HostsPath``), and the
+# container's own ``shm`` directory (``StaticDir`` plus ``/shm``), each compared after resolving links.
+OWN_FILE = "<own file>"
+OWN_SHM = "<own shm>"
+_FILE_OPTIONS = frozenset(("bind", "rprivate", "ro", "nosuid", "noexec", "nodev"))
+_PTS_OPTIONS = frozenset(("nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"))
+
+
+class AllowedMount(NamedTuple):
+    """One row of the engine-default allowlist: an entry matches it by destination, type, source rule
+    and option set (compared as sets: order and repeats ignored; ``options`` lists the sets accepted)."""
+
+    destination: str
+    type: str
+    source: str
+    options: tuple[frozenset[str], ...]
+    required: bool
+
+
+# The mounts Podman 4.9.3 adds, rootless, under the launcher's flags on cgroup v2, and nothing else
+# (docs/launcher.md, "Podman", has the table beside Docker's equivalents; the fixture
+# tests/launcher/fixtures/podman-4.9.3-clean-config.json pins it). A required row must be present.
+ENGINE_DEFAULTS: tuple[AllowedMount, ...] = (
+    AllowedMount("/proc", "proc", "proc", (frozenset(("nosuid", "noexec", "nodev")),), True),
+    AllowedMount(
+        "/dev",
+        "tmpfs",
+        "tmpfs",
+        (frozenset(("nosuid", "strictatime", "mode=755", "size=65536k", "ro")),),
+        True,
+    ),
+    # `gid=5`, or `rprivate` in its place when fewer than five group ids are mapped
+    AllowedMount(
+        "/dev/pts",
+        "devpts",
+        "devpts",
+        (_PTS_OPTIONS | {"gid=5"}, _PTS_OPTIONS | {"rprivate"}),
+        True,
+    ),
+    AllowedMount(
+        "/dev/mqueue", "mqueue", "mqueue", (frozenset(("nosuid", "noexec", "nodev")),), True
+    ),
+    AllowedMount("/dev/shm", "bind", OWN_SHM, (_FILE_OPTIONS,), True),  # noqa: S108 - a container path
+    AllowedMount("/sys", "sysfs", "sysfs", (frozenset(("nosuid", "noexec", "nodev", "ro")),), True),
+    AllowedMount(
+        "/sys/fs/cgroup",
+        "cgroup",
+        "cgroup",
+        (frozenset(("rprivate", "nosuid", "noexec", "nodev", "relatime", "ro")),),
+        True,
+    ),
+    AllowedMount("/etc/hosts", "bind", OWN_FILE, (_FILE_OPTIONS,), False),
+    AllowedMount("/etc/hostname", "bind", OWN_FILE, (_FILE_OPTIONS,), False),
+    AllowedMount("/etc/resolv.conf", "bind", OWN_FILE, (_FILE_OPTIONS,), False),
+    AllowedMount("/etc/passwd", "bind", OWN_FILE, (_FILE_OPTIONS,), False),
+    AllowedMount("/etc/group", "bind", OWN_FILE, (_FILE_OPTIONS,), False),
+    AllowedMount("/run/.containerenv", "bind", OWN_FILE, (_FILE_OPTIONS,), False),
+)
+_ROWS = {row.destination: row for row in ENGINE_DEFAULTS}
+
+
+class Refusal(NamedTuple):
+    """Why a container's configuration is refused: one of ``config_unreadable``, ``hook``,
+    ``extra_device``, ``declared_bind``, ``extra_mount``, ``missing_default`` and
+    ``duplicate_mount``, and the container path it is about (``-`` when there is none)."""
+
+    reason: str
+    destination: str
+
+
+class Resolved(NamedTuple):
+    """A path as the engine's user namespace sees it: its real path and ``file``, ``directory`` or
+    ``other``."""
+
+    real: str
+    kind: str
+
+
+class ContainerDirs(NamedTuple):
+    """From ``container inspect``: the OCI configuration's path, ``StaticDir``, and the run directory
+    that holds ``HostsPath``."""
+
+    config: str
+    static: str
+    run: str
+
+
+class _Mount(NamedTuple):
+    destination: str
+    type: str
+    source: str
+    options: frozenset[str]
+
+
+def container_dirs(inspected: Any) -> ContainerDirs | None:
+    """The container's directories from its ``container inspect`` document (an object, or a list of
+    one), or None: each path absolute and normalized, and ``OCIConfigPath`` exactly ``StaticDir``
+    plus ``/config.json``."""
+    if isinstance(inspected, list) and len(inspected) == 1:
+        inspected = inspected[0]
+    if not isinstance(inspected, dict):
+        return None
+    values = [inspected.get(key) for key in ("OCIConfigPath", "StaticDir", "HostsPath")]
+    if not all(
+        isinstance(value, str) and os.path.isabs(value) and os.path.normpath(value) == value
+        for value in values
+    ):
+        return None
+    config, static, hosts = values
+    if config != os.path.join(static, "config.json"):
+        return None
+    return ContainerDirs(config, static, os.path.dirname(hosts))
+
+
+def _mounts(document: Any) -> list[_Mount] | None:
+    """The ``mounts`` of an OCI configuration, or None when it is not a list of well-formed entries."""
+    if not isinstance(document, dict):
+        return None
+    entries = document.get("mounts")
+    if not isinstance(entries, list):
+        return None
+    found: list[_Mount] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        destination = entry.get("destination")
+        kind = entry.get("type", "")
+        source = entry.get("source", "")
+        options = entry.get("options", [])
+        if (
+            not isinstance(destination, str)
+            or not isinstance(kind, str)
+            or not isinstance(source, str)
+            or not isinstance(options, list)
+            or not all(isinstance(option, str) for option in options)
+        ):
+            return None
+        found.append(_Mount(destination, kind, source, frozenset(options)))
+    return found
+
+
+def namespace_paths(inspected: Any, document: Any) -> list[str]:
+    """The paths ``check_container`` needs resolved in the engine's user namespace: the container's
+    two directories, and the source of every bind at a destination of the allowlist whose source rule
+    is the container's own (``OWN_FILE``, ``OWN_SHM``). Empty when either document is not readable."""
+    dirs = container_dirs(inspected)
+    mounts = _mounts(document)
+    if dirs is None or mounts is None:
+        return []
+    paths = [dirs.static, dirs.run]
+    for mount in mounts:
+        row = _ROWS.get(mount.destination)
+        if (
+            row is not None
+            and row.source in (OWN_FILE, OWN_SHM)
+            and mount.type == "bind"
+            and os.path.isabs(mount.source)
+            and mount.source not in paths
+        ):
+            paths.append(mount.source)
+    return paths
+
+
+def _declared_bind_holds(mount: _Mount, bind: Bind) -> bool:
+    """Type ``bind``, the source's real path the launcher's own, ``ro`` exactly when declared
+    read-only (and never beside ``rw``), and no option outside ``DECLARED_BIND_OPTIONS``."""
+    return (
+        mount.type == "bind"
+        and os.path.realpath(mount.source) == os.path.realpath(bind.source)
+        and mount.options <= DECLARED_BIND_OPTIONS
+        and ("ro" in mount.options) == bind.read_only
+        and not {"ro", "rw"} <= mount.options
+    )
+
+
+def _default_holds(
+    mount: _Mount, row: AllowedMount, dirs: ContainerDirs, resolved: dict[str, Resolved]
+) -> bool:
+    if mount.type != row.type or mount.options not in row.options:
+        return False
+    if row.source not in (OWN_FILE, OWN_SHM):
+        return mount.source == row.source
+    found = resolved.get(mount.source)
+    static = resolved.get(dirs.static)
+    run_dir = resolved.get(dirs.run)
+    if found is None or static is None or run_dir is None:
+        return False
+    if row.source == OWN_SHM:
+        return found.kind == "directory" and found.real == os.path.join(static.real, "shm")
+    return found.kind == "file" and os.path.dirname(found.real) in (static.real, run_dir.real)
+
+
+def check_container(
+    inspected: Any, document: Any, binds: list[Bind], resolved: dict[str, Resolved]
+) -> Refusal | None:
+    """The check of a created and initialized Podman container, before it starts: None when its OCI
+    configuration (``document``, the ``config.json`` the runtime was given) holds exactly the
+    declared ``binds`` and the engine defaults of ``ENGINE_DEFAULTS``, and no device and no hook.
+    ``inspected`` is its ``container inspect`` document and ``resolved`` what the engine's user
+    namespace says of ``namespace_paths``. The first failure is the refusal, in this order:
+
+    * ``config_unreadable``: either document is not what it should be (``container_dirs``,
+      ``_mounts``), or ``linux`` is not an object;
+    * ``hook``: ``hooks`` is present with a stage that is not empty;
+    * ``extra_device``: ``linux.devices`` is present and not empty;
+    * then each mount entry in the document's order: at a declared bind's destination it must hold
+      as declared (``declared_bind``); at a destination of the allowlist it must match that row
+      (``missing_default`` for a required row, ``extra_mount`` for the others); anywhere else it is
+      an ``extra_mount`` (a configured device, which rootless Podman turns into a bind at its
+      destination, is refused here);
+    * ``duplicate_mount``: a destination appears twice;
+    * ``missing_default``: a required row is absent; ``declared_bind``: a declared bind is absent.
+    """
+    dirs = container_dirs(inspected)
+    mounts = _mounts(document)
+    if dirs is None or mounts is None:
+        return Refusal("config_unreadable", "-")
+    assert isinstance(document, dict)  # `_mounts` read it
+    hooks = document.get("hooks")
+    if hooks is not None and (not isinstance(hooks, dict) or any(hooks.values())):
+        return Refusal("hook", "-")
+    linux = document.get("linux")
+    if linux is not None and not isinstance(linux, dict):
+        return Refusal("config_unreadable", "-")
+    devices = (linux or {}).get("devices")
+    if devices:
+        first = devices[0] if isinstance(devices, list) else None
+        path = first.get("path") if isinstance(first, dict) else None
+        return Refusal("extra_device", path if isinstance(path, str) else "-")
+    declared = {bind.dest: bind for bind in binds}
+    for mount in mounts:
+        bind = declared.get(mount.destination)
+        row = _ROWS.get(mount.destination)
+        if bind is not None:
+            if not _declared_bind_holds(mount, bind):
+                return Refusal("declared_bind", mount.destination)
+        elif row is not None:
+            if not _default_holds(mount, row, dirs, resolved):
+                return Refusal(
+                    "missing_default" if row.required else "extra_mount", mount.destination
+                )
+        else:
+            return Refusal("extra_mount", mount.destination)
+    seen: set[str] = set()
+    for mount in mounts:
+        if mount.destination in seen:
+            return Refusal("duplicate_mount", mount.destination)
+        seen.add(mount.destination)
+    for row in ENGINE_DEFAULTS:
+        if row.required and row.destination not in seen:
+            return Refusal("missing_default", row.destination)
+    for bind in binds:
+        if bind.dest not in seen:
+            return Refusal("declared_bind", bind.dest)
+    return None
+
+
+_KINDS = {b"regular file": "file", b"regular empty file": "file", b"directory": "directory"}
+
+
+def resolve_in_namespace(
+    engine: Engine, paths: list[str], env: Env, stop: threading.Event | None = None
+) -> dict[str, Resolved]:
+    """What the engine's user namespace says of each path (``podman unshare realpath -e -z`` and
+    ``podman unshare stat --printf '%F\\0'``): the container's own directories belong to a
+    subordinate id, which the user cannot read from outside. Empty when either call fails or answers
+    with another number of entries: nothing resolved, so nothing that needed it is allowed."""
+    if not paths:
+        return {}
+    args = ["unshare", "realpath", "-e", "-z", "--", *paths]
+    status, output = _run(engine, args, env, INSPECT_SECONDS, stop, capture=True, limit=1 << 20)
+    reals = output.split(b"\0")[:-1] if status == 0 else []
+    if len(reals) != len(paths):
+        return {}
+    args = ["unshare", "stat", "--printf", "%F\\0", "--", *[os.fsdecode(r) for r in reals]]
+    status, output = _run(engine, args, env, INSPECT_SECONDS, stop, capture=True, limit=1 << 20)
+    kinds = output.split(b"\0")[:-1] if status == 0 else []
+    if len(kinds) != len(paths):
+        return {}
+    return {
+        path: Resolved(os.fsdecode(real), _KINDS.get(kind, "other"))
+        for path, real, kind in zip(paths, reals, kinds)
+    }
+
+
+def _shown(destination: str) -> str:
+    """A container path for the log: printable ASCII without spaces, at most 200 characters."""
+    return "".join(c for c in destination if "!" <= c <= "~")[:200] or "-"
+
+
+def podman_refusal(
+    engine: Engine, name: str, binds: list[Bind], env: Env, stop: threading.Event | None = None
+) -> Refusal | None:
+    """Read what the runtime was given for the initialized container ``name`` and check it
+    (``check_container``): ``container inspect``, then ``podman unshare cat -- <OCIConfigPath>`` (the
+    file belongs to a subordinate id), at most ``OCI_CONFIG_MAX_BYTES``, then the namespace's view of
+    the container's own paths. What was read is what runs: the runtime read this same file during
+    ``init``, and ``start`` does not write it again."""
+    args = ["container", "inspect", "--format", "{{json .}}", name]
+    status, output = _run(
+        engine, args, env, INSPECT_SECONDS, stop, capture=True, limit=INSPECT_MAX_BYTES
+    )
+    try:
+        inspected: Any = json.loads(output) if status == 0 else None
+    except ValueError:
+        inspected = None
+    dirs = container_dirs(inspected)
+    if dirs is None:
+        return Refusal("config_unreadable", "-")
+    args = ["unshare", "cat", "--", dirs.config]
+    status, output = _run(
+        engine, args, env, INSPECT_SECONDS, stop, capture=True, limit=OCI_CONFIG_MAX_BYTES
+    )
+    try:
+        document: Any = json.loads(output) if status == 0 else None
+    except ValueError:
+        document = None
+    if not isinstance(document, dict):
+        return Refusal("config_unreadable", "-")
+    resolved = resolve_in_namespace(engine, namespace_paths(inspected, document), env, stop)
+    return check_container(inspected, document, binds, resolved)
+
+
+def verify_podman(
+    engine: Engine,
+    name: str,
+    binds: list[Bind],
+    env: Env,
+    stop: threading.Event | None,
+    log: Log,
+) -> None:
+    """The check before an initialized Podman container starts (``podman_refusal``). A refusal is
+    logged as ``podman_config_refused reason=<word> destination=<container path>`` (never a host
+    path), the container is removed, and the launch ends as ``runtime_unusable`` before any user
+    code ran."""
+    refusal = podman_refusal(engine, name, binds, env, stop)
+    if refusal is None:
+        log.info("podman: the OCI configuration holds the declared binds and engine defaults only")
+        return
+    log.error(
+        "podman_config_refused reason={} destination={}".format(
+            refusal.reason, _shown(refusal.destination)
+        )
+    )
+    remove_container(engine, name, env)
+    raise _refused("runtime_unusable", "the container's configuration is not the one declared")
+
+
+def create_verified(
+    engine: Engine,
+    argv: list[str],
+    name: str,
+    binds: list[Bind],
+    env: Env,
+    stop: threading.Event,
+    log: Log,
+) -> None:
+    """Podman only: ``create`` (``argv``, from ``build_argv``), ``init``, then ``verify_podman``.
+    A ``create`` or ``init`` that fails is ``runtime_unusable`` before any user code ran (an OCI hook
+    would run during ``init``, which is why the prevention, not this check, is the guard for hooks);
+    the caller removes the container whatever happened."""
+    status, _ = _run_argv(argv, engine.environment(env), CREATE_SECONDS, stop)
+    if status != 0:
+        raise _refused("runtime_unusable", "the engine could not create the container")
+    status, _ = _run(engine, ["init", name], env, INIT_SECONDS, stop)
+    if status != 0:
+        raise _refused("runtime_unusable", "the engine could not initialize the container")
+    verify_podman(engine, name, binds, env, stop, log)
+
+
+def start_argv(engine: Engine, name: str) -> list[str]:
+    """Podman's attached start of the verified container: it proxies signals to the container as
+    ``run`` does, and exits with the entry's own status."""
+    return engine.argv("start", "--attach", name)

@@ -61,13 +61,6 @@ class Engine:
         return call["argv"]
 
 
-@pytest.fixture(autouse=True)
-def podman_code_paths_are_tested_behind_the_refusal(monkeypatch):
-    """Podman is refused by default (`runtime.UNSUPPORTED_ENGINES`); its argv and checks stay tested
-    here with the refusal lifted. `test_runtime_podman_refused.py` tests the refusal itself."""
-    monkeypatch.setattr(runtime, "UNSUPPORTED_ENGINES", ())
-
-
 @pytest.fixture(params=["docker", "podman"])
 def engine(request, rig):
     return Engine(rig, request.param, present=True)
@@ -83,8 +76,18 @@ def entry_spec(rig, **overrides):
     return rig.spec(runtime="python", entry="run.py", bundle=bundle, **overrides)
 
 
+def runtime_dir(rig) -> str:
+    """A user runtime directory as Podman needs it: the user's own, mode 0700."""
+    path = rig.tmp / "xdg-runtime"
+    path.mkdir(exist_ok=True)
+    path.chmod(0o700)
+    return str(path)
+
+
 def launch(rig, engine, job=None, **extra):
     environment = {"NEMAR_CONTAINER_RUNTIME": engine.name, **LIMITS, **extra}
+    if engine.name == "podman":
+        environment.setdefault("XDG_RUNTIME_DIR", runtime_dir(rig))
     environment = {k: v for k, v in environment.items() if v is not None}
     return rig.launch(job if job is not None else entry_spec(rig), **environment)
 
@@ -138,7 +141,7 @@ def test_the_engine_arguments_are_exactly_these(rig, engine):
     assert str(rig.scratch) in sources["/code"]  # code and data stage in node-local scratch,
     assert str(rig.out) not in sources["/code"] + sources["/data/nm000104"] + sources["/tmp"]
     expected = [
-        "run",
+        "run" if engine.name == "docker" else "create",
         "--name",
         name,
         "--label",
@@ -656,7 +659,7 @@ def test_a_cancel_ends_a_pull_at_once(rig):
     started = time.monotonic()
     with pytest.raises(Stopped):
         runtime.ensure_image(
-            str(rig.bin_dir / "docker"),
+            runtime.Engine("docker", str(rig.bin_dir / "docker")),
             REFERENCE,
             Env({b"PATH": str(rig.bin_dir).encode()}),
             stop,
@@ -672,7 +675,11 @@ def test_an_engine_that_cannot_be_started_cannot_pull_an_image(tmp_path):
     broken.chmod(0o755)
     with pytest.raises(Failure) as caught:
         runtime.ensure_image(
-            str(broken), REFERENCE, Env({b"PATH": b"/usr/bin"}), threading.Event(), Log(None)
+            runtime.Engine("docker", str(broken)),
+            REFERENCE,
+            Env({b"PATH": b"/usr/bin"}),
+            threading.Event(),
+            Log(None),
         )
     assert caught.value.detail == "image_missing"
 
@@ -770,8 +777,7 @@ def test_build_argv_has_one_mount_per_bind_in_order_and_the_image_last_before_th
     job = parsed_spec(command=["echo", "x"], args=["y"])
     binds = [run.Bind("/w", "/work", False), run.Bind("/c", "/code", True)]
     argv = runtime.build_argv(
-        "docker",
-        "/bin/docker",
+        runtime.Engine("docker", "/bin/docker"),
         job,
         "r@sha256:" + "0" * 64,
         "n",
@@ -792,8 +798,7 @@ def test_build_argv_has_one_mount_per_bind_in_order_and_the_image_last_before_th
 def test_build_argv_refuses_a_run_without_a_memory_size():
     with pytest.raises(Failure) as caught:
         runtime.build_argv(
-            "docker",
-            "/bin/docker",
+            runtime.Engine("docker", "/bin/docker"),
             parsed_spec(),
             REFERENCE,
             "n",
@@ -807,8 +812,7 @@ def test_build_argv_refuses_a_run_without_a_memory_size():
 def build(cpu_shares=None):
     extra = {} if cpu_shares is None else {"cpu_shares": cpu_shares}
     return runtime.build_argv(
-        "docker",
-        "/bin/docker",
+        runtime.Engine("docker", "/bin/docker"),
         parsed_spec(),
         REFERENCE,
         "n",

@@ -170,21 +170,34 @@ def _do_work(
         engine = runtime.selected(env)
         runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
         sif = ""
+        handle: runtime.Engine | None = None
         if engine == runtime.APPTAINER:
             runtime_name, runtime_path = run.find_runtime(env)
             sif = run.resolve_sif(job, env)
+            state.runtime_version = run.runtime_version(
+                runtime_path, env, platform.python_version()
+            )
         else:  # Docker or Podman: the image comes from the registry, there is no image file
             runtime_name, runtime_path = run.find_runtime(env, (engine,))
-        state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
+            # Podman's configuration is shut out before its first call, `--version` included
+            prevention = (
+                runtime.prepare_prevention(scratch, env) if engine == runtime.PODMAN else None
+            )
+            handle = runtime.Engine(engine, runtime_path, prevention)
+            state.runtime_version = run.runtime_version(
+                runtime_path,
+                env,
+                platform.python_version(),
+                handle.argv("--version"),
+                handle.environment(env),
+            )
         reference = runtime.image_reference(job)
         engine_found: runtime.Assessment | None = None
-        if engine != runtime.APPTAINER:  # like the image file: before anything is fetched
+        if handle is not None:  # like the image file: before anything is fetched
             assert settings.limits is not None  # read_settings refuses a launch without them
             runtime.check_registry(reference, env)
-            engine_found = runtime.preflight(
-                engine, runtime_path, settings.limits, env, terminator.stop, log
-            )
-            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
+            engine_found = runtime.preflight(handle, settings.limits, env, terminator.stop, log)
+            runtime.ensure_image(handle, reference, env, terminator.stop, log)
 
         code_dir: str | None = None
         started = time.monotonic()
@@ -217,7 +230,7 @@ def _do_work(
 
         binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
         container: str | None = None
-        if engine == runtime.APPTAINER:
+        if handle is None:
             run.check_bind_sources(binds)
             argv = run.build_argv(
                 runtime_path,
@@ -236,8 +249,7 @@ def _do_work(
             container = runtime.container_name()
             log.info("container: named {}".format(container))
             argv = runtime.build_argv(
-                engine,
-                runtime_path,
+                handle,
                 job,
                 reference,
                 container,
@@ -247,23 +259,37 @@ def _do_work(
                 cpu_shares=engine_found.cpu_shares,
                 device=settings.device,
             )
-        if settings.device is not None:
-            state.device = settings.device  # recorded only for a container that is about to start
-            log.info("device: {} ({})".format(settings.device.device, settings.device.reason))
         oom_check = (
             None
-            if container is None
-            else functools.partial(runtime.oom_killed, runtime_path, container, env)
+            if handle is None or container is None
+            else functools.partial(runtime.oom_killed, handle, container, env)
         )
         started = time.monotonic()
         try:
+            environment: dict[bytes, bytes] | None = None
+            if handle is not None and handle.name == runtime.PODMAN:
+                # create, init and the check of the OCI configuration the runtime was given, before
+                # any user code runs; only then the attached start of that same configuration
+                assert container is not None
+                runtime.create_verified(handle, argv, container, binds, env, terminator.stop, log)
+                argv = runtime.start_argv(handle, container)
+                environment = handle.environment(env)
+            if settings.device is not None:
+                state.device = settings.device  # recorded only for a container about to start
+                log.info("device: {} ({})".format(settings.device.device, settings.device.reason))
             outcome = run.run_container(
-                argv, env, state.layout.work, terminator, log, oom_check=oom_check
+                argv,
+                env,
+                state.layout.work,
+                terminator,
+                log,
+                oom_check=oom_check,
+                environment=environment,
             )
         finally:
             state.phase("run", started)
-            if container is not None:
-                runtime.remove_container(runtime_path, container, env)
+            if handle is not None and container is not None:
+                runtime.remove_container(handle, container, env)
         state.entry_exit_code = outcome.entry_exit_code
         if outcome.failure is not None:
             raise outcome.failure

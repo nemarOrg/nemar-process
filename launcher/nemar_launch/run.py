@@ -142,12 +142,22 @@ def resolve_sif(job: spec.Spec, env: Env) -> str:
     return path
 
 
-def runtime_version(path: str, env: Env, python_version: str) -> str:
-    """Free text for humans: the runtime's own version line and the host Python. Never parsed."""
+def runtime_version(
+    path: str,
+    env: Env,
+    python_version: str,
+    argv: list[str] | None = None,
+    environment: dict[bytes, bytes] | None = None,
+) -> str:
+    """Free text for humans: the runtime's own version line and the host Python. Never parsed.
+
+    ``argv`` and ``environment``, when given, are the engine's own call (Podman's ``--version``
+    carries its prevention, ``runtime.Engine``); otherwise ``<path> --version`` with
+    ``runtime_environment``."""
     try:
         done = subprocess.run(
-            [path, "--version"],
-            env=runtime_environment(env),
+            argv if argv is not None else [path, "--version"],
+            env=environment if environment is not None else runtime_environment(env),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
@@ -714,11 +724,15 @@ def _child_setup(death: Callable[[], None] | None) -> Callable[[], None]:
 
 
 def _spawn(
-    argv: list[str], env: Env, work: str, death: Callable[[], None] | None
+    argv: list[str],
+    env: Env,
+    work: str,
+    death: Callable[[], None] | None,
+    environment: dict[bytes, bytes] | None = None,
 ) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         argv,
-        env=runtime_environment(env),
+        env=environment if environment is not None else runtime_environment(env),
         cwd=work,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
@@ -732,7 +746,13 @@ def _runtime_not_started() -> Failure:
     )
 
 
-def start_container(argv: list[str], env: Env, work: str, log: Log) -> subprocess.Popen[bytes]:
+def start_container(
+    argv: list[str],
+    env: Env,
+    work: str,
+    log: Log,
+    environment: dict[bytes, bytes] | None = None,
+) -> subprocess.Popen[bytes]:
     """Start the container runtime in a session of its own, tied to the launcher's life.
 
     On Linux the kernel signals the child when the launcher dies (``parent_death_signal``), so a
@@ -743,20 +763,23 @@ def start_container(argv: list[str], env: Env, work: str, log: Log) -> subproces
     Only the main thread may call this: the kernel's signal follows the thread that created the
     child, and any other thread can end while the launcher goes on, which would end the container
     with it. ``RuntimeError`` otherwise (a launcher bug, recorded as ``internal_error``).
+
+    ``environment``, when given, is the engine process's environment (Podman's, which carries its
+    prevention); otherwise ``runtime_environment``.
     """
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("the container must be started from the main thread")
     death = parent_death_hook(parent_death_signal(env), os.getpid())
     if death is not None:
         try:
-            return _spawn(argv, env, work, death)
+            return _spawn(argv, env, work, death, environment)
         except subprocess.SubprocessError:  # the prctl failed in the child: nothing has run
             pass
         except OSError:
             raise _runtime_not_started() from None
     log.warning("pdeathsig_unavailable: the container will not follow the launcher if it is killed")
     try:
-        return _spawn(argv, env, work, None)
+        return _spawn(argv, env, work, None, environment)
     except OSError:
         raise _runtime_not_started() from None
 
@@ -780,6 +803,7 @@ def run_container(
     terminator: Terminator,
     log: Log,
     oom_check: Callable[[], bool] | None = None,
+    environment: dict[bytes, bytes] | None = None,
 ) -> Outcome:
     """Start the container, wait for it, and map how it ended (the first failure wins).
 
@@ -799,10 +823,10 @@ def run_container(
     once user code could have run, and refunding 255 would let any entry end itself that way.
     ``runtime_unusable`` is only for a runtime that cannot be started at all or whose preflight
     failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or
-    ``runtime_error`` (detail ``terminated``).
+    ``runtime_error`` (detail ``terminated``). ``environment`` is ``start_container``'s.
     """
     log.info("run: starting the container with {}".format(os.path.basename(argv[0])))
-    child = start_container(argv, env, work, log)
+    child = start_container(argv, env, work, log, environment)
     terminator.attach(child)
     ends = end_time(env)
     killed = False

@@ -31,10 +31,13 @@ from test_runtime_docker import (
 
 
 @pytest.fixture(autouse=True)
-def podman_code_paths_are_tested_behind_the_refusal(monkeypatch):
-    """Podman is refused by default (`runtime.UNSUPPORTED_ENGINES`); its argv and checks stay tested
-    here with the refusal lifted. `test_runtime_podman_refused.py` tests the refusal itself."""
-    monkeypatch.setattr(runtime, "UNSUPPORTED_ENGINES", ())
+def user_runtime_dir(tmp_path, monkeypatch):
+    """`engine_preflight` reads this process's environment: Podman needs the user's runtime directory
+    there (the user's own, mode 0700), which a developer's macOS does not set."""
+    path = tmp_path / "xdg-runtime"
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(path))
 
 
 @pytest.fixture(params=["docker", "podman"])
@@ -107,8 +110,7 @@ def test_a_cancel_ends_the_info_call_at_once(rig, docker):
     started = time.monotonic()
     with pytest.raises(Stopped):
         runtime.preflight(
-            "docker",
-            str(rig.bin_dir / "docker"),
+            runtime.Engine("docker", str(rig.bin_dir / "docker")),
             settings.Limits(1, 64),
             Env({b"PATH": str(rig.bin_dir).encode()}),
             stop,
@@ -554,7 +556,9 @@ def test_the_removal_and_inspect_waits_are_the_termination_grace():
 
 def test_removing_a_container_with_no_engine_never_raises(rig, docker):
     # A binary that does not exist stands for an engine that is gone: the removal returns.
-    runtime.remove_container(str(rig.tmp / "no-such-engine"), "n", Env({b"PATH": b"/usr/bin"}))
+    runtime.remove_container(
+        runtime.Engine("docker", str(rig.tmp / "no-such-engine")), "n", Env({b"PATH": b"/usr/bin"})
+    )
     assert docker.removals() == []
 
 
@@ -646,10 +650,45 @@ def test_the_standin_refuses_what_a_real_engine_would(rig, argv):
     assert standin(rig, "docker", *argv)[1] == 125
 
 
+def podman_standin(rig, *argv, prevention=True, environ=None):
+    """The stand-in under the name ``podman``, given the prevention (flags and environment) or not."""
+    Engine(rig, "podman", present=True)
+    xdg = rig.tmp / "xdg-runtime"
+    xdg.mkdir(mode=0o700, exist_ok=True)
+    base = rig.tmp / "podman"
+    held = runtime.Prevention(
+        str(base / "containers.conf"), str(base / "hooks.d"), str(rig.tmp), str(xdg)
+    )
+    if not base.exists():
+        runtime.prepare_prevention(str(rig.tmp), Env({b"XDG_RUNTIME_DIR": bytes(xdg)}))
+    env = {"PATH": "/usr/bin:/bin", "HOME": held.home, "XDG_RUNTIME_DIR": str(xdg)}
+    env["CONTAINERS_CONF"] = held.conf
+    env.update(environ or {})
+    done = subprocess.run(
+        [str(rig.bin_dir / "podman"), *(held.flags() if prevention else []), *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd="/",
+        env=env,
+    )
+    return done.returncode
+
+
 def test_the_standin_takes_the_podman_only_flags_under_that_name_only(rig):
     flags = with_args(("--userns=keep-id", None), ("--read-only-tmpfs=false", None))
-    assert standin(rig, "podman", *flags)[1] == 0
+    assert podman_standin(rig, "create", *flags[1:]) == 0
     assert standin(rig, "docker", *flags)[1] == 125
+
+
+def test_the_podman_standin_runs_nothing_without_the_prevention_and_never_runs_run(rig):
+    created = with_args(("--userns=keep-id", None))[1:]
+    assert podman_standin(rig, "--version") == 0
+    assert podman_standin(rig, "--version", prevention=False) == 125
+    assert podman_standin(rig, "--version", environ={"CONTAINERS_CONF": "/nonexistent"}) == 125
+    assert podman_standin(rig, "run", *created) == 125
+    (rig.tmp / "podman" / "hooks.d" / "a.json").write_text("{}")
+    assert podman_standin(rig, "--version") == 125  # a hook in the hooks directory
 
 
 def test_the_standin_refuses_a_duplicate_mount_point(rig):

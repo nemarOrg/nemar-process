@@ -32,6 +32,27 @@ What it does (``<rec>`` is the record file baked into the wrapper):
   arguments and values, and the working directory set to the host source of ``--workdir``. A
   command named ``python`` is the interpreter running this file. With ``<rec>.term-in-run`` it first
   sends the launcher a SIGTERM and then exits 143 when the launcher passes it on.
+
+Under the name ``podman`` it is Podman's verified path (docs/launcher.md, "Podman"), and nothing else:
+
+* every call must begin with the global flags ``--default-mounts-file=/dev/null --hooks-dir=<dir>``,
+  ``<dir>`` an existing empty directory, and its environment must name in ``CONTAINERS_CONF`` an
+  existing empty file and hold ``HOME`` and ``XDG_RUNTIME_DIR``; otherwise it exits 125 and does
+  nothing (``<rec>.calls`` still records the call, with its environment);
+* ``run`` is refused (125): the launcher creates, initializes, checks and only then starts;
+* ``create [options] <image> <command...>``: the options and values ``run`` takes, recorded in ``<rec>``
+  like a ``run``; the container is kept under ``<rec>.containers/<name>``;
+* ``init <name>``: writes the container's OCI configuration: the engine defaults of the fixture
+  ``tests/launcher/fixtures/podman-4.9.3-clean-config.json`` (its placeholder directories made real
+  under the container's own ``static`` and ``run`` directories) and one bind per ``--mount``, as Podman
+  writes them; the JSON in ``<rec>.oci-extra`` is merged in (``mounts`` appended, ``hooks`` and
+  ``devices`` set), standing for what a configuration the prevention missed would add; exits 1 with
+  ``<rec>.initfail``;
+* ``container inspect --format {{json .}} <name>``: ``OCIConfigPath``, ``StaticDir`` and ``HostsPath``;
+* ``unshare cat -- <path>``, ``unshare realpath -e -z -- <paths>`` and ``unshare stat --printf %F\\0
+  -- <paths>``: what GNU ``cat``, ``realpath`` and ``stat`` print;
+* ``start --attach <name>``: recorded in ``<rec>.starts``, then runs the created command as ``run``
+  does (``<rec>.term-in-run`` included).
 """
 
 from __future__ import annotations
@@ -41,6 +62,7 @@ import json
 import os
 import re
 import signal
+import stat
 import sys
 import time
 
@@ -85,6 +107,18 @@ UNITS = {"b": 1, "k": 1 << 10, "": 1, "m": 1 << 20, "g": 1 << 30}
 MIN_MEMORY_BYTES = 6 << 20
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+FIXTURE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "launcher",
+    "fixtures",
+    "podman-4.9.3-clean-config.json",
+)
+PLACEHOLDER = "/podman-fixture"
+# The files Podman writes into a container's own directories, and the bind sources of the fixture
+OWN_FILES = {
+    "static": ("passwd", "group"),
+    "run": ("hosts", "hostname", "resolv.conf", ".containerenv"),
+}
 
 
 def default_info(name: str) -> dict:
@@ -208,8 +242,150 @@ def _bad_run_option(name: str, option: str, value: str, ncpu: int) -> str | None
     return None
 
 
+def _podman_prevention(argv: list[str]) -> list[str] | None:
+    """The call after Podman's two global flags, or None when the prevention is not all there."""
+    if len(argv) < 2 or argv[0] != "--default-mounts-file=/dev/null":
+        return None
+    if not argv[1].startswith("--hooks-dir="):
+        return None
+    hooks = argv[1][len("--hooks-dir=") :]
+    conf = os.environ.get("CONTAINERS_CONF", "")
+    try:
+        empty_hooks = os.path.isdir(hooks) and not os.listdir(hooks)
+        empty_conf = stat.S_ISREG(os.lstat(conf).st_mode) and os.lstat(conf).st_size == 0
+    except OSError:
+        return None
+    if not (
+        empty_hooks and empty_conf and os.environ.get("HOME") and os.environ.get("XDG_RUNTIME_DIR")
+    ):
+        return None
+    return argv[2:]
+
+
+def _container_dir(record_path: str, name: str) -> str:
+    return os.path.join(record_path + ".containers", name)
+
+
+def _podman(argv: list[str], record_path: str) -> int | None:
+    """Podman's own commands (None for the ones Docker and Podman share)."""
+    if argv[:1] == ["run"]:
+        print(
+            "fake podman: the launcher runs Podman through create, init and start", file=sys.stderr
+        )
+        return 125
+    if argv[:1] == ["init"] and len(argv) == 2:
+        _log(record_path, ".inits", {"argv": argv})
+        if os.path.exists(record_path + ".initfail"):
+            return 1
+        return _init(record_path, argv[1])
+    if argv[:4] == ["container", "inspect", "--format", "{{json .}}"] and len(argv) == 5:
+        home = _container_dir(record_path, argv[4])
+        if not os.path.isdir(home):
+            return 125
+        static = os.path.join(home, "static")
+        print(
+            json.dumps(
+                {
+                    "OCIConfigPath": os.path.join(static, "config.json"),
+                    "StaticDir": static,
+                    "HostsPath": os.path.join(home, "run", "hosts"),
+                }
+            )
+        )
+        return 0
+    if argv[:3] == ["unshare", "cat", "--"] and len(argv) == 4:
+        try:
+            with open(argv[3], "rb") as handle:
+                sys.stdout.buffer.write(handle.read())
+        except OSError:
+            return 1
+        return 0
+    if argv[:5] == ["unshare", "realpath", "-e", "-z", "--"]:
+        status = 0
+        for path in argv[5:]:
+            if os.path.exists(path):
+                sys.stdout.buffer.write(os.fsencode(os.path.realpath(path)) + b"\0")
+            else:
+                status = 1
+        return status
+    if argv[:5] == ["unshare", "stat", "--printf", "%F\\0", "--"]:
+        for path in argv[5:]:
+            mode = os.stat(path).st_mode
+            if stat.S_ISREG(mode):
+                kind = "regular file" if os.path.getsize(path) else "regular empty file"
+            else:
+                kind = "directory" if stat.S_ISDIR(mode) else "symbolic link"
+            sys.stdout.buffer.write(kind.encode() + b"\0")
+        return 0
+    if argv[:2] == ["start", "--attach"] and len(argv) == 3:
+        _log(record_path, ".starts", {"argv": argv, "environ": dict(os.environ)})
+        try:
+            with open(os.path.join(_container_dir(record_path, argv[2]), "created.json")) as handle:
+                created = json.load(handle)
+        except OSError:
+            return 125
+        return _execute(
+            record_path, created["mounts"], created["env"], created["workdir"], created["command"]
+        )
+    return None
+
+
+def _init(record_path: str, name: str) -> int:
+    home = _container_dir(record_path, name)
+    try:
+        with open(os.path.join(home, "created.json")) as handle:
+            created = json.load(handle)
+    except OSError:
+        return 125
+    with open(FIXTURE, encoding="utf-8") as handle:
+        text = handle.read()
+    text = text.replace(PLACEHOLDER + "/static", os.path.join(home, "static"))
+    text = text.replace(PLACEHOLDER + "/run", os.path.join(home, "run"))
+    config = json.loads(text)
+    for where, names in OWN_FILES.items():
+        os.makedirs(os.path.join(home, where), exist_ok=True)
+        for file_name in names:
+            with open(os.path.join(home, where, file_name), "w") as handle:
+                handle.write("" if file_name == ".containerenv" else file_name + "\n")
+    os.makedirs(os.path.join(home, "static", "shm"), exist_ok=True)
+    config["mounts"] = [
+        m for m in config["mounts"] if not m["source"].startswith(PLACEHOLDER + "/binds/")
+    ]
+    for mount in created["mounts"]:
+        options = ["rbind", "rprivate", "ro" if "readonly" in mount else "rw"]
+        config["mounts"].append(
+            {
+                "destination": mount["dst"],
+                "type": "bind",
+                "source": mount["src"],
+                "options": options,
+            }
+        )
+    extra_path = record_path + ".oci-extra"
+    if os.path.exists(extra_path):
+        with open(extra_path, encoding="utf-8") as handle:
+            extra = json.load(handle)
+        config["mounts"] += extra.get("mounts", [])
+        if "hooks" in extra:
+            config["hooks"] = extra["hooks"]
+        if "devices" in extra:
+            config["linux"]["devices"] = extra["devices"]
+    with open(os.path.join(home, "static", "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(config, handle)
+    return 0
+
+
 def main(argv: list[str], record_path: str, name: str = "docker") -> int:
-    _log(record_path, ".calls", {"argv": argv})  # every call, whatever it is
+    _log(record_path, ".calls", {"argv": argv, "environ": dict(os.environ)})  # every call
+    if name == "podman":
+        rest = _podman_prevention(argv)
+        if rest is None:
+            print("fake podman: its configuration is not shut out", file=sys.stderr)
+            return 125
+        argv = rest
+        answer = _podman(argv, record_path)
+        if answer is not None:
+            return answer
     if argv[:1] == ["--version"]:
         print("{} version 0.0.0-standin".format(name.capitalize()))
         return 0
@@ -256,7 +432,8 @@ def main(argv: list[str], record_path: str, name: str = "docker") -> int:
         _log(record_path, ".removals", {"argv": argv})
         print("Error: no such container", file=sys.stderr)
         return 1
-    if argv[:1] != ["run"]:
+    verb = "create" if name == "podman" else "run"
+    if argv[:1] != [verb]:
         print("fake {}: unsupported command".format(name), file=sys.stderr)
         return 125
     rest = argv[1:]
@@ -311,6 +488,21 @@ def main(argv: list[str], record_path: str, name: str = "docker") -> int:
     if image not in _present(record_path):
         print("Unable to find image locally", file=sys.stderr)
         return 125
+    if verb == "create":
+        container = dict(options).get("--name", "")
+        home = _container_dir(record_path, container)
+        os.makedirs(home)
+        with open(os.path.join(home, "created.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {"mounts": mounts, "env": env, "workdir": workdir, "command": command}, handle
+            )
+        print("0" * 64)
+        return 0
+    return _execute(record_path, mounts, env, workdir, command)
+
+
+def _execute(record_path: str, mounts: list, env: dict, workdir: str, command: list) -> int:
+    """What the container does: the command on the host, its mount destinations rewritten."""
     if os.path.exists(record_path + ".term-in-run"):
         # A SIGTERM for the launcher while its container runs: the launcher passes it on to this
         # process group, and this is what a container does with it.
