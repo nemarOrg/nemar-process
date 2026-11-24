@@ -260,7 +260,7 @@ def write_product(
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
-    ``extra_segments`` are spans an embedding recipe removed itself (nemar-ica's burst spans), as
+    ``extra_segments`` are spans an embedding recipe flags itself (nemar-ica's: the spans ASR repaired), as
     ``(start, stop, label, reason)`` sample indices of the samples the floor read, stop exclusive:
     they are rows of ``_badsegments.tsv`` and ``_samplemask.tsv`` beside the floor's, in time order,
     and when the window step was skipped they are the files' only rows, belonging to
@@ -324,7 +324,7 @@ def write_product(
                 "tsv",
                 owner,
                 "Bad segments found by clean_windows"
-                + (" and the spans the recipe removed" if extra_segments else ""),
+                + (" and the spans the recipe flagged" if extra_segments else ""),
                 lambda path: files.write_tsv(path, SEGMENT_COLUMNS, seconds, SEGMENT_DECIMALS),
             )
         )
@@ -334,7 +334,7 @@ def write_product(
                 "tsv",
                 owner,
                 "Bad windows as sample indices of the samples read, stop exclusive"
-                + (", and the spans the recipe removed" if extra_segments else ""),
+                + (", and the spans the recipe flagged" if extra_segments else ""),
                 lambda path: files.write_tsv(path, MASK_COLUMNS, spans),
             )
         )

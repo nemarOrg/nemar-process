@@ -659,6 +659,14 @@ def test_asr_repairs_cuts_nothing_and_the_record_states_the_share_it_repaired(ru
         row for row in rows_of(named(run.directory, "samplemask.tsv")) if row["label"] != "burst"
     ]
     assert nemar["ica"]["browser_transform"]["shaded"]["label"] == "burst"
+    described = [
+        target["description"]
+        for step in record["processingSteps"]
+        for target in step.get("outputTargets", [])
+        if target.get("location", "").endswith(("_samplemask.tsv", "_badsegments.tsv"))
+    ]
+    assert len(described) == 2
+    assert all(text.endswith("the spans the recipe flagged") for text in described)
 
 
 def test_a_sample_counts_as_repaired_from_a_summed_change_of_1e_8_uv_across_blocks():
