@@ -8,7 +8,10 @@ with the upstream gap it stands for (docs/upstream.md):
   the line-noise excess and the median spectrum are arithmetic on its output;
 * the robust amplitude is a median absolute deviation, NumPy median arithmetic (sccn/eegprep#536);
 * the location guard is a rank test of the channel positions (sccn/eegprep#539: ``clean_channels`` accepts
-  degenerate locations silently).
+  degenerate locations silently);
+* the samples ASR repaired (``asr_repaired``) are found by comparing its input and its output with
+  eegprep's own rule from ``clean_artifacts`` (sccn/eegprep#684: ``clean_asr`` does not return its
+  repaired mask).
 
 The percentages are read from eegprep's own masks (``etc.clean_channel_mask`` for channels and the
 sample mask ``clean_windows`` returns), never recomputed from the data.
@@ -169,6 +172,30 @@ def robust_amplitude(data: np.ndarray) -> np.ndarray:
     """Per channel: 1.4826 times the median absolute deviation, in the unit the loader delivered."""
     centers = np.median(data, axis=1, keepdims=True)
     return MAD_SCALE * np.median(np.abs(data - centers), axis=1)
+
+
+# A sample counts as unchanged by ASR's repair when the sum over the channels of the absolute change is
+# below this, in microvolts: eegprep's own rule, the one clean_artifacts applies when it cuts the bursts
+# ASR repairs (BurstRejection). clean_asr returns no mask of what it repaired (an upstream gap).
+ASR_UNCHANGED_UV = 1e-8
+ASR_COMPARE_BLOCK = 65536  # samples compared at a time, so the comparison holds no third full copy
+
+
+def asr_repaired(before: np.ndarray, after: np.ndarray) -> np.ndarray:
+    """Which samples ASR's repair changed: True where the sum over the channels of
+    ``|after - before|`` reaches ``ASR_UNCHANGED_UV`` (eegprep's rule in ``clean_artifacts``).
+    Arithmetic on the input and on eegprep's output, block by block; nothing is changed. It stands for
+    a mask ``clean_asr`` does not return (sccn/eegprep#684), and goes when eegprep returns one."""
+    before = np.asarray(before)
+    after = np.asarray(after)
+    if before.shape != after.shape or before.ndim != 2:
+        raise ValueError("the repair is not the input's shape")
+    changed = np.zeros(before.shape[1], dtype=bool)
+    for start in range(0, before.shape[1], ASR_COMPARE_BLOCK):
+        stop = start + ASR_COMPARE_BLOCK
+        moved = np.sum(np.abs(after[:, start:stop] - before[:, start:stop]), axis=0)
+        changed[start:stop] = moved >= ASR_UNCHANGED_UV
+    return changed
 
 
 def runs(mask: np.ndarray) -> list[tuple[int, int]]:

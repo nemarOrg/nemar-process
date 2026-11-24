@@ -1,6 +1,6 @@
 """Write or check the pinned decisions of ``nemar-floor`` on the EEG fixture.
 
-The golden files in ``tests/recipes/golden/nemar-floor-1.0.0-b1/`` are what the floor DECIDED for the
+The golden files in ``tests/recipes/golden/nemar-floor-1.0.0-b2/`` are what the floor DECIDED for the
 fixture recording: the channel table, the bad segments, and a small JSON of the plan hash, the
 rules, the skipped steps and the applied filters. They hold no float beyond the table's rounding and
 no measurement that depends on how a sum is accumulated, so they are the part of the output that
@@ -36,7 +36,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GOLDEN = ROOT / "tests" / "recipes" / "golden" / "nemar-floor-1.0.0-b1"
+GOLDEN = ROOT / "tests" / "recipes" / "golden" / "nemar-floor-1.0.0-b2"
 DATASET = ROOT / "tests" / "fixtures" / "eeg" / "dataset"
 RECORDING = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
 PRODUCT = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"

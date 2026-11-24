@@ -98,7 +98,7 @@ class Distribution:
 
     name: str  # the key under summaryMetrics
     column: str  # the table column it summarizes
-    edges: tuple[int, ...]
+    edges: tuple[float, ...]  # whole numbers for counts, fractions for a share
 
 
 @dataclass(frozen=True)

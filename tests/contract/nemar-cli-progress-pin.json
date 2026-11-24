@@ -1,7 +1,7 @@
 {
   "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and the vendored neuroschema bundle the recipes validate plugin outputs against, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
-  "ref": "e8bf3c2d8e74805155ff5ed5e814b71a5342d773",
+  "ref": "055731fa4dc5c88d65ad85b6e3fe189f5c4a6918",
   "schema": {
     "source": "shared/contract/compute-progress.schema.json",
     "copy": "launcher/schema/compute-progress.v1.json",
@@ -11,7 +11,7 @@
   "vectors": {
     "source": "shared/contract/compute-progress-vectors.json",
     "copy": "tests/contract/compute-progress-vectors.json",
-    "sha256": "7a64a1821681921e9c9ca41e91cbb2527048c70d9195971cefcaa3026a676645",
+    "sha256": "20d2353796bbca2f0c50d53811b356e9c2dea1e8ecabd19cc3c1a79534a86287",
     "bytes": 20566
   },
   "plugin_manifest": {

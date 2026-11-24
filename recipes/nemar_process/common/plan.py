@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any
 
+import numpy as np
+
 # sccn/eegprep#537: the design function is reachable only through a private module of eegprep.
 from eegprep.plugins.firfilt._filtering import design_eegfiltnew
 
@@ -163,6 +165,23 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "num_mix_comps": "int",
         "max_threads": "int",
         "amica_binary": "str",
+        # what decided the decomposition's channels and is not an argument: the types of the input's
+        # rows, as their digest (``decomposition_input.channel_types``)
+        "rules": {"channel_types_sha256": "str"},
+        # AMICA's sample rejection: pAMICA's names (`maxrej`) or the binary's (`numrej`)
+        "do_reject": "bool",
+        "rejsig": "float",
+        "rejstart": "int",
+        "rejint": "int",
+        "maxrej": "int",
+        "numrej": "int",
+        # AMICA's convergence stops: pAMICA's names (`min_nd`) or the binary's (`min_grad_norm`)
+        "use_min_dll": "bool",
+        "min_dll": "float",
+        "maxincs": "int",
+        "use_grad_norm": "bool",
+        "min_nd": "float",
+        "min_grad_norm": "float",
     },
     "eegprep.pop_iclabel": {"icversion": "str"},
 }
@@ -228,6 +247,21 @@ def recorded_band_stop(srate: float, frequency: int) -> dict[str, Any]:
         "order": int(meta["filtorder"]),
         "transitionHz": rounded(meta["df"], 6),
         "cutoffHz": [rounded(value, 6) for value in meta["cutoff"]],
+    }
+
+
+def recorded_highpass(srate: float, passband_hz: float) -> dict[str, Any]:
+    """The FIR high-pass eegprep designs for ``pop_eegfiltnew(locutoff=passband_hz)``, as recorded:
+    the order, the transition width, the -6 dB cutoff and the kernel's length and SHA-256, read
+    from eegprep's own design function called with the same arguments (sccn/eegprep#537)."""
+    kernel, meta = design_eegfiltnew(float(srate), locutoff=float(passband_hz))
+    values = np.asarray(kernel, dtype="<f8")
+    return {
+        "order": int(meta["filtorder"]),
+        "transitionHz": rounded(meta["df"], 6),
+        "cutoffHz": [rounded(value, 6) for value in meta["cutoff"]],
+        "kernelLength": int(values.size),
+        "kernelSha256": hashlib.sha256(values.tobytes()).hexdigest(),
     }
 
 

@@ -311,7 +311,8 @@ def test_no_template_is_applied_to_a_store_that_declares_no_positions(located):
     assert loaded.n_channels_with_locations == 0
     assert loaded.location_source == "none"
     assert source.reader_locations[STANDARD] is None
-    assert all(set(chanloc) == {"labels"} for chanloc in loaded.eeg["chanlocs"])
+    # the labels and the type the store states for the row (zarr_input.apply_types), no position
+    assert all(set(chanloc) <= {"labels", "type"} for chanloc in loaded.eeg["chanlocs"])
     assert "nosedir" not in loaded.eeg["chaninfo"]
 
 

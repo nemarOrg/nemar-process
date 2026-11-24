@@ -3,8 +3,14 @@ and ICLabel. Every numerical step is an eegprep call, and no file is read or wri
 
 The chain (docs/recipes.md): the floor's own chain with its parameters (its decisions are this
 record's first steps; the bad channels it found are already removed from its working copy);
-``clean_asr`` with its state kept; ``pop_reref`` to the average; ``pop_runica`` with the engine
-asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``. A step that raises ends the
+``clean_asr`` with its state kept and the owner's cutoff of 30, the share of samples it repairs
+measured (``asrBurstFraction``; nothing is cut); ``pop_reref`` to the average;
+``pop_runica`` with the engine asked for and AMICA's convergence stops (its sample rejection's
+schedule recorded, the rejection off), on the ASR-repaired, re-referenced copy; ``pop_iclabel``. The
+floor runs with nemar-ica's two values in place of its own (``FLOOR_EMBEDDING``: a 0.5 Hz FIR
+high-pass, RANSAC's 0.85). The chain is the same on both inputs, and the record states what the fit
+was given (``decomposition_input``: the steps that shaped it, the channels, the unit and the
+reference, and on the Zarr serving copy the store it was read from). A step that raises ends the
 recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
 and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
 ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-device auto``, that runs
@@ -23,11 +29,11 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from nemar_process.common import device, io
+from nemar_process.common import determinism, device, io, qc
 from nemar_process.common.determinism import rounded
 from nemar_process.common.errors import (
     ICA_DEGENERATE,
@@ -45,6 +51,17 @@ from nemar_process.nemar_floor import pipeline as floor
 from nemar_process.nemar_floor import steps as floor_steps
 from nemar_process.nemar_ica import engines, steps, tally
 from nemar_process.nemar_ica.options import Settings
+
+if TYPE_CHECKING:
+    from nemar_process.common.plan import Plan
+    from nemar_process.common.zarr_input import ServingStore
+
+# The floor's values nemar-ica sets in place of the floor's own (steps.py).
+FLOOR_EMBEDDING = floor_steps.Embedding(
+    highpass_hz=steps.HIGHPASS_HZ,
+    corr_threshold=steps.CORR_THRESHOLD,
+    max_broken_time=steps.MAX_BROKEN_TIME,
+)
 
 # eegprep's ICLabel network, the file the classification reads (hashed into the record).
 ICLABEL_WEIGHTS = "netICL.mat"
@@ -75,12 +92,21 @@ class Decomposition:
     classes: list[str]
     probabilities: np.ndarray
     variance_pct: list[float]
+    # what the fit was given (``decomposition_input``), the store a serving-copy recording was read
+    # from (None on a dataset directory), and the spans ASR repaired with their share (``bursts``)
+    decomposition_input: dict[str, Any]
+    serving: ServingStore | None
+    bursts: dict[str, Any]
+    # the store row of each kept channel, in order (None on a dataset directory)
+    store_rows: list[int] | None
     iclabel: dict[str, Any] = field(default_factory=dict)
 
 
-def canonical_text(document: dict[str, Any]) -> str:
-    """A document as the bytes its hash is taken over: sorted keys, no spaces, ASCII, no NaN, one
-    final newline."""
+def state_text(document: dict[str, Any]) -> str:
+    """ASR's state as the text of ``_asr.json``: sorted keys, no spaces, ASCII, no NaN, one final
+    newline. The record's digest of the state is of these file bytes, as read back; it is not a
+    canonical form recomputed from values. A digest that other languages recompute from values
+    (``channel_types_sha256``) is RFC 8785 text (``determinism.jcs``), never this."""
     return (
         json.dumps(
             document, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=True
@@ -108,8 +134,25 @@ def asr_parameters() -> dict[str, Any]:
 
     return {
         **signature_defaults(clean_asr, steps.ASR_APPLIED),
+        "cutoff": steps.ASR_CUTOFF,
         "maxmem": steps.ASR_MAXMEM_MB,
         "return_state": True,
+    }
+
+
+def burst_share(before: np.ndarray, after: np.ndarray) -> dict[str, Any]:
+    """What the record says of ASR's bursts: the samples its repair changed (``qc.asr_repaired``,
+    eegprep's rule), as ``[start, stop)`` spans of the samples the floor read, and their share of the
+    recording (``fraction``, 0 to 1, six decimals). Nothing is removed: the fit gets the repair."""
+    repaired = qc.asr_repaired(before, after)
+    total = int(repaired.size)
+    flagged = int(repaired.sum())
+    return {
+        "fraction": rounded(flagged / total, 6) if total else None,
+        "n_samples": total,
+        "n_repaired": flagged,
+        "threshold_uv": qc.ASR_UNCHANGED_UV,
+        "spans": [[int(start), int(start + length)] for start, length in qc.runs(~repaired)],
     }
 
 
@@ -142,7 +185,7 @@ def check_locations(eeg: dict[str, Any]) -> None:
     the Zarr input that declares no positions is one (eegprep-lean's ``to_eeg`` fills ``chanlocs``
     from the positions a store carries in its root attributes, and leaves labels alone otherwise), and
     so is one whose unit or coordinate system the reader refuses. The fit of such a recording (up to
-    2000 iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
+    ``steps.DEFAULT_MAX_ITER``, 4000, iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
     channels exactly as ICLabel calls it, with one value per channel: the rule is eegprep's own and
     cannot drift from it. The error is recognized by its class, never by its message. ICLabel is not
     skipped: the recording fails, writing nothing.
@@ -170,13 +213,82 @@ def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        repaired, state = clean_asr(eeg, return_state=True, maxmem=steps.ASR_MAXMEM_MB)
+        repaired, state = clean_asr(
+            eeg, cutoff=steps.ASR_CUTOFF, return_state=True, maxmem=steps.ASR_MAXMEM_MB
+        )
     if any(
         issubclass(item.category, UserWarning) and str(item.message).startswith("maxmem=")
         for item in caught
     ):
         raise RecordingError(STEP_FAILED, "asr", steps.ASR_MAXMEM_DETAIL)
-    return repaired, canonical_text(state_to_json(state))
+    return repaired, state_text(state_to_json(state))
+
+
+def kept_rows(result: floor.FloorResult) -> list[int]:
+    """The row of the loaded recording (on the serving copy, of the store) of each channel the floor
+    kept, in order: the signal channels it kept, each at its row."""
+    return [
+        row
+        for row, kept in zip(result.signal_indices, result.kept_final, strict=True)
+        if bool(kept)
+    ]
+
+
+def channel_types(result: floor.FloorResult) -> list[list[str | None]]:
+    """Each row of the loaded recording as ``[label, type]``, in order, the type as the loader gave
+    it for that row (None for an untyped row): what decided, row by row, which rows were signal
+    channels the floor and the decomposition could take."""
+    return [[name, kind] for name, kind in zip(result.all_names, result.all_types, strict=True)]
+
+
+def types_sha256(typed: list[list[str | None]]) -> str:
+    """The SHA-256 of the UTF-8 bytes of ``{"channel_types": [[label, type], ...]}`` in RFC 8785's
+    canonical form (``determinism.jcs``, neuroschema's ``nemar.view-digest.v1`` form), so a browser or
+    another language recomputes it from the record."""
+    return hashlib.sha256(determinism.jcs({"channel_types": typed}).encode("utf-8")).hexdigest()
+
+
+def decomposition_input(
+    plan: Plan, good: list[str], result: floor.FloorResult, serving: ServingStore | None
+) -> dict[str, Any]:
+    """What the fit was given, as the record states it (``extensions.nemar.ica.decomposition_input``).
+
+    ``preprocessing`` names, in the order they ran, the steps of the plan that changed the data the fit
+    received (the functions of ``steps.PREPROCESSING_FUNCTIONS``: channel selection and removal, the
+    drift high-pass, each line-noise band-stop, ASR, the average reference); their parameters are those
+    steps'. ``channels`` are the decomposition's channels, the columns of its unmixing, in the order
+    of the recording (on the serving copy, store row order).
+
+    On the serving copy the block also names the store (its source path, the channel group read and
+    its content digest, the record's ``stores_content`` row), and the kept channels must be the
+    store's rows they name, in store order: the signal channels the floor kept, each at its row of the
+    store, else the recording fails (``internal_error``, ``serving_rows_mismatch``), because the
+    browser's matrix (``outputs``) is applied to those rows.
+    """
+    shaped = []
+    for step in plan.steps:
+        if step.function in steps.PREPROCESSING_FUNCTIONS:
+            shaped.append({"step": step.step_id, "function": step.function})
+    typed = channel_types(result)
+    block: dict[str, Any] = {
+        "source": steps.ARCHIVE_SOURCE if serving is None else steps.SERVING_SOURCE,
+        "preprocessing": shaped,
+        "channels": list(good),
+        "channel_types": typed,
+        "channel_types_sha256": types_sha256(typed),
+        "reference": steps.REREF_REFERENCE,
+        "unit": steps.INPUT_UNIT,
+    }
+    if serving is not None:
+        rows = kept_rows(result)
+        if rows != sorted(rows) or [serving.labels[row] for row in rows] != list(good):
+            raise RecordingError(INTERNAL_ERROR, "reref", steps.SERVING_ROWS_MISMATCH)
+        block["store"] = {
+            "path": serving.path,
+            "group": serving.group,
+            "content_sha256": serving.content_sha256,
+        }
+    return block
 
 
 def amica15_account(eeg: dict[str, Any]) -> dict[str, Any]:
@@ -291,7 +403,8 @@ def process(
     resolution: device.Resolution,
     path: str | None = None,
 ) -> Decomposition:
-    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``.
+    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``; ``loaded.serving`` names the
+    store of a recording of the serving copy (``decomposition_input``).
 
     ``resolution`` is the device the recording starts on (``device.resolve``, then ``tally.begin``).
     With the recording's ``path`` in the run, the run decides right before the fit where it runs
@@ -299,9 +412,16 @@ def process(
     fitted again on the CPU (``decompose``); the call, the record and the count state the device that
     ran it (``Decomposition.resolution``).
     """
-    result = floor.process(loaded, recipe_id=steps.RECIPE_ID, recipe_version=steps.RECIPE_VERSION)
+    serving = loaded.serving
+    result = floor.process(
+        loaded,
+        recipe_id=steps.RECIPE_ID,
+        recipe_version=steps.RECIPE_VERSION,
+        embedding=FLOOR_EMBEDDING,
+    )
     plan = result.plan
-    # the floor's decisions have the hash they would have had as the floor's own plan
+    # the hash of the floor's part of this plan (its steps to qc), named as the floor's recipe: with
+    # nemar-ica's three embedded values (FLOOR_EMBEDDING) it is not the hash of a nemar-floor product
     floor_plan_hash = plan.hash_as(floor_steps.RECIPE_ID, floor_steps.RECIPE_VERSION, "qc")
     # The floor's samples are dropped as soon as ASR has them (a long recording is gigabytes a copy);
     # its header stays, because the floor's writer reads it (`pnts` for `mask_grid`).
@@ -325,7 +445,9 @@ def process(
 
     # ASR, keeping the state that reproduces it
     with guarded("asr"):
-        eeg, asr_text = asr_repair(eeg)
+        repaired, asr_text = asr_repair(eeg)
+        bursts = burst_share(eeg["data"], repaired["data"])
+        eeg = repaired
         asr_sha256 = hashlib.sha256(asr_text.encode("utf-8")).hexdigest()
         state = json.loads(asr_text)
         asr = {
@@ -347,6 +469,8 @@ def process(
                 "windowLenS": state["window_len"],
                 "stepSize": state["step_size"],
                 "channelsNamed": state["channels"] is not None,
+                "burstFraction": bursts["fraction"],
+                "nBurstSpans": len(bursts["spans"]),
             },
         )
 
@@ -364,6 +488,7 @@ def process(
             description=steps.DESCRIPTIONS["reref"],
             quality={"reference": steps.REREF_REFERENCE, "nChannels": int(eeg["nbchan"])},
         )
+        given = decomposition_input(plan, good, result, serving)
 
     # the decomposition, on the device the run holds right before it
     with guarded("ica"):
@@ -374,7 +499,7 @@ def process(
         plan.add_step(
             "ica",
             steps.ICA_FUNCTION,
-            call,
+            {**call, "rules": {"channel_types_sha256": given["channel_types_sha256"]}},
             description=steps.DESCRIPTIONS["ica"],
             quality={
                 "engine": settings.engine,
@@ -413,5 +538,9 @@ def process(
         classes=classes,
         probabilities=probabilities,
         variance_pct=variance,
+        decomposition_input=given,
+        serving=serving,
+        bursts=bursts,
+        store_rows=None if serving is None else kept_rows(result),
         iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
     )

@@ -70,7 +70,10 @@ jobs:
   test:
     name: build and smoke test (${{ matrix.flavor }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The full-length nemar-ica run (a pull request into main, the tag, the dispatch) fits pAMICA at the
+    # recipe's 4000 iterations: the last full run (2000 iterations) took 25.8 minutes, 15.7 of them in the
+    # fits, so doubling pAMICA's share bounds the job near 42 minutes; 90 leaves room on a slow runner.
+    timeout-minutes: 90
     # One leg per flavor; a flavor that fails does not stop the other from reporting. The CUDA flavor
     # has no GitHub Actions cache: its layers are several gigabytes and would push the CPU flavor's
     # (and the repository's other caches) out of the 10 GB the repository gets.

@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 RECIPE_ID = "nemar-ica"
-RECIPE_VERSION = "1.0.0-b1"
+RECIPE_VERSION = "1.0.0-b2"
 
 STEP_ORDER = ("asr", "reref", "ica", "iclabel")
 
@@ -59,20 +59,25 @@ CHECKPOINTS = (
 PRE_CHECKS = ("qc_amplitude", "ica_eligibility", "iclabel_locations")
 
 DESCRIPTIONS = {
-    "asr": "Repair bursts with artifact subspace reconstruction, keeping its calibration state",
+    "asr": (
+        "Repair bursts with artifact subspace reconstruction, keeping its calibration state, and "
+        "measure the share of samples it repairs"
+    ),
     "reref": "Re-reference to the average of the good channels",
     "ica": "Decompose the repaired, re-referenced data into independent components",
     "iclabel": "Classify the components with ICLabel",
 }
 
-# ASR: eegprep's defaults but one. The memory budget is fixed and recorded because a smaller or
+# ASR: eegprep's defaults but two. The memory budget is fixed and recorded because a smaller or
 # missing one makes asr_process replace it with half of the machine's free memory, and the cleaned
 # data then depend on the machine (sccn/eegprep#621): 1024 MB covers 64 channels up to a lookahead
-# of about 10000 samples (channels * channels * lookahead samples * 24 bytes).
+# of about 10000 samples (channels * channels * lookahead samples * 24 bytes). The cutoff (the
+# standard deviations a burst must pass, clean_rawdata's BurstCriterion) is the owner's 30, not
+# eegprep's 5 (2026-11-23; legacy NEMAR passed 20: docs/recipes.md).
 ASR_FUNCTION = "eegprep.clean_asr"
 ASR_MAXMEM_MB = 1024
+ASR_CUTOFF = 30.0
 ASR_APPLIED = (
-    "cutoff",
     "window_len",
     "step_size",
     "max_dims",
@@ -95,9 +100,30 @@ N_MODELS = 1
 N_MIX = 3
 BLOCK_SIZE = 131072
 SEED = 5489
+# AMICA's in-algorithm rejection of improbable samples, off (the owner's decision, 2026-11-23: on the
+# fixture it made the decomposition depend on the seed), its schedule still passed and hashed at AMICA's
+# own defaults (runamica15.m and the Fortran program, as eegprep's runamica table states them): were it
+# on, a sample whose log-likelihood is below the mean by more than `rejsig` standard deviations would be
+# dropped from the fit at iteration `rejstart`, then every `rejint` iterations, `numrej` times in all.
+# pAMICA names the count `maxrej` (its own default is 1, AMICA's is 3).
+REJECT = False
+REJSIG = 3.0
+REJSTART = 2
+REJINT = 3
+NUMREJ = 3
+# AMICA's own convergence stops, on at the Fortran program's defaults (the owner's "conservative"
+# choice, 2026-11-23): a fit stops when its log-likelihood gains less than `min_dll` for more than
+# `maxincs` consecutive iterations, or when the norm of its weight update falls to `min_grad_norm`,
+# or at `DEFAULT_MAX_ITER`; eegprep's runamica15 table turns both off, so they are passed. pAMICA
+# names the norm threshold `min_nd`; the binary takes `max_incs` from its own default (5).
+USE_MIN_DLL = True
+MIN_DLL = 1e-9
+MAXINCS = 5
+USE_GRAD_NORM = True
+MIN_GRAD_NORM = 1e-7
 RANK_CAP = 64
 MIN_RANK = 2
-DEFAULT_MAX_ITER = 2000
+DEFAULT_MAX_ITER = 4000
 
 ICLABEL_FUNCTION = "eegprep.pop_iclabel"
 ICLABEL_VERSION = "default"
@@ -122,6 +148,68 @@ ASR_MAXMEM_DETAIL = "asr_maxmem"
 ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 
+# What the decomposition was given (docs/recipes.md, "The decomposition input"), stated in the record's
+# `extensions.nemar.ica.decomposition_input`: the same chain on both inputs (the floor's channel
+# selection, flatline and bad-channel removal, drift high-pass and line-noise band-stops, then ASR and
+# the average reference), named by the steps of the plan whose functions change the data the fit gets.
+ARCHIVE_SOURCE = "archive"
+SERVING_SOURCE = "serving_copy"
+SOURCES = {ARCHIVE_SOURCE: INPUT_PROFILES["bids"], SERVING_SOURCE: INPUT_PROFILES["zarr"]}
+INPUT_UNIT = "uV"  # eegprep's unit: both loaders hand it microvolts
+PREPROCESSING_FUNCTIONS = (
+    "eegprep.pop_select",
+    "eegprep.clean_flatlines",
+    "eegprep.clean_drifts",
+    "eegprep.pop_eegfiltnew",
+    "eegprep.clean_channels",
+    "eegprep.clean_channels_nolocs",
+    ASR_FUNCTION,
+    "eegprep.pop_reref",
+)
+# A recording of the serving copy whose kept channels are not the store's rows they name (a fault of
+# the recipe, never of the data).
+SERVING_ROWS_MISMATCH = "serving_rows_mismatch"
+
+# The browser's matrix (docs/recipes.md, "The browser weights"): on the serving copy only, the unmixing
+# with the average reference over the kept channels and the store unit's factor to microvolts folded
+# in, so that the browser multiplies the store's physical values of the kept channels by it and
+# applies no preprocessing. Its activations approximate the decomposition input's, which was filtered
+# and repaired.
+SERVING_UNMIXING = "servingunmixing"
+BROWSER_APPLIES_TO = "serving_copy channels listed, physical unit"
+BROWSER_NOTE = "no preprocessing; activations approximate the decomposition input"
+# On a dataset directory the store was not read: the matrix's columns are matched to the serving copy's
+# channels by label, it applies to microvolts (the view converts by the store's unit field and refuses
+# a unit it does not know), and the view says the match was not checked against the fit's input.
+BROWSER_APPLIES_TO_LABELS = (
+    "serving_copy channels matched by label, in microvolts: the view converts by the store's unit "
+    "field and refuses an unknown unit or any channel it cannot match"
+)
+BROWSER_CAPTION_UNCHECKED = "not checked against the decomposition input"
+# Matched by label, a column must carry the channel's own label: when the labels cannot head columns
+# (two of one name, or text a header may not hold, so the matrices fall back to Ch001 and so on) there
+# is no browser matrix, and the record says why in place of publishing placeholder columns.
+BROWSER_LABELS_UNUSABLE = "labels_unusable"
+# The spans ASR repairs (its bursts) are shaded by the view over the whole recording, from the rows of
+# the floor's _badsegments.tsv (in seconds) with this label and reason: flagged, never removed. They are
+# rows of _samplemask.tsv too, which the view does not read: its samples are the archive's grid.
+BURST_LABEL = "burst"
+BURST_REASON = "asr_repaired"
+# The share of samples ASR's reconstruction changed, a number per recording (`asrBurstFraction`, 0 to
+# 1), at ASR's update resolution and relative to the recording's own calibration: the same rule for every
+# recording (the cutoff is fixed), not an absolute amount of noise (docs/recipes.md). Its distribution
+# in the dataset record has these edges.
+BURST_FRACTION_EDGES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0)
+
+# The floor's three values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
+# settings, 2026-11-23): a 0.5 Hz FIR high-pass (pop_eegfiltnew, legacy's call) in place of
+# clean_drifts, RANSAC's correlation threshold of 0.85 in place of 0.8, and a channel removed when it is
+# bad for more than half the recording (0.5 in place of 0.4): legacy's clean_rawdata default and
+# eegprep's clean_artifacts default (ChannelCriterionMaxBadTime), which legacy never changed.
+HIGHPASS_HZ = 0.5
+CORR_THRESHOLD = 0.85
+MAX_BROKEN_TIME = 0.5
+
 
 def rank_of(n_good: int) -> int:
     """The rank of the decomposition: one less than the good channels (the average reference takes
@@ -134,7 +222,8 @@ def pamica_call(max_iter: int, device: str, threads: int, rank: int) -> dict[str
     (eegprep applies its ``runamica15`` table to the rest, and the record states every value).
 
     No ``fix_init``: pAMICA 0.4.0's torch backend does not take it; the start is its draw from the
-    fixed seed.
+    fixed seed. The rejection settings are pAMICA's names (``maxrej`` for AMICA's ``numrej``), which
+    ``pop_runica`` hands on unchanged to pAMICA's backend.
     """
     return {
         "n_models": N_MODELS,
@@ -145,6 +234,16 @@ def pamica_call(max_iter: int, device: str, threads: int, rank: int) -> dict[str
         "device": device,
         "threads": threads,
         "pcakeep": rank,
+        "do_reject": REJECT,
+        "rejsig": REJSIG,
+        "rejstart": REJSTART,
+        "rejint": REJINT,
+        "maxrej": NUMREJ,
+        "use_min_dll": USE_MIN_DLL,
+        "min_dll": MIN_DLL,
+        "maxincs": MAXINCS,
+        "use_grad_norm": USE_GRAD_NORM,
+        "min_nd": MIN_GRAD_NORM,
     }
 
 
@@ -154,7 +253,9 @@ def amica15_call(
     """The keywords ``pop_runica`` gets for the AMICA binary: these and no other.
 
     Never ``seed`` or ``fix_init``: eegprep would write either into the binary's parameter file,
-    and this recipe seeds nothing the binary reads, so a run starts from the clock.
+    and this recipe seeds nothing the binary reads, so a run starts from the clock. The rejection
+    settings are the binary's own names, which eegprep writes into that file (``do_reject`` as 0:
+    rejection off, its schedule still written).
     """
     return {
         "num_models": N_MODELS,
@@ -163,4 +264,13 @@ def amica15_call(
         "pcakeep": rank,
         "max_threads": threads,
         "amica_binary": binary,
+        "do_reject": int(REJECT),
+        "rejsig": REJSIG,
+        "rejstart": REJSTART,
+        "rejint": REJINT,
+        "numrej": NUMREJ,
+        "use_min_dll": int(USE_MIN_DLL),
+        "min_dll": MIN_DLL,
+        "use_grad_norm": int(USE_GRAD_NORM),
+        "min_grad_norm": MIN_GRAD_NORM,
     }

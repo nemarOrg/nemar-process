@@ -35,9 +35,9 @@ DATASET_ID = "on007823"
 DATASET_VERSION = "v1.0.0"
 # The versions the tests pin. A bump of the recipe, of the common layer or of eegprep is an edit of
 # these lines (and of the places that declare them), not a search through the tests.
-PINNED_RECIPE_VERSION = "1.0.0-b1"
-PINNED_COMMON_VERSION = "1.0.0-b1"
-PINNED_ICA_RECIPE_VERSION = "1.0.0-b1"
+PINNED_RECIPE_VERSION = "1.0.0-b2"
+PINNED_COMMON_VERSION = "1.0.0-b2"
+PINNED_ICA_RECIPE_VERSION = "1.0.0-b2"
 # eegprep is taken from one commit of sccn/eegprep `develop`, which still says 0.5.0 like the PyPI
 # release that lacks what it holds: the distribution's own version is `0.5.0`, and every record, stamp
 # and `nemar-recipe version` names the commit too (`0.5.0+<commit>`, common/versions.py).

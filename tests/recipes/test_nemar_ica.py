@@ -126,7 +126,7 @@ def test_the_recipe_is_one_recipe_with_two_inputs_and_the_options_the_card_names
         "--ica-engine": "pamica",
         "--ica-device": "auto",
         "--ica-threads": 1,
-        "--ica-max-iter": 2000,
+        "--ica-max-iter": 4000,
         "--time-budget-s": None,
     }
     assert RECIPE.reading("zarr").id == "nemar-ica"
@@ -151,6 +151,7 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
             "mixing.tsv",
             "qc.json",
             "samplemask.tsv",
+            "servingunmixing.tsv",
             "signalJourney.json",
             "sphere.tsv",
             "unmixing.tsv",
@@ -362,8 +363,8 @@ def test_the_pamica_block_states_every_setting_eegprep_applies_as_the_docs_list_
         "lrate": 0.05,
         "minlrate": 1e-8,
         "maxdecs": 3,
-        "use_min_dll": False,
-        "use_grad_norm": False,
+        "use_min_dll": True,  # AMICA's own stops, on (the recipe's; eegprep's table has them off)
+        "use_grad_norm": True,
         "do_newton": True,
         "newt_start": 50,
         "newtrate": 1.0,
@@ -427,6 +428,95 @@ def test_the_asr_state_is_canonical_json_that_names_its_channels_and_its_memory_
     asr = next(s for s in product.record["processingSteps"] if s["stepId"] == "asr")
     assert asr["parameters"]["maxmem"] == 1024
     assert asr["parameters"]["return_state"] is True
+    # the owner's cutoff, passed, hashed, and the one ASR calibrated with (eegprep's default is 5)
+    assert (
+        asr["parameters"]["cutoff"] == 30.0 == state["cutoff"] == block_of(product)["asr"]["cutoff"]
+    )
+
+
+def test_the_archive_input_is_the_floor_copy_after_asr_and_its_matrix_is_matched_by_label(tiny):
+    """On a dataset directory the record states what the fit was given (the steps that shaped it, the
+    channels, the unit, the reference; no store), and the browser's matrix is in microvolts with its
+    columns matched to the serving copy by label, which the caption says was not checked against
+    the fit's input. The serving copy's block is in ``test_nemar_ica_serving_input.py``."""
+    directory, fit, product, _ = tiny
+    ran = product.record["processingSteps"]
+    shaped = []
+    for step in ran:
+        if step["name"] in steps.PREPROCESSING_FUNCTIONS:
+            shaped.append({"step": step["stepId"], "function": step["name"]})
+    assert [entry["step"] for entry in shaped][-2:] == ["asr", "reref"]
+    assert {"step": "drift", "function": "eegprep.pop_eegfiltnew"} in shaped
+    typed = [
+        [name, kind]
+        for name, kind in zip(fit.floor_result.all_names, fit.floor_result.all_types, strict=True)
+    ]
+    expected = {
+        "source": "archive",
+        "preprocessing": shaped,
+        "channels": fit.good_channels,
+        "channel_types": typed,
+        "channel_types_sha256": pipeline.types_sha256(typed),
+        "reference": "average",
+        "unit": "uV",
+    }
+    assert block_of(product)["decomposition_input"] == expected == fit.decomposition_input
+    header, weights = read_matrix(named(directory, "servingunmixing.tsv"))
+    _, unmixing = read_matrix(named(directory, "unmixing.tsv"))
+    assert header == fit.good_channels
+    assert np.array_equal(weights, unmixing - unmixing.mean(axis=1, keepdims=True))  # microvolts
+    transform = block_of(product)["browser_transform"]
+    assert (transform["match"], transform["rows"], transform["unit"]) == ("label", None, "uV")
+    assert transform["columns"] == fit.good_channels
+    assert transform["caption"] == "not checked against the decomposition input"
+    assert "refuses an unknown unit" in transform["applies_to"]
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [lambda labels: [labels[0], labels[0], *labels[2:]], lambda labels: ["F\tp1", *labels[1:]]],
+    ids=["duplicate", "tab"],
+)
+def test_labels_that_cannot_head_columns_give_no_browser_matrix_and_say_why(tiny, tmp_path, spoil):
+    """On a dataset directory the browser matrix is matched by label; labels that cannot head columns
+    (the matrices fall back to Ch001 and so on) are never published as its columns: the transform is
+    null with the reason labels_unusable and no _servingunmixing.tsv is written."""
+    _, fit, _, context = tiny
+    spoiled = dataclasses.replace(fit, good_channels=spoil(list(fit.good_channels)))
+    (recording,) = io.discover(DATASET)
+    with command.quiet():
+        product = outputs.write_product(
+            recording, context, tmp_path, spoiled, [], profile=steps.INPUT_PROFILES["bids"]
+        )
+    block = block_of(product)
+    assert block["browser_transform"] is None
+    assert block["browser_transform_reason"] == "labels_unusable"
+    assert not list(tmp_path.rglob("*_servingunmixing.tsv"))
+    assert not [
+        entry
+        for entry in product.record["extensions"]["nemar"]["outputs"]
+        if entry["location"].endswith("_servingunmixing.tsv")
+    ]
+    header, _ = read_matrix(named(tmp_path, "unmixing.tsv"))
+    assert header[0] == "Ch001"  # the matrices that do not match by label keep their placeholders
+    # and the usable labels of the same fit give the transform, with no reason
+    with command.quiet():
+        kept = outputs.write_product(
+            recording, context, tmp_path / "kept", fit, [], profile=steps.INPUT_PROFILES["bids"]
+        )
+    assert block_of(kept)["browser_transform"]["columns"] == fit.good_channels
+    assert block_of(kept)["browser_transform_reason"] is None
+
+
+def test_the_rank_is_one_less_than_the_good_channels_and_the_inputs_numerical_rank(tiny):
+    """The average reference takes one dimension, ASR repairs without lowering the rank and no channel
+    is interpolated, so the decomposition keeps N_good - 1 components: the numerical rank of its
+    input. One more would fit a component the data do not hold."""
+    _, fit, product, _ = tiny
+    data = np.asarray(fit.eeg["data"], dtype=np.float64)
+    n_good = len(fit.good_channels)
+    assert fit.rank == steps.rank_of(n_good) == n_good - 1 == np.linalg.matrix_rank(data)
+    assert block_of(product)["pcakeep"] == fit.rank
 
 
 def test_a_state_that_cannot_reproduce_its_data_fails_the_recording_and_writes_nothing(
@@ -931,6 +1021,18 @@ PAMICA_KEYS = {
     "device": "cpu",
     "threads": 3,
     "pcakeep": 6,
+    # AMICA's sample rejection at AMICA's defaults, under pAMICA's names
+    "do_reject": False,  # off (the owner's choice), its schedule still passed
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rejint": 3,
+    "maxrej": 3,
+    # AMICA's convergence stops at the Fortran program's defaults, under pAMICA's names
+    "use_min_dll": True,
+    "min_dll": 1e-9,
+    "maxincs": 5,
+    "use_grad_norm": True,
+    "min_nd": 1e-7,
 }
 AMICA15_KEYS = {
     "icatype": "runamica15",
@@ -941,6 +1043,17 @@ AMICA15_KEYS = {
     "pcakeep": 6,
     "max_threads": 3,
     "amica_binary": "/opt/amica/amica15",
+    # the same rejection under the binary's names
+    "do_reject": 0,
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rejint": 3,
+    "numrej": 3,
+    # the same stops under the binary's names
+    "use_min_dll": 1,
+    "min_dll": 1e-9,
+    "use_grad_norm": 1,
+    "min_grad_norm": 1e-7,
 }
 
 
@@ -990,8 +1103,38 @@ def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_fil
     assert seen["max_iter"].strip() == "7"
     assert seen["num_models"].strip() == "1"
     assert seen["pcakeep"].strip() == "6"
+    # AMICA's sample rejection reaches the binary's parameter file off, with its schedule
+    assert {key: seen[key].strip() for key in ("do_reject", "numrej", "rejstart", "rejint")} == {
+        "do_reject": "0",
+        "numrej": "3",
+        "rejstart": "2",
+        "rejint": "3",
+    }
+    assert float(seen["rejsig"]) == 3.0
+    # and AMICA's convergence stops, switched on (their thresholds: the next test)
+    assert (seen["use_min_dll"].strip(), seen["use_grad_norm"].strip()) == ("1", "1")
     assert "seed" not in seen  # nothing seeds the binary: it starts from the clock
     assert seen["fix_init"].strip() == "0"  # eegprep's own default, not a setting of the recipe
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "eegprep's runamica._write_param_file writes a float outside _SCI_PARAMS with '%f', so "
+        "min_dll=1e-9 and min_grad_norm=1e-7 reach the binary as 0.000000 (sccn/eegprep#680); "
+        "this test passes, and so fails as strict, once eegprep writes them as they are"
+    ),
+)
+def test_the_binary_reads_amicas_convergence_thresholds_as_passed(copying_binary, tmp_path):
+    options = {"ica_engine": "amica15", "ica_device": "cpu", "ica_max_iter": 7, "ica_threads": 1}
+    (recording,) = io.discover(DATASET)
+    with pytest.raises(RecordingError), determinism.pinned_threads(1):
+        outputs.produce(
+            recording, run_context(**options), tmp_path / "o", cut_fixture(), profile="a"
+        )
+    seen = dict(line.split(None, 1) for line in copying_binary.read_text("ascii").splitlines())
+    assert float(seen["min_dll"]) == 1e-9
+    assert float(seen["min_grad_norm"]) == 1e-7
 
 
 def test_pamica_is_found_by_the_search_for_the_module_and_torch(tmp_path, monkeypatch):
