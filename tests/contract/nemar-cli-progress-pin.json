@@ -1,7 +1,7 @@
 {
   "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and its vectors, the vendored neuroschema bundle and its view registry the recipes validate plugin outputs against (ADR 0137), the naming vectors of nemar-cli's port of common/naming.py, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
-  "ref": "bc772b52a4c9468a964caa265cf357b9655a0854",
+  "ref": "1788c5d2bf5075a853573527fc9536b1689a671c",
   "schema": {
     "source": "shared/contract/compute-progress.schema.json",
     "copy": "launcher/schema/compute-progress.v1.json",
@@ -17,8 +17,8 @@
   "plugin_manifest": {
     "source": "shared/contract/plugin-manifest.schema.json",
     "copy": "recipes/nemar_process/common/contract/plugin-manifest.v1.json",
-    "sha256": "ea6e62c416ec2040ab5536fc83a6171a18c9f8932133f9fae343dc09d29c202f",
-    "bytes": 7784
+    "sha256": "f93a4941f21b0af6bced1e9f99b28dc9329ea694225cb5f95bc2eb9bf43ea8aa",
+    "bytes": 8193
   },
   "neuroschema_bundle": {
     "source": "shared/contract/neuroschema/dataset.bundle.json",
@@ -47,8 +47,8 @@
   "plugin_manifest_vectors": {
     "source": "shared/contract/plugin-manifest-vectors.json",
     "copy": "tests/contract/plugin-manifest-vectors.json",
-    "sha256": "90b3bf282c4920ea507dab8ee27777642046a6fe7f1a990735e066d5c97daaf2",
-    "bytes": 31179
+    "sha256": "a914fa228bd1713a876468fc4f1adab4619e2a0f9ae794bcf28e04ee60168dc8",
+    "bytes": 39140
   },
   "views_registry": {
     "source": "shared/contract/neuroschema/views/registry.json",
