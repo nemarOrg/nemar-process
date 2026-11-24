@@ -183,7 +183,7 @@ def check_locations(eeg: dict[str, Any]) -> None:
     the Zarr input that declares no positions is one (eegprep-lean's ``to_eeg`` fills ``chanlocs``
     from the positions a store carries in its root attributes, and leaves labels alone otherwise), and
     so is one whose unit or coordinate system the reader refuses. The fit of such a recording (up to
-    2000 iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
+    ``steps.DEFAULT_MAX_ITER``, 4000, iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
     channels exactly as ICLabel calls it, with one value per channel: the rule is eegprep's own and
     cannot drift from it. The error is recognized by its class, never by its message. ICLabel is not
     skipped: the recording fails, writing nothing.
@@ -418,7 +418,8 @@ def process(
         embedding=FLOOR_EMBEDDING,
     )
     plan = result.plan
-    # the floor's decisions have the hash they would have had as the floor's own plan
+    # the hash of the floor's part of this plan (its steps to qc), named as the floor's recipe: with
+    # nemar-ica's three embedded values (FLOOR_EMBEDDING) it is not the hash of a nemar-floor product
     floor_plan_hash = plan.hash_as(floor_steps.RECIPE_ID, floor_steps.RECIPE_VERSION, "qc")
     # The floor's samples are dropped as soon as ASR has them (a long recording is gigabytes a copy);
     # its header stays, because the floor's writer reads it (`pnts` for `mask_grid`).

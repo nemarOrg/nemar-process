@@ -254,7 +254,8 @@ def amica15_call(
 
     Never ``seed`` or ``fix_init``: eegprep would write either into the binary's parameter file,
     and this recipe seeds nothing the binary reads, so a run starts from the clock. The rejection
-    settings are the binary's own names, which eegprep writes into that file (``do_reject`` as 1).
+    settings are the binary's own names, which eegprep writes into that file (``do_reject`` as 0:
+    rejection off, its schedule still written).
     """
     return {
         "num_models": N_MODELS,
