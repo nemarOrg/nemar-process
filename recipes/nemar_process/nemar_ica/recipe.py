@@ -54,7 +54,7 @@ COLUMNS = (
 )
 
 RANK_EDGES = (0, 8, 16, 24, 32, 40, 48, 56, 64)
-ITERATION_EDGES = (0, 50, 100, 250, 500, 1000, 2000)
+ITERATION_EDGES = (0, 50, 100, 250, 500, 1000, 2000, 4000)
 
 DISTRIBUTIONS = (
     Distribution("icaRank", "rank", RANK_EDGES),
