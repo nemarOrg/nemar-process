@@ -86,7 +86,7 @@ A runner decides, for a job whose `resources.gpus` is above zero, whether the jo
 | `NEMAR_DEVICE_REASON` | for `cuda` exactly `gpu_idle`; for `cpu` one of `gpu_disabled`, `gpu_unsupported_runtime`, `gpu_reserved`, `gpu_check_failed`, `gpu_busy`, `gpu_memory_short`, `gpu_in_use` |
 | `NEMAR_GPU_ID` | `cuda` only: the one GPU, as `nvidia-smi` prints its identifier (`GPU-` and 36 characters of hexadecimal digits and hyphens) |
 | `NEMAR_GPU_INDEX` | `cuda` only: the GPU's index, 0 to 999 with no leading zero |
-| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the most of the GPU's memory the job may take, a whole number from 1 to 999999999 |
+| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the limit of the job's allocator, a whole number from 1 to 999999999; a runner sets it below the job's whole share of the GPU, to leave room for the CUDA context and libraries that the limit does not count |
 
 With none of them set (a Tapis or SLURM launch, and any job with no GPU) the command line is exactly what it always was.
 Any malformed value, an inconsistent set (`cuda` with a reason that is not `gpu_idle`, `cpu` with `gpu_idle`, a GPU identifier, index or cap without `cuda`, `cuda` without all three, or any of them without `NEMAR_DEVICE`) ends the launch at the start as `runtime_error` with detail `invalid_spec`, as a malformed lease does: one fixed line on standard error, the four launcher files written, and nothing fetched, run or uploaded.

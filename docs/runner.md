@@ -96,7 +96,7 @@ The launcher is started as `python3 -I -S -c '<boot line>' <launcher directory>`
 | `NEMAR_MEMORY_MB` | the job's `memory_mb`; under Docker or Podman always, `default_job_memory_mb` when the claim's is null (the log line is `memory_default_applied job=<id> mb=<n>`); under Apptainer only when the claim's is not null | the claim answer, the configuration |
 | `NEMAR_RUNNER_LABEL` | Docker and Podman only: the runner's registration id, `rnr_` and 24 lowercase hexadecimal digits, which the launcher puts on every container as `nemar.runner` | `GET /compute/runners/me`, read at start |
 | `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` | only for a job whose claim has `gpus` above zero: `cpu` or `cuda`, and the reason, one of the fixed words of [A GPU, only when it is idle](#a-gpu-only-when-it-is-idle); a job with no GPUs gets neither | the GPU check |
-| `NEMAR_GPU_ID`, `NEMAR_GPU_INDEX`, `NEMAR_GPU_MEMORY_MB` | only for a `cuda` decision: the one GPU's identifier as `nvidia-smi` prints it, its index, and the most of its memory the job may take | the GPU check |
+| `NEMAR_GPU_ID`, `NEMAR_GPU_INDEX`, `NEMAR_GPU_MEMORY_MB` | only for a `cuda` decision: the one GPU's identifier as `nvidia-smi` prints it, its index, and the limit of the job's allocator, the cap less `cuda_reserve_mb` (not the job's whole use of the GPU, which is at most the cap) | the GPU check |
 | `HOME` | `<job>/home` | the runner |
 | `PATH` | `/usr/local/bin:/usr/bin:/bin` | fixed |
 | `LANG` | `C.UTF-8` | fixed |
@@ -369,7 +369,7 @@ Nothing about the accounting changes: the Worker counted the job's `resources.gp
 **When.**
 The decision is made for each claimed job whose `gpus` is above zero, just before it starts: after its image is proven and made, and after the start check of [Just before a claimed job starts](#just-before-a-claimed-job-starts) found room.
 A job whose `gpus` is zero gets no decision, no variable, and no call of `nvidia-smi`.
-Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `gpus` the claim allowed, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index and `cap_mb`, and, when the reason is `gpu_check_failed`, a fixed word `why`.
+Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `gpus` the claim allowed, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index, `cap_mb` (the cap) and `limit_mb` (what the job is told, below), and, when the reason is `gpu_check_failed`, a fixed word `why`.
 A GPU is never named in the log by its identifier.
 
 **The reason.**
@@ -382,7 +382,7 @@ The CPU is chosen with the first of these that applies:
 | `gpu_reserved` | an entry named `gpu<i>` or `gpu-all` is in a reservation directory (below), for the GPU with index `i` |
 | `gpu_check_failed` | `nvidia-smi` is missing, is not trusted, does not answer within 10 seconds a call, exits non-zero, or prints anything that cannot be read (no GPU, a field that is `[N/A]`, a process on a GPU the other call did not name, a GPU that appeared or went between samples); or the whole window cannot end before the time the lease leaves before the launcher starts (`lease_abandon_seconds` after the claim) or before the job's own deadline (below), or the runner is stopping |
 | `gpu_busy` | in some sample a compute process lists the GPU, or `memory.used` is above `max_used_mb` (memory held by a process that is quiet counts), or `utilization.gpu` is above `max_utilization_pct` |
-| `gpu_memory_short` | in some sample `memory.total` less `memory.used` is under the cap plus `headroom_mb`, where the cap is `floor(memory_fraction * memory.total)`; a cap under one megabyte is short too |
+| `gpu_memory_short` | in some sample `memory.total` less `memory.used` is under the cap plus `headroom_mb`, where the cap is `floor(memory_fraction * memory.total)`; or the cap less `cuda_reserve_mb` is under one megabyte |
 | `gpu_in_use` | the GPU passed and another job of this runner holds it |
 
 A GPU is granted, with reason `gpu_idle`, only when `samples` readings taken `sample_seconds` apart ALL pass every rule, and the reservation is looked for in every one of them: one failing sample is the CPU.
@@ -421,12 +421,16 @@ An optional `gpu` object in the configuration file, its keys checked as the top 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | `true` turns the GPU on: without it every GPU job runs on the CPU, reason `gpu_disabled` |
-| `memory_fraction` | `0.5` | the most of one GPU's memory a job may take, as a fraction above 0 and at most 1; the cap is told to the recipe |
-| `headroom_mb` | `2048` | memory that must remain free on top of the cap |
+| `memory_fraction` | `0.5` | the most of one GPU's memory a job may take in all, as a fraction above 0 and at most 1: the cap |
+| `headroom_mb` | `2048` | memory that must remain free on top of the cap, and stays free while the job runs |
+| `cuda_reserve_mb` | `1024` | the memory a job takes on its GPU outside its allocator's limit (the CUDA context and the CUDA libraries' own memory), 0 to 16777216; the job is told the cap less this |
 | `max_used_mb` | `1024` | the memory other processes may hold on a GPU that still counts as idle (a desktop's), megabytes |
 | `max_utilization_pct` | `10` | the busiest `utilization.gpu` that still counts as idle, 0 to 100 |
 | `samples` | `6` | readings that must all pass, 2 to 120 |
 | `sample_seconds` | `5` | the gap between readings, above 0 and at most 60 |
+
+The idle rule asks for the cap plus `headroom_mb`, and does not change with `cuda_reserve_mb`: the reserve is taken out of the cap, never out of the headroom.
+The default reserve is a conservative choice until it is measured on a real GPU.
 
 ```json
 "gpu": {
@@ -439,16 +443,18 @@ An optional `gpu` object in the configuration file, its keys checked as the top 
 `python3 -m nemar_runner gpu-check` (with `--config <file>` before or after the command) takes the check once, every sample, whether or not `enabled` is true (a note on standard error says when it is not, so that a host can look before it turns the GPU on), and prints one line per GPU, `gpu<i>: idle` or `gpu<i>: busy reason=<word>`, then the sizes and, per sample, the number of compute processes, `memory.used` and `utilization.gpu`:
 
 ```text
-gpu0: idle total_mb=24576 cap_mb=12288 processes=0,0,0,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
-gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 processes=1,1,1,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
+gpu0: idle total_mb=24576 cap_mb=12288 limit_mb=11264 processes=0,0,0,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
+gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 limit_mb=11264 processes=1,1,1,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
 ```
 
 It exits 0 when a GPU is idle and 1 when none is; when the check cannot be made the one line is `gpu: unavailable reason=gpu_check_failed why=<word>`.
 `doctor` adds an informational `gpu` line: `no (disabled)`, `no (gpu_unsupported_runtime)`, `no (gpu_check_failed (<word>))`, `no (tool found, GPUs seen: <n>, but <k> of <m> reservation directories do not exist)` (a reservation can only be made in a directory that is there, and a mistyped one would silently turn reservations off; the default one beside the configuration file is never created by the runner), or `yes (tool found, GPUs seen: <n>, reservations: <names>)`; it never changes the exit status.
 
 **What the recipe is told.**
-`NEMAR_DEVICE` (`cpu` or `cuda`), `NEMAR_DEVICE_REASON`, and for `cuda` `NEMAR_GPU_MEMORY_MB` (the cap), inside the container ([the launcher](launcher.md#the-device)).
-A recipe keeps to the cap, and a Compute Unified Device Architecture (CUDA) out-of-memory error or another process taking memory moves the recipe to the CPU for good and is recorded; that is the recipe's rule, not the runner's.
+`NEMAR_DEVICE` (`cpu` or `cuda`), `NEMAR_DEVICE_REASON`, and for `cuda` `NEMAR_GPU_MEMORY_MB`, inside the container ([the launcher](launcher.md#the-device)).
+`NEMAR_GPU_MEMORY_MB` is the cap less `cuda_reserve_mb`: the recipe limits its allocator to it, and the CUDA context and libraries, which that limit does not count, take the reserve, so the job's whole use stays within the cap and the `headroom_mb` the check found on top of the cap stays free while it runs.
+On a 24576 MiB GPU with the defaults the cap is 12288 and the job is told 11264.
+A recipe keeps to the number it is told, and a Compute Unified Device Architecture (CUDA) out-of-memory error or another process taking memory moves the recipe to the CPU for good and is recorded; that is the recipe's rule, not the runner's.
 
 **What is not guaranteed.**
 `nvidia-smi` lists compute processes of other accounts only where the host lets it (a container or `hidepid` can hide them), and `memory.used` and `utilization.gpu` are the backstop that still sees their use; the check is a reading of a moment, so a person who starts work a second after the window is not seen until the next one, and nothing stops the job then.
