@@ -16,6 +16,7 @@ on:
       - "observer/schema/**"
       - "tests/observer/fixtures/**"
       - "deploy/tapis/**"
+      - "recipes/nemar_process/common/contract/**"
   push:
     branches: ["dev"]
   workflow_dispatch:
@@ -107,7 +108,9 @@ jobs:
   nemar-cli-progress-latest:
     # Advisory: says, without failing, when nemar-cli's pipeline progress epic branch has changed the live
     # progress contract (the schema, the counting vectors and rules, the recipe checkpoint maps, the
-    # runner schema that carries it) since the commit the pin `tests/contract/nemar-cli-progress-pin.json`
+    # runner schema that carries it) or a file pinned beside it (the plugin manifest schema and vectors,
+    # the neuroschema bundle and views registry, the naming port and its vectors, the standalone
+    # contracts) since the commit the pin `tests/contract/nemar-cli-progress-pin.json`
     # names, so the copies here are moved deliberately. Move the branch name to `dev` once the epic merges.
     runs-on: ubuntu-24.04
     continue-on-error: true
@@ -126,7 +129,7 @@ jobs:
             echo "::warning title=nemar-cli's progress contract could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
             exit 0
           fi
-          changed=$(printf '%s\n' "$files" | grep -E '^(shared/contract/compute-progress(\.schema\.json|-vectors\.json|\.ts)$|shared/contract/compute-runner\.schema\.json$|shared/compute-checkpoints\.ts$|shared/compute-recipes\.ts$)' || true)
+          changed=$(printf '%s\n' "$files" | grep -E '^(shared/contract/compute-progress(\.schema\.json|-vectors\.json|\.ts)$|shared/contract/compute-runner\.schema\.json$|shared/compute-checkpoints\.ts$|shared/compute-recipes\.ts$|shared/compute-naming\.ts$|shared/contract/compute-naming-vectors\.json$|shared/contract/plugin-manifest(\.schema\.json|-vectors\.json|\.ts)$|shared/contract/neuroschema/dataset\.bundle\.json$|shared/contract/neuroschema/views/registry\.json$|shared/contract/compute-(local-launch|recipe-progress|results-report)\.schema\.json$)' || true)
           if [ -n "$changed" ]; then
             echo "::warning title=nemar-cli's progress contract moved past the pin::Changed since ${ref:0:12}: $(echo "$changed" | tr '\n' ' '). Copy them (docs/contracts.md, The live progress contract, Bumping the progress pin), then bump tests/contract/nemar-cli-progress-pin.json and tests/contract/nemar-cli-runner-pin.json to the same ref."
           else
