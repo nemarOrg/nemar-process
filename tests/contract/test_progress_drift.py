@@ -111,7 +111,25 @@ STANDALONE = {
     ),
     "results_report": ("compute-results-report", "launcher/schema/compute-results-report.v1.json"),
 }
-COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle", *STANDALONE)
+# What ADR 0137 added at nemar-cli N1b: the plugin manifest vectors (replayed by
+# tests/recipes/test_plugin_manifest.py), the neuroschema view registry (the loader's kinds, roles and
+# formats) and the naming vectors (nemar-cli's port of common/naming.py, replayed by
+# tests/contract/test_naming_vectors.py).
+VIEWS = {
+    "plugin_manifest_vectors": (
+        "shared/contract/plugin-manifest-vectors.json",
+        "tests/contract/plugin-manifest-vectors.json",
+    ),
+    "views_registry": (
+        "shared/contract/neuroschema/views/registry.json",
+        "recipes/nemar_process/common/contract/views-registry.json",
+    ),
+    "naming_vectors": (
+        "shared/contract/compute-naming-vectors.json",
+        "tests/contract/compute-naming-vectors.json",
+    ),
+}
+COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle", *STANDALONE, *VIEWS)
 
 
 def test_the_pin_names_a_full_commit_and_both_files():
@@ -134,6 +152,15 @@ def test_the_pin_names_a_full_commit_and_both_files():
     for part, (name, copy) in STANDALONE.items():
         assert PIN[part]["source"] == "shared/contract/{}.schema.json".format(name)
         assert PIN[part]["copy"] == copy
+    for part, (source, copy) in VIEWS.items():
+        assert PIN[part]["source"] == source
+        assert PIN[part]["copy"] == copy
+
+
+def test_the_pin_names_exactly_the_copies_this_test_checks():
+    """A pin entry no test reads would be a copy nobody compares."""
+    entries = {key for key, value in PIN.items() if isinstance(value, dict) and "copy" in value}
+    assert entries == set(COPIES)
 
 
 @pytest.mark.parametrize("part", COPIES)
@@ -370,6 +397,17 @@ REFUSED = [
     _set((*FAILURE, "path"), "a\n.set"),
     _set((*FAILURE, "path"), ""),
     _set((*FAILURE, "path"), "a" * 257),
+    # neuroschema 0.6.0 relativeLocation (nemar-cli N1b)
+    _set((*FAILURE, "path"), "./a.set"),
+    _set((*FAILURE, "path"), "a/./b.set"),
+    _set((*FAILURE, "path"), "a/."),
+    _set((*FAILURE, "path"), "a//b.set"),
+    _set((*FAILURE, "path"), "a/"),
+    _set((*FAILURE, "path"), " a.set"),
+    _set((*FAILURE, "path"), "a.set "),
+    _set((*FAILURE, "path"), "a%20.set"),
+    _set((*FAILURE, "path"), "a?.set"),
+    _set((*FAILURE, "path"), "a#.set"),
     _set((*FAILURE, "code"), "Load_failed"),
     _set((*FAILURE, "code"), "load-failed"),
     _set((*FAILURE, "step"), ".load"),
@@ -384,6 +422,8 @@ ACCEPTED = [
     _set((*FAILURE, "path"), "a" * 256),
     _set((*FAILURE, "path"), "sub-01/eeg/a b.set"),
     _set((*FAILURE, "path"), "a/..b/c"),
+    _set((*FAILURE, "path"), "a/.b/c"),
+    _set((*FAILURE, "path"), "a/b./c"),
     _set(("failures",), []),
 ]
 

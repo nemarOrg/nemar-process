@@ -314,8 +314,11 @@ PROGRESS_MAX_BYTES = 8192
 PROGRESS_CHECKPOINT_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 PROGRESS_FAILURE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 PROGRESS_STEP_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+# neuroschema 0.6.0 `relativeLocation` narrowed to printable ASCII, as the schema's `ProgressPath`.
 PROGRESS_PATH_RE = re.compile(
-    r"(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\s\S]*/)?\.\.(?:/|(?![\s\S])))[\x20-\x5B\x5D-\x7E]{1,256}"
+    r"(?! )(?![\s\S]* (?![\s\S]))(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)"
+    r"(?!(?:[\s\S]*/)?\.\.?(?:/|(?![\s\S])))(?![\s\S]*//)(?![\s\S]*/(?![\s\S]))"
+    r"[\x20-\x22\x24\x26-\x3E\x40-\x5B\x5D-\x7E]{1,256}"
 )
 _PROGRESS_KEYS = frozenset(("format", "checkpoint", "counts", "failures"))
 _COUNT_KEYS = frozenset(("passed", "failed", "skipped", "total"))

@@ -11,12 +11,20 @@ state are ``manifest_problem``'s, a port of nemar-cli's ``pluginManifestProblem`
 
 A metric a plugin writes is a neuroschema ``qualityMetric`` (value, unit, description, the declared
 bounds, the plugin's name and version), validated against the bundle's own definition.
+
+A view a plugin declares (ADR 0137) is checked against ``contract/views-registry.json``, the byte copy of
+the neuroschema view registry nemar-cli vendors (``shared/contract/neuroschema/views/registry.json``):
+its kind and version must be registered, each role must be one of the kind's roles with the registered
+dimensions, a produced role's format one the kind allows and the runner can write, and a role taken
+from the recipe one the host recipe provides (``view_problem``). A view's per-run ``parameters`` are
+validated against its kind's schema in the bundle (``view_parameters_errors``).
 """
 
 from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +35,36 @@ from referencing.jsonschema import DRAFT202012
 HERE = Path(__file__).resolve().parent / "contract"
 MANIFEST_SCHEMA_PATH = HERE / "plugin-manifest.v1.json"
 BUNDLE_PATH = HERE / "neuroschema.bundle.json"
+VIEWS_REGISTRY_PATH = HERE / "views-registry.json"
 
 MANIFEST_FORMAT = "nemar.plugin-manifest.v1"
 MANIFEST_MAX_BYTES = 65_536  # nemar-cli's PLUGIN_MANIFEST_MAX_BYTES
 QUALITY_METRIC_ID = "nsc:/definitions/qualityMetric.schema.json"
+VIEWS_REGISTRY_FORMAT = "neuroschema.views-registry.v1"
+
+# nemar-cli's PLUGIN_MANIFEST_PROBLEMS, in the order pluginManifestProblem checks them.
+MANIFEST_PROBLEMS = ("bounds_reversed", "plugin_without_output", "metric_not_prefixed")
+
+# What the loader refuses a declared view for (``view_problem``), in the order it checks them, and the
+# word of a view key two plugins (or a plugin and its host recipe) declare.
+KIND_UNREGISTERED = "kind_unregistered"
+ROLE_UNREGISTERED = "role_unregistered"
+DIMS_UNREGISTERED = "dims_unregistered"
+FORMAT_UNWRITABLE = "format_unwritable"
+ROLE_UNPROVIDED = "role_unprovided"
+VIEW_REPEATED = "view_repeated"
+VIEW_PROBLEMS = (
+    KIND_UNREGISTERED,
+    ROLE_UNREGISTERED,
+    DIMS_UNREGISTERED,
+    FORMAT_UNWRITABLE,
+    ROLE_UNPROVIDED,
+)
+
+# The formats the runner can write a produced role in: a table (``files.write_matrix_tsv``) and a JSON
+# document (``files.write_json``). A format the registry lists but the runner has no writer for is
+# ``format_unwritable``.
+WRITABLE_FORMATS = ("tsv", "json")
 
 
 @functools.cache
@@ -70,10 +104,12 @@ def manifest_errors(manifest: Any) -> list[str]:
 
 
 def manifest_problem(manifest: dict[str, Any]) -> str | None:
-    """The first rule the schema cannot state that ``manifest`` breaks, in nemar-cli's words.
+    """The first rule the schema cannot state that ``manifest`` breaks, in nemar-cli's words and order
+    (``pluginManifestProblem``; ``tests/contract/plugin-manifest-vectors.json`` holds the cases).
 
-    ``bounds_reversed``: a metric's bounds have min > max. ``quality_without_metric``: a ``quality``
-    plugin declares no metric. ``figures_without_figure``: a ``figures`` plugin declares no figure.
+    ``bounds_reversed``: a metric's bounds have min > max. ``plugin_without_output``: the plugin
+    declares neither a metric nor a view. ``metric_not_prefixed``: a metric is not named
+    ``<plugin>:<name>`` with the manifest's own name as the prefix.
     """
     outputs = manifest["outputs"]
     for metric in outputs["metrics"].values():
@@ -85,11 +121,85 @@ def manifest_problem(manifest: dict[str, Any]) -> str | None:
             and bounds["min"] > bounds["max"]
         ):
             return "bounds_reversed"
-    if manifest["checkpoint"] == "quality" and not outputs["metrics"]:
-        return "quality_without_metric"
-    if manifest["checkpoint"] == "figures" and not outputs["figures"]:
-        return "figures_without_figure"
+    if not outputs["metrics"] and not outputs["views"]:
+        return "plugin_without_output"
+    prefix = manifest["name"] + ":"
+    if any(not name.startswith(prefix) for name in outputs["metrics"]):
+        return "metric_not_prefixed"
     return None
+
+
+@functools.cache
+def views_registry() -> dict[str, Any]:
+    registry = json.loads(VIEWS_REGISTRY_PATH.read_text(encoding="utf-8"))
+    if registry.get("format") != VIEWS_REGISTRY_FORMAT:
+        raise ValueError("the views registry copy is not {}".format(VIEWS_REGISTRY_FORMAT))
+    return registry
+
+
+def kind_entry(kind: str, kind_version: int) -> dict[str, Any] | None:
+    """The registry's entry for ``kind`` at ``kind_version`` (its ``base``, ``base_version``, roles and
+    schema), or None when the registry does not list it."""
+    for entry in views_registry()["kinds"]:
+        if entry["kind"] == kind and entry["kind_version"] == kind_version:
+            return entry
+    return None
+
+
+def kind_schema_id(entry: Mapping[str, Any]) -> str:
+    """The bundle ``$id`` of a registered kind's schema: its registry path ``schema/views/...`` is the
+    bundle's ``nsc:/views/...``."""
+    path = entry["schema"]
+    if not path.startswith("schema/"):
+        raise ValueError("a registry schema path outside schema/: {}".format(path))
+    return "nsc:/" + path[len("schema/") :]
+
+
+def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | None:
+    """The first reason a view a manifest declares cannot be written, or None (ADR 0137, C12).
+
+    In order: its kind and version are not in the registry (``kind_unregistered``: a plugin writes only
+    registered kinds, so the runner takes a preset's ``base`` and ``base_version`` from the registry); a
+    role is not one of the kind's (``role_unregistered``); a produced role's dimensions differ from the
+    ones the registry fixes for that role (``dims_unregistered``; a role whose registry dimensions are
+    null takes any); a produced role's format is not one the kind allows for that role, or one the
+    runner cannot write (``format_unwritable``); a role taken ``{"from": "recipe"}`` is not one the host
+    recipe provides (``role_unprovided``).
+    """
+    entry = kind_entry(view["kind"], view["kind_version"])
+    if entry is None:
+        return KIND_UNREGISTERED
+    registered = entry["roles"]
+    provided = frozenset(recipe_roles)
+    for role, declared in view["roles"].items():
+        if role not in registered:
+            return ROLE_UNREGISTERED
+        if "from" in declared:
+            continue
+        dims = registered[role]["dims"]
+        if dims is not None and list(declared["dims"]) != list(dims):
+            return DIMS_UNREGISTERED
+        allowed = registered[role]["formats"]
+        if declared["format"] not in allowed or declared["format"] not in WRITABLE_FORMATS:
+            return FORMAT_UNWRITABLE
+    for role, declared in view["roles"].items():
+        if "from" in declared and role not in provided:
+            return ROLE_UNPROVIDED
+    return None
+
+
+def view_parameters_errors(view: Mapping[str, Any], parameters: Any) -> list[str]:
+    """Where a run's ``parameters`` for ``view`` break its kind's schema in the bundle
+    (``#/properties/parameters``): JSON paths only. A view whose kind requires parameters (the spectrum)
+    and is given none is checked as ``{}`` and fails."""
+    entry = kind_entry(view["kind"], view["kind_version"])
+    if entry is None:
+        return ["(kind)"]
+    validator = bundle_validator(kind_schema_id(entry) + "#/properties/parameters")
+    return sorted(
+        "/".join(str(part) for part in error.absolute_path) or "(root)"
+        for error in validator.iter_errors(parameters)
+    )
 
 
 def quality_metric_errors(metric: Any) -> list[str]:

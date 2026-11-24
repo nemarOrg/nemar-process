@@ -165,8 +165,8 @@ def _strongest_line(result: FloorResult) -> tuple[int | None, float | None, floa
     return best, measured[best], result.line_after.get(best)
 
 
-# The summary metric names the floor writes (``summary_metrics``); a plugin's headline metric may not
-# take one (the recipe passes them to ``plugins.load`` as ``reserved``).
+# The summary metric names the floor writes (``summary_metrics``): bare names, so a plugin's headline
+# metric, always ``<plugin>:<name>`` (``metric_not_prefixed``), never takes one.
 SUMMARY_METRICS = (
     "nChannelsInput",
     "nSignalChannels",

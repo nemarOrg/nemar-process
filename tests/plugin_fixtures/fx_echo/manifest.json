@@ -13,7 +13,7 @@
   "parameters": {},
   "outputs": {
     "metrics": {
-      "fxEcho": {
+      "fx-echo:fxEcho": {
         "unit": "ratio",
         "description": "What the test asked for.",
         "bounds": {
@@ -22,6 +22,6 @@
         }
       }
     },
-    "figures": {}
+    "views": {}
   }
 }

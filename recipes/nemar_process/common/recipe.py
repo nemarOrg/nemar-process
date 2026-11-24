@@ -33,8 +33,9 @@ INPUTS: tuple[Input, ...] = get_args(Input)
 
 # The checkpoints a recipe may declare, in the order it declares the ones it has (ADR 0134 decision 2);
 # `stored` follows them and only the backend sets it, so a recipe never declares it. The names and the
-# limits are the progress contract's (launcher/schema/compute-progress.v1.json).
-STANDARD_CHECKPOINTS = ("import", "preprocess", "ica", "iclabel", "quality", "figures")
+# limits are the progress contract's (launcher/schema/compute-progress.v1.json). There is no `figures`
+# checkpoint: a plugin's views are written at `quality` (ADR 0137 decision 1).
+STANDARD_CHECKPOINTS = ("import", "preprocess", "ica", "iclabel", "quality")
 STORED_CHECKPOINT = "stored"
 MAX_CHECKPOINTS = 8
 CHECKPOINT_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")

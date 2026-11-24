@@ -1,8 +1,10 @@
 # Quality plugins
 
 **Partly built.**
-The loader, the runner for metric plugins and the two contracts a plugin is checked against are built (Phase 5, P1); no plugin of NEMAR's ships yet, and no recipe runs plugins yet.
-Figures are on hold (owner direction, 2026-11-23): what can be drawn in the browser from data, such as topographic maps from the mixing weights and channel locations, or component activations from the signals and the unmixing weights, is not stored as an image, and a design for that is being written; until it lands, a plugin that declares a figure is refused, and the figure sections below are the plan, not what is built.
+The loader, the runner for metric plugins, the checks of declared views and the contracts a plugin is checked against are built (Phase 5, P1 and P2); no plugin of NEMAR's ships yet, and no recipe runs plugins yet.
+Figures are gone (nemar-cli ADR 0137): a plugin writes views, data a browser draws (a spectrum, component classes, a table), never an image, and there is no `figures` checkpoint.
+Writing a view's files and checking its arrays is the next phase (P3); until then the runner checks a returned view's shape and parameters and hands it back unwritten.
+The legacy figures are kept below as a mapping to the views that replace them.
 This page describes the plugin interface that nemar-cli ADR 0134 decides on.
 The interface is one part of a general job platform that anyone can follow, not something private to NEMAR's pipeline:
 a job that runs in a nemar-process image (or one built from it) under the launcher, declares its checkpoints and writes signalJourney records and a recordings table gets the same progress and results reports wherever it runs ([progress.md](progress.md)).
@@ -13,8 +15,10 @@ Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md
 
 - **Loading** (`recipes/nemar_process/common/plugins.py`, `load`): a recipe pins its plugins as a literal, `PLUGINS = ((name, version), ...)`; there is no discovery.
   A plugin is the package `nemar_process.plugins.<name with - as _>` with a `manifest.json` and a `run`.
-  The manifest is validated against `#/$defs/PluginManifest` of the byte copy of nemar-cli's schema (`common/contract.py`; the schema's root accepts anything, so validating the root would check nothing), with nemar-cli's extra rules (`bounds_reversed`, `quality_without_metric`, `figures_without_figure`).
-  The loader refuses a name that is not a step word without `.`, a name that is one of the recipe's own step ids, a module that fails to import or is a namespace package, a tree that holds a symbolic link, an entry that is not the package module, a name or version other than the pin, a checkpoint other than the recipe map's, a declared figure (on hold), reading the dataset, reading a recipe the host does not provide, a missing `run`, a metric name two plugins declare, and a metric that takes one of the summary metric names the recipe writes itself (its `SUMMARY_METRICS`, passed to `load` as `reserved`; `write_product` still refuses one as a backstop).
+  The manifest is validated against `#/$defs/PluginManifest` of the byte copy of nemar-cli's schema (`common/contract.py`; the schema's root accepts anything, so validating the root would check nothing), with nemar-cli's extra rules, in its order (`bounds_reversed`, `plugin_without_output`, `metric_not_prefixed`), replayed from nemar-cli's pinned manifest vectors.
+  The loader refuses a name that is not neuroschema's plugin name (a letter, then letters, digits, `_` or `-`, at most 64), a name that is one of the recipe's own step ids, a module that fails to import or is a namespace package, a tree that holds a symbolic link, an entry that is not the package module, a name or version other than the pin, a checkpoint other than the recipe map's, reading the dataset, reading a recipe the host does not provide, and a missing `run`.
+  A plugin's metrics are named `<plugin>:<name>` with its own name as the prefix, so they never repeat another plugin's and never take one of the recipe's bare summary metric names (`write_product` still refuses one as a backstop).
+  Each declared view is checked against the vendored neuroschema view registry ([contracts.md](contracts.md#plugin-views-and-their-per-run-parameters)): `kind_unregistered`, `role_unregistered`, `dims_unregistered`, `format_unwritable` (a format the kind does not allow for the role, or one the runner has no writer for: it writes `tsv` and `json`), `role_unprovided` (a `{"from": "recipe"}` role the host recipe does not provide, passed to `load` as `recipe_roles`), and `view_repeated` (a view key two plugins declare, or one the host recipe writes itself, passed as `recipe_views`).
   Parameter rows are registered only once every pin has loaded.
   Each `plugin@version` is pinned to the SHA-256 of its source tree (every regular file but `__pycache__` and dotfiles such as `.DS_Store`, which `.dockerignore` also keeps out of the image) in `tests/recipes/plugin_digests.json`: the test fails whenever the tree changes until the recorded digest is updated, and review must refuse a digest change that comes without a version bump.
 - **Running** (`run_checkpoint`): a plugin gets only the views its manifest reads, read-only all the way down (mappings as `MappingProxyType`, lists as tuples, sets as frozensets, numeric arrays as read-only views, plain scalars as they are; an object array or any other type is refused, which skips the plugin), and copies of its parameters, and becomes a plan step whose id is its name, whose function is its `run`, and whose `software` is the plugin itself.
@@ -23,7 +27,7 @@ Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md
   Each metric becomes a neuroschema `qualityMetric` (value, unit, description, the declared bounds, the plugin's name and version) in the step's `qualityMetrics`, validated against the vendored neuroschema bundle; headline metrics also go to the record's `summaryMetrics`.
   The record's `extensions.nemar.plugins` lists each plugin with its version, checkpoint, the SHA-256 of its manifest and of its source tree, and whether it ran.
 - **A plugin never fails the recording** (owner decision, 2026-11-23).
-  An exception, or an output that breaks the manifest (a missing or extra key, NaN, infinity, a bool, a value outside the declared bounds, a metric neuroschema refuses, a figure while figures are on hold), skips that plugin: the plan records the skip with the word `plugin_failed`, the record keeps only the exception's class name (or the word `exception` when that name is not a plain identifier) or the rule's word, its metrics are absent, a fixed line `plugin_skipped: <name> code=plugin_failed detail=<word>` goes to standard error, and the rest of the recording is kept.
+  An exception, or an output that breaks the manifest (a missing or extra key, NaN, infinity, a bool, a value outside the declared bounds, a metric neuroschema refuses; views that are not exactly the declared ones, `views_differ`; a view that is not `{"roles": {...}, "parameters": {...}}` with each role a `TableArray` or a mapping, `view_malformed`; parameters that are not strict JSON or that the kind's schema refuses, `parameters_invalid`), skips that plugin: the plan records the skip with the word `plugin_failed`, the record keeps only the exception's class name (or the word `exception` when that name is not a plain identifier) or the rule's word, its metrics are absent, a fixed line `plugin_skipped: <name> code=plugin_failed detail=<word>` goes to standard error, and the rest of the recording is kept.
 - **A plugin is part of the executed plan** (owner decision, 2026-11-23): its step or its skip is hashed like any other, with its identity (name, version, source-tree digest) as a `plugin` field of the step's resolved entry, so two versions with the same parameters, or a run where the plugin was skipped, hash differently.
   The record writer takes `extensions.nemar.plugins` (with `tree_sha256`) from the plan itself, never from a caller, and the plan refuses an outcome whose identity is not the one its step or skip was hashed with; that list is where the plan is read back from, and `verify` reports a malformed entry as a problem; the step's `software` is display only.
   The dataset's `plan_hashes` histogram therefore counts the recordings where a plugin was skipped as their own variant.
@@ -37,7 +41,7 @@ A plugin is a Python module with a manifest.
 The manifest states:
 
 - its name and version;
-- its checkpoint, one of the recipe checkpoints in [progress.md](progress.md) (`quality` for a metric, `figures` for a display figure);
+- its checkpoint, `quality` (metrics and views alike, ADR 0137);
 - what it reads: the floor's outputs, the decomposition's outputs, or the dataset itself;
 - its parameters;
 - the schema of what it writes.
@@ -48,19 +52,19 @@ The implementation fixes them, and from then on the manifest is a public interfa
 ## What a plugin writes
 
 A plugin adds a step to the signalJourney record ([signalJourney](https://signaljourney.github.io/introduction/)), the shape `recipes/nemar_process/common/records.py` already builds for the recipes, and writes nothing in a format of its own:
-its metrics are that step's `qualityMetrics`, its headline numbers are `summaryMetrics`, and each figure is an `outputTargets` entry.
+its metrics are that step's `qualityMetrics`, its headline numbers are `summaryMetrics`, and each view's data file is an `outputTargets` entry (written by the views writer, P3).
 
 signalJourney leaves a metric's value unshaped, so the schema a plugin declares for its output is its real contract.
-Each metric it declares uses neuroschema's `dataQuality` metric definition: a value, a unit, a description, optional bounds, and the plugin's name and version.
+Each metric it declares uses neuroschema's `qualityMetric` definition: a value, a unit, a description, optional bounds, and the plugin's name and version; its name is `<plugin>:<name>`.
 
-For display, a plugin may also write figures, in PNG, SVG or WebP only, each under a size cap the implementation sets.
-A figure that draws a time series (a raw segment, component activations) is PNG or WebP only, because a vector trace stores the samples as coordinates;
-SVG is for maps, histograms and charts of computed values.
-A plugin never writes samples, as no recipe does: no arrays, no matrices of signal values, no NumPy files.
+For display, a plugin writes views (nemar-cli ADR 0137): data a browser draws, never an image.
+A view has a kind from the neuroschema view registry (a spectrum, component classes, a table, lines, a heatmap), a caption, and roles; each role is a table (TSV) or a JSON document the plugin returns, or a file the host recipe provides (`{"from": "recipe"}`), at most 4 MiB.
+The browser draws the maps, spectra and activations from these data, so no plugin stores a PNG, SVG or WebP.
+A view's data are computed values (a spectrum per sensor, class counts, mixing weights), never a recording's samples: no raw signal arrays and no NumPy files.
 
-Two of this repository's guards change for plugins, and by exactly this much:
-the product-tree assertions in `tests/recipes/test_cli.py` and `tests/recipes/test_floor_input_zarr.py`, which today fail on any file that is not TSV or JSON, accept the declared figure formats under the plugins' output directory;
-and the upstream-first scan (`tests/recipes/test_upstream_first.py`), which today bans no plotting library, extends to the plugins directory and gains a ban on plotting libraries everywhere except plugin figure code.
+The repository's guards stay as they are:
+the product-tree assertions in `tests/recipes/test_cli.py` and `tests/recipes/test_floor_input_zarr.py` keep accepting only TSV and JSON, which are the formats views are written in;
+and the upstream-first scan (`tests/recipes/test_upstream_first.py`) keeps banning plotting libraries everywhere, plugins included.
 
 ## Who writes one, and what NEMAR runs
 
@@ -72,7 +76,7 @@ NEMAR never runs an unreviewed plugin under its own identity, because the number
 
 A plugin in NEMAR's pipeline follows the recipe rule for numerics ([AGENTS.md](../AGENTS.md), [recipes.md](recipes.md)):
 every signal-processing call is an eegprep function, and one eegprep lacks is added to eegprep upstream, never written into the plugin.
-Drawing a figure from those results may use the image's plotting library.
+A plugin draws nothing: it returns data, and the browser draws the view.
 
 ## The starting set
 
@@ -92,17 +96,18 @@ The floor already measures the first three: its `qc` step's `qualityMetrics` hol
 A plugin reports a value the floor measures from the floor's output rather than computing it again.
 The dataset summary adds the legacy per-dataset bounds (lowest and highest good channels, good data and brain components), which today's QC summary does not hold.
 
-Figures, from `nemar_plugins/`:
+Figures, from `nemar_plugins/`, and the view each becomes (ADR 0137; the browser draws it from data):
 
-| Figure | Legacy source | Content |
+| Legacy figure | Legacy source | Content |
 |---|---|---|
 | Spectrum with scalp maps | `nemar_plugin_spectra.m` | the power spectrum from 1 to 70 Hz with scalp maps at 6, 10 and 22 Hz and at the stronger line frequency |
 | ICLabel component maps | `nemar_plugin_iclabel.m` | the scalp maps of the first components (the legacy figure shows up to 35) with their ICLabel classes |
 | ICLabel class histogram | `nemar_plugin_iclabel_hist.m` | the share of the data's variance each ICLabel class accounts for |
-| Component activations | `nemar_plugin_icaact.m` | a short window of component activations (PNG or WebP) |
-| Raw segment | `nemar_plugin_midraw.m` | two seconds of clean data from the middle of the recording (PNG or WebP) |
+| Component activations | `nemar_plugin_icaact.m` | a short window of component activations |
+| Raw segment | `nemar_plugin_midraw.m` | two seconds of clean data from the middle of the recording |
 
-The component figures read the decomposition, so they run after `nemar-ica`.
+As views: the spectrum is `nemar.spectrum` (written by `nemar-spectrum`), the class histogram is `nemar.ic-classes` (`nemar-quality`), and the component maps, the activations and the raw segment are `nemar.ic-maps`, `nemar.ic-activity` and `nemar.signal-window`, which `nemar-ica` declares itself; the activations and the raw segment are computed in the browser from the stored weights and the serving copy.
+The component views read the decomposition, so they come after `nemar-ica`.
 
 ## Where each schema lives
 
@@ -111,13 +116,13 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 
 | What | Home |
 |---|---|
-| Quality results per recording (typed metrics; figures with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
+| Quality results per recording (typed metrics; views with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
 | The dataset QC summary (counts, distributions, bounds, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level; in a later version it replaces `schemas/qc-summary.v1.json` and drops that schema's fixed `recipe: nemar-floor` |
 | Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | a new neuroschema namespace, `processing` |
 | Links to the signalJourney records | neuroschema `signalJourney` |
 | The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |
 | The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
-| NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
+| NEMAR's rules for signalJourney records (view formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
 
 nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted today at the dataset document; its vendor script gains a record root (or validates extension objects by their `$id`), and this repository will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 

@@ -394,8 +394,8 @@ def table_row(
     }
 
 
-# The summary metric names nemar-ica adds to the floor's; a plugin's headline metric may not take one
-# (the recipe passes them to ``plugins.load`` as ``reserved``).
+# The summary metric names nemar-ica adds to the floor's: bare names, so a plugin's headline metric,
+# always ``<plugin>:<name>`` (``metric_not_prefixed``), never takes one.
 SUMMARY_METRICS = (
     "icaRank",
     "icaIterations",

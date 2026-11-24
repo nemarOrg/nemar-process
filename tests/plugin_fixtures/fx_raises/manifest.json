@@ -13,11 +13,11 @@
   "parameters": {},
   "outputs": {
     "metrics": {
-      "fxNever": {
+      "fx-raises:fxNever": {
         "unit": "count",
         "description": "Never written."
       }
     },
-    "figures": {}
+    "views": {}
   }
 }
