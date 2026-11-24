@@ -232,6 +232,11 @@ Nothing below names a host, an account or a path: write them as placeholders whe
    Run it with `--device cuda --max-iter 4000` for the job's whole fit, and with `--max-iter 100` on each device for the median time of an iteration before and after the Newton start and the projection to 4000 iterations; read each job's own CUDA context from `nvidia-smi` while a fit runs and pass it as `--context-mib`.
    Report the numbers against the job's time limit (720 minutes for `nemar-ica`, which covers every recording of the job).
 
+The fit runs on one thread by default, and stays so: one thread is what makes a CPU fit bit-reproducible (`bit_reproducible` true), and the GPU is the main path.
+`--ica-threads N` is an option for a CPU run where time matters more than that: it sets the threads of the whole run and is recorded, and above one thread the record states no bit reproducibility (`bit_reproducible` null).
+Measured on a development machine with `scripts/measure_ica_time.py` (128 channels, 10 minutes at 250 Hz, rank 64, the median iteration after the Newton start): 1.51 s an iteration on one thread and 0.68 s on four, 2.2 times faster, so a 4000-iteration fit takes about 45 minutes instead of 101.
+The registry passes no `--ica-threads`, so a job runs the default.
+
 ## Housekeeping
 
 Tapis does not remove a job's execution, input or output directory, so they accumulate under `EXEC_ROOT_DIR`, and the observer adds one every 15 minutes.
