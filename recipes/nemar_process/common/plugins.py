@@ -298,8 +298,8 @@ def load(
     checkpoints: Mapping[str, str],
     provides: Iterable[str],
     steps: Iterable[str],
-    recipe_roles: Iterable[str] = (),
-    recipe_views: Iterable[str] = (),
+    recipe_roles: Iterable[str],
+    recipe_views: Iterable[str],
     package: str = PACKAGE,
 ) -> list[Plugin]:
     """The recipe's pinned plugins, loaded and checked, in pinned order.
@@ -382,12 +382,38 @@ def _quality_metrics(plugin: Plugin, values: Mapping[str, Any]) -> dict[str, dic
 _VIEW_KEYS = frozenset(("roles", "parameters"))
 
 
+# The largest integer every JSON reader holds exactly (I-JSON, RFC 7493).
+JSON_SAFE_INTEGER = 2**53 - 1
+
+
 def _json_copy(value: Any) -> Any:
-    """``value`` as strict JSON gives it back (finite numbers, string keys), or ``_OutputRefused``."""
-    try:
-        return json.loads(json.dumps(value, allow_nan=False))
-    except (TypeError, ValueError) as error:
-        raise _OutputRefused("parameters_invalid") from error
+    """A strict JSON copy of ``value``, or ``_OutputRefused("parameters_invalid")``.
+
+    Walked by hand, never through ``json.dumps``, which turns a non-string key into a string (so
+    ``{1: "a", "1": "b"}`` would collide), a tuple into a list, and writes integers of any size. Refused:
+    a key that is not a ``str``; an integer outside +-(2**53 - 1); a float that is not finite; any value
+    that is not a mapping, a list, a string, a number, a bool or None (a tuple, a set, NumPy values).
+    """
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if type(value) is int:
+        if abs(value) > JSON_SAFE_INTEGER:
+            raise _OutputRefused("parameters_invalid")
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise _OutputRefused("parameters_invalid")
+        return value
+    if type(value) is list:
+        return [_json_copy(item) for item in value]
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise _OutputRefused("parameters_invalid")
+            out[key] = _json_copy(item)
+        return out
+    raise _OutputRefused("parameters_invalid")
 
 
 def _plugin_views(plugin: Plugin, values: Any) -> list[PluginView]:
@@ -414,7 +440,7 @@ def _plugin_views(plugin: Plugin, values: Any) -> list[PluginView]:
             or not isinstance(given.get("parameters", {}), Mapping)
         ):
             raise _OutputRefused("view_malformed")
-        parameters = _json_copy(dict(given.get("parameters", {})))
+        parameters = _json_copy(given.get("parameters", {}))
         if contract.view_parameters_errors(view, parameters):
             raise _OutputRefused("parameters_invalid")
         out.append(PluginView(key, types.MappingProxyType(dict(given["roles"])), parameters))

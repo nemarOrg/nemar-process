@@ -9,7 +9,11 @@ def run(inputs, parameters):
             "icclasses": {"roles": {"histogram": dict(ica["classes"])}},
             "spectrum": {
                 "roles": {"values": TableArray(("freq_hz", "Fz"), ica["spectrum"])},
-                "parameters": dict(ica["spectrum_parameters"]),
+                # the input is read-only (a list arrives as a tuple); parameters are strict JSON
+                "parameters": {
+                    key: list(value) if isinstance(value, tuple) else value
+                    for key, value in ica["spectrum_parameters"].items()
+                },
             },
         },
     )

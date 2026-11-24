@@ -160,6 +160,8 @@ def test_the_fixture_plugins_load_in_pinned_order_with_their_parameter_rows():
         [("fx-echo", "0.1.0"), ("fx-metrics", "0.1.0")],
         checkpoints=QUALITY,
         provides=["nemar-floor", "nemar-ica"],
+        recipe_views=(),
+        recipe_roles=(),
         steps=(),
         package="plugin_fixtures",
     )
@@ -216,6 +218,7 @@ def load_one(
         checkpoints={name: checkpoint},
         provides=provides,
         steps=(),
+        recipe_views=(),
         recipe_roles=recipe_roles,
         package="tmp_plugins",
     )
@@ -248,6 +251,8 @@ def test_a_name_that_is_a_recipe_step_is_refused(plugin_dir):
             [("qc", "1.0.0")],
             checkpoints={"qc": "quality"},
             provides=["nemar-floor"],
+            recipe_views=(),
+            recipe_roles=(),
             steps=("highpass", "qc"),
             package="tmp_plugins",
         ),
@@ -275,6 +280,8 @@ def test_a_missing_plugin_package_is_not_importable(plugin_dir):
             [("x", "1.0.0")],
             checkpoints={"x": "quality"},
             provides=["nemar-floor"],
+            recipe_views=(),
+            recipe_roles=(),
             steps=(),
             package="no_such_plugin_package",
         ),
@@ -376,6 +383,8 @@ def test_a_plugin_the_map_does_not_place_is_refused(plugin_dir):
             [("unplaced", "1.0.0")],
             checkpoints={},
             provides=["nemar-floor"],
+            recipe_views=(),
+            recipe_roles=(),
             steps=(),
             package="tmp_plugins",
         ),
@@ -409,6 +418,8 @@ def test_a_plugin_pinned_twice_is_refused(plugin_dir):
             [("twice", "1.0.0"), ("twice", "1.0.0")],
             checkpoints={"twice": "quality"},
             provides=["nemar-floor"],
+            recipe_views=(),
+            recipe_roles=(),
             steps=(),
             package="tmp_plugins",
         ),
@@ -420,8 +431,10 @@ def test_a_recipe_summary_metric_name_is_never_a_plugin_metric(plugin_dir, headl
     """A recipe's summary metrics are bare names; a plugin's are ``<plugin>:<name>``, so a plugin cannot
     take one: the bare name is refused as unprefixed before anything could collide."""
     from nemar_process.nemar_floor import outputs as floor_outputs
+    from nemar_process.nemar_ica import outputs as ica_outputs
 
     assert all(":" not in name for name in floor_outputs.SUMMARY_METRICS)
+    assert all(":" not in name for name in ica_outputs.SUMMARY_METRICS)
     manifest = manifest_for("shadow")
     metric = next(iter(manifest["outputs"]["metrics"].values()))
     manifest["outputs"]["metrics"] = {"percentGoodChannels": {**metric, "headline": headline}}
@@ -450,6 +463,8 @@ def test_parameter_rows_are_registered_only_when_every_pin_loads(plugin_dir):
             [("early", "1.0.0"), ("absent", "1.0.0")],
             checkpoints={"early": "quality", "absent": "quality"},
             provides=["nemar-floor"],
+            recipe_views=(),
+            recipe_roles=(),
             steps=(),
             package="tmp_plugins",
         ),
@@ -511,6 +526,32 @@ def test_a_view_the_runner_cannot_write_is_refused(plugin_dir, declared, word):
     refused(word, lambda: load_one("viewer"))
 
 
+def test_the_view_problems_are_checked_in_their_declared_order():
+    """Each case breaks its own check and every later one; the first word in VIEW_PROBLEMS wins."""
+    recipe = {"from": "recipe"}
+    cases = [
+        view("nemar.unknown", roles={"bogus": produced(dims=["x"], format="npy")}),
+        view("nemar.spectrum", roles={"layout": recipe, "bogus": produced(format="npy")}),
+        view(
+            "nemar.spectrum",
+            roles={"layout": recipe, "values": produced(dims=["sensor", "freq"], format="json")},
+        ),
+        view(
+            "nemar.spectrum",
+            roles={"layout": recipe, "values": produced(dims=["freq", "sensor"], format="json")},
+        ),
+        SPECTRUM,
+    ]
+    assert [contract.view_problem(case, ()) for case in cases] == list(contract.VIEW_PROBLEMS)
+
+
+def test_a_role_the_kind_lacks_is_refused_before_a_role_the_recipe_lacks():
+    unknown_after_recipe_role = view(
+        "nemar.spectrum", roles={"layout": {"from": "recipe"}, "bogus": {"from": "recipe"}}
+    )
+    assert contract.view_problem(unknown_after_recipe_role, ()) == "role_unregistered"
+
+
 def test_a_format_the_registry_allows_but_the_runner_cannot_write_is_refused(monkeypatch):
     """Every format the registry lists today has a writer; a new one without a writer is refused."""
     histogram = view("nemar.ic-classes", roles={"histogram": produced(format="json")})
@@ -534,6 +575,8 @@ def test_a_view_key_two_plugins_declare_is_refused(plugin_dir):
             [("first", "1.0.0"), ("second", "1.0.0")],
             checkpoints={"first": "quality", "second": "quality"},
             provides=["nemar-floor"],
+            recipe_views=(),
+            recipe_roles=(),
             steps=(),
             package="tmp_plugins",
         ),
@@ -548,6 +591,7 @@ def test_a_view_key_the_host_recipe_writes_is_refused(plugin_dir):
             [("taker", "1.0.0")],
             checkpoints={"taker": "quality"},
             provides=["nemar-floor"],
+            recipe_roles=(),
             steps=(),
             recipe_views=("icmaps",),
             package="tmp_plugins",

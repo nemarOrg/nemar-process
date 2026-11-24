@@ -43,6 +43,7 @@ def loaded():
             checkpoints=CHECKPOINTS,
             provides=["nemar-floor", "nemar-ica"],
             steps=(),
+            recipe_views=(),
             recipe_roles=("layout",),
             package="plugin_fixtures",
         )
@@ -96,7 +97,7 @@ def test_a_null_metric_is_kept_as_null(loaded):
 
 
 def test_plugins_of_another_checkpoint_do_not_run(loaded):
-    plan, result = run_one(loaded["fx-metrics"], {"share": 1, "level": 1}, checkpoint="figures")
+    plan, result = run_one(loaded["fx-metrics"], {"share": 1, "level": 1}, checkpoint="ica")
     assert plan.steps == []
     assert result.outcomes == []
 
@@ -624,3 +625,57 @@ def test_an_outcome_must_match_the_identity_its_step_was_hashed_with(loaded):
         plan.add_plugin_outcome(entry)
     with pytest.raises(ValueError):
         fresh_plan().add_plugin_outcome(result.outcomes[0].entry())
+
+
+# ---- the strict JSON copy of a view's parameters --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {1: "a", "1": "b"},
+        {"n": 10**400},
+        {"n": 2**53},
+        {"n": -(2**53)},
+        {"x": float("nan")},
+        {"x": float("-inf")},
+        {"x": (1, 2)},
+        (1, 2),
+        {"x": {1, 2}},
+        {"x": np.float64(1.0)},
+        {"x": b"bytes"},
+        {"x": [1, {"y": float("inf")}]},
+        {"x": {2: "nested key"}},
+    ],
+    ids=[
+        "int_and_str_key_collide",
+        "huge_int",
+        "int_over_safe",
+        "int_under_safe",
+        "nan",
+        "minus_inf",
+        "tuple_inside",
+        "tuple",
+        "set",
+        "numpy_float",
+        "bytes",
+        "inf_in_a_list",
+        "nested_int_key",
+    ],
+)
+def test_the_json_copy_refuses_what_strict_json_cannot_hold(value):
+    with pytest.raises(plugins._OutputRefused) as caught:
+        plugins._json_copy(value)
+    assert caught.value.word == "parameters_invalid"
+
+
+def test_the_json_copy_keeps_strict_json_as_it_is():
+    value = {
+        "a": [1, 2.5, None, True, "s", {"b": []}],
+        "edge": 2**53 - 1,
+        "low": -(2**53 - 1),
+    }
+    copied = plugins._json_copy(value)
+    assert copied == value
+    assert copied is not value
+    assert copied["a"] is not value["a"]
