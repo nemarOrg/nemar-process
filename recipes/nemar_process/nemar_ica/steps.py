@@ -186,8 +186,13 @@ BROWSER_APPLIES_TO_LABELS = (
     "field and refuses an unknown unit or any channel it cannot match"
 )
 BROWSER_CAPTION_UNCHECKED = "not checked against the decomposition input"
-# The spans ASR repairs (its bursts) are shaded by the view over the whole recording; they are rows of
-# the floor's _badsegments.tsv and _samplemask.tsv with this label and reason, flagged, never removed.
+# Matched by label, a column must carry the channel's own label: when the labels cannot head columns
+# (two of one name, or text a header may not hold, so the matrices fall back to Ch001 and so on) there
+# is no browser matrix, and the record says why in place of publishing placeholder columns.
+BROWSER_LABELS_UNUSABLE = "labels_unusable"
+# The spans ASR repairs (its bursts) are shaded by the view over the whole recording, from the rows of
+# the floor's _badsegments.tsv (in seconds) with this label and reason: flagged, never removed. They are
+# rows of _samplemask.tsv too, which the view does not read: its samples are the archive's grid.
 BURST_LABEL = "burst"
 BURST_REASON = "asr_repaired"
 # The share of samples ASR repairs, a number per recording (`asrBurstFraction`, 0 to 1): how much of

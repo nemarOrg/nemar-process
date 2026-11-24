@@ -1,9 +1,11 @@
 """The floor's files and its record: what a recording's result is written as.
 
 Per recording, beside the recording (``naming.py``): ``_channels.tsv`` (the BIDS ``status`` and
-``status_description`` columns), ``_badsegments.tsv`` (absent when the window step was skipped: an
-empty file would claim "no bad segments"), ``_samplemask.tsv`` (the same bad windows as sample
-indices of the samples the floor read, absent in the same case), ``_filters.json``, ``_qc.json``
+``status_description`` columns, always written), ``_badsegments.tsv`` (the window step's bad windows
+and the spans a recipe that embeds the floor flagged, such as the spans nemar-ica's ASR repaired;
+absent only when the window step was skipped and no span was flagged, because an empty file would
+claim "no bad segments"), ``_samplemask.tsv`` (the same rows as sample indices of the samples the
+floor read, absent in the same case; ``segment_tables_written``), ``_filters.json``, ``_qc.json``
 and the signalJourney record, which holds the size and SHA-256 of the others. The record also names
 the grid of the samples that were read (``extensions.nemar.mask_grid``: how many, at what rate, and
 whether they are the archived recording's or NEMAR's serving copy). Everything is TSV and JSON:
@@ -180,6 +182,34 @@ SUMMARY_METRICS = (
 )
 
 
+def segment_tables_written(result: FloorResult, extra_segments: Sequence[Any] = ()) -> bool:
+    """Whether ``_badsegments.tsv`` and ``_samplemask.tsv`` are written: when the window step ran (its
+    mask) or a recipe that embeds the floor flagged spans of its own; never empty."""
+    return result.sample_mask is not None or bool(extra_segments)
+
+
+def segment_descriptions(windows: bool, flagged: bool) -> tuple[str, str]:
+    """The descriptions of ``_badsegments.tsv`` and ``_samplemask.tsv``, naming only what ran: the
+    window step's bad windows (``clean_windows``), the spans the recipe flagged, or both."""
+    if windows and flagged:
+        return (
+            "Bad segments found by clean_windows and the spans the recipe flagged",
+            "Bad windows as sample indices of the samples read, stop exclusive, and the spans the "
+            "recipe flagged",
+        )
+    if windows:
+        return (
+            "Bad segments found by clean_windows",
+            "Bad windows as sample indices of the samples read, stop exclusive",
+        )
+    if flagged:
+        return (
+            "The spans the recipe flagged",
+            "The spans the recipe flagged, as sample indices of the samples read, stop exclusive",
+        )
+    raise ValueError("no segment table is written when nothing found or flagged a span")
+
+
 def summary_metrics(result: FloorResult) -> dict[str, Any]:
     channels, samples = result.metrics["channels"], result.metrics["samples"]
     return {
@@ -281,6 +311,9 @@ def write_product(
     """
     if "mask_grid" in (nemar_extra or {}):
         raise ValueError("mask_grid is a key the floor writes")
+    if extra_segments and result.sample_mask is None and extra_segments_step is None:
+        # the segment tables would belong to no step of the plan
+        raise ValueError("spans a recipe flagged need its step when the window step did not run")
     grid = mask_grid(result, grid_profile(profile, nemar_extra))  # refused before any file is made
     info = INFO if info is None else info
     label = info.label
@@ -302,7 +335,7 @@ def write_product(
             lambda path: files.write_tsv(path, CHANNEL_COLUMNS, channel_rows(result)),
         )
     ]
-    if result.sample_mask is not None or extra_segments:
+    if segment_tables_written(result, extra_segments):
         mask = result.sample_mask
         windows = mask_rows(mask) if mask is not None else []
         spans = sorted(
@@ -317,14 +350,15 @@ def write_product(
         seconds = [
             [start / rate, (stop - start) / rate, label, why] for start, stop, label, why in spans
         ]
-        owner = "bad_windows" if mask is not None else str(extra_segments_step)
+        owner = "bad_windows" if mask is not None else extra_segments_step
+        assert owner is not None  # refused above, before anything was written
+        segments_text, mask_text = segment_descriptions(mask is not None, bool(extra_segments))
         jobs.append(
             Product(
                 "badsegments",
                 "tsv",
                 owner,
-                "Bad segments found by clean_windows"
-                + (" and the spans the recipe flagged" if extra_segments else ""),
+                segments_text,
                 lambda path: files.write_tsv(path, SEGMENT_COLUMNS, seconds, SEGMENT_DECIMALS),
             )
         )
@@ -333,8 +367,7 @@ def write_product(
                 "samplemask",
                 "tsv",
                 owner,
-                "Bad windows as sample indices of the samples read, stop exclusive"
-                + (", and the spans the recipe flagged" if extra_segments else ""),
+                mask_text,
                 lambda path: files.write_tsv(path, MASK_COLUMNS, spans),
             )
         )

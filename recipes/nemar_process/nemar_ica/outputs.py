@@ -108,10 +108,25 @@ def serving_unmixing(unmixing: np.ndarray, unit: str | None) -> np.ndarray:
     return referenced * microvolts_per(unit)
 
 
-def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict[str, Any]:
-    """What the record says of the browser's matrix: its file, what it applies to, how its columns
-    map to the serving copy's channels, the unit it takes, the caption a view shows, and where the
-    spans ASR repaired are (the view shades them over the whole recording).
+def browser_unavailable(fit: pipeline.Decomposition) -> str | None:
+    """Why there is no browser matrix, or None: on a dataset directory the columns are matched by
+    label, so labels that cannot head columns (``channel_labels`` falls back to ``Ch001``) give none
+    (``labels_unusable``); on the serving copy the columns are the store's rows, matched by row."""
+    if fit.serving is None and channel_labels(fit.good_channels) != list(fit.good_channels):
+        return steps.BROWSER_LABELS_UNUSABLE
+    return None
+
+
+def browser_transform(
+    recording: Recording, fit: pipeline.Decomposition, segments_written: bool
+) -> dict[str, Any] | None:
+    """What the record says of the browser's matrix, or None when there is none
+    (``browser_unavailable``): its file, what it applies to, how its columns map to the serving
+    copy's channels, the unit it takes, the caption a view shows, and where the spans ASR repaired are
+    (``shaded``: the view shades the ``burst`` rows of ``_badsegments.tsv``, in seconds, over the whole
+    recording; ``files`` is null exactly when that file was not written, ``segments_written``).
+    ``_samplemask.tsv`` is never named: its sample indices are the grid the floor read, not the
+    serving copy the view draws.
 
     On the serving copy the columns are the store's rows (``rows``), in the store's own unit, and the
     match was checked (the fit read that store). On a dataset directory the store was not read: the
@@ -123,6 +138,8 @@ def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict
     def place(suffix: str) -> str:
         return naming.product_path(recording.path, LABEL, suffix, "tsv")
 
+    if browser_unavailable(fit) is not None:
+        return None
     on_serving = fit.serving is not None
     return {
         "matrix": place(steps.SERVING_UNMIXING),
@@ -135,13 +152,16 @@ def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict
         "caption": None if on_serving else steps.BROWSER_CAPTION_UNCHECKED,
         "shaded": {
             "label": steps.BURST_LABEL,
-            "files": [place("badsegments"), place("samplemask")],
+            "files": [place("badsegments")] if segments_written else None,
         },
     }
 
 
 def facts(
-    fit: pipeline.Decomposition, profile: str, browser: Mapping[str, Any] | None = None
+    fit: pipeline.Decomposition,
+    profile: str,
+    browser: Mapping[str, Any] | None = None,
+    browser_reason: str | None = None,
 ) -> dict[str, Any]:
     """The block ``extensions.nemar.ica`` and ``_ica.json`` hold.
 
@@ -207,6 +227,7 @@ def facts(
         "asr_burst_fraction": fit.bursts["fraction"],
         "asr_bursts": copy.deepcopy(fit.bursts),
         "browser_transform": None if browser is None else copy.deepcopy(dict(browser)),
+        "browser_transform_reason": browser_reason,
         **device.facts(
             resolution,
             threads=settings.threads,
@@ -312,7 +333,12 @@ def products(fit: pipeline.Decomposition, block: Mapping[str, Any]) -> list[floo
             "What the run says of its decomposition: engine, settings, start, device",
             lambda path: files.write_json(path, {**stamp, **block}),
         ),
-        *serving_products(fit, unmixing, components, channels),
+        # no browser matrix without its transform (labels_unusable): never placeholder columns
+        *(
+            serving_products(fit, unmixing, components, channels)
+            if block["browser_transform"] is not None
+            else []
+        ),
     ]
 
 
@@ -400,7 +426,11 @@ def write_product(
         raise ValueError(
             "the decomposition input {!r} is not the input profile {!r}'s".format(source, profile)
         )
-    block = facts(fit, profile, browser_transform(recording, fit))
+    spans = fit.bursts["spans"]
+    written = floor_outputs.segment_tables_written(fit.floor_result, spans)
+    block = facts(
+        fit, profile, browser_transform(recording, fit, written), browser_unavailable(fit)
+    )
     values = (
         block["rank"],
         block["iterations"],
@@ -418,8 +448,7 @@ def write_product(
         info=INFO,
         extra_products=products(fit, block),
         extra_segments=[
-            (start, stop, steps.BURST_LABEL, steps.BURST_REASON)
-            for start, stop in fit.bursts["spans"]
+            (start, stop, steps.BURST_LABEL, steps.BURST_REASON) for start, stop in spans
         ],
         extra_segments_step="asr",
         summary_extra=summary,

@@ -472,6 +472,42 @@ def test_the_archive_input_is_the_floor_copy_after_asr_and_its_matrix_is_matched
     assert "refuses an unknown unit" in transform["applies_to"]
 
 
+@pytest.mark.parametrize(
+    "spoil",
+    [lambda labels: [labels[0], labels[0], *labels[2:]], lambda labels: ["F\tp1", *labels[1:]]],
+    ids=["duplicate", "tab"],
+)
+def test_labels_that_cannot_head_columns_give_no_browser_matrix_and_say_why(tiny, tmp_path, spoil):
+    """On a dataset directory the browser matrix is matched by label; labels that cannot head columns
+    (the matrices fall back to Ch001 and so on) are never published as its columns: the transform is
+    null with the reason labels_unusable and no _servingunmixing.tsv is written."""
+    _, fit, _, context = tiny
+    spoiled = dataclasses.replace(fit, good_channels=spoil(list(fit.good_channels)))
+    (recording,) = io.discover(DATASET)
+    with command.quiet():
+        product = outputs.write_product(
+            recording, context, tmp_path, spoiled, [], profile=steps.INPUT_PROFILES["bids"]
+        )
+    block = block_of(product)
+    assert block["browser_transform"] is None
+    assert block["browser_transform_reason"] == "labels_unusable"
+    assert not list(tmp_path.rglob("*_servingunmixing.tsv"))
+    assert not [
+        entry
+        for entry in product.record["extensions"]["nemar"]["outputs"]
+        if entry["location"].endswith("_servingunmixing.tsv")
+    ]
+    header, _ = read_matrix(named(tmp_path, "unmixing.tsv"))
+    assert header[0] == "Ch001"  # the matrices that do not match by label keep their placeholders
+    # and the usable labels of the same fit give the transform, with no reason
+    with command.quiet():
+        kept = outputs.write_product(
+            recording, context, tmp_path / "kept", fit, [], profile=steps.INPUT_PROFILES["bids"]
+        )
+    assert block_of(kept)["browser_transform"]["columns"] == fit.good_channels
+    assert block_of(kept)["browser_transform_reason"] is None
+
+
 def test_the_rank_is_one_less_than_the_good_channels_and_the_inputs_numerical_rank(tiny):
     """The average reference takes one dimension, ASR repairs without lowering the rank and no channel
     is interpolated, so the decomposition keeps N_good - 1 components: the numerical rank of its

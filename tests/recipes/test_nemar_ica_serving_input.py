@@ -55,6 +55,7 @@ from nemar_process.common import determinism, device, io, naming, records, zarr_
 from nemar_process.common import plan as plans
 from nemar_process.common.errors import RecordingError
 from nemar_process.common.recipe import RecordingProduct, RunContext
+from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import RECIPE, outputs, pipeline, steps
 from nemar_process.nemar_ica.options import Settings
 from recipe_support import make_context, read_matrix_tsv
@@ -418,13 +419,12 @@ def test_the_record_names_the_input_its_store_and_the_browsers_matrix(runs, stan
         "caption": None,
         "shaded": {
             "label": "burst",
-            "files": [
-                naming.product_path(path, outputs.LABEL, "badsegments", "tsv"),
-                naming.product_path(path, outputs.LABEL, "samplemask", "tsv"),
-            ],
+            "files": [naming.product_path(path, outputs.LABEL, "badsegments", "tsv")],
         },
     }
+    assert block["browser_transform_reason"] is None
     assert (run.directory / matrix).is_file()
+    assert (run.directory / block["browser_transform"]["shaded"]["files"][0]).is_file()
     assert matrix in [entry["location"] for entry in record["extensions"]["nemar"]["outputs"]]
     written = json.loads(named(run.directory, "ica.json").read_text(encoding="utf-8"))
     assert written["decomposition_input"] == block["decomposition_input"]
@@ -709,8 +709,93 @@ def test_asr_repairs_cuts_nothing_and_the_record_states_the_share_it_repaired(ru
         for target in step.get("outputTargets", [])
         if target.get("location", "").endswith(("_samplemask.tsv", "_badsegments.tsv"))
     ]
-    assert len(described) == 2
+    # the window step ran and ASR flagged spans: both are named, and nothing that did not run
+    assert sorted(described) == sorted(
+        floor_outputs.segment_descriptions(windows=True, flagged=True)
+    )
     assert all(text.endswith("the spans the recipe flagged") for text in described)
+
+
+def test_the_segment_descriptions_name_only_what_ran():
+    windows = floor_outputs.segment_descriptions
+    assert windows(True, False) == (
+        "Bad segments found by clean_windows",
+        "Bad windows as sample indices of the samples read, stop exclusive",
+    )
+    flagged = windows(False, True)
+    assert flagged == (
+        "The spans the recipe flagged",
+        "The spans the recipe flagged, as sample indices of the samples read, stop exclusive",
+    )
+    assert not any("clean_windows" in text for text in flagged)
+    with pytest.raises(ValueError):
+        windows(False, False)
+
+
+def without_windows(fit: pipeline.Decomposition, spans: list[list[int]]) -> pipeline.Decomposition:
+    """The fit as if the window step had been skipped (no mask) and ASR had repaired ``spans``."""
+    floor_result = dataclasses.replace(fit.floor_result, sample_mask=None)
+    bursts = {**fit.bursts, "spans": spans}
+    return dataclasses.replace(fit, floor_result=floor_result, bursts=bursts)
+
+
+@pytest.mark.parametrize("flagged", [True, False], ids=["asr-repaired", "nothing-repaired"])
+def test_with_the_window_step_skipped_the_tables_exist_only_for_flagged_spans(
+    runs, tmp_path, flagged
+):
+    """``shaded.files`` names ``_badsegments.tsv`` exactly when it was written, and the descriptions name
+    only the spans the recipe flagged; with nothing flagged neither table is written and it is null.
+    ``_channels.tsv`` is written either way."""
+    run = runs[STORE]
+    fit = without_windows(run.fit, run.fit.bursts["spans"] if flagged else [])
+    recording = run.source.recording(run.source.index.store(STORE))
+    with command.quiet():
+        product = outputs.write_product(
+            recording,
+            run_context(run.source),
+            tmp_path,
+            fit,
+            [],
+            profile=steps.INPUT_PROFILES["zarr"],
+        )
+    block = product.record["extensions"]["nemar"]["ica"]
+    tables = sorted(
+        path.name.rsplit("_", 1)[-1] for path in tmp_path.rglob("*_desc-nemarica_*.tsv")
+    )
+    assert "channels.tsv" in tables
+    shaded = block["browser_transform"]["shaded"]
+    if flagged:
+        assert {"badsegments.tsv", "samplemask.tsv"} <= set(tables)
+        assert shaded["files"] == [naming.product_path(STORE, outputs.LABEL, "badsegments", "tsv")]
+        assert (tmp_path / shaded["files"][0]).is_file()
+        described = {
+            target["description"]
+            for step in product.record["processingSteps"]
+            for target in step.get("outputTargets", [])
+            if target.get("location", "").endswith(("_samplemask.tsv", "_badsegments.tsv"))
+        }
+        assert described == set(floor_outputs.segment_descriptions(False, True))
+    else:
+        assert not {"badsegments.tsv", "samplemask.tsv"} & set(tables)
+        assert shaded["files"] is None
+
+
+def test_spans_with_neither_a_mask_nor_a_step_are_refused_before_anything_is_written(
+    runs, tmp_path
+):
+    run = runs[STORE]
+    fit = without_windows(run.fit, run.fit.bursts["spans"])
+    with pytest.raises(ValueError, match="need its step"):
+        floor_outputs.write_product(
+            run.source.recording(run.source.index.store(STORE)),
+            run_context(run.source),
+            tmp_path,
+            fit.floor_result,
+            [],
+            extra_segments=[(0, 10, "burst", "asr_repaired")],
+            extra_segments_step=None,
+        )
+    assert not [path for path in tmp_path.rglob("*") if path.is_file()]
 
 
 def test_a_sample_counts_as_repaired_from_a_summed_change_of_1e_8_uv_across_blocks():
