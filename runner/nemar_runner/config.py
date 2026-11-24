@@ -98,7 +98,7 @@ class Gpu:
     left out of the `gpu` object has the value below.
 
     ``enabled`` False (the default: a host turns it on) gives every GPU job the CPU, reason `gpu_disabled`.
-    ``memory_fraction`` is the most of one GPU's memory a job may take (the cap the recipe is told).
+    ``memory_fraction`` is the most of one GPU's memory a job may take in all (the cap).
     ``headroom_mb`` is what must remain free on top of that cap; ``max_used_mb`` is the memory other
     processes may hold on a GPU that still counts as idle (a desktop); ``max_utilization_pct`` the busiest
     it may be. ``samples`` readings, ``sample_seconds`` apart, must ALL pass. ``cuda_reserve_mb`` is the

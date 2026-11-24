@@ -360,9 +360,8 @@ def test_a_reserve_one_below_the_cap_still_tells_the_job_one_megabyte():
 @pytest.mark.parametrize("reserve", [0, 1024, 4096])
 def test_the_idle_rule_is_the_cap_plus_the_headroom_whatever_the_reserve(reserve):
     rules = settings(max_used_mb=TOTAL, headroom_mb=2048, cuda_reserve_mb=reserve)
-    free_needed = (
-        CAP + 2048
-    )  # the reserve is inside the cap, never taken off the room the check asks
+    # the reserve is inside the cap, never taken off the room the check asks
+    free_needed = CAP + 2048
     assert gpu.judge(rules, reading(used=TOTAL - free_needed), 0) is None  # exactly enough
     assert gpu.judge(rules, reading(used=TOTAL - free_needed + 1), 0) == "gpu_memory_short"
 
@@ -398,7 +397,7 @@ def test_the_told_value_and_the_reserve_never_exceed_the_cap_the_check_asked_for
 # ---- the decision -------------------------------------------------------------------------------------
 
 
-def test_six_idle_samples_give_the_gpu_with_its_identifier_index_and_cap(tmp_path, smi):
+def test_six_idle_samples_give_the_gpu_with_its_identifier_index_and_limit(tmp_path, smi):
     pool = build_pool(tmp_path, smi)
     decision = decide(pool)
     assert decision == gpu.Decision("cuda", "gpu_idle", UUID0, 0, LIMIT, cap_mb=CAP)
@@ -920,7 +919,7 @@ def device_keys(env: dict) -> dict:
     return {k: v for k, v in env.items() if k.startswith(("NEMAR_DEVICE", "NEMAR_GPU"))}
 
 
-def test_a_job_that_asked_for_a_gpu_is_given_the_idle_one_and_told_the_cap(jobs):
+def test_a_job_that_asked_for_a_gpu_is_given_the_idle_one_and_told_the_limit(jobs):
     jobs.claim(claim_job(1, gpus=1))
     agent = jobs.agent()
     assert run_once(jobs, agent) == 0
