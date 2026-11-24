@@ -173,7 +173,7 @@ def test_a_sound_object_has_no_problem():
     ("change", "word"),
     [
         (lambda p: p["counts"].pop("quality"), "checkpoints_differ"),
-        (lambda p: p["counts"].update(figures=dict(p["counts"]["quality"])), "checkpoints_differ"),
+        (lambda p: p["counts"].update(ica=dict(p["counts"]["quality"])), "checkpoints_differ"),
         (lambda p: p["counts"]["import"].update(passed=3), "counts_over_total"),
         (lambda p: p["counts"]["quality"].update(total=4), "totals_differ"),
         (lambda p: p.update(checkpoint="ica"), "checkpoint_unknown"),
@@ -273,6 +273,13 @@ def test_a_reference_the_validator_does_not_implement_is_refused():
             [{"step": "nemar-quality", "code": "plugin_failed"}],
         ),
         ("bad_windows", []),
+        (
+            "nemar-quality:plugin_failed,nemar-spectrum:plugin_failed",
+            [
+                {"step": "nemar-quality", "code": "plugin_failed"},
+                {"step": "nemar-spectrum", "code": "plugin_failed"},
+            ],
+        ),
     ],
 )
 def test_a_skipped_steps_cell_gives_its_plugin_pairs(cell, pairs):
@@ -307,7 +314,10 @@ def test_the_column_is_read_only_on_a_succeeded_row():
 
 
 def test_a_skipped_plugin_is_skipped_at_its_checkpoint_only_and_listed_there():
-    checkpoints = [("import", ("load",)), ("quality", ("nemar-quality",)), ("figures", ("fig",))]
+    checkpoints = [
+        ("import", ("load",)),
+        ("quality", ("nemar-quality", "nemar-spectrum")),
+    ]
     row = {
         "path": "a.set",
         "status": "succeeded",
@@ -316,7 +326,7 @@ def test_a_skipped_plugin_is_skipped_at_its_checkpoint_only_and_listed_there():
         "skipped_steps": [{"step": "nemar-quality", "code": "plugin_failed"}],
     }
     outcomes = rules.recording_outcomes(row, checkpoints)
-    assert [o["status"] for o in outcomes] == ["passed", "skipped", "passed"]
+    assert [o["status"] for o in outcomes] == ["passed", "skipped"]
     assert outcomes[1] == {"status": "skipped", "code": "plugin_failed", "step": "nemar-quality"}
     entry = {
         "path": "a.set",
@@ -327,6 +337,5 @@ def test_a_skipped_plugin_is_skipped_at_its_checkpoint_only_and_listed_there():
     assert rules.failures_by_checkpoint([row], checkpoints) == {
         "import": [],
         "quality": [entry],
-        "figures": [],
     }
     assert rules.recent_failures([row], checkpoints) == [entry]

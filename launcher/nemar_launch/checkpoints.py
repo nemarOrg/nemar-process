@@ -46,7 +46,8 @@ PATH_RE = re.compile(
 
 RECORD_STEP = "record"  # the recipe writing its own record, after its last step
 STORED_CHECKPOINT = "stored"  # set by NEMAR's backend only
-STANDARD_CHECKPOINTS = ("import", "preprocess", "ica", "iclabel", "quality", "figures", "stored")
+# No `figures` checkpoint: views are written at `quality` (ADR 0137 decision 1).
+STANDARD_CHECKPOINTS = ("import", "preprocess", "ica", "iclabel", "quality", "stored")
 NOT_RUN_CODE = "not_run"
 
 RECORDING_STATUSES = ("succeeded", "failed", "skipped")
@@ -55,7 +56,7 @@ RECORDINGS_TABLE_COLUMNS = ("path", "status", "code", "step")
 # by commas, empty or `n/a` when none). Only pairs whose step is one of `RECIPE_PLUGIN_STEPS` are read:
 # a plugin that failed is absorbed and counted as skipped at its checkpoint.
 SKIPPED_STEPS_COLUMN = "skipped_steps"
-RECIPE_PLUGIN_STEPS = ("nemar-quality",)
+RECIPE_PLUGIN_STEPS = ("nemar-quality", "nemar-spectrum")
 
 PROGRESS_PROBLEMS = (
     "checkpoints_differ",
