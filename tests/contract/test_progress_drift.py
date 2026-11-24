@@ -397,6 +397,17 @@ REFUSED = [
     _set((*FAILURE, "path"), "a\n.set"),
     _set((*FAILURE, "path"), ""),
     _set((*FAILURE, "path"), "a" * 257),
+    # neuroschema 0.6.0 relativeLocation (nemar-cli N1b)
+    _set((*FAILURE, "path"), "./a.set"),
+    _set((*FAILURE, "path"), "a/./b.set"),
+    _set((*FAILURE, "path"), "a/."),
+    _set((*FAILURE, "path"), "a//b.set"),
+    _set((*FAILURE, "path"), "a/"),
+    _set((*FAILURE, "path"), " a.set"),
+    _set((*FAILURE, "path"), "a.set "),
+    _set((*FAILURE, "path"), "a%20.set"),
+    _set((*FAILURE, "path"), "a?.set"),
+    _set((*FAILURE, "path"), "a#.set"),
     _set((*FAILURE, "code"), "Load_failed"),
     _set((*FAILURE, "code"), "load-failed"),
     _set((*FAILURE, "step"), ".load"),
@@ -411,6 +422,8 @@ ACCEPTED = [
     _set((*FAILURE, "path"), "a" * 256),
     _set((*FAILURE, "path"), "sub-01/eeg/a b.set"),
     _set((*FAILURE, "path"), "a/..b/c"),
+    _set((*FAILURE, "path"), "a/.b/c"),
+    _set((*FAILURE, "path"), "a/b./c"),
     _set(("failures",), []),
 ]
 

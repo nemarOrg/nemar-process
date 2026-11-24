@@ -98,7 +98,13 @@ def test_the_recent_failures_are_the_last_ten_in_table_order():
 
 @pytest.mark.parametrize(
     "path",
-    ["/abs.set", "a/../b.set", "../a.set", "s3:x", "a\\b.set", "é.set", "x" * 257, "a.set\n"],
+    [
+        *("/abs.set", "a/../b.set", "../a.set", "s3:x", "a\\b.set", "é.set", "x" * 257, "a.set\n"),
+        # neuroschema 0.6.0 relativeLocation: no `.` segment, no empty segment, no space at either end,
+        # none of % ? #
+        *("./a.set", "a/./b.set", "a/.", "a//b.set", "a/", " a.set", "a.set ", "a%20.set"),
+        *("a?.set", "a#.set"),
+    ],
 )
 def test_a_path_the_contract_cannot_carry_is_left_out_but_still_counted(path):
     checkpoints = mapping("nemar-floor")
