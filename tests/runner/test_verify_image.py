@@ -1677,7 +1677,7 @@ def test_every_published_sif_digest_is_64_lowercase_hexadecimal_digits_and_the_d
 
 
 @pytest.mark.parametrize("hex_", PUBLISHED_SIF_DIGESTS, ids=lambda h: h[:12])
-def test_the_real_sif_artifact_of_the_demo_digest_is_verified_to_one_layer(machine, hex_):
+def test_the_real_sif_artifact_of_each_published_digest_is_verified_to_one_layer(machine, hex_):
     proof = machine.verifier.sif_proof("job_demo", hex_, lambda: None, use_cache=False)
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", proof.manifest)
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", proof.layer)
@@ -1732,7 +1732,7 @@ def real_apptainer(machine) -> str:
 
 
 @pytest.mark.parametrize("hex_", PUBLISHED_SIF_DIGESTS, ids=lambda h: h[:12])
-def test_the_real_sif_of_the_demo_digest_is_pulled_by_the_verified_digest_and_hashes_to_its_layer(
+def test_the_real_sif_of_each_published_digest_is_pulled_by_the_verified_digest_and_hashes_to_its_layer(
     machine, real_apptainer, tmp_path, hex_
 ):
     scratch = tmp_path / "scratch"
