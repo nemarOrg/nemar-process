@@ -3,8 +3,9 @@
 A plugin never fails the recording (owner decision, 2026-11-23): an exception or an output that breaks
 its manifest skips that plugin, with the word ``plugin_failed`` and only the exception's class name
 or the rule's word, nothing it returned is kept, and the recordings table's existing ``skipped_steps``
-cell (built from the plan's skips) holds ``<plugin>:plugin_failed``. Figures are on hold, so a result
-that carries one is refused. The plugins here are real modules (``tests/plugin_fixtures``).
+cell (built from the plan's skips) holds ``<plugin>:plugin_failed``. A result's views are checked for
+shape and their parameters against the kind's schema (ADR 0137); a view a plugin did not declare is
+refused. The plugins here are real modules (``tests/plugin_fixtures``).
 """
 
 from __future__ import annotations
@@ -23,11 +24,13 @@ PINS = [
     ("fx-metrics", "0.1.0"),
     ("fx-echo", "0.1.0"),
     ("fx-raises", "0.1.0"),
+    ("fx-views", "0.1.0"),
 ]
 CHECKPOINTS = {
     "fx-metrics": "quality",
     "fx-echo": "quality",
     "fx-raises": "quality",
+    "fx-views": "quality",
 }
 
 
@@ -38,9 +41,9 @@ def loaded():
         for p in plugins.load(
             PINS,
             checkpoints=CHECKPOINTS,
-            provides=["nemar-floor"],
+            provides=["nemar-floor", "nemar-ica"],
             steps=(),
-            reserved=(),
+            recipe_roles=("layout",),
             package="plugin_fixtures",
         )
     }
@@ -72,24 +75,24 @@ def test_a_quality_plugin_becomes_a_plan_step_with_neuroschema_metrics(loaded):
         "version": "0.1.0",
         "functionCall": "plugin_fixtures.fx_metrics.run",
     }
-    assert step.quality["fxShare"] == {
+    assert step.quality["fx-metrics:fxShare"] == {
         "value": 87.5,
         "unit": "%",
         "description": "Share of the fixture kept.",
         "plugin": {"name": "fx-metrics", "version": "0.1.0"},
         "bounds": {"min": 0, "max": 100},
     }
-    assert step.quality["fxLevel"]["value"] == -6.0
+    assert step.quality["fx-metrics:fxLevel"]["value"] == -6.0
     for metric in step.quality.values():
         assert contract.quality_metric_errors(metric) == []
-    assert result.summary_metrics == {"fxShare": 87.5}  # the headline metric only
+    assert result.summary_metrics == {"fx-metrics:fxShare": 87.5}  # the headline metric only
     assert [o.entry()["status"] for o in result.outcomes] == ["ran"]
     assert plan.skipped == []
 
 
 def test_a_null_metric_is_kept_as_null(loaded):
     plan, _ = run_one(loaded["fx-metrics"], {"share": None, "level": 1.0})
-    assert plan.steps[0].quality["fxShare"]["value"] is None
+    assert plan.steps[0].quality["fx-metrics:fxShare"]["value"] is None
 
 
 def test_plugins_of_another_checkpoint_do_not_run(loaded):
@@ -172,7 +175,7 @@ def test_a_plugin_cannot_change_its_inputs(loaded, capsys, target, detail):
             view["items"].append(3)
         else:
             view["tags"].add("b")
-        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+        return plugins.PluginResult(metrics={"fx-metrics:fxShare": 1, "fx-metrics:fxLevel": 1})
 
     plugin = replace(loaded["fx-metrics"], run=run)
     plan, result = run_one(plugin, floor)
@@ -199,7 +202,7 @@ def test_an_input_that_cannot_be_made_read_only_skips_the_plugin(loaded, capsys,
 
     def run(inputs, parameters):
         ran.append(True)
-        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+        return plugins.PluginResult(metrics={"fx-metrics:fxShare": 1, "fx-metrics:fxLevel": 1})
 
     plugin = replace(loaded["fx-metrics"], run=run)
     plan, result = run_one(plugin, {"value": value})
@@ -220,7 +223,7 @@ def test_a_plugin_can_read_its_inputs(loaded):
     def run(inputs, parameters):
         view = inputs["nemar-floor"]
         seen.update(total=float(view["data"].sum()), n=view["meta"]["n"], first=view["items"][0])
-        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+        return plugins.PluginResult(metrics={"fx-metrics:fxShare": 1, "fx-metrics:fxLevel": 1})
 
     plugin = replace(loaded["fx-metrics"], run=run)
     run_one(plugin, {"meta": {"n": 1}, "data": np.arange(3.0), "items": [4]})
@@ -236,18 +239,30 @@ def echo(plugin, returns):
     ("returned", "word"),
     [
         (lambda: plugins.PluginResult(metrics={}), "metrics_differ"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": 0.5, "more": 1}), "metrics_differ"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": float("nan")}), "metric_not_finite"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": float("inf")}), "metric_not_finite"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": True}), "metric_not_a_number"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": np.bool_(True)}), "metric_not_a_number"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": "0.5"}), "metric_not_a_number"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": 1.5}), "metric_out_of_bounds"),
-        (lambda: plugins.PluginResult(metrics={"fxEcho": -0.1}), "metric_out_of_bounds"),
-        (lambda: {"fxEcho": 0.5}, "result_not_a_plugin_result"),
         (
-            lambda: plugins.PluginResult(metrics={"fxEcho": 0.5}, figures={"x": None}),
-            "figures_on_hold",
+            lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": 0.5, "more": 1}),
+            "metrics_differ",
+        ),
+        (
+            lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": float("nan")}),
+            "metric_not_finite",
+        ),
+        (
+            lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": float("inf")}),
+            "metric_not_finite",
+        ),
+        (lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": True}), "metric_not_a_number"),
+        (
+            lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": np.bool_(True)}),
+            "metric_not_a_number",
+        ),
+        (lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": "0.5"}), "metric_not_a_number"),
+        (lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": 1.5}), "metric_out_of_bounds"),
+        (lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": -0.1}), "metric_out_of_bounds"),
+        (lambda: {"fx-echo:fxEcho": 0.5}, "result_not_a_plugin_result"),
+        (
+            lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": 0.5}, views={"x": None}),
+            "views_differ",
         ),
     ],
     ids=[
@@ -261,7 +276,7 @@ def echo(plugin, returns):
         "above",
         "below",
         "not_a_result",
-        "a_figure",
+        "an_undeclared_view",
     ],
 )
 def test_an_output_that_breaks_the_manifest_skips_the_plugin(loaded, capsys, returned, word):
@@ -272,7 +287,7 @@ def test_an_output_that_breaks_the_manifest_skips_the_plugin(loaded, capsys, ret
 
 def test_a_passing_echo_is_published(loaded):
     plan, result = run_one(loaded["fx-echo"], {"value": 1})
-    assert plan.steps[0].quality["fxEcho"]["value"] == 1.0
+    assert plan.steps[0].quality["fx-echo:fxEcho"]["value"] == 1.0
     assert result.outcomes[0].status == "ran"
 
 
@@ -294,7 +309,7 @@ def test_the_plugin_gets_copies_of_its_parameters(loaded):
     def run(inputs, parameters):
         parameters["scale"] = 99
         seen.append(parameters)
-        return plugins.PluginResult(metrics={"fxShare": 1, "fxLevel": 1})
+        return plugins.PluginResult(metrics={"fx-metrics:fxShare": 1, "fx-metrics:fxLevel": 1})
 
     plugin = replace(loaded["fx-metrics"], run=run)
     plan, _ = run_one(plugin, {})
@@ -343,6 +358,164 @@ def test_the_display_software_is_not_hashed(loaded):
     before = plan.hash()
     plan.steps[0].software = {"name": "renamed", "version": "9", "functionCall": "x"}
     assert plan.hash() == before
+
+
+# ---- views: the PluginResult shape and the per-run parameters (ADR 0137, docs/contracts.md) -----------
+
+SPECTRUM_PARAMETERS = {
+    "method": "welch",
+    "window": "hamming",
+    "window_s": 2.0,
+    "overlap": 0.5,
+    "unit": "dB",
+    "upper_hz": 125.0,
+    "initial_maps_hz": [6, 10, 22, 60],
+}
+CLASSES = {
+    "classifier": "ICLabel",
+    "categories": ["Brain", "Muscle", "Eye", "Heart", "Line Noise", "Channel Noise", "Other"],
+    "counts": [3, 1, 1, 0, 0, 0, 1],
+    "summed_variance_pct": [60.0, 10.0, 20.0, 0.0, 0.0, 0.0, 10.0],
+    "n_components": 6,
+}
+
+
+def ica_input(parameters=None):
+    return {
+        "classes": CLASSES,
+        "spectrum": np.array([[1.0, -3.0], [2.0, -4.0]]),
+        "spectrum_parameters": SPECTRUM_PARAMETERS if parameters is None else parameters,
+    }
+
+
+def run_views(plugin, ica):
+    plan = fresh_plan()
+    result = plugins.run_checkpoint([plugin], "quality", {"nemar-ica": ica}, plan)
+    return plan, result
+
+
+def test_a_plugins_views_are_checked_and_handed_to_the_writer(loaded):
+    plan, result = run_views(loaded["fx-views"], ica_input())
+    assert [o.status for o in result.outcomes] == ["ran"]
+    assert [step.step_id for step in plan.steps] == ["fx-views"]
+    views = {view.key: view for view in result.views["fx-views"]}
+    assert list(views) == ["icclasses", "spectrum"]  # manifest order
+    assert views["spectrum"].parameters == SPECTRUM_PARAMETERS
+    assert views["icclasses"].parameters == {}
+    table = views["spectrum"].roles["values"]
+    assert isinstance(table, plugins.TableArray)
+    assert table.header == ("freq_hz", "Fz")
+    assert dict(views["icclasses"].roles["histogram"])["n_components"] == 6
+    assert result.summary_metrics == {}
+
+
+def test_a_plugin_without_views_hands_none(loaded):
+    _, result = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
+    assert result.views == {}
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {k: v for k, v in SPECTRUM_PARAMETERS.items() if k != "upper_hz"},
+        {**SPECTRUM_PARAMETERS, "upper_hz": -1.0},
+        {**SPECTRUM_PARAMETERS, "method": "multitaper"},
+        {**SPECTRUM_PARAMETERS, "overlap": 1.0},
+        {**SPECTRUM_PARAMETERS, "window_s": float("nan")},
+        {**SPECTRUM_PARAMETERS, "window_s": float("inf")},
+        {**SPECTRUM_PARAMETERS, 3: "not a string key"},
+        {},
+    ],
+    ids=[
+        "missing",
+        "negative",
+        "method",
+        "overlap",
+        "nan",
+        "inf",
+        "int_key",
+        "none",
+    ],
+)
+def test_parameters_the_kinds_schema_refuses_skip_the_plugin(loaded, capsys, parameters):
+    plan, result = run_views(loaded["fx-views"], ica_input(parameters))
+    assert_skipped(plan, result, loaded["fx-views"], "parameters_invalid", capsys)
+    assert result.views == {}
+
+
+def test_parameters_that_are_not_json_skip_the_plugin(loaded, capsys):
+    def returns():
+        return plugins.PluginResult(
+            metrics={}, views=_views(parameters={**SPECTRUM_PARAMETERS, "window_s": object()})
+        )
+
+    plugin = echo(loaded["fx-views"], returns)
+    plan, result = run_views(plugin, {})
+    assert_skipped(plan, result, plugin, "parameters_invalid", capsys)
+
+
+def test_parameters_on_a_kind_that_takes_none_skip_the_plugin(loaded, capsys):
+    def returns():
+        return plugins.PluginResult(
+            metrics={},
+            views={
+                "icclasses": {"roles": {"histogram": CLASSES}, "parameters": {"limits": "x"}},
+                "spectrum": {"roles": {}, "parameters": SPECTRUM_PARAMETERS},
+            },
+        )
+
+    plugin = echo(loaded["fx-views"], returns)
+    plan, result = run_views(plugin, {})
+    assert_skipped(plan, result, plugin, "parameters_invalid", capsys)
+
+
+def _views(**spectrum):
+    good = {"roles": {"values": plugins.TableArray(("f",), np.zeros((1, 1)))}}
+    return {"icclasses": {"roles": {"histogram": CLASSES}}, "spectrum": {**good, **spectrum}}
+
+
+@pytest.mark.parametrize(
+    ("views", "word"),
+    [
+        ({"icclasses": {"roles": {}}}, "views_differ"),
+        ({**_views(), "extra": {"roles": {}}}, "views_differ"),
+        ([("icclasses", {})], "views_differ"),
+        ({**_views(), "spectrum": None}, "view_malformed"),
+        ({**_views(), "spectrum": {"parameters": {}}}, "view_malformed"),
+        (_views(roles=[1]), "view_malformed"),
+        (_views(roles={"values": np.zeros((1, 1))}), "view_malformed"),
+        (_views(roles={1: CLASSES}), "view_malformed"),
+        (_views(parameters=[("upper_hz", 1)]), "view_malformed"),
+        (_views(extra=1), "view_malformed"),
+    ],
+    ids=[
+        "missing",
+        "extra",
+        "not_a_mapping",
+        "view_none",
+        "no_roles",
+        "roles_list",
+        "bare_array",
+        "role_not_a_name",
+        "parameters_list",
+        "unknown_member",
+    ],
+)
+def test_a_view_of_the_wrong_shape_skips_the_plugin(loaded, capsys, views, word):
+    def returns():
+        return plugins.PluginResult(metrics={}, views=views)
+
+    plugin = echo(loaded["fx-views"], returns)
+    plan, result = run_views(plugin, {})
+    assert_skipped(plan, result, plugin, word, capsys)
+
+
+def test_a_view_with_valid_parameters_and_its_roles_passes(loaded):
+    def returns():
+        return plugins.PluginResult(metrics={}, views=_views(parameters=SPECTRUM_PARAMETERS))
+
+    _, result = run_views(echo(loaded["fx-views"], returns), {})
+    assert [o.status for o in result.outcomes] == ["ran"]
 
 
 # ---- plugin steps reach the record --------------------------------------------------
@@ -395,7 +568,7 @@ def test_plugin_steps_are_recorded_with_their_software_and_metrics(
         "version": "0.1.0",
         "functionCall": "plugin_fixtures.fx_metrics.run",
     }
-    assert steps["fx-metrics"]["qualityMetrics"]["fxShare"]["value"] == 40.0
+    assert steps["fx-metrics"]["qualityMetrics"]["fx-metrics:fxShare"]["value"] == 40.0
     assert "fx-raises" not in steps
     skip = {
         "step_id": "fx-raises",
@@ -403,7 +576,7 @@ def test_plugin_steps_are_recorded_with_their_software_and_metrics(
         "reason": "plugin_failed",
     }
     assert skip in record["extensions"]["nemar"]["skipped_steps"]
-    assert record["summaryMetrics"]["fxShare"] == 40.0
+    assert record["summaryMetrics"]["fx-metrics:fxShare"] == 40.0
     assert plans.verify(record) == []
     assert record["extensions"]["nemar"]["plan_hash"] == made.hash()
     assert record["extensions"]["nemar"]["plugins"] == [o.entry() for o in quality.outcomes]

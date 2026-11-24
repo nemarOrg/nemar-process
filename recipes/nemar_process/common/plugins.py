@@ -2,17 +2,27 @@
 
 A plugin is a package ``nemar_process.plugins.<name with - as _>`` holding a ``manifest.json`` (the
 nemar-cli contract ``nemar.plugin-manifest.v1``) and a ``run(inputs, parameters)`` that returns a
-``PluginResult``: a value for every declared metric, a finite number or None when it could not be
-computed. A plugin is given only what its manifest ``reads`` and never a path; it writes nothing itself.
+``PluginResult``: a value for every declared metric (named ``<plugin>:<name>``), a finite number or
+None when it could not be computed, and the data of every declared view. A plugin is given only what
+its manifest ``reads`` and never a path; it writes nothing itself.
 
-Figures are on hold (owner direction, 2026-11-23: what can be drawn in the browser from data, such as
-topographic maps from mixing weights and channel locations, is not stored as an image), so a plugin
-that declares a figure is refused when it is loaded, and a result that carries one is refused.
+A view is data a browser draws, never an image (ADR 0137). The loader refuses a declared view whose
+kind is not in the vendored registry, whose role or dimensions the registry does not list for that
+kind, whose format the runner cannot write, or whose role is taken from a recipe that does not provide
+it, and a view key that two plugins, or a plugin and its host recipe, declare. A run's view value is
+``{"roles": {role: TableArray | Mapping}, "parameters": {...}}`` (``parameters`` optional): the
+runner checks its shape and validates the parameters against the kind's schema in the bundle; the
+manifest carries no parameters, a preset's ``base`` comes from the registry, and a generic kind's
+coordinates and units come from the array headers and the manifest role, never from the plugin
+(``docs/contracts.md``). The checked views are handed back in ``CheckpointRun.views``; writing them and
+checking their arrays is the views writer's.
 
 What runs is fixed in the image: a recipe declares ``PLUGINS = ((name, version), ...)`` beside its
 step order, and ``load`` refuses a plugin whose entry, name, version, checkpoint or reads differ from
-what the recipe and the manifest say, or whose metric names repeat another plugin's. There is no
-discovery: no entry points, no environment variable, no directory scan.
+what the recipe and the manifest say. A plugin's metrics are named ``<plugin>:<name>`` with its own
+name as the prefix (``metric_not_prefixed``), so they never repeat another plugin's or take one of the
+recipe's bare summary metric names. There is no discovery: no entry points, no environment variable,
+no directory scan.
 
 A plugin never fails the recording (owner decision, 2026-11-23). An exception, or an output that
 breaks its manifest (a key missing or added, a value that is NaN, infinite, a bool or outside the
@@ -47,7 +57,9 @@ from nemar_process.common import plan as plans
 PACKAGE = "nemar_process.plugins"
 # A plugin's name is a step word without ``.``: its package is the name with ``-`` as ``_``, so a dot
 # would make it a subpackage that the digest test (one manifest per direct child) would not see.
-PLUGIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+# It is also neuroschema 0.6.0's ``plugin.name`` (nemar-cli's PLUGIN_NAME_RE), the prefix of a plugin's
+# metric names, so it starts with a letter.
+PLUGIN_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 PLUGIN_FAILED = "plugin_failed"
 # The detail of a skip for an exception: its class name when it is a plain identifier, else this word.
 EXCEPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -64,11 +76,27 @@ class PluginLoadError(Exception):
 
 
 @dataclass(frozen=True)
+class TableArray:
+    """One produced table role of a view: the column names and a 2-D float64 array of the cells.
+
+    The runner reads a generic kind's dimension coordinates from ``header``; checking the array
+    (finite, shape, the declared coordinates) and writing it is the views writer's.
+    """
+
+    header: tuple[str, ...]
+    values: np.ndarray
+
+
+@dataclass(frozen=True)
 class PluginResult:
-    """What a plugin's ``run`` returns: every declared metric, by name (``figures`` must stay empty)."""
+    """What a plugin's ``run`` returns: every declared metric, by name, and every declared view, by key.
+
+    A view's value is ``{"roles": {role: TableArray | Mapping}, "parameters": {...}}``; ``parameters`` is
+    optional and validated against the view kind's schema.
+    """
 
     metrics: Mapping[str, Any]
-    figures: Mapping[str, Any] = field(default_factory=dict)
+    views: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -126,12 +154,24 @@ class PluginOutcome:
         return entry
 
 
+@dataclass(frozen=True)
+class PluginView:
+    """One view a plugin returned, checked: its key, its roles' data and its validated parameters (a
+    JSON copy, ``{}`` when the plugin gave none)."""
+
+    key: str
+    roles: Mapping[str, Any]
+    parameters: dict[str, Any]
+
+
 @dataclass
 class CheckpointRun:
-    """What one checkpoint's plugins gave: outcomes in order and the headline numbers."""
+    """What one checkpoint's plugins gave: outcomes in order, the headline numbers, and the checked
+    views of each plugin that ran, by plugin name, for the views writer."""
 
     outcomes: list[PluginOutcome] = field(default_factory=list)
     summary_metrics: dict[str, Any] = field(default_factory=dict)
+    views: dict[str, list[PluginView]] = field(default_factory=dict)
 
 
 def module_name(name: str, package: str = PACKAGE) -> str:
@@ -188,6 +228,7 @@ def _load_one(
     version: str,
     checkpoints: Mapping[str, str],
     provides: frozenset[str],
+    recipe_roles: frozenset[str],
     package: str,
 ) -> Plugin:
     if not PLUGIN_NAME.fullmatch(name):
@@ -228,8 +269,10 @@ def _load_one(
         raise PluginLoadError(name, "entry_mismatch")
     if checkpoints.get(name) != manifest["checkpoint"]:
         raise PluginLoadError(name, "checkpoint_mismatch")
-    if manifest["outputs"]["figures"]:
-        raise PluginLoadError(name, "figures_on_hold")
+    for view in manifest["outputs"]["views"].values():
+        problem = contract.view_problem(view, recipe_roles)
+        if problem is not None:
+            raise PluginLoadError(name, problem)
     if manifest["reads"]["dataset"]:
         raise PluginLoadError(name, "reads_dataset")
     if not set(manifest["reads"]["recipes"]) <= provides:
@@ -255,37 +298,37 @@ def load(
     checkpoints: Mapping[str, str],
     provides: Iterable[str],
     steps: Iterable[str],
-    reserved: Iterable[str],
+    recipe_roles: Iterable[str] = (),
+    recipe_views: Iterable[str] = (),
     package: str = PACKAGE,
 ) -> list[Plugin]:
     """The recipe's pinned plugins, loaded and checked, in pinned order.
 
     ``checkpoints`` maps each plugin's name to the checkpoint the recipe's map puts it in,
     ``provides`` names the recipes whose outputs the host can hand a plugin, and ``steps`` are the
-    recipe's own step ids, which a plugin's name (its step id) may not repeat, and ``reserved`` the
-    summary metric names the recipe writes itself (its ``SUMMARY_METRICS``), which no plugin metric may
-    take (``write_product`` would refuse it, failing the recording). Once every pin has
-    loaded, each plugin's function gets its parameter row in ``plan.PARAMETER_TYPES``.
+    recipe's own step ids, which a plugin's name (its step id) may not repeat. ``recipe_roles`` are the
+    view roles the host recipe can attach to a role declared ``{"from": "recipe"}``, and
+    ``recipe_views`` the view keys the host recipe writes itself, which no plugin view may take
+    (``view_repeated``, as a view key two plugins declare). Once every pin has loaded, each plugin's
+    function gets its parameter row in ``plan.PARAMETER_TYPES``.
     """
     provided = frozenset(provides)
+    roles = frozenset(recipe_roles)
     recipe_steps = frozenset(steps)
-    reserved_names = frozenset(reserved)
     loaded: list[Plugin] = []
     names: set[str] = set()
-    metrics: set[str] = set()
+    views: set[str] = set(recipe_views)
     for name, version in pins:
         if name in names:
             raise PluginLoadError(name, "pinned_twice")
         if name in recipe_steps:
             raise PluginLoadError(name, "name_is_a_step")
         names.add(name)
-        plugin = _load_one(name, version, checkpoints, provided, package)
-        declared = plugin.manifest["outputs"]["metrics"]
-        if reserved_names & set(declared):
-            raise PluginLoadError(name, "metric_reserved")
-        if metrics & set(declared):
-            raise PluginLoadError(name, "metric_repeated")
-        metrics |= set(declared)
+        plugin = _load_one(name, version, checkpoints, provided, roles, package)
+        keys = set(plugin.manifest["outputs"]["views"])
+        if views & keys:
+            raise PluginLoadError(name, contract.VIEW_REPEATED)
+        views |= keys
         loaded.append(plugin)
     for plugin in loaded:
         plans.PARAMETER_TYPES[plugin.function] = dict.fromkeys(plugin.manifest["parameters"], "any")
@@ -333,6 +376,48 @@ def _quality_metrics(plugin: Plugin, values: Mapping[str, Any]) -> dict[str, dic
         if contract.quality_metric_errors(metric):
             raise _OutputRefused("metric_invalid")
         out[name] = metric
+    return out
+
+
+_VIEW_KEYS = frozenset(("roles", "parameters"))
+
+
+def _json_copy(value: Any) -> Any:
+    """``value`` as strict JSON gives it back (finite numbers, string keys), or ``_OutputRefused``."""
+    try:
+        return json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as error:
+        raise _OutputRefused("parameters_invalid") from error
+
+
+def _plugin_views(plugin: Plugin, values: Any) -> list[PluginView]:
+    """The views a plugin returned, in manifest order, checked for shape and parameters.
+
+    ``views_differ``: the keys are not exactly the declared views. ``view_malformed``: a value is not a
+    mapping of ``roles`` (a mapping of role names to a ``TableArray`` or a mapping) and an optional
+    ``parameters`` (a mapping). ``parameters_invalid``: the parameters are not strict JSON or break the
+    kind's schema in the bundle. Which roles a view carries, and its arrays, are the views writer's.
+    """
+    declared = plugin.manifest["outputs"]["views"]
+    if not isinstance(values, Mapping) or set(values) != set(declared):
+        raise _OutputRefused("views_differ")
+    out: list[PluginView] = []
+    for key, view in declared.items():
+        given = values[key]
+        if (
+            not isinstance(given, Mapping)
+            or "roles" not in given
+            or not set(given) <= _VIEW_KEYS
+            or not isinstance(given["roles"], Mapping)
+            or not all(isinstance(role, str) for role in given["roles"])
+            or not all(isinstance(data, (TableArray, Mapping)) for data in given["roles"].values())
+            or not isinstance(given.get("parameters", {}), Mapping)
+        ):
+            raise _OutputRefused("view_malformed")
+        parameters = _json_copy(dict(given.get("parameters", {})))
+        if contract.view_parameters_errors(view, parameters):
+            raise _OutputRefused("parameters_invalid")
+        out.append(PluginView(key, types.MappingProxyType(dict(given["roles"])), parameters))
     return out
 
 
@@ -417,8 +502,7 @@ def run_checkpoint(
             if not isinstance(returned, PluginResult):
                 raise _OutputRefused("result_not_a_plugin_result")
             quality = _quality_metrics(plugin, returned.metrics)
-            if returned.figures:
-                raise _OutputRefused("figures_on_hold")
+            views = _plugin_views(plugin, returned.views)
         except Exception as error:  # noqa: BLE001  (a plugin never fails the recording: it is skipped)
             detail = error.word if isinstance(error, _OutputRefused) else _exception_detail(error)
             outcome.status, outcome.code, outcome.detail = "skipped", PLUGIN_FAILED, detail
@@ -442,6 +526,8 @@ def run_checkpoint(
         for name, metric in quality.items():
             if declared[name].get("headline"):
                 result.summary_metrics[name] = metric["value"]
+        if views:
+            result.views[plugin.name] = views
         plan.add_plugin_outcome(outcome.entry())
         result.outcomes.append(outcome)
     return result

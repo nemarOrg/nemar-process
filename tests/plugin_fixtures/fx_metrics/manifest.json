@@ -16,7 +16,7 @@
   },
   "outputs": {
     "metrics": {
-      "fxShare": {
+      "fx-metrics:fxShare": {
         "unit": "%",
         "description": "Share of the fixture kept.",
         "bounds": {
@@ -25,11 +25,11 @@
         },
         "headline": true
       },
-      "fxLevel": {
+      "fx-metrics:fxLevel": {
         "unit": "dB",
         "description": "Level of the fixture."
       }
     },
-    "figures": {}
+    "views": {}
   }
 }
