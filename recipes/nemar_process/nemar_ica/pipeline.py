@@ -102,9 +102,11 @@ class Decomposition:
     iclabel: dict[str, Any] = field(default_factory=dict)
 
 
-def canonical_text(document: dict[str, Any]) -> str:
-    """A document as the bytes its hash is taken over: sorted keys, no spaces, ASCII, no NaN, one
-    final newline."""
+def state_text(document: dict[str, Any]) -> str:
+    """ASR's state as the text of ``_asr.json``: sorted keys, no spaces, ASCII, no NaN, one final
+    newline. The record's digest of the state is of these file bytes, as read back; it is not a
+    canonical form recomputed from values. A digest that other languages recompute from values
+    (``channel_types_sha256``) is RFC 8785 text (``determinism.jcs``), never this."""
     return (
         json.dumps(
             document, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=True
@@ -219,7 +221,7 @@ def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
         for item in caught
     ):
         raise RecordingError(STEP_FAILED, "asr", steps.ASR_MAXMEM_DETAIL)
-    return repaired, canonical_text(state_to_json(state))
+    return repaired, state_text(state_to_json(state))
 
 
 def kept_rows(result: floor.FloorResult) -> list[int]:
