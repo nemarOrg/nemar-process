@@ -100,6 +100,7 @@ The launcher is started as `python3 -I -S -c '<boot line>' <launcher directory>`
 | `HOME` | `<job>/home` | the runner |
 | `PATH` | `/usr/local/bin:/usr/bin:/bin` | fixed |
 | `LANG` | `C.UTF-8` | fixed |
+| `XDG_RUNTIME_DIR` | Podman only: the runner's own `XDG_RUNTIME_DIR`, only when it is a directory the user owns with mode 0700; without it the launcher refuses Podman as `runtime_unusable` | the runner's environment |
 
 The launch specification carries no cores or memory, by design, so the runner passes both from the claim answer; the launcher fails closed when `NEMAR_ENFORCE_LIMITS=1` has no usable `NEMAR_CPUS`.
 The launcher fails closed under an engine without `NEMAR_MEMORY_MB`, because the runner's watchdog sees only the engine's client process there.
@@ -230,7 +231,11 @@ Ids the engine prints are checked to be hexadecimal before they reach `rm`; a fa
 Under Apptainer nothing is done.
 Each container `ps` lists is inspected and removed only if its labels, read back, include every one asked for, so an engine that ORs repeated `--filter label=` cannot get another runner's container removed.
 Run ONE runner process per registration: two processes on one registration (with different roots) share the label and remove each other's containers at start.
-The launcher refuses Podman for now (`podman_unsupported`), so `doctor` answers no on both engine lines under it.
+Under Podman every one of these calls, and `doctor`'s `--version`, carries the prevention the launcher's Podman calls carry ([launcher.md](launcher.md#podman-one-verified-path)): the global flags `--default-mounts-file=/dev/null --hooks-dir=<root>/podman/hooks.d` first, and an environment of `PATH`, `LANG`, `HOME` (the account's home directory from the password database), the user's `XDG_RUNTIME_DIR` (only when it is a directory the user owns with mode 0700) and `CONTAINERS_CONF=<root>/podman/containers.conf`, and nothing else.
+`<root>/podman/containers.conf` is an empty file (mode 0600) and `<root>/podman/hooks.d` an empty directory (mode 0700), made without following a link and checked right before each call to be the user's, not links and empty; when any of that does not hold, Podman is not run and the log says `container_cleanup_failed` with `reason=podman_unusable`.
+The launcher's own Podman calls use the same account home and runtime directory, with an empty file and directory of their own in the job's scratch.
+So Podman's state lives in the account's one rootless store (under the account's home directory, with its run state under `XDG_RUNTIME_DIR`), never in a job's `home/`: the runner's labeled removal sees every container a launcher made, and nothing Podman writes is left in a job directory, whose deletion could not remove files owned by subordinate ids.
+`doctor`'s two engine lines under Podman are the launcher's preflight run with the prevention, so they answer yes only where the launcher would run Podman; the child that asks is given the user's checked `XDG_RUNTIME_DIR` as well.
 
 ### Usage
 
