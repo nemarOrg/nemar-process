@@ -195,9 +195,10 @@ BROWSER_LABELS_UNUSABLE = "labels_unusable"
 # rows of _samplemask.tsv too, which the view does not read: its samples are the archive's grid.
 BURST_LABEL = "burst"
 BURST_REASON = "asr_repaired"
-# The share of samples ASR repairs, a number per recording (`asrBurstFraction`, 0 to 1): how much of
-# the recording is noise by ASR's fixed cutoff, so comparable across datasets. Its distribution in the
-# dataset record has these edges.
+# The share of samples ASR's reconstruction changed, a number per recording (`asrBurstFraction`, 0 to
+# 1), at ASR's update resolution and relative to the recording's own calibration: the same rule for every
+# recording (the cutoff is fixed), not an absolute amount of noise (docs/recipes.md). Its distribution
+# in the dataset record has these edges.
 BURST_FRACTION_EDGES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0)
 
 # The floor's three values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
