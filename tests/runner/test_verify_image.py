@@ -1513,6 +1513,10 @@ def test_doctor_prints_no_log_lines_of_the_verification(doctor_world):
 
 DEMO_HEX = "33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a"
 DEMO_REFERENCE = "{}@sha256:{}".format(REPOSITORY, DEMO_HEX)
+# The image digests whose SIF artifact the workflow published and signed, each 64 hexadecimal
+# digits. A release adds its digests here, one line each (the CUDA image's included), and the two
+# SIF tests below run for every one.
+PUBLISHED_SIF_DIGESTS = (DEMO_HEX,)
 REQUIRE_COSIGN = os.environ.get("NEMAR_REQUIRE_COSIGN") == "1"
 REQUIRE_APPTAINER = os.environ.get("NEMAR_REQUIRE_APPTAINER") == "1"
 
@@ -1665,12 +1669,20 @@ def test_a_digest_nobody_signed_is_refused(machine):
     assert caught.value.reason == "cosign_failed"
 
 
-def test_the_real_sif_artifact_of_the_demo_digest_is_verified_to_one_layer(machine):
-    proof = machine.verifier.sif_proof("job_demo", DEMO_HEX, lambda: None, use_cache=False)
+def test_every_published_sif_digest_is_64_lowercase_hexadecimal_digits_and_the_demo_is_one():
+    assert DEMO_HEX in PUBLISHED_SIF_DIGESTS
+    assert len(set(PUBLISHED_SIF_DIGESTS)) == len(PUBLISHED_SIF_DIGESTS)
+    for hex_ in PUBLISHED_SIF_DIGESTS:
+        assert re.fullmatch(r"[0-9a-f]{64}", hex_), hex_
+
+
+@pytest.mark.parametrize("hex_", PUBLISHED_SIF_DIGESTS, ids=lambda h: h[:12])
+def test_the_real_sif_artifact_of_the_demo_digest_is_verified_to_one_layer(machine, hex_):
+    proof = machine.verifier.sif_proof("job_demo", hex_, lambda: None, use_cache=False)
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", proof.manifest)
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", proof.layer)
     assert proof.manifest != proof.layer
-    entry = json.loads((machine.root / "verified" / (DEMO_HEX + ".json")).read_text("utf-8"))
+    entry = json.loads((machine.root / "verified" / (hex_ + ".json")).read_text("utf-8"))
     assert (entry["sif_manifest"], entry["sif_layer"]) == (proof.manifest, proof.layer)
 
 
@@ -1719,8 +1731,9 @@ def real_apptainer(machine) -> str:
     return str(wrapper)
 
 
+@pytest.mark.parametrize("hex_", PUBLISHED_SIF_DIGESTS, ids=lambda h: h[:12])
 def test_the_real_sif_of_the_demo_digest_is_pulled_by_the_verified_digest_and_hashes_to_its_layer(
-    machine, real_apptainer, tmp_path
+    machine, real_apptainer, tmp_path, hex_
 ):
     scratch = tmp_path / "scratch"
     scratch.mkdir(mode=0o700)
@@ -1730,14 +1743,14 @@ def test_the_real_sif_of_the_demo_digest_is_pulled_by_the_verified_digest_and_ha
         return done.returncode
 
     def prove():
-        return machine.verifier.sif_proof("job_demo", DEMO_HEX, lambda: None)
+        return machine.verifier.sif_proof("job_demo", hex_, lambda: None)
 
     final = images.ensure_sif(
         machine.config,
         machine.tuning,
         machine.log,
         images.PullLocks(),
-        DEMO_HEX,
+        hex_,
         "job_demo",
         str(scratch),
         str(scratch),
@@ -1746,6 +1759,6 @@ def test_the_real_sif_of_the_demo_digest_is_pulled_by_the_verified_digest_and_ha
         prove,
     )
     proof = prove()
-    assert final == str(machine.sif_root / (DEMO_HEX + ".sif"))
+    assert final == str(machine.sif_root / (hex_ + ".sif"))
     assert "sha256:" + images.file_sha256(final, lambda: None) == proof.layer
     assert not any(p.name.endswith(".part") for p in machine.sif_root.iterdir())
