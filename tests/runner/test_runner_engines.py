@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import pwd
 import re
 import sys
 import threading
@@ -38,6 +39,24 @@ FAKE_ENGINE = """#!{python}
 import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 argv = sys.argv[1:]
+if "{name}" == "podman":
+    # Podman runs only with its configuration shut out: the two global flags first, an empty
+    # CONTAINERS_CONF file and an empty hooks directory, HOME and XDG_RUNTIME_DIR; the flags and the
+    # environment of each call are recorded beside it
+    hooks = argv[1][len("--hooks-dir="):] if len(argv) > 1 else ""
+    conf = os.environ.get("CONTAINERS_CONF", "")
+    held = (
+        argv[:1] == ["--default-mounts-file=/dev/null"]
+        and argv[1].startswith("--hooks-dir=")
+        and os.path.isdir(hooks) and not os.listdir(hooks)
+        and os.path.isfile(conf) and os.path.getsize(conf) == 0
+        and os.environ.get("HOME") and os.environ.get("XDG_RUNTIME_DIR")
+    )
+    with open(os.path.join(here, "engine-prevention.jsonl"), "a") as handle:
+        handle.write(json.dumps([argv[:2], dict(os.environ)]) + "\\n")
+    if not held:
+        sys.exit(125)
+    argv = argv[2:]
 with open(os.path.join(here, "engine-calls.jsonl"), "a") as handle:
     handle.write(json.dumps(argv) + "\\n")
 table = os.path.join(here, "containers.json")
@@ -70,6 +89,26 @@ elif argv[:1] == ["rm"]:
     gone = set(argv[3:])
     json.dump([c for c in containers if c["id"] not in gone], open(table, "w"))
 """
+
+
+@pytest.fixture(autouse=True)
+def user_runtime_dir(tmp_path, monkeypatch):
+    """The user's runtime directory as Podman needs it (the user's own, mode 0700): the runner reads its
+    own `XDG_RUNTIME_DIR`, and a host without one (a developer's macOS) has none to give."""
+    path = tmp_path / "xdg-runtime"
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(path))
+    return path
+
+
+def prevention_calls(rig):
+    """Each Podman call's global flags and environment, as the stand-in recorded them."""
+    path = rig.bin / "engine-prevention.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
 
 MINE = RUNNER_ID  # this runner's label
 OTHER = "rnr_" + "99" * 12  # another runner's, on a daemon the runners share
@@ -328,6 +367,98 @@ def test_after_a_normal_exit_or_a_cancel_the_same_cleanup_runs(tmp_path, how):
         rig.close()
 
 
+def test_every_podman_call_of_the_runner_carries_the_prevention(tmp_path, user_runtime_dir):
+    rig = make_rig(tmp_path, "podman", seen_env(tmp_path))
+    try:
+        put_containers(rig, (A, MINE, job_id(1)))
+        run_once(rig, claim_job(1))
+        seen = prevention_calls(rig)
+        assert len(seen) == len(engine_calls(rig)) >= 3  # the sweep's ps, inspect, rm, the job's ps
+        conf = rig.root / "podman" / "containers.conf"
+        hooks = rig.root / "podman" / "hooks.d"
+        for flags, environ in seen:
+            assert flags == ["--default-mounts-file=/dev/null", "--hooks-dir=" + str(hooks)]
+            assert set(environ) - {"PWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"} == {
+                "PATH",
+                "LANG",
+                "HOME",
+                "XDG_RUNTIME_DIR",
+                "CONTAINERS_CONF",
+            }
+            assert environ["HOME"] == pwd.getpwuid(os.getuid()).pw_dir  # the account's
+            assert environ["XDG_RUNTIME_DIR"] == str(user_runtime_dir)
+            assert environ["CONTAINERS_CONF"] == str(conf)
+        assert conf.stat().st_size == 0
+        assert conf.stat().st_mode & 0o777 == 0o600
+        assert hooks.stat().st_mode & 0o777 == 0o700
+        assert remaining(rig) == []
+        # the launcher is told the same runtime directory, for Podman only
+        launched = json.loads((tmp_path / "seen.json").read_text())
+        assert launched["XDG_RUNTIME_DIR"] == str(user_runtime_dir)
+        assert launched["HOME"] != environ["HOME"]  # the job's home is the launcher's, not Podman's
+    finally:
+        rig.close()
+
+
+def test_docker_calls_and_launches_get_no_podman_setting(tmp_path):
+    rig = make_rig(tmp_path, "docker", seen_env(tmp_path))
+    try:
+        run_once(rig, claim_job(1))
+        assert prevention_calls(rig) == []
+        assert not (rig.root / "podman").exists()
+        assert "XDG_RUNTIME_DIR" not in json.loads((tmp_path / "seen.json").read_text())
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(
+    "how", ["no-runtime-dir", "wide-runtime-dir", "hook-dropped-in", "conf-written"]
+)
+def test_a_podman_whose_prevention_does_not_hold_is_not_run_by_the_runner(
+    tmp_path, monkeypatch, user_runtime_dir, how
+):
+    rig = make_rig(tmp_path, "podman", seen_env(tmp_path))
+    try:
+        if how == "no-runtime-dir":
+            monkeypatch.delenv("XDG_RUNTIME_DIR")
+        elif how == "wide-runtime-dir":
+            user_runtime_dir.chmod(0o755)
+        else:
+            (rig.root / "podman" / "hooks.d").mkdir(parents=True, mode=0o700)
+            (rig.root / "podman").chmod(0o700)
+            (rig.root / "podman" / "containers.conf").write_text(
+                "[containers]\n" if how == "conf-written" else ""
+            )
+            (rig.root / "podman" / "containers.conf").chmod(0o600)
+            if how == "hook-dropped-in":
+                (rig.root / "podman" / "hooks.d" / "a.json").write_text("{}")
+        put_containers(rig, (A, MINE, job_id(1)))
+        run_once(rig, claim_job(1))
+        assert prevention_calls(rig) == []  # Podman was never run
+        assert remaining(rig) == [A]
+        assert "podman_unusable" in {e["reason"] for e in rig.events("container_cleanup_failed")}
+        assert rig.routes.count("complete") == 1  # a failed cleanup never stops the completion
+        launched = json.loads((tmp_path / "seen.json").read_text())
+        if how.endswith("runtime-dir"):
+            assert "XDG_RUNTIME_DIR" not in launched  # and the launcher refuses Podman itself
+    finally:
+        rig.close()
+
+
+def test_a_link_where_the_runners_podman_directory_goes_makes_nothing_through_it(tmp_path):
+    rig = make_rig(tmp_path, "podman")
+    try:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        (rig.root / "podman").symlink_to(elsewhere)
+        put_containers(rig, (A, MINE, job_id(1)))
+        run_once(rig, claim_job(1))
+        assert prevention_calls(rig) == []
+        assert list(elsewhere.iterdir()) == []
+    finally:
+        rig.close()
+
+
 def test_no_containers_means_no_rm(tmp_path):
     rig = make_rig(tmp_path, "docker")
     try:
@@ -543,6 +674,34 @@ def test_doctor_gets_its_two_engine_lines_from_the_real_launcher_preflight(tmp_p
         assert answers["engine limits enforceable"] == "yes"
         assert answers["engine mode accepted"] == "yes"
         assert status == 0
+    finally:
+        rig.close()
+
+
+def test_doctor_gets_podmans_two_engine_lines_and_its_version_with_the_prevention(tmp_path):
+    """Against the REAL launcher preflight and the launcher's own strict Podman stand-in, which refuses
+    any call without the prevention: the doctor's `--version` (the runner's call) and the preflight's
+    `info` (the launcher's, with the runtime directory the runner hands it) both carry it."""
+    import fake_docker
+
+    rig = make_rig(tmp_path, "podman")
+    try:
+        rig.launcher = ROOT / "launcher"
+        fake_docker.install(str(rig.bin), str(rig.bin / "fake-podman.rec"), name="podman")
+        status, answers, text = diagnose(rig, "podman")
+        assert "runtime podman: yes (Podman version 0.0.0-standin)" in text
+        if os.getuid() == 0:
+            assert answers["engine mode accepted"] == "no"
+            return
+        assert answers["engine limits enforceable"] == "yes"
+        assert answers["engine mode accepted"] == "yes"
+        assert status == 0
+        calls = [
+            json.loads(line)["argv"]
+            for line in (rig.bin / "fake-podman.rec.calls").read_text().splitlines()
+        ]
+        assert [c[2:] for c in calls] == [["--version"], ["info", "--format", "json"]]
+        assert all(c[0] == "--default-mounts-file=/dev/null" for c in calls)
     finally:
         rig.close()
 
