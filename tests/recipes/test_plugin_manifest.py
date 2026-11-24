@@ -392,8 +392,9 @@ def test_the_recipes_declare_the_summary_metrics_they_write(fixture_result):
     from nemar_process.nemar_ica import outputs as ica_outputs
 
     assert set(floor_outputs.summary_metrics(fixture_result)) == set(floor_outputs.SUMMARY_METRICS)
-    # nemar-ica builds its summary by zipping SUMMARY_METRICS (strict) with its four values
-    assert len(set(ica_outputs.SUMMARY_METRICS)) == 4
+    # nemar-ica builds its summary by zipping SUMMARY_METRICS (strict) with its five values
+    assert len(set(ica_outputs.SUMMARY_METRICS)) == 5
+    assert "asrBurstFraction" in ica_outputs.SUMMARY_METRICS
     assert not set(ica_outputs.SUMMARY_METRICS) & set(floor_outputs.SUMMARY_METRICS)
 
 
