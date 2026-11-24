@@ -97,7 +97,8 @@ The container then gets exactly that GPU, or none:
 - Docker: `cuda` passes `--gpus device=<GPU id>` in place of `--gpus <n>`, so one GPU is handed over whatever count the specification allowed; `cpu` passes no `--gpus` and sets `NVIDIA_VISIBLE_DEVICES=void`, once, whatever the count was.
 - Apptainer: `cuda` passes `--nv` and `CUDA_VISIBLE_DEVICES=<GPU id>` (the scheduler's own value is not read); `cpu` passes neither.
   Apptainer's `--nv` binds the host's NVIDIA device files, and `CUDA_VISIBLE_DEVICES` is what picks the one GPU: a request the CUDA runtime honors, not a wall.
-- Podman: no GPU is handed over ([Podman](#podman-one-verified-path)); a runner never sends it a `cuda` decision, and a device in the container's OCI configuration ends the launch before the entry runs.
+- Podman: no GPU is handed over ([Podman](#podman-one-verified-path)), and `--gpus` is never passed.
+  A launch that would hand one over (a GPU job without a decision, or a `cuda` decision) ends at the start as `runtime_unusable`, logged `podman_gpu_unsupported`, before any engine call; a `cpu` decision, which is what a runner sends under Podman, runs on the CPU.
 - The container's environment gets `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` and, for `cuda`, `NEMAR_GPU_MEMORY_MB`, after `NEMAR_OUT`: launcher-owned, because the specification's `env` allowlist is closed and cannot name them.
   The GPU's identifier and index are not passed in: the recipe is told the device and the limit.
 - `provenance.json` gets a `device` object only when a decision was made and the container was about to start: `{"device", "reason", "gpu_index", "memory_mb"}`, the index and the limit null for `cpu`, and never the GPU's identifier or a host name.
@@ -126,18 +127,20 @@ Every call the launcher makes (`--version`, `info`, `image inspect`, `pull`, `cr
 
 `--default-mounts-file=/dev/null` replaces every `mounts.conf`, and `--hooks-dir` replaces the built-in hooks directory (`/usr/share/containers/oci/hooks.d`), which applies even with an empty `CONTAINERS_CONF`.
 The file and the directory are made in the launch's scratch with mode 0600 and 0700 without following a link, and are checked right before each call to be the user's, not links, and empty; anything else is `runtime_unusable` and nothing runs.
+No path of the prevention (the file, the directory, `HOME`, `XDG_RUNTIME_DIR`) may hold a comma, a double quote or a line break, which Podman could read as a list or a record: such a path is `runtime_unusable` too, and nothing is made.
+`--systemd=false` is among the Podman flags: systemd mode, which Podman turns on by itself for a command named like an init system, adds tmpfs mounts and more.
 A Podman call made any other way is refused before anything runs (`runtime.Engine` holds no call without its prevention): `runtime.UNSUPPORTED_ENGINES` is empty, and `tests/launcher/test_runtime_podman.py` pins every other path with a stand-in `podman` that records no call.
 
 **The sequence.**
-`podman create` with the command line below (`create` in place of `run`); `podman init`; `podman container inspect --format '{{json .}}'`, whose `OCIConfigPath` must be `StaticDir` plus `/config.json`; `podman unshare cat -- <OCIConfigPath>` (the file belongs to a subordinate id, which the user cannot read from outside), at most 1 MiB, parsed as JSON; the check below; then `podman start --attach`, which passes signals to the container as `run` does and exits with the entry's own status.
+`podman create` with the command line below (`create` in place of `run`); `podman init`; `podman container inspect --format '{{json .}}'`, whose `State.Status` must be `initialized` (`start` writes `config.json` again for a configured, stopped or exited container) and whose `OCIConfigPath` must be `StaticDir` plus `/config.json`; `podman unshare cat -- <OCIConfigPath>` (the file belongs to a subordinate id, which the user cannot read from outside), at most 1 MiB, parsed as JSON; the check below; then `podman start --attach`, which passes signals to the container as `run` does and exits with the entry's own status.
 What was read is what runs: the runtime read that same file during `init`, and `start` of an initialized container does not write it again (the end-to-end test compares its SHA-256 after `init` and after `start`).
 A refusal removes the container (`rm --force --volumes`) and ends the launch as `runtime_error` with detail `runtime_unusable` before the entry ran, with the log line `podman_config_refused reason=<word> destination=<container path>` (`-` when there is none; never a host path).
 A `create` or `init` that fails is `runtime_unusable` too.
 
 **The check** of the parsed `config.json`; the first failure names the reason:
 
-- `config_unreadable`: the inspect document or `config.json` cannot be read or parsed, or `OCIConfigPath` is not `StaticDir` plus `/config.json`;
-- `hook`: `hooks` is present with a stage that is not empty;
+- `config_unreadable`: the inspect document or `config.json` cannot be read or parsed, the container's `State.Status` is not `initialized`, or `OCIConfigPath` is not `StaticDir` plus `/config.json`;
+- `hook`: `config.json` has a `hooks` key at all, even an empty one;
 - `extra_device`: `linux.devices` is present and not empty;
 - then each mount entry, in order: at a declared bind's destination it must be type `bind`, its source's real path the launcher's, `ro` in its options exactly when declared read-only, and no option outside `bind`, `rbind`, `rprivate`, `private`, `ro`, `rw`, `nosuid`, `nodev`, `noexec` (`declared_bind`); at a destination of the allowlist below it must match that row by type, source rule and option set, compared as sets (`missing_default` for a required row, `extra_mount` for the others); anywhere else it is `extra_mount`;
 - `duplicate_mount`: a destination appears twice;
@@ -161,10 +164,11 @@ The paths of the container's own directories are resolved in Podman's user names
 | `/run/.containerenv` | `bind` | as above | as above | no | none (Podman's marker file) |
 
 - **tmpfs.** No `tmpfs` is allowed but `/dev`.
-  Podman adds `/run`, `/tmp` or `/var/tmp` as tmpfs only with read-only tmpfs or in systemd mode, which the launcher never asks for, and Docker adds none; a configured tmpfs cannot appear under the prevention, and any tmpfs that does appear is refused (`extra_mount`).
+  Podman adds `/run`, `/tmp` or `/var/tmp` as tmpfs only with read-only tmpfs, which the launcher turns off (`--read-only-tmpfs=false`), or in systemd mode, which Podman turns on by itself for a command named `/sbin/init`, `/usr/sbin/init`, `/usr/local/sbin/init` or ending in `systemd`, and which the launcher turns off (`--systemd=false`), so such an entry runs as any other; Docker adds none.
+  A configured tmpfs cannot appear under the prevention, and any tmpfs that does appear is refused (`extra_mount`).
 - **Devices.** `linux.devices` must be empty.
   Rootless Podman turns a configured device into a bind at its destination (listed twice in `mounts`, never in `linux.devices`), which the mount rule refuses as `extra_mount`.
-  No GPU is passed under Podman.
+  No GPU is passed under Podman: `--gpus` is never given, and a launch that would hand one over is refused before any engine call (`podman_gpu_unsupported`), which also keeps out the device hooks a newer Podman adds for a GPU.
 - **A host with `/etc/system-fips` cannot run Podman jobs.**
   Podman 4.9.3 adds `/run/secrets` there (and `/etc/crypto-policies/back-ends` when the image has the FIPS back-end) whatever its configuration says, and no flag removes it; the check refuses it (`extra_mount` at `/run/secrets`), so Podman is unsupported on a FIPS-mode host.
 
@@ -172,7 +176,8 @@ Residuals, stated plainly:
 
 - `/dev/shm` is read-only under these flags, where Docker's and Apptainer's are writable, so a recipe that needs POSIX shared memory fails under Podman; `/dev` is read-only too.
 - The runtime itself adds the standard device nodes (`/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`) and the masked and read-only paths of `linux.maskedPaths` and `linux.readonlyPaths`; they are not `config.json` mounts.
-- A hook runs on the host during `init`, before the check can look; were the prevention bypassed, the check would refuse to start the container, but the hook would have run already: the prevention, not the check, is the guard for hooks.
+- Hooks are guarded by the prevention, not by the check.
+  A `createRuntime` hook runs on the host during `init`, before the check can look, and Podman's own `precreate` and `poststop` hooks are never written into `config.json` at all; the check refuses any `hooks` key, but were the prevention bypassed, a hook would have run already, and a `precreate` or `poststop` hook would not show.
 - SELinux relabeling is unverified.
 
 ### Before anything runs
@@ -255,7 +260,7 @@ The command line, `<name>` being the container's name (under Podman, after the p
 run|create --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --pull=missing
     --network=bridge --user <uid>:<gid>
     [podman: --userns=keep-id --pid=private --ipc=private --uts=private --cgroupns=private
-             --env-host=false --read-only-tmpfs=false --image-volume=ignore]
+             --env-host=false --read-only-tmpfs=false --image-volume=ignore --systemd=false]
     --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
     [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
     --cpus <NEMAR_CPUS> [--cpu-shares 2] --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
