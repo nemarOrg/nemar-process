@@ -1412,6 +1412,7 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         "observer/schema/**",
         "tests/observer/fixtures/**",
         "deploy/tapis/**",
+        "recipes/nemar_process/common/contract/**",
     ]
     for pattern in paths:  # a path that matches no file would never start the workflow
         files = ROOT.glob(pattern.removesuffix("/**") + "/**/*" if "**" in pattern else pattern)
