@@ -21,7 +21,8 @@ The decision is one of these, the first that applies in this order (``REASONS``)
 * ``gpu_busy``: in some sample a compute process lists the GPU, or `memory.used` is above `max_used_mb`
   (memory held by a quiet process counts), or `utilization.gpu` is above `max_utilization_pct`;
 * ``gpu_memory_short``: in some sample `memory.total - memory.used` is under the cap plus `headroom_mb`,
-  where the cap is `floor(memory_fraction * memory.total)`, the most of the GPU's memory the job may take;
+  where the cap is `floor(memory_fraction * memory.total)`, the most of the GPU's memory the job may take
+  in all; or the cap less `cuda_reserve_mb` (what the job is told, below) is under one megabyte;
 * ``gpu_in_use``: the GPU passed, and another job of this runner holds it (one lock per GPU, released
   when that job ends), so two jobs of one runner never share a GPU. A GPU the runner holds is not
   sampled again for its own sake: it is simply not given twice.
@@ -32,7 +33,10 @@ started unless the gaps and the last sample at its slowest (two calls, each kill
 all fit before it, and no gap is slept unless the next sample would still fit, so a runner that is given the
 time the lease leaves never starts the launcher after the lease has run out. A window that cannot fit is
 the CPU at once, not after a wait. One failing sample is the CPU. The first GPU (lowest
-index) that passed and is free is granted, as ``gpu_idle``, with its identifier, its index and the cap.
+index) that passed and is free is granted, as ``gpu_idle``, with its identifier, its index and the limit:
+the job is told the cap less `cuda_reserve_mb` (`NEMAR_GPU_MEMORY_MB`, the limit of torch's allocator), so
+that its CUDA context and libraries, which that limit does not count, fit inside the cap, and the
+`headroom_mb` the check found on top of the cap stays free while the job runs.
 When there is no such GPU the reason is the first of ``REASONS`` that any GPU has. When every GPU the runner
 has seen is held by one of its jobs, there is nothing to look for: ``gpu_in_use`` at once, no window.
 
@@ -120,6 +124,7 @@ class Report(NamedTuple):
     uuid: str
     total_mb: int
     cap_mb: int
+    limit_mb: int
     reason: str | None
     processes: tuple[int, ...]
     used_mb: tuple[int, ...]
@@ -128,7 +133,8 @@ class Report(NamedTuple):
 
 class Decision(NamedTuple):
     """The device a GPU job runs on. ``cuda`` names the one GPU (``gpu_id`` as `nvidia-smi` prints it,
-    ``gpu_index``) and the cap (``memory_mb``); ``cpu`` names none. ``why`` is for the log only."""
+    ``gpu_index``), the limit the job is told (``memory_mb``, the cap less `cuda_reserve_mb`) and the cap
+    the check held room for (``cap_mb``, for the log); ``cpu`` names none. ``why`` is for the log only."""
 
     device: str
     reason: str
@@ -136,6 +142,7 @@ class Decision(NamedTuple):
     gpu_index: int | None = None
     memory_mb: int | None = None
     why: str | None = None
+    cap_mb: int | None = None
 
     @property
     def cuda(self) -> bool:
@@ -143,7 +150,7 @@ class Decision(NamedTuple):
 
     def environment(self) -> dict[str, str]:
         """What the launcher is given (`NEMAR_DEVICE` ... in docs/launcher.md): the device and the reason,
-        and for `cuda` the GPU's identifier and index and the cap."""
+        and for `cuda` the GPU's identifier and index and the limit (the cap less the reserve)."""
         found = {"NEMAR_DEVICE": self.device, "NEMAR_DEVICE_REASON": self.reason}
         if self.cuda:
             assert self.gpu_id is not None
@@ -295,18 +302,31 @@ def cap_mb(settings: Gpu, total_mb: int) -> int:
     return int(settings.memory_fraction * total_mb + 1e-9)
 
 
+def limit_mb(settings: Gpu, total_mb: int) -> int:
+    """What the job is told (`NEMAR_GPU_MEMORY_MB`, the limit of torch's allocator): the cap less
+    `cuda_reserve_mb`, the memory the CUDA context and libraries take outside that limit, so the job's
+    whole use is at most the cap. Below 1 the GPU is `gpu_memory_short` (``judge``)."""
+    return cap_mb(settings, total_mb) - settings.cuda_reserve_mb
+
+
 def judge(settings: Gpu, reading: Reading, processes: int) -> str | None:
     """What one reading says: None when it passes every rule, `gpu_busy` when a compute process lists the
     GPU or `memory.used` or `utilization.gpu` is over its limit, `gpu_memory_short` when the memory that
-    is left cannot hold the cap and the headroom. A limit is inclusive: equal passes."""
+    is left cannot hold the cap and the headroom, or the job would be told less than one megabyte (the
+    reserve is inside the cap, never taken off the room asked for). A limit is inclusive: equal passes."""
     if (
         processes > 0
         or reading.used_mb > settings.max_used_mb
         or reading.utilization_pct > settings.max_utilization_pct
     ):
         return BUSY
-    cap = cap_mb(settings, reading.total_mb)
-    if cap < 1 or reading.total_mb - reading.used_mb < cap + settings.headroom_mb:
+    # the limit is at most the cap, so a cap under one megabyte is short here too
+    if limit_mb(settings, reading.total_mb) < 1:
+        return SHORT
+    if (
+        reading.total_mb - reading.used_mb
+        < cap_mb(settings, reading.total_mb) + settings.headroom_mb
+    ):
         return SHORT
     return None
 
@@ -330,11 +350,12 @@ def _worse(old: str | None, new: str | None) -> str | None:
 class _Track:
     """What the samples have said about one GPU so far."""
 
-    def __init__(self, reading: Reading, cap: int) -> None:
+    def __init__(self, reading: Reading, settings: Gpu) -> None:
         self.uuid = reading.uuid
         self.index = reading.index
         self.total_mb = reading.total_mb
-        self.cap_mb = cap
+        self.cap_mb = cap_mb(settings, reading.total_mb)
+        self.limit_mb = limit_mb(settings, reading.total_mb)
         self.reason: str | None = None
         self.processes: list[int] = []
         self.used_mb: list[int] = []
@@ -351,6 +372,7 @@ class _Track:
             self.uuid,
             self.total_mb,
             self.cap_mb,
+            self.limit_mb,
             self.reason,
             tuple(self.processes),
             tuple(self.used_mb),
@@ -415,9 +437,7 @@ class Pool:
             for reading in gpus:
                 track = tracks.get(reading.index)
                 if track is None:
-                    track = tracks[reading.index] = _Track(
-                        reading, cap_mb(settings, reading.total_mb)
-                    )
+                    track = tracks[reading.index] = _Track(reading, settings)
                 count = apps.get(reading.uuid, 0)
                 track.processes.append(count)
                 track.used_mb.append(reading.used_mb)
@@ -467,7 +487,9 @@ class Pool:
                     reasons.add(IN_USE)
                 else:
                     self._held[report.index] = key
-                    return Decision(CUDA, IDLE, report.uuid, report.index, report.cap_mb)
+                    return Decision(
+                        CUDA, IDLE, report.uuid, report.index, report.limit_mb, cap_mb=report.cap_mb
+                    )
         return cpu(min(reasons, key=REASONS.index) if reasons else FAILED)
 
     def release(self, key: str) -> None:
@@ -491,17 +513,20 @@ def _counts(values: tuple[int, ...]) -> str:
 
 
 def lines(reports: list[Report]) -> list[str]:
-    """`gpu<i>: idle` or `gpu<i>: busy reason=<word>` for each GPU, then the sizes and, per sample, the
-    number of compute processes, `memory.used` and `utilization.gpu`. No process id, no user name."""
+    """`gpu<i>: idle` or `gpu<i>: busy reason=<word>` for each GPU, then the sizes (the total, the cap and
+    the limit a job would be told) and, per sample, the number of compute processes, `memory.used` and
+    `utilization.gpu`. No process id, no user name."""
     out = []
     for report in reports:
         head = "idle" if report.reason is None else "busy reason={}".format(report.reason)
         out.append(
-            "gpu{}: {} total_mb={} cap_mb={} processes={} used_mb={} utilization_pct={}".format(
+            "gpu{}: {} total_mb={} cap_mb={} limit_mb={} processes={} used_mb={} "
+            "utilization_pct={}".format(
                 report.index,
                 head,
                 report.total_mb,
                 report.cap_mb,
+                report.limit_mb,
                 _counts(report.processes),
                 _counts(report.used_mb),
                 _counts(report.utilization_pct),
