@@ -47,6 +47,7 @@ GPU_KEYS = (
     "max_utilization_pct",
     "samples",
     "sample_seconds",
+    "cuda_reserve_mb",
 )
 AVAILABILITY_KEYS = (
     "enabled",
@@ -100,7 +101,9 @@ class Gpu:
     ``memory_fraction`` is the most of one GPU's memory a job may take (the cap the recipe is told).
     ``headroom_mb`` is what must remain free on top of that cap; ``max_used_mb`` is the memory other
     processes may hold on a GPU that still counts as idle (a desktop); ``max_utilization_pct`` the busiest
-    it may be. ``samples`` readings, ``sample_seconds`` apart, must ALL pass."""
+    it may be. ``samples`` readings, ``sample_seconds`` apart, must ALL pass. ``cuda_reserve_mb`` is the
+    memory a job takes on its GPU outside torch's allocator limit (the CUDA context and the CUDA libraries'
+    own memory): the job is told the cap less it, so that its whole use stays within the cap."""
 
     enabled: bool = False
     memory_fraction: float = 0.5
@@ -109,6 +112,7 @@ class Gpu:
     max_utilization_pct: int = 10
     samples: int = 6
     sample_seconds: float = 5.0
+    cuda_reserve_mb: int = 1024
 
 
 @dataclass(frozen=True)
@@ -346,6 +350,9 @@ def _gpu(value: Any) -> Gpu:
         ),
         samples=_int(value.get("samples", 6), "gpu samples", 2, 120),
         sample_seconds=_number(value.get("sample_seconds", 5), "gpu sample_seconds", 0, 60),
+        cuda_reserve_mb=_int(
+            value.get("cuda_reserve_mb", 1024), "gpu cuda_reserve_mb", 0, 16_777_216
+        ),
     )
 
 

@@ -596,7 +596,10 @@ class JobRunner:
             "reason": decision.reason,
         }
         if decision.cuda:
-            fields.update(gpu=decision.gpu_index, cap_mb=decision.memory_mb)
+            # the cap the check held room for, and the limit the job is told (the cap less the reserve)
+            fields.update(
+                gpu=decision.gpu_index, cap_mb=decision.cap_mb, limit_mb=decision.memory_mb
+            )
         if decision.why is not None:
             fields["why"] = decision.why
         self.log.info("device_chosen", job=job.id, **fields)
