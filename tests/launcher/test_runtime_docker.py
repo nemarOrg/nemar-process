@@ -209,6 +209,7 @@ PODMAN_FLAGS = {
         "--env-host=false",
         "--read-only-tmpfs=false",
         "--image-volume=ignore",
+        "--systemd=false",
     ],
 }
 FORBIDDEN = (
@@ -234,7 +235,8 @@ FORBIDDEN = (
 
 
 def test_no_flag_that_weakens_the_isolation_is_ever_passed(rig, engine):
-    job = entry_spec(rig, datasets=DATASET, resources={"gpus": 2}, env={"OMP_NUM_THREADS": "2"})
+    gpus = 2 if engine.name == "docker" else 0  # Podman hands over no GPU (test_runtime_podman.py)
+    job = entry_spec(rig, datasets=DATASET, resources={"gpus": gpus}, env={"OMP_NUM_THREADS": "2"})
     assert launch(rig, engine, job).exit == 0
     argv = engine.run_argv()
     for flag in FORBIDDEN:
@@ -274,10 +276,11 @@ def test_the_launcher_directory_is_never_in_the_engine_arguments(rig, engine):
     assert "/launcher" not in joined
 
 
-def test_a_gpu_job_gets_gpus_and_no_cuda_visible_devices(rig, engine):
+def test_a_gpu_job_gets_gpus_and_no_cuda_visible_devices(rig, docker):
+    """Docker only: Podman refuses a launch that would hand over a GPU (test_runtime_podman.py)."""
     job = entry_spec(rig, resources={"gpus": 2})
-    assert launch(rig, engine, job, CUDA_VISIBLE_DEVICES="3,4").exit == 0
-    argv = engine.run_argv()
+    assert launch(rig, docker, job, CUDA_VISIBLE_DEVICES="3,4").exit == 0
+    argv = docker.run_argv()
     assert value_after(argv, "--gpus") == "2"
     assert not any("CUDA_VISIBLE_DEVICES" in part for part in argv)
     # no runner decided the device: the count is the specification's, nothing is hidden, nothing added

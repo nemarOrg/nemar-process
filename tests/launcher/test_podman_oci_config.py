@@ -54,6 +54,7 @@ class Case:
             "OCIConfigPath": static + "/config.json",
             "StaticDir": static,
             "HostsPath": str(self.root / "run" / "hosts"),
+            "State": {"Status": "initialized"},
         }
 
     def resolved(self, document) -> dict:
@@ -131,11 +132,19 @@ def test_devpts_takes_rprivate_in_place_of_gid_5_when_few_group_ids_are_mapped(c
     assert changed(case, few_gids) is None
 
 
-def test_empty_hook_stages_pass(case):
-    def empty(_case, document):
-        document["hooks"] = {"createRuntime": [], "poststart": []}
+@pytest.mark.parametrize(
+    "hooks",
+    [{"createRuntime": [], "poststart": []}, {}, None, []],
+    ids=["empty-stages", "empty-object", "null", "empty-list"],
+)
+def test_a_hooks_key_is_refused_even_when_it_holds_nothing(case, hooks):
+    """Any `hooks` key at all: Podman's own precreate and poststop hooks never reach config.json, so
+    nothing there can be told apart, and the clean case has no such key."""
 
-    assert changed(case, empty) is None
+    def present(_case, document):
+        document["hooks"] = hooks
+
+    assert changed(case, present) == runtime.Refusal("hook", "-")
 
 
 # ---- one change each, and the reason ----------------------------------------------------------------
@@ -363,6 +372,30 @@ def test_a_document_that_is_not_an_oci_configuration_is_unreadable(case, documen
 def test_an_inspect_document_without_the_containers_directories_is_unreadable(case, inspected):
     refusal = runtime.check_container(inspected, case.document, case.binds, {})
     assert refusal == runtime.Refusal("config_unreadable", "-")
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"Status": "configured"},
+        {"Status": "running"},
+        {"Status": "exited"},
+        {"Status": "stopped"},
+        {},
+        None,
+        "initialized",
+    ],
+    ids=["configured", "running", "exited", "stopped", "no-status", "no-state", "not-an-object"],
+)
+def test_a_container_that_is_not_initialized_is_unreadable(case, state):
+    """Only an initialized container starts from the config.json that was read: `start` writes it
+    again for a configured, stopped or exited one."""
+    inspected = dict(case.inspected)
+    if state is None:
+        del inspected["State"]
+    else:
+        inspected["State"] = state
+    assert case.check(inspected=inspected) == runtime.Refusal("config_unreadable", "-")
 
 
 def test_an_inspect_answer_that_is_a_list_of_one_is_read(case):

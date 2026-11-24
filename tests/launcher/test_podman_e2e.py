@@ -41,7 +41,7 @@ from pathlib import Path
 
 import harness
 import pytest
-from harness import Rig
+from harness import Rig, make_bundle
 from nemar_launch import run, runtime, settings, spec
 from nemar_launch.codes import Env, Failure
 from nemar_launch.provenance import Log
@@ -198,18 +198,21 @@ def site_files(files: dict[Path, str]):
                 sudo("tee", str(path), stdin=old)
 
 
-def hook_files(tmp_path: Path) -> tuple[dict[Path, str], Path]:
-    """An OCI hook in the built-in hooks directory (stage createRuntime, always) whose program writes a
-    marker on the host, and that marker."""
+def hook_files(
+    tmp_path: Path, stages: tuple[str, ...] = ("createRuntime",)
+) -> tuple[dict[Path, str], Path]:
+    """An OCI hook in the built-in hooks directory (``stages``, always) whose program writes a marker on
+    the host and passes its input through (a ``precreate`` hook must give the configuration back), and
+    that marker."""
     marker = tmp_path / "hook-ran"
     program = tmp_path / "hook.sh"
-    program.write_text("#!/bin/sh\ntouch {}\n".format(marker))
+    program.write_text("#!/bin/sh\ntouch {}\ncat\n".format(marker))
     program.chmod(0o755)
     document = {
         "version": "1.0.0",
         "hook": {"path": str(program)},
         "when": {"always": True},
-        "stages": ["createRuntime"],
+        "stages": list(stages),
     }
     return {SITE_HOOKS / "nemar-c4-test.json": json.dumps(document)}, marker
 
@@ -217,12 +220,17 @@ def hook_files(tmp_path: Path) -> tuple[dict[Path, str], Path]:
 # ---- launches -----------------------------------------------------------------------------------------
 
 
-def launch(tmp_path: Path, script: str = ENTRY):
+def launch(tmp_path: Path, script: str = ENTRY, entry: str | None = None):
     """The launcher, in this process, with the real Podman: ``script`` runs as ``sh /code/run.sh``
-    from a one-file bundle (so ``/work``, ``/tmp`` and the read-only ``/code`` are the binds)."""
+    from a one-file bundle (so ``/work``, ``/tmp`` and the read-only ``/code`` are the binds), or, with
+    ``entry``, as the executable ``/code/<entry>`` itself (a ``runtime: image`` job with an entry)."""
     rig = Rig(tmp_path / "rig", "podman")
     try:
-        document = rig.script_spec(script)
+        if entry is None:
+            document = rig.script_spec(script)
+        else:
+            bundle = rig.set_bundle(make_bundle({entry: "#!/bin/sh\n" + script + "\n"}, (entry,)))
+            document = rig.spec(entry=entry, bundle=bundle)
         document["image"] = {"uri": IMAGE_URI, "digest": IMAGE_DIGEST, "sif": IMAGE_HEX + ".sif"}
         result = rig.launch(
             document,
@@ -433,6 +441,17 @@ def test_clean_what_was_read_after_init_is_what_start_ran(engine, tmp_path):
     assert first == second
 
 
+def test_clean_an_entry_named_systemd_runs_without_systemd_mode(tmp_path, podman):
+    """Podman turns systemd mode on by itself for a command named /sbin/init or *systemd, which adds
+    tmpfs mounts the check would refuse; ``--systemd=false`` keeps it off, so such an entry runs."""
+    result = launch(tmp_path, ENTRY, entry="systemd")
+    assert result.exit == 0, result.log
+    inside, marker = ran(result)
+    assert marker
+    assert "/run" not in inside
+    assert "podman_config_refused" not in result.log
+
+
 def test_clean_an_entry_that_exits_7_is_recorded_with_7(tmp_path, podman):
     result = launch(tmp_path, "echo ran > /work/marker; exit 7")
     assert result.exit == 13
@@ -509,7 +528,9 @@ def test_p4_a_configured_volume_and_bind_are_prevented(engine, tmp_path):
 
 
 def test_p5_a_hook_in_the_built_in_hooks_directory_is_prevented(engine, tmp_path):
-    files, marker = hook_files(tmp_path)
+    """Podman's own precreate and poststop hooks never reach config.json, so only the prevention
+    keeps them out: a hook at all three stages, and its marker never appears."""
+    files, marker = hook_files(tmp_path, ("createRuntime", "precreate", "poststop"))
     with site_files(files):
         result = launch(tmp_path)
         assert result.exit == 0, result.log

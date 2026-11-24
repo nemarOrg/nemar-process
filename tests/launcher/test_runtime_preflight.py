@@ -508,6 +508,7 @@ def test_podman_pins_every_namespace_against_the_site_configuration(rig):
         "--cgroupns=private",
         "--env-host=false",
         "--read-only-tmpfs=false",
+        "--systemd=false",
     ):
         assert flag in argv, flag
 
@@ -522,7 +523,12 @@ def test_a_job_without_gpus_hides_every_gpu_and_a_gpu_job_does_not(rig, engine):
     assert "NVIDIA_VISIBLE_DEVICES=void" in engine.run_argv()
     rig.reset_out()
     Path(str(engine.record)).unlink()
-    assert launch(rig, engine, entry_spec(rig, resources={"gpus": 2})).exit == 0
+    gpu_job = launch(rig, engine, entry_spec(rig, resources={"gpus": 2}))
+    if engine.name == "podman":  # Podman hands over no GPU: refused before anything is created
+        assert gpu_job.result["detail"] == "runtime_unusable"
+        assert engine.runs() == []
+        return
+    assert gpu_job.exit == 0
     argv = engine.run_argv()
     assert "NVIDIA_VISIBLE_DEVICES=void" not in argv
     assert value_after(argv, "--gpus") == "2"

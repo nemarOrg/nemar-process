@@ -169,6 +169,7 @@ def _do_work(
 
         engine = runtime.selected(env)
         runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
+        runtime.refuse_podman_gpu(engine, job, settings.device, log)  # Podman hands over no GPU
         sif = ""
         handle: runtime.Engine | None = None
         if engine == runtime.APPTAINER:

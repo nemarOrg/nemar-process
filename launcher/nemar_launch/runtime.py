@@ -23,9 +23,13 @@ with ``HOME`` the account's home directory, the user's checked ``XDG_RUNTIME_DIR
 ``CONTAINERS_CONF=<scratch>/podman/containers.conf`` (an empty file), so no site or user
 ``containers.conf``, no ``mounts.conf`` and no OCI hook applies. The container is not ``run``: it is
 created (the command line below, ``create`` in place of ``run``) and initialized, the OCI
-configuration the runtime was given is read and checked (``check_container``: the declared binds and
-``ENGINE_DEFAULTS`` only, no device, no hook), and only then started attached; a refusal removes it
-and ends the launch as ``runtime_unusable`` before user code ran.
+configuration the runtime was given is read and checked (``check_container``: the container is
+``initialized``, its mounts are the declared binds and ``ENGINE_DEFAULTS`` only, it has no device and
+no ``hooks`` key at all), and only then started attached; a refusal removes it and ends the launch as
+``runtime_unusable`` before user code ran. Podman's own ``precreate`` and ``poststop`` hooks are never
+written into ``config.json``: only the prevention excludes them. No GPU is handed over under Podman
+(``refuse_podman_gpu``), and ``--systemd=false`` keeps a command named like an init system from
+turning on systemd mode, which would add tmpfs mounts.
 
 THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counterpart here, and
 ``tests/launcher/test_runtime_docker.py`` pins each one (``docs/launcher.md`` has the table):
@@ -33,7 +37,7 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
     run (podman: create) --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --pull=missing --network=bridge
         --user <uid>:<gid>
         [podman: --userns=keep-id --pid=private --ipc=private --uts=private --cgroupns=private
-                 --env-host=false --read-only-tmpfs=false --image-volume=ignore]
+                 --env-host=false --read-only-tmpfs=false --image-volume=ignore --systemd=false]
         --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
         [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
         --cpus <NEMAR_CPUS> [--cpu-shares 2] --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
@@ -193,6 +197,25 @@ def refuse_unsupported(engine: str, log: Log | None = None) -> None:
         raise _refused("runtime_unusable", "this engine is not supported yet")
 
 
+def hands_over_gpu(job: spec.Spec, device: Device | None) -> bool:
+    """Whether the engine command line would hand the container a GPU: ``--gpus <n>`` for a GPU job
+    without a runner's decision, ``--gpus device=<id>`` for a ``cuda`` decision; never for ``cpu``."""
+    return job.gpus > 0 if device is None else device.cuda
+
+
+def refuse_podman_gpu(
+    engine: str, job: spec.Spec, device: Device | None, log: Log | None = None
+) -> None:
+    """Under Podman no GPU is handed over (``--gpus``, and with it any CDI hook a newer Podman would
+    add): a launch that would hand one over (``hands_over_gpu``) ends as ``runtime_unusable`` before
+    anything is created, logged ``podman_gpu_unsupported``. A runner's ``cpu`` decision for a GPU job,
+    which is what a runner sends under Podman, hands over none and runs."""
+    if engine == PODMAN and hands_over_gpu(job, device):
+        if log is not None:
+            log.error("podman_gpu_unsupported")
+        raise _refused("runtime_unusable", "no GPU is handed over under Podman")
+
+
 # ---- Podman: its configuration shut out ----------------------------------------------------------
 
 
@@ -250,6 +273,15 @@ def account_home() -> str | None:
     return home if home and os.path.isabs(home) else None
 
 
+# What no path of the prevention may hold: Podman and the containers libraries read some flag and
+# variable values as comma-separated lists or CSV records, and a line break ends a record.
+UNSAFE_PATH_CHARACTERS = (",", '"', "\n", "\r")
+
+
+def _safe_path(path: str) -> bool:
+    return not any(c in path for c in UNSAFE_PATH_CHARACTERS)
+
+
 def _owned(path: str, kind: int) -> os.stat_result | None:
     """``lstat`` of ``path`` when it is of ``kind`` (``stat.S_IFREG``, ``stat.S_IFDIR``), not a link,
     the user's, and not writable by group or others; else None."""
@@ -264,12 +296,14 @@ def _owned(path: str, kind: int) -> os.stat_result | None:
 
 def check_prevention(prevention: Prevention) -> None:
     """Right before each Podman call: the ``podman`` directory, the empty file and the empty hooks
-    directory are the user's, not links, and empty, and ``XDG_RUNTIME_DIR`` is still the user's with
-    mode 0700. Anything else is ``runtime_unusable``, and nothing runs."""
+    directory are the user's, not links, and empty, ``XDG_RUNTIME_DIR`` is still the user's with
+    mode 0700, and no path of the prevention holds a comma, a double quote or a line break. Anything
+    else is ``runtime_unusable``, and nothing runs."""
     base = os.path.dirname(prevention.conf)
     conf = _owned(prevention.conf, stat.S_IFREG)
     ok = (
-        _owned(base, stat.S_IFDIR) is not None
+        all(_safe_path(path) for path in prevention)
+        and _owned(base, stat.S_IFDIR) is not None
         and conf is not None
         and conf.st_size == 0
         and os.path.dirname(prevention.hooks) == base
@@ -291,12 +325,16 @@ def prepare_prevention(directory: str, env: Env) -> Prevention:
     ``O_NOFOLLOW`` and must be the user's own before the two are made through its descriptor
     (``O_CREAT | O_EXCL`` and ``mkdir`` never follow a link either); what already exists is accepted
     only if ``check_prevention`` passes. ``HOME`` and ``XDG_RUNTIME_DIR`` are read too
-    (``account_home``, ``user_runtime_dir``). ``runtime_unusable`` when any of it cannot be had."""
+    (``account_home``, ``user_runtime_dir``). ``runtime_unusable`` when any of it cannot be had, and
+    before anything is made when one of these paths holds a comma, a double quote or a line break."""
     runtime_dir = user_runtime_dir(env)
     home = account_home()
     if runtime_dir is None or home is None:
         raise _podman_refused("the user's runtime directory or home cannot be used")
     base = os.path.join(directory, PREVENTION_DIR)
+    if not all(_safe_path(path) for path in (base, home, runtime_dir)):
+        # nothing is made: a comma, a double quote or a line break in a path Podman is given
+        raise _podman_refused("a path of the engine's configuration is ambiguous")
     conf = os.path.join(base, PREVENTION_CONF)
     hooks = os.path.join(base, PREVENTION_HOOKS)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -421,8 +459,10 @@ def build_argv(
 
     ``cpu_shares`` is what ``preflight`` found: True only when the engine can apply CPU shares, and
     then ``--cpu-shares 2`` follows ``--cpus``. ``device`` is the runner's decision for a GPU job, if
-    it made one: with None the GPU flags are what they always were."""
+    it made one: with None the GPU flags are what they always were. Podman is never given ``--gpus``:
+    a launch that would hand it a GPU is refused here too (``refuse_podman_gpu``)."""
     check_device(device, job.gpus)
+    refuse_podman_gpu(engine.name, job, device)
     if limits.memory_mb is None:  # read_settings refuses this earlier; never run without a size
         raise Failure("runtime_error", "invalid_spec", "the memory size to enforce is not valid")
     uid, gid = current_user()
@@ -453,6 +493,9 @@ def build_argv(
             "--env-host=false",
             "--read-only-tmpfs=false",
             "--image-volume=ignore",
+            # systemd mode, which Podman turns on by itself for a command named /sbin/init,
+            # /usr/sbin/init, /usr/local/sbin/init or *systemd, adds tmpfs mounts and more
+            "--systemd=false",
         ]
     argv += [
         "--cap-drop",
@@ -871,20 +914,26 @@ class _Mount(NamedTuple):
     options: frozenset[str]
 
 
+def _one(inspected: Any) -> dict[str, Any]:
+    """The ``container inspect`` document (an object, or a list of one), or an empty object."""
+    if isinstance(inspected, list) and len(inspected) == 1:
+        inspected = inspected[0]
+    return inspected if isinstance(inspected, dict) else {}
+
+
 def container_dirs(inspected: Any) -> ContainerDirs | None:
     """The container's directories from its ``container inspect`` document (an object, or a list of
     one), or None: each path absolute and normalized, and ``OCIConfigPath`` exactly ``StaticDir``
     plus ``/config.json``."""
-    if isinstance(inspected, list) and len(inspected) == 1:
-        inspected = inspected[0]
-    if not isinstance(inspected, dict):
-        return None
-    values = [inspected.get(key) for key in ("OCIConfigPath", "StaticDir", "HostsPath")]
-    if not all(
-        isinstance(value, str) and os.path.isabs(value) and os.path.normpath(value) == value
-        for value in values
-    ):
-        return None
+    document = _one(inspected)
+    values: list[str] = []
+    for key in ("OCIConfigPath", "StaticDir", "HostsPath"):
+        value = document.get(key)
+        if not isinstance(value, str) or not os.path.isabs(value):
+            return None
+        if os.path.normpath(value) != value:
+            return None
+        values.append(value)
     config, static, hosts = values
     if config != os.path.join(static, "config.json"):
         return None
@@ -979,8 +1028,10 @@ def check_container(
     namespace says of ``namespace_paths``. The first failure is the refusal, in this order:
 
     * ``config_unreadable``: either document is not what it should be (``container_dirs``,
-      ``_mounts``), or ``linux`` is not an object;
-    * ``hook``: ``hooks`` is present with a stage that is not empty;
+      ``_mounts``), the container's ``State.Status`` is not ``initialized`` (only an initialized
+      container starts from the file that was read), or ``linux`` is not an object;
+    * ``hook``: ``hooks`` is present at all, empty or not (Podman's own ``precreate`` and ``poststop``
+      hooks are never written there: only the prevention excludes them);
     * ``extra_device``: ``linux.devices`` is present and not empty;
     * then each mount entry in the document's order: at a declared bind's destination it must hold
       as declared (``declared_bind``); at a destination of the allowlist it must match that row
@@ -995,8 +1046,10 @@ def check_container(
     if dirs is None or mounts is None:
         return Refusal("config_unreadable", "-")
     assert isinstance(document, dict)  # `_mounts` read it
-    hooks = document.get("hooks")
-    if hooks is not None and (not isinstance(hooks, dict) or any(hooks.values())):
+    state = _one(inspected).get("State")
+    if not isinstance(state, dict) or state.get("Status") != "initialized":
+        return Refusal("config_unreadable", "-")
+    if "hooks" in document:
         return Refusal("hook", "-")
     linux = document.get("linux")
     if linux is not None and not isinstance(linux, dict):

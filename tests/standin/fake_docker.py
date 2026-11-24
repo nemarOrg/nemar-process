@@ -48,7 +48,9 @@ Under the name ``podman`` it is Podman's verified path (docs/launcher.md, "Podma
   writes them; the JSON in ``<rec>.oci-extra`` is merged in (``mounts`` appended, ``hooks`` and
   ``devices`` set), standing for what a configuration the prevention missed would add; exits 1 with
   ``<rec>.initfail``;
-* ``container inspect --format {{json .}} <name>``: ``OCIConfigPath``, ``StaticDir`` and ``HostsPath``;
+* ``container inspect --format {{json .}} <name>``: ``OCIConfigPath``, ``StaticDir``, ``HostsPath`` and
+  ``State.Status`` (``configured`` after ``create``, ``initialized`` after ``init``, or the word in
+  ``<rec>.status``);
 * ``unshare cat -- <path>``, ``unshare realpath -e -z -- <paths>`` and ``unshare stat --printf %F\\0
   -- <paths>``: what GNU ``cat``, ``realpath`` and ``stat`` print;
 * ``start --attach <name>``: recorded in ``<rec>.starts``, then runs the created command as ``run``
@@ -83,6 +85,7 @@ PODMAN_ONLY = {
     "--env-host=false",
     "--read-only-tmpfs=false",
     "--image-volume=ignore",
+    "--systemd=false",
 }
 VALUED = {
     "--name",
@@ -283,12 +286,19 @@ def _podman(argv: list[str], record_path: str) -> int | None:
         if not os.path.isdir(home):
             return 125
         static = os.path.join(home, "static")
+        status = (
+            "initialized" if os.path.exists(os.path.join(static, "config.json")) else "configured"
+        )
+        if os.path.exists(record_path + ".status"):
+            with open(record_path + ".status", encoding="utf-8") as handle:
+                status = handle.read().strip()
         print(
             json.dumps(
                 {
                     "OCIConfigPath": os.path.join(static, "config.json"),
                     "StaticDir": static,
                     "HostsPath": os.path.join(home, "run", "hosts"),
+                    "State": {"Status": status},
                 }
             )
         )

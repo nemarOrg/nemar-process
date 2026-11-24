@@ -431,3 +431,113 @@ def test_a_clean_container_passes_the_check_and_is_left_for_the_start(rig, podma
     runtime.create_verified(engine, argv, "nemar-c4-ok", binds, env, threading.Event(), log)
     assert podman.removals() == []
     assert runtime.start_argv(engine, "nemar-c4-ok")[-3:] == ["start", "--attach", "nemar-c4-ok"]
+
+
+# ---- the state the check reads, and no GPU ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["configured", "running", "exited"])
+def test_a_container_that_is_not_initialized_is_not_started(rig, podman, status):
+    Path(str(podman.record) + ".status").write_text(status)
+    result = launch(rig, podman, writing_entry(rig))
+    assert result.result["detail"] == "runtime_unusable"
+    assert "podman_config_refused reason=config_unreadable destination=-" in result.log
+    assert podman._read(".starts") == []
+    assert not (rig.out / "work" / "outputs" / "marker").exists()
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        {},
+        {
+            "NEMAR_DEVICE": "cuda",
+            "NEMAR_DEVICE_REASON": "gpu_idle",
+            "NEMAR_GPU_ID": "GPU-" + "0" * 8 + "-0000-0000-0000-" + "0" * 12,
+            "NEMAR_GPU_INDEX": "0",
+            "NEMAR_GPU_MEMORY_MB": "1024",
+        },
+    ],
+    ids=["no-decision", "cuda-decision"],
+)
+def test_a_podman_launch_that_would_hand_over_a_gpu_is_refused_before_any_call(rig, podman, device):
+    result = launch(rig, podman, entry_spec(rig, resources={"gpus": 1}), **device)
+    assert result.exit == 13
+    assert (result.result["failure_code"], result.result["detail"]) == (
+        "runtime_error",
+        "runtime_unusable",
+    )
+    assert "podman_gpu_unsupported" in result.log
+    assert calls(podman) == []  # not even `--version`, let alone `create`
+    assert not [r for r in rig.server.requests if r.path.endswith("/bundle")]
+
+
+def test_a_cpu_decision_for_a_gpu_job_runs_under_podman_with_no_gpus_flag(rig, podman):
+    """What a runner sends under Podman (`gpu_unsupported_runtime`): the job runs on the CPU."""
+    job = entry_spec(rig, resources={"gpus": 1})
+    result = launch(
+        rig, podman, job, NEMAR_DEVICE="cpu", NEMAR_DEVICE_REASON="gpu_unsupported_runtime"
+    )
+    assert result.exit == 0, result.log
+    argv = podman.run_argv()
+    assert not any(part.startswith("--gpus") for part in argv)
+    assert "NVIDIA_VISIBLE_DEVICES=void" in argv
+
+
+@pytest.mark.parametrize("gpu_device", [None, "cuda"])
+def test_build_argv_never_gives_podman_a_gpus_flag(rig, gpu_device):
+    from nemar_launch.settings import Device
+
+    prevention = make(rig.tmp)
+    engine = runtime.Engine("podman", "/usr/bin/podman", prevention)
+    job = spec.parse_text(spec_text(rig.spec(command=["true"], resources={"gpus": 2})))
+    device = (
+        None
+        if gpu_device is None
+        else Device("cuda", "gpu_idle", "GPU-" + "0" * 8 + "-0000-0000-0000-" + "0" * 12, 0, 1024)
+    )
+    with pytest.raises(Failure) as caught:
+        runtime.build_argv(
+            engine, job, REFERENCE, "n", [], settings.Limits(1, 64), RUNNER, device=device
+        )
+    assert caught.value.detail == "runtime_unusable"
+    docker = runtime.Engine("docker", "/usr/bin/docker")
+    argv = runtime.build_argv(
+        docker, job, REFERENCE, "n", [], settings.Limits(1, 64), RUNNER, device=device
+    )
+    assert any(part == "--gpus" for part in argv)  # Docker is unchanged
+
+
+# ---- no comma, quote or line break in a path the prevention gives Podman ------------------------------
+
+
+@pytest.mark.parametrize("bad", ["a,b", 'a"b', "a\nb", "a\rb"])
+def test_a_prevention_directory_with_an_ambiguous_name_is_refused_and_nothing_is_made(
+    tmp_path, bad
+):
+    xdg = tmp_path / "xdg"
+    xdg.mkdir(mode=0o700)
+    directory = tmp_path / bad
+    directory.mkdir()
+    with pytest.raises(Failure) as caught:
+        runtime.prepare_prevention(str(directory), Env({b"XDG_RUNTIME_DIR": bytes(xdg)}))
+    assert caught.value.detail == "runtime_unusable"
+    assert list(directory.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad", ["a,b", 'a"b', "a\nb"])
+def test_a_runtime_directory_with_an_ambiguous_name_is_refused(tmp_path, bad):
+    xdg = tmp_path / bad
+    xdg.mkdir(mode=0o700)
+    xdg.chmod(0o700)
+    with pytest.raises(Failure):
+        runtime.prepare_prevention(str(tmp_path), Env({b"XDG_RUNTIME_DIR": bytes(xdg)}))
+    assert not (tmp_path / "podman").exists()
+
+
+@pytest.mark.parametrize("field", ["conf", "hooks", "home", "runtime_dir"])
+def test_the_check_before_each_call_refuses_an_ambiguous_path(tmp_path, field):
+    prevention = make(tmp_path)
+    runtime.check_prevention(prevention)
+    with pytest.raises(Failure):
+        runtime.check_prevention(prevention._replace(**{field: getattr(prevention, field) + ",x"}))
