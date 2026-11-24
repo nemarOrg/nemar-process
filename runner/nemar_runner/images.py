@@ -127,16 +127,23 @@ def runtime_binary(config: Config, tuning: Tuning) -> str | None:
     return None
 
 
-def runtime_version(binary: str, tuning: Tuning) -> str | None:
-    """The first line of `<runtime> --version`, printable ASCII, at most 80 characters."""
+def runtime_version(binary: str, tuning: Tuning, config: Config) -> str | None:
+    """The first line of `<runtime> --version`, printable ASCII, at most 80 characters. Under Podman
+    the call carries the prevention every runner call of Podman carries (`containers.engine_call`),
+    and a Podman whose prevention cannot be had is not run (None)."""
+    from . import containers  # it imports this module
+
+    call = containers.engine_call(config, tuning)
+    if call is None:
+        return None
     try:
         done = subprocess.run(
-            [binary, "--version"],
+            [binary, *call.flags, "--version"],
             capture_output=True,
             timeout=30,
             check=False,
             stdin=subprocess.DEVNULL,
-            env={"PATH": tuning.launch_path, "LANG": "C.UTF-8"},
+            env=call.env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -360,7 +367,15 @@ _PREFLIGHT_BOOT = (
 def engine_preflight(
     config: Config, binary: str, python: str, tuning: Tuning
 ) -> tuple[bool, bool, str]:
-    """``(limits enforceable, mode accepted, note)`` from the launcher's preflight."""
+    """``(limits enforceable, mode accepted, note)`` from the launcher's preflight. Under Podman the
+    child also gets the user's checked `XDG_RUNTIME_DIR` (`containers.user_runtime_dir`), which the
+    launcher's prevention needs: without it the launcher does not run Podman and answers no."""
+    from . import containers  # it imports this module
+
+    env = {"PATH": tuning.launch_path, "LANG": "C.UTF-8"}
+    runtime_dir = containers.user_runtime_dir() if config.runtime == containers.PODMAN else None
+    if runtime_dir is not None:
+        env["XDG_RUNTIME_DIR"] = runtime_dir
     try:
         done = subprocess.run(
             [
@@ -377,7 +392,7 @@ def engine_preflight(
             timeout=tuning.probe_timeout_seconds,
             check=False,
             stdin=subprocess.DEVNULL,
-            env={"PATH": tuning.launch_path, "LANG": "C.UTF-8"},
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return False, False, "the preflight did not run"
