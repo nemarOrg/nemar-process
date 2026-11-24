@@ -1085,7 +1085,7 @@ def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_fil
     strict=True,
     reason=(
         "eegprep's runamica._write_param_file writes a float outside _SCI_PARAMS with '%f', so "
-        "min_dll=1e-9 and min_grad_norm=1e-7 reach the binary as 0.000000 (an eegprep fix); "
+        "min_dll=1e-9 and min_grad_norm=1e-7 reach the binary as 0.000000 (sccn/eegprep#680); "
         "this test passes, and so fails as strict, once eegprep writes them as they are"
     ),
 )
