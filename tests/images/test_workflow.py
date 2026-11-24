@@ -973,6 +973,21 @@ def test_a_failed_push_still_reports_its_time_and_fails_the_step_with_its_status
     assert output == ""
 
 
+def test_the_sign_build_prints_the_sif_and_cache_sizes_and_the_disk_after_the_build():
+    """The first release reads the `sign` leg's disk, as the pull request reads the `test` leg's."""
+    step = the_step("sign", SIGN_BUILD_STEP)
+    assert step["env"] == {
+        "APPTAINER_DOCKER_USERNAME": "${{ github.actor }}",
+        "APPTAINER_DOCKER_PASSWORD": "${{ secrets.GITHUB_TOKEN }}",
+        "APPTAINER_CACHEDIR": "${{ runner.temp }}/apptainer-cache",
+    }
+    lines = [line.strip() for line in step["run"].splitlines()]
+    build = next(i for i, line in enumerate(lines) if line.startswith("apptainer build "))
+    # the cache exists before the build, so the reading after it cannot fail for want of it
+    assert lines.index('mkdir -p "$APPTAINER_CACHEDIR"') < build
+    assert lines[build + 1 :] == ['du -sh nemar-python.sif "$APPTAINER_CACHEDIR"', "df -h /"]
+
+
 def test_the_dispatch_input_names_both_tags():
     description = triggers(workflow())["workflow_dispatch"]["inputs"]["version"]["description"]
     assert "<version>-cpu" in description

@@ -289,7 +289,7 @@ The first images are published from `main` (a manual dispatch, or a version tag 
 - **The hosted runner's disk.** The CUDA build frees disk space first and keeps no cache; if a run still runs out of disk, a larger runner is the owner's to provide.
   On pull request 87 (run 45436618601) the `cuda` leg of `test` read, on the root filesystem of 145G (the only large one; there was no `/mnt`): 86G available before the free-disk step and 104G after it, 69G after the image build and before Apptainer was installed, and 50G after the SIF build with the exported archive (7.5G), Apptainer's cache (7.5G) and the SIF (4.2G) still on disk.
   The SIF build took about 6 minutes and the whole leg about 17, within its 60.
-  The `sign` leg builds from the pushed digest instead, and its disk is not measured until the first release.
+  The `sign` leg builds from the pushed digest instead and prints `du -sh` of its SIF and Apptainer's cache and `df -h /` after the build, so its disk is first read in the first release's log.
 - **The CUDA SIF's size and push time.** On the same run the `test` job's SIFs were 4,458,627,072 bytes (`cuda`) and 473,722,880 bytes (`cpu`), built from the local images, both under the size gate.
   A SIF built in `sign` from the pushed digest, its size and its push's wall time are first read in the first release's `sign` log (`SIF size (cuda)` and `SIF push (cuda)`).
 - **The registry's two limits.** 10 GB per layer and 10 minutes for an upload are GitHub's documentation, not observations; no SIF near either has been pushed, and the size gate stops one of 9,000,000,000 bytes or more before the push.
