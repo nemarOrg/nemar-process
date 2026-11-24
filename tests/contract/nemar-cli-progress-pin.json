@@ -1,5 +1,5 @@
 {
-  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and its vectors, the vendored neuroschema bundle and its view registry the recipes validate plugin outputs against (ADR 0137), the naming vectors of nemar-cli's port of common/naming.py, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
+  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and its vectors, the vendored neuroschema bundle and its view registry the recipes validate plugin outputs against (ADR 0137), the naming vectors of nemar-cli's port of common/naming.py, three of neuroschema's view vectors (the record checks, the preset checks and the view digest) that the views writer's tests replay, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
   "ref": "1788c5d2bf5075a853573527fc9536b1689a671c",
   "schema": {
@@ -61,6 +61,24 @@
     "copy": "tests/contract/compute-naming-vectors.json",
     "sha256": "b8b41f8fa0e9a06a7783da172a6ad2374e61f0cc2be5165be4b834813a44a8a0",
     "bytes": 5775
+  },
+  "record_checks_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/record-checks.v1.json",
+    "copy": "tests/contract/neuroschema-views/record-checks.v1.json",
+    "sha256": "4d9e641606037d351a93621c8eeef588f3862cf4981187fc366c504c15c28905",
+    "bytes": 196899
+  },
+  "preset_checks_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/preset-checks.v1.json",
+    "copy": "tests/contract/neuroschema-views/preset-checks.v1.json",
+    "sha256": "a4517dda1546f7213823ada152a4284ae7e9d5df57604ad1f9df147a4301d67e",
+    "bytes": 311507
+  },
+  "view_digest_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/view-digest.v1.json",
+    "copy": "tests/contract/neuroschema-views/view-digest.v1.json",
+    "sha256": "ddc048c896b098302300eabaedfd289f596df2df3a03a3e40450cbc87ac07b70",
+    "bytes": 22145
   },
   "words": {
     "progress_contract": "shared/contract/compute-progress.ts",

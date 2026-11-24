@@ -120,6 +120,7 @@ It has its own pin, `tests/contract/nemar-cli-progress-pin.json`, apart from the
 It records the nemar-cli commit, and the SHA-256 and size of the schema and of the vectors.
 The same pin holds the two files the quality plugins are checked against (ADR 0134 decision 6), copied into the recipes package so they ship in the image: the plugin manifest schema (`shared/contract/plugin-manifest.schema.json`, copied to `recipes/nemar_process/common/contract/plugin-manifest.v1.json`) and the vendored neuroschema bundle (`shared/contract/neuroschema/dataset.bundle.json`, copied to `recipes/nemar_process/common/contract/neuroschema.bundle.json`).
 Since nemar-cli's N1b (ADR 0137) it also holds the manifest vectors (`shared/contract/plugin-manifest-vectors.json`, copied to `tests/contract/plugin-manifest-vectors.json`, replayed by `tests/recipes/test_plugin_manifest.py`), the neuroschema view registry (`shared/contract/neuroschema/views/registry.json`, copied to `recipes/nemar_process/common/contract/views-registry.json`, which the loader checks declared views against) and the naming vectors (`shared/contract/compute-naming-vectors.json`, copied to `tests/contract/compute-naming-vectors.json`, replayed against `common/naming.py` by `tests/contract/test_naming_vectors.py`: nemar-cli's `shared/compute-naming.ts` is a port of `naming.py`, so a name that moves on either side fails there).
+Since the views writer (ADR 0137, phase P3) it also holds three of neuroschema 0.6.0's view vectors that nemar-cli vendors beside the bundle (`shared/contract/neuroschema/views/vectors/{record-checks,preset-checks,view-digest}.v1.json`, copied to `tests/contract/neuroschema-views/`), which `tests/recipes/test_views.py` replays against the writer's own checks rather than restating neuroschema's rules.
 It also holds the three contracts of the launcher's standalone entry (ADR 0134 decision 8, [standalone.md](standalone.md)): the local launch specification (`shared/contract/compute-local-launch.schema.json`, copied to `launcher/schema/compute-local-launch.v1.json`), the recipe progress file (`shared/contract/compute-recipe-progress.schema.json`, copied to `launcher/schema/compute-recipe-progress.v1.json`) and the results report (`shared/contract/compute-results-report.schema.json`, copied to `launcher/schema/compute-results-report.v1.json`).
 `test_the_local_launch_shares_the_launch_specifications_members_and_rules` holds the local launch specification's shared members equal to the launch specification's copy, across the two pins.
 The commit is on nemar-cli's pipeline progress epic branch (`feature/issue-2324-epic-pipeline-progress`): it stays reachable once that epic is merged into `dev` with a merge commit, and the pin then moves to the `dev` commit that holds the same bytes (only `ref` changes).
@@ -146,11 +147,14 @@ git -C "$NEMAR_CLI" show "${REF}:shared/contract/neuroschema/dataset.bundle.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/neuroschema/views/registry.json" > recipes/nemar_process/common/contract/views-registry.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/plugin-manifest-vectors.json" > tests/contract/plugin-manifest-vectors.json
 git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-naming-vectors.json" > tests/contract/compute-naming-vectors.json
+for name in record-checks preset-checks view-digest; do
+  git -C "$NEMAR_CLI" show "${REF}:shared/contract/neuroschema/views/vectors/${name}.v1.json" > "tests/contract/neuroschema-views/${name}.v1.json"
+done
 for name in local-launch recipe-progress results-report; do
   git -C "$NEMAR_CLI" show "${REF}:shared/contract/compute-${name}.schema.json" > "launcher/schema/compute-${name}.v1.json"
 done
-shasum -a 256 launcher/schema/*.json tests/contract/*-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
-wc -c launcher/schema/*.json tests/contract/*-vectors.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
+shasum -a 256 launcher/schema/*.json tests/contract/*-vectors.json tests/contract/neuroschema-views/*.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
+wc -c launcher/schema/*.json tests/contract/*-vectors.json tests/contract/neuroschema-views/*.json runner/schema/compute-runner.v1.json recipes/nemar_process/common/contract/*.json
 # edit tests/contract/nemar-cli-progress-pin.json: ref, and the sha256 and bytes of every copy it names
 # edit tests/contract/nemar-cli-runner-pin.json: the same ref, and the sha256 and bytes of the runner schema
 NEMAR_CLI_PROGRESS_DIR="$NEMAR_CLI" NEMAR_REQUIRE_PROGRESS_DRIFT=1 \
