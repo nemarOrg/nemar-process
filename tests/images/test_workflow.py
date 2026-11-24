@@ -551,17 +551,202 @@ def test_the_cpu_smoke_does_not_hide_the_gpu_and_checks_flavor_cpu():
 def test_every_check_of_a_smoke_document_in_an_image_names_the_flavor_it_expects():
     text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
     checks = [line for line in text.splitlines() if "python3 scripts/check_smoke_pins.py" in line]
-    assert len(checks) == 6  # test: cpu container, cuda container, SIF; sign: the same three
+    # test: cpu container, cuda container, cpu SIF, cuda SIF; sign: cpu container, cuda container,
+    # cpu SIF
+    assert len(checks) == 7
     for line in checks:
         assert re.search(r"--image --flavor (cpu|cuda)\b", line), line
 
 
-def test_the_sif_and_the_launch_test_are_cpu_only():
-    for job in ("test", "sign"):
-        for step in workflow()["jobs"][job]["steps"]:
-            blob = step.get("run", "") + step.get("name", "")
-            if re.search(r"apptainer|SIF|tests/e2e|setup-uv", blob + step.get("uses", "")):
-                assert step.get("if") == "matrix.flavor == 'cpu'", (job, step.get("name"))
+# ---- the SIF of each flavor: built, sized and smoke-tested in both legs of `test` --------------------
+
+DIRS_STEP = "Put Apptainer's directories on the largest filesystem"
+INSTALL_STEP = "Install Apptainer"
+TEST_BUILD_STEP = "Build a SIF from the local image"
+SIZE_GATE_STEP = "Refuse a SIF at or over the size gate"
+TEST_SIF_SMOKE_STEP = "Smoke test the SIF under Apptainer, isolated as the launcher runs it"
+SIF_MAX_BYTES = 9_000_000_000
+ISOLATED = "apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif"
+
+
+def the_step(job: str, name: str) -> dict:
+    found = [s for s in workflow()["jobs"][job]["steps"] if s.get("name") == name]
+    assert len(found) == 1, (job, name)
+    return found[0]
+
+
+def case_branch(run: str, flavor: str) -> list[str]:
+    """The lines of the `case "$FLAVOR"` branch for `flavor`, without its label and its `;;`."""
+    lines = [line.strip() for line in run.splitlines()]
+    start = lines.index(flavor + ")")
+    end = lines.index(";;", start)
+    return lines[start + 1 : end]
+
+
+def test_the_launch_tests_are_cpu_only_and_the_sif_build_size_gate_and_smoke_run_in_both_legs():
+    steps = workflow()["jobs"]["test"]["steps"]
+    # repository test code runs against the SIF in the `cpu` leg only
+    for step in steps:
+        blob = step.get("run", "") + step.get("name", "") + step.get("uses", "")
+        if re.search(r"tests/e2e|setup-uv|pytest", blob):
+            assert step.get("if") == "matrix.flavor == 'cpu'", step.get("name")
+    # the SIF itself is built, sized and smoke-tested in every leg: no step of it has a condition
+    for name in (DIRS_STEP, INSTALL_STEP, TEST_BUILD_STEP, SIZE_GATE_STEP, TEST_SIF_SMOKE_STEP):
+        assert "if" not in the_step("test", name), name
+    names = [s.get("name", "") for s in steps]
+    assert (
+        names.index(DIRS_STEP)
+        < names.index(INSTALL_STEP)
+        < names.index(TEST_BUILD_STEP)
+        < names.index(SIZE_GATE_STEP)
+        < names.index(TEST_SIF_SMOKE_STEP)
+    )
+    # the `sign` job turns only the CPU image into a SIF
+    for step in workflow()["jobs"]["sign"]["steps"]:
+        blob = step.get("run", "") + step.get("name", "") + step.get("uses", "")
+        if re.search(r"apptainer|SIF", blob):
+            assert step.get("if") == "matrix.flavor == 'cpu'", step.get("name")
+
+
+def test_apptainer_is_installed_by_one_pinned_text_in_every_leg_that_builds_a_sif():
+    test_install = the_step("test", INSTALL_STEP)
+    sign_install = the_step("sign", INSTALL_STEP)
+    assert test_install["run"] == sign_install["run"]
+    assert 'echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -' in test_install["run"]
+
+
+def test_apptainers_directories_go_on_the_largest_filesystem_and_the_archive_is_removed():
+    dirs = the_step("test", DIRS_STEP)
+    assert dirs["id"] == "apptainer-dirs"
+    run = dirs["run"]
+    assert run.splitlines()[1] == "df -h"  # the first reading, before Apptainer is installed
+    assert "df --output=avail /mnt" in run
+    assert 'df --output=avail "$RUNNER_TEMP"' in run
+    assert 'echo "tmpdir=' in run
+    assert 'echo "cachedir=' in run
+    build = the_step("test", TEST_BUILD_STEP)
+    assert build["env"] == {
+        "APPTAINER_TMPDIR": "${{ steps.apptainer-dirs.outputs.tmpdir }}",
+        "APPTAINER_CACHEDIR": "${{ steps.apptainer-dirs.outputs.cachedir }}",
+    }
+    lines = build["run"].splitlines()
+    order = [
+        "docker save nemar-python:ci --output nemar-python.tar",
+        "apptainer build nemar-python.sif docker-archive:nemar-python.tar",
+        "df -h",  # the second reading, after the build
+        "rm -f nemar-python.tar",
+    ]
+    assert [line for line in lines if line in order] == order
+
+
+def test_the_cuda_sif_smoke_runs_the_command_line_of_a_job_kept_off_the_gpu():
+    step = the_step("test", TEST_SIF_SMOKE_STEP)
+    assert step["env"] == {"FLAVOR": "${{ matrix.flavor }}"}
+    run = step["run"]
+    assert case_branch(run, "cuda") == [
+        ISOLATED + " python /opt/smoke.py --no-gpu > smoke-sif.json",
+        "python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-sif.json",
+    ]
+    assert case_branch(run, "cpu") == [
+        ISOLATED + " python /opt/smoke.py > smoke-sif.json",
+        "python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json",
+    ]
+    # a flavor with no branch fails the step rather than smoke-testing nothing
+    assert 'case "$FLAVOR" in' in run
+    assert "exit 1" in case_branch(run, "*")
+    # no SIF run anywhere in the workflow asks for the host's GPU
+    text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "apptainer exec" in line:
+            assert "--nv" not in line, line
+
+
+def test_the_size_gate_is_the_constant_the_docs_name():
+    assert workflow()["env"]["SIF_MAX_BYTES"] == str(SIF_MAX_BYTES)
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert "{:,} bytes".format(SIF_MAX_BYTES) in docs
+    assert "10 GB per layer" in docs
+
+
+@pytest.mark.parametrize("job", ["test", "sign"])
+def test_the_size_gate_directly_follows_each_sif_build_and_precedes_every_tag_check_and_push(job):
+    steps = workflow()["jobs"][job]["steps"]
+    builds = [i for i, s in enumerate(steps) if "apptainer build" in s.get("run", "")]
+    gates = [i for i, s in enumerate(steps) if s.get("name") == SIZE_GATE_STEP]
+    assert len(builds) == 1, job
+    assert gates == [builds[0] + 1], job
+    # the gate runs in every leg that builds a SIF
+    assert steps[gates[0]].get("if") == steps[builds[0]].get("if"), job
+    for index, step in enumerate(steps):
+        run = step.get("run", "")
+        if re.search(r"check_tag_absent\.py nemarorg/nemar-python-sif|apptainer push|oras ", run):
+            assert index > gates[0], (job, step.get("name"))
+
+
+def test_the_size_gate_is_one_text_in_both_jobs():
+    assert the_step("test", SIZE_GATE_STEP)["run"] == the_step("sign", SIZE_GATE_STEP)["run"]
+
+
+@pytest.mark.parametrize("job", ["test", "sign"])
+@pytest.mark.parametrize(
+    ("size", "passes"),
+    [(0, True), (SIF_MAX_BYTES - 1, True), (SIF_MAX_BYTES, False), (SIF_MAX_BYTES + 1, False)],
+)
+def test_the_size_gate_runs_and_refuses_a_sif_of_the_gate_or_more(job, size, passes, tmp_path):
+    """The gate's own shell, run on a sparse file of the size: nothing of the disk is used."""
+    work = tmp_path / "work"
+    work.mkdir()
+    with (work / "nemar-python.sif").open("wb") as handle:
+        handle.truncate(size)
+    script = tmp_path / "gate.sh"
+    script.write_text(the_step(job, SIZE_GATE_STEP)["run"], encoding="utf-8")
+    done = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "FLAVOR": "cuda",
+            "SIF_MAX_BYTES": workflow()["env"]["SIF_MAX_BYTES"],
+        },
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert "SIF size (cuda): {} bytes".format(size) in done.stdout
+    assert (done.returncode == 0) is passes, done.stdout + done.stderr
+    if not passes:
+        assert "::error::" in done.stdout
+
+
+def test_the_size_gate_fails_without_a_sif_or_without_its_constant(tmp_path):
+    script = tmp_path / "gate.sh"
+    script.write_text(the_step("test", SIZE_GATE_STEP)["run"], encoding="utf-8")
+    base = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "FLAVOR": "cuda"}
+    # no SIF: the size cannot be read
+    no_file = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={**base, "SIF_MAX_BYTES": str(SIF_MAX_BYTES)},
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert no_file.returncode != 0
+    # a SIF but no gate: the step refuses rather than compares with nothing
+    (tmp_path / "nemar-python.sif").write_bytes(b"")
+    no_gate = subprocess.run(
+        ["bash", "-e", str(script)],
+        env=base,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert no_gate.returncode != 0
 
 
 def test_the_image_digest_of_a_sign_leg_is_the_one_its_own_publish_leg_pushed():

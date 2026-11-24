@@ -129,9 +129,9 @@ The controls that would stop that are the owner's and are not yet in place (see 
 
 | Job | Runs on | Does |
 |---|---|---|
-| `test` | pull request, tag, dispatch | builds the flavor's image without pushing, as a dev build, and runs `smoke.py` inside it (the `cuda` leg with no GPU visible, see "The two flavors"); checks the built image's build file and its version, revision and build labels against the dev build it named; the `cpu` leg also builds a SIF from the local image, runs `smoke.py` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`, and runs the launch end to end in it; the `cuda` leg frees disk space first and has no GitHub Actions cache |
+| `test` | pull request, tag, dispatch | builds the flavor's image without pushing, as a dev build, and runs `smoke.py` inside it (the `cuda` leg with no GPU visible, see "The two flavors"); checks the built image's build file and its version, revision and build labels against the dev build it named; builds a SIF from the local image (Apptainer's temporary directory and cache on the filesystem with the most space available, `df -h` printed before Apptainer is installed and after the build, the exported archive removed after the build), refuses a SIF at or over the size gate ("The SIF's size", below), and runs `smoke.py` in it under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths` (the `cuda` leg with `--no-gpu` and without `--nv`); the `cpu` leg also runs the launch end to end in that SIF; the `cuda` leg frees disk space first and has no GitHub Actions cache |
 | `publish` | tag, dispatch from `main` | fails unless the commit is reachable from `main`; fails unless the version is the `pyproject.toml` version at the commit, a release, and the git tag `v<version>` points at the commit; fails unless the registry says `<version>-<flavor>` is absent (`scripts/check_tag_absent.py`, below); pushes `ghcr.io/nemarorg/nemar-python:<version>-<flavor>` and captures the digest, as the output `digest_<flavor>` |
-| `sign` | after `publish` | refuses an empty digest, smoke-tests the pushed digest, refuses to sign unless the pushed digest's build file and labels equal the version step's version, the run's commit and `release`, and only then signs it and verifies the signature; the `cpu` leg then builds the SIF from that digest, smoke-tests it, fails unless the registry says the SIF tag is absent (the same script), pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, and signs and verifies the artifact; each leg writes its digest file |
+| `sign` | after `publish` | refuses an empty digest, smoke-tests the pushed digest, refuses to sign unless the pushed digest's build file and labels equal the version step's version, the run's commit and `release`, and only then signs it and verifies the signature; the `cpu` leg then builds the SIF from that digest, refuses it at or over the size gate, smoke-tests it, fails unless the registry says the SIF tag is absent (the same script), pushes it to `oras://ghcr.io/nemarorg/nemar-python-sif:sha256-<hex>`, and signs and verifies the artifact; each leg writes its digest file |
 | `release` | tag only | attaches `nemar-python-<version>-cpu-digests.json` and `nemar-python-<version>-cuda-digests.json` to the release of the tag; an existing asset of either name is an error, never overwritten |
 
 A pull request runs `test` only: nothing on a pull request pushes, signs or releases, and it builds both flavors.
@@ -156,6 +156,16 @@ Exactly 404 means the tag is absent and the run goes on; 200 means it exists and
 Every other answer also stops the run before anything is pushed: another 2xx, a redirect (never followed), 401, 403, 429, a 5xx, a token exchange that fails, a TLS or network error, an empty reply, a missing credential.
 No text in a reply is searched, so an error that merely contains "404", "unknown" or "not found" is not taken for an absence.
 `tests/images/test_publish_guards.py` runs the steps' shell against a stand-in registry for each of these, and the "not on `main`" guard in a throwaway git repository.
+
+### The SIF's size
+
+GHCR documents two limits for its Container registry: 10 GB per layer, and 10 minutes for an upload ("Working with the Container registry", Troubleshooting).
+A SIF artifact is one layer, so a SIF over the first limit cannot be pushed.
+Right after each SIF build, in `test` and in `sign`, the step "Refuse a SIF at or over the size gate" prints `SIF size (<flavor>): <bytes> bytes` and fails when the file is 9,000,000,000 bytes or more (`SIF_MAX_BYTES` in the workflow).
+That is 90% of the limit, and under it whether GB or GiB is meant.
+In `sign` the step runs before the SIF tag is checked and before anything is pushed.
+The `test` job builds a SIF of each flavor from its local image on every pull request, so each flavor's size is read, and gated, before a release.
+`tests/images/test_workflow.py` runs the step's shell on files of the gate's size and one byte under it.
 
 ### The build a record names
 
@@ -251,7 +261,7 @@ Both lengths run the binary twice for 50 iterations each on the same recording, 
 What the short run proves, on every image pull request: `nemar-recipe run nemar-ica` in the SIF built from the commit, under Apptainer with the launcher's isolation flags, exits zero for both engines and writes the recording's weights and record; the pAMICA record of a CPU image with no GPU states the device facts and the thread count; the binary's record names the pinned digest and says it starts from the clock and is not bit reproducible; two unseeded runs differ; and each record is internally consistent at 50 iterations.
 What only the full run proves (a pull request into `main`, the tag, the dispatch): the invocation the registry uses, with no `--ica-max-iter`, completes in the SIF within the job's time and says 2000 iterations in its record; the binary's 2000-iteration output reads consistently; nothing fails between iteration 50 and 2000; the two `unmixing.tsv` files are read and their shapes match (at the short length only the `E1R` test reads them); and the `E1R` line is printed.
 Neither length runs `nemar-ica` through `nemar-launch`: these runs are `apptainer exec` with the launcher's flags, and the run through the real launcher in the SIF is the floor's test in the same step, at both lengths.
-Neither runs the CUDA flavor in a SIF (it has none) or on a GPU.
+Neither runs in the CUDA flavor's SIF, which the `cuda` leg only smoke-tests, or on a GPU.
 
 The workflow starts on the default pull request types, so a pull request opened into another branch and later retargeted to `main` keeps the checks of its short run.
 Re-running that run does not help, because a re-run reuses the original event and its base branch stays the old one; only a new push, or closing and reopening the pull request, starts a run that reads `main` and runs the full length.
