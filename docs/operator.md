@@ -228,6 +228,9 @@ Nothing below names a host, an account or a path: write them as placeholders whe
 5. Repeat the GPU run once more and compare the two GPU weight files byte for byte: equal files are a reading to report (pAMICA's statement for CUDA float64 is unmeasured), and unequal files are one too.
 6. Run once with a runner's decision: `--env NEMAR_DEVICE=cpu --env NEMAR_DEVICE_REASON=gpu_busy` with the default device must run on the CPU and say `gpu_busy` and `fallback` true; `NEMAR_DEVICE=cuda --env NEMAR_DEVICE_REASON=gpu_idle` must run on the GPU and say `gpu_idle`.
 7. Report: the image digest, the GPU model and driver version, torch's version, the wall time and the peak GPU memory of each run, the readings of steps 3 to 5, and anything unexpected, with every host, account and path replaced by a placeholder.
+8. Measure the fit's time and memory on a long, high-channel recording: `scripts/measure_ica_time.py` fits the recipe's own call on a synthetic input of a given size (128 channels, so rank 64, and 60 minutes at 250 Hz by default), and prints the wall time, the peak resident memory and, on CUDA, torch's peak GPU memory and how many such fits one GPU holds by memory.
+   Run it with `--device cuda --max-iter 4000` for the job's whole fit, and with `--max-iter 60` and `--max-iter 100` on each device for the rate per iteration (its docstring says how); read each job's own CUDA context from `nvidia-smi` while a fit runs and pass it as `--context-mib`.
+   Report the numbers against the job's time limit (720 minutes for `nemar-ica`, which covers every recording of the job).
 
 ## Housekeeping
 

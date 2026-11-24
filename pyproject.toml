@@ -148,6 +148,7 @@ include = ["images", "launcher", "observer", "runner", "recipes", "scripts", "te
 include = [
     "images/nemar-python/smoke.py",
     "scripts/make_smoke_fixture.py",
+    "scripts/measure_ica_time.py",
     "recipes/nemar_process/**",
     "tests/recipes/**",
     "tests/recipe_plugin.py",
