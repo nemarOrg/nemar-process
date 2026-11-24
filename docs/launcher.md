@@ -86,10 +86,10 @@ A runner decides, for a job whose `resources.gpus` is above zero, whether the jo
 | `NEMAR_DEVICE_REASON` | for `cuda` exactly `gpu_idle`; for `cpu` one of `gpu_disabled`, `gpu_unsupported_runtime`, `gpu_reserved`, `gpu_check_failed`, `gpu_busy`, `gpu_memory_short`, `gpu_in_use` |
 | `NEMAR_GPU_ID` | `cuda` only: the one GPU, as `nvidia-smi` prints its identifier (`GPU-` and 36 characters of hexadecimal digits and hyphens) |
 | `NEMAR_GPU_INDEX` | `cuda` only: the GPU's index, 0 to 999 with no leading zero |
-| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the most of the GPU's memory the job may take, a whole number from 1 to 999999999 |
+| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the limit of the job's allocator, a whole number from 1 to 999999999; a runner sets it below the job's whole share of the GPU, to leave room for the CUDA context and libraries that the limit does not count |
 
 With none of them set (a Tapis or SLURM launch, and any job with no GPU) the command line is exactly what it always was.
-Any malformed value, an inconsistent set (`cuda` with a reason that is not `gpu_idle`, `cpu` with `gpu_idle`, a GPU identifier, index or cap without `cuda`, `cuda` without all three, or any of them without `NEMAR_DEVICE`) ends the launch at the start as `runtime_error` with detail `invalid_spec`, as a malformed lease does: one fixed line on standard error, the four launcher files written, and nothing fetched, run or uploaded.
+Any malformed value, an inconsistent set (`cuda` with a reason that is not `gpu_idle`, `cpu` with `gpu_idle`, a GPU identifier, index or limit without `cuda`, `cuda` without all three, or any of them without `NEMAR_DEVICE`) ends the launch at the start as `runtime_error` with detail `invalid_spec`, as a malformed lease does: one fixed line on standard error, the four launcher files written, and nothing fetched, run or uploaded.
 A `cuda` decision for a specification whose `resources.gpus` is 0 is `invalid_spec` too: the runner may use fewer GPUs than the specification allows and never more.
 It is checked once before anything is fetched or run (the launcher's own files are then uploaded as for any failure) and again by each command-line builder, so no path can hand over a GPU the specification did not allow.
 The container then gets exactly that GPU, or none:
@@ -99,8 +99,8 @@ The container then gets exactly that GPU, or none:
   Apptainer's `--nv` binds the host's NVIDIA device files, and `CUDA_VISIBLE_DEVICES` is what picks the one GPU: a request the CUDA runtime honors, not a wall.
 - Podman: no GPU is handed over ([Podman](#podman-one-verified-path)); a runner never sends it a `cuda` decision, and a device in the container's OCI configuration ends the launch before the entry runs.
 - The container's environment gets `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` and, for `cuda`, `NEMAR_GPU_MEMORY_MB`, after `NEMAR_OUT`: launcher-owned, because the specification's `env` allowlist is closed and cannot name them.
-  The GPU's identifier and index are not passed in: the recipe is told the device and the cap.
-- `provenance.json` gets a `device` object only when a decision was made and the container was about to start: `{"device", "reason", "gpu_index", "memory_mb"}`, the index and the cap null for `cpu`, and never the GPU's identifier or a host name.
+  The GPU's identifier and index are not passed in: the recipe is told the device and the limit.
+- `provenance.json` gets a `device` object only when a decision was made and the container was about to start: `{"device", "reason", "gpu_index", "memory_mb"}`, the index and the limit null for `cpu`, and never the GPU's identifier or a host name.
 
 ## Docker and Podman
 
