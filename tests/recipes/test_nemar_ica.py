@@ -445,9 +445,7 @@ def test_the_archive_input_is_the_floor_copy_after_asr_and_its_matrix_is_matched
     for step in ran:
         if step["name"] in steps.PREPROCESSING_FUNCTIONS:
             shaped.append({"step": step["stepId"], "function": step["name"]})
-            if step["stepId"] == "asr":
-                shaped.append({"step": "asr", "function": "eegprep.clean_artifacts"})
-    assert [entry["step"] for entry in shaped][-3:] == ["asr", "asr", "reref"]
+    assert [entry["step"] for entry in shaped][-2:] == ["asr", "reref"]
     assert {"step": "drift", "function": "eegprep.pop_eegfiltnew"} in shaped
     typed = [
         [name, kind]

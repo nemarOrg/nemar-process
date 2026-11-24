@@ -8,7 +8,7 @@ times ``icasphere``, components by channels), ``_weights.tsv``, ``_sphere.tsv``,
 (``icawinv``), ``_components.tsv`` (variance and ICLabel's probabilities), ``_ica.json`` (what the
 record says of the run, below), ``_servingunmixing.tsv`` (the browser's matrix,
 ``serving_unmixing``) and the signalJourney record; the floor's ``_badsegments.tsv`` and
-``_samplemask.tsv`` also list the burst spans cut from the fit's input. Every matrix is
+``_samplemask.tsv`` also list the spans ASR repaired (flagged, not removed). Every matrix is
 ``format(x, ".17g")`` text, so a float64 reads back exactly; ``LLt`` is never stored. Everything is TSV and JSON: nothing that
 carries samples is written.
 
@@ -16,8 +16,9 @@ What the record says is one block, ``extensions.nemar.ica``, and ``_ica.json`` i
 under the recipe's name and version (``facts``): the engine, pAMICA's own account of the run copied
 whole under its names, the settings, the start, whether the run repeats bit for bit, the device facts,
 ASR's state digest, the good channels, ICLabel's version and the digest of its network, the
-input profile, what the fit was given (``decomposition_input``), the burst spans cut from it
-(``burst_rejection``) and the browser's matrix (``browser_transform``). Nothing in it says the
+input profile, what the fit was given (``decomposition_input``), the share of samples ASR repaired
+and where (``asr_burst_fraction``, ``asr_bursts``) and the browser's matrix (``browser_transform``).
+Nothing in it says the
 decomposition agrees with EEGLAB's AMICA: it is pAMICA's.
 """
 
@@ -110,7 +111,7 @@ def serving_unmixing(unmixing: np.ndarray, unit: str | None) -> np.ndarray:
 def browser_transform(recording: Recording, fit: pipeline.Decomposition) -> dict[str, Any]:
     """What the record says of the browser's matrix: its file, what it applies to, how its columns
     map to the serving copy's channels, the unit it takes, the caption a view shows, and where the
-    spans cut from the fit's input are (the view shades them over the whole recording).
+    spans ASR repaired are (the view shades them over the whole recording).
 
     On the serving copy the columns are the store's rows (``rows``), in the store's own unit, and the
     match was checked (the fit read that store). On a dataset directory the store was not read: the
@@ -203,7 +204,8 @@ def facts(
         "iclabel": fit.iclabel,
         "input_profile": profile,
         "decomposition_input": copy.deepcopy(fit.decomposition_input),
-        "burst_rejection": copy.deepcopy(fit.bursts),
+        "asr_burst_fraction": fit.bursts["fraction"],
+        "asr_bursts": copy.deepcopy(fit.bursts),
         "browser_transform": None if browser is None else copy.deepcopy(dict(browser)),
         **device.facts(
             resolution,
@@ -361,13 +363,20 @@ def table_row(
         "device": block["device"],
         "device_reason": block["device_reason"],
         "fallback": str(block["fallback"]).lower(),
+        "asr_burst_fraction": block["asr_burst_fraction"],
         "record_content_sha256": content,
     }
 
 
 # The summary metric names nemar-ica adds to the floor's; a plugin's headline metric may not take one
 # (the recipe passes them to ``plugins.load`` as ``reserved``).
-SUMMARY_METRICS = ("icaRank", "icaIterations", "icaFinalLogLikelihood", "icaDidConverge")
+SUMMARY_METRICS = (
+    "icaRank",
+    "icaIterations",
+    "icaFinalLogLikelihood",
+    "icaDidConverge",
+    "asrBurstFraction",
+)
 
 
 def write_product(
@@ -392,7 +401,13 @@ def write_product(
             "the decomposition input {!r} is not the input profile {!r}'s".format(source, profile)
         )
     block = facts(fit, profile, browser_transform(recording, fit))
-    values = (block["rank"], block["iterations"], block["final_ll"], block["did_converge"])
+    values = (
+        block["rank"],
+        block["iterations"],
+        block["final_ll"],
+        block["did_converge"],
+        block["asr_burst_fraction"],
+    )
     summary = dict(zip(SUMMARY_METRICS, values, strict=True))
     product = floor_outputs.write_product(
         recording,

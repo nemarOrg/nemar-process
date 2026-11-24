@@ -3,12 +3,13 @@ and ICLabel. Every numerical step is an eegprep call, and no file is read or wri
 
 The chain (docs/recipes.md): the floor's own chain with its parameters (its decisions are this
 record's first steps; the bad channels it found are already removed from its working copy);
-``clean_asr`` with its state kept and the owner's cutoff of 30, the samples it would repair then cut
-by eegprep's ``clean_artifacts`` (burst rejection, as legacy NEMAR); ``pop_reref`` to the average;
-``pop_runica`` with the engine asked for, AMICA's sample rejection and its convergence stops on, on
-the cut, re-referenced copy; ``pop_iclabel``. The floor runs with nemar-ica's two values in place of
-its own (``FLOOR_EMBEDDING``: a 0.5 Hz FIR high-pass, RANSAC's 0.85). The chain is the same on both inputs, and the record states what
-the fit was given (``decomposition_input``: the steps that shaped it, the channels, the unit and the
+``clean_asr`` with its state kept and the owner's cutoff of 30, the share of samples it repairs
+measured (``asrBurstFraction``; nothing is cut); ``pop_reref`` to the average;
+``pop_runica`` with the engine asked for and AMICA's convergence stops (its sample rejection's
+schedule recorded, the rejection off), on the ASR-repaired, re-referenced copy; ``pop_iclabel``. The
+floor runs with nemar-ica's two values in place of its own (``FLOOR_EMBEDDING``: a 0.5 Hz FIR
+high-pass, RANSAC's 0.85). The chain is the same on both inputs, and the record states what the fit
+was given (``decomposition_input``: the steps that shaped it, the channels, the unit and the
 reference, and on the Zarr serving copy the store it was read from). A step that raises ends the
 recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
 and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
@@ -90,7 +91,7 @@ class Decomposition:
     probabilities: np.ndarray
     variance_pct: list[float]
     # what the fit was given (``decomposition_input``), the store a serving-copy recording was read
-    # from (None on a dataset directory), and the burst spans cut from the fit's input (``bursts``)
+    # from (None on a dataset directory), and the spans ASR repaired with their share (``bursts``)
     decomposition_input: dict[str, Any]
     serving: ServingStore | None
     bursts: dict[str, Any]
@@ -132,62 +133,22 @@ def asr_parameters() -> dict[str, Any]:
         "cutoff": steps.ASR_CUTOFF,
         "maxmem": steps.ASR_MAXMEM_MB,
         "return_state": True,
-        "burst_rejection": {"function": steps.BURST_FUNCTION, **burst_call()},
     }
 
 
-def burst_call() -> dict[str, Any]:
-    """The arguments of eegprep's ``clean_artifacts`` that cut the bursts ASR finds: every stage off
-    but ASR, ASR's settings as the state's own call has them (``asr_parameters``), and burst
-    rejection on. The same data and settings give the same repair, so the state describes the repair
-    that decided which samples were cut (``tests/recipes/test_nemar_ica_serving_input.py``)."""
-    from eegprep import clean_asr
-
-    applied = signature_defaults(clean_asr, ("ref_maxbadchannels", "ref_tolerances"))
+def burst_share(before: np.ndarray, after: np.ndarray) -> dict[str, Any]:
+    """What the record says of ASR's bursts: the samples its repair changed (``qc.asr_repaired``,
+    eegprep's rule), as ``[start, stop)`` spans of the samples the floor read, and their share of the
+    recording (``fraction``, 0 to 1, six decimals). Nothing is removed: the fit gets the repair."""
+    repaired = qc.asr_repaired(before, after)
+    total = int(repaired.size)
+    flagged = int(repaired.sum())
     return {
-        "FlatlineCriterion": "off",
-        "Highpass": "off",
-        "ChannelCriterion": "off",
-        "LineNoiseCriterion": "off",
-        "WindowCriterion": "off",
-        "BurstCriterion": steps.ASR_CUTOFF,
-        "BurstCriterionRefMaxBadChns": applied["ref_maxbadchannels"],
-        "BurstCriterionRefTolerances": tuple(applied["ref_tolerances"]),
-        "BurstRejection": True,
-        "MaxMem": steps.ASR_MAXMEM_MB,
-        "Distance": "euclidian",
-    }
-
-
-def cut_bursts(eeg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """The recording with the bursts ASR finds cut out, by eegprep's ``clean_artifacts`` (``burst_call``),
-    and what the record says of them: the spans cut, as ``[start, stop)`` sample indices of the samples
-    the floor read, and how many samples were kept.
-
-    eegprep's own mask (``etc.clean_sample_mask``, True for a sample kept) is the one read; a dataset
-    whose length or channels disagree with it ends the recording (``internal_error``,
-    ``burst_mask_inconsistent``). The input's ``etc`` is copied first, without cleaning state of earlier
-    steps, so the floor's header is left as it was.
-    """
-    from eegprep import clean_artifacts
-
-    total = int(eeg["pnts"])
-    given = {**eeg, "etc": {k: v for k, v in eeg["etc"].items() if k not in io.STALE_ETC_KEYS}}
-    cut, _highpassed, _repaired, _removed = clean_artifacts(given, **burst_call())
-    found = cut["etc"].get("clean_sample_mask")
-    kept = np.asarray(found if found is not None else [], dtype=bool)
-    if (
-        kept.shape != (total,)
-        or int(cut["pnts"]) != int(kept.sum())
-        or int(cut["nbchan"]) != int(eeg["nbchan"])
-    ):
-        raise RecordingError(INTERNAL_ERROR, "asr", steps.BURST_MASK_INCONSISTENT)
-    spans = [[int(start), int(start + length)] for start, length in qc.runs(kept)]
-    return cut, {
-        "spans": spans,
+        "fraction": rounded(flagged / total, 6) if total else None,
         "n_samples": total,
-        "n_kept": int(kept.sum()),
-        "kept_share": rounded(float(kept.sum()) / total, 6),
+        "n_repaired": flagged,
+        "threshold_uv": qc.ASR_UNCHANGED_UV,
+        "spans": [[int(start), int(start + length)] for start, length in qc.runs(~repaired)],
     }
 
 
@@ -302,8 +263,6 @@ def decomposition_input(
     for step in plan.steps:
         if step.function in steps.PREPROCESSING_FUNCTIONS:
             shaped.append({"step": step.step_id, "function": step.function})
-            if step.function == steps.ASR_FUNCTION and "burst_rejection" in step.parameters:
-                shaped.append({"step": step.step_id, "function": steps.BURST_FUNCTION})
     typed = channel_types(result)
     block: dict[str, Any] = {
         "source": steps.ARCHIVE_SOURCE if serving is None else steps.SERVING_SOURCE,
@@ -480,8 +439,8 @@ def process(
     # ASR, keeping the state that reproduces it
     with guarded("asr"):
         repaired, asr_text = asr_repair(eeg)
-        del repaired  # the cut below removes what ASR would change and keeps the rest as it was
-        eeg, bursts = cut_bursts(eeg)
+        bursts = burst_share(eeg["data"], repaired["data"])
+        eeg = repaired
         asr_sha256 = hashlib.sha256(asr_text.encode("utf-8")).hexdigest()
         state = json.loads(asr_text)
         asr = {
@@ -503,8 +462,8 @@ def process(
                 "windowLenS": state["window_len"],
                 "stepSize": state["step_size"],
                 "channelsNamed": state["channels"] is not None,
+                "burstFraction": bursts["fraction"],
                 "nBurstSpans": len(bursts["spans"]),
-                "keptShare": bursts["kept_share"],
             },
         )
 

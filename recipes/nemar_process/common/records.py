@@ -307,7 +307,7 @@ def check(record: Mapping[str, Any], validator: Any) -> list[str]:
 # ---- the dataset record -----------------------------------------------------------------------
 
 
-def distribution(values: Sequence[float], edges: Sequence[int]) -> dict[str, Any]:
+def distribution(values: Sequence[float], edges: Sequence[float]) -> dict[str, Any]:
     """The count, min, median and max of the values and a histogram with fixed edges.
 
     A value belongs to the bin ``[edge_i, edge_i+1)``; the last bin is closed; a value outside the

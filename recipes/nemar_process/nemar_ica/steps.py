@@ -60,11 +60,11 @@ PRE_CHECKS = ("qc_amplitude", "ica_eligibility", "iclabel_locations")
 
 DESCRIPTIONS = {
     "asr": (
-        "Find bursts with artifact subspace reconstruction, keeping its calibration state, and cut "
-        "the samples it would repair"
+        "Repair bursts with artifact subspace reconstruction, keeping its calibration state, and "
+        "measure the share of samples it repairs"
     ),
     "reref": "Re-reference to the average of the good channels",
-    "ica": "Decompose the cleaned, re-referenced data into independent components",
+    "ica": "Decompose the repaired, re-referenced data into independent components",
     "iclabel": "Classify the components with ICLabel",
 }
 
@@ -186,25 +186,20 @@ BROWSER_APPLIES_TO_LABELS = (
     "field and refuses an unknown unit or any channel it cannot match"
 )
 BROWSER_CAPTION_UNCHECKED = "not checked against the decomposition input"
-# The burst spans cut from the fit's input are shaded by the view over the whole recording; they are
-# rows of the floor's _badsegments.tsv and _samplemask.tsv with this label and reason.
+# The spans ASR repairs (its bursts) are shaded by the view over the whole recording; they are rows of
+# the floor's _badsegments.tsv and _samplemask.tsv with this label and reason, flagged, never removed.
 BURST_LABEL = "burst"
-BURST_REASON = "asr_burst_rejection"
+BURST_REASON = "asr_repaired"
+# The share of samples ASR repairs, a number per recording (`asrBurstFraction`, 0 to 1): how much of
+# the recording is noise by ASR's fixed cutoff, so comparable across datasets. Its distribution in the
+# dataset record has these edges.
+BURST_FRACTION_EDGES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0)
 
 # The floor's two values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
 # settings, 2026-11-23): a 0.5 Hz FIR high-pass (pop_eegfiltnew, legacy's call) in place of
 # clean_drifts, and RANSAC's correlation threshold of 0.85 in place of 0.8.
 HIGHPASS_HZ = 0.5
 CORR_THRESHOLD = 0.85
-
-# ASR's bursts are cut, as legacy NEMAR's clean_rawdata did with BurstRejection on: eegprep's
-# clean_artifacts with every stage but ASR off, the same ASR settings as the state's call, and burst
-# rejection on (the samples ASR would change are removed, and retained runs shorter than 5 samples with
-# them, by eegprep's own rule).
-BURST_FUNCTION = "eegprep.clean_artifacts"
-# eegprep's mask of the samples kept does not fit the recording it was made from (a fault upstream or
-# here, never of the data).
-BURST_MASK_INCONSISTENT = "burst_mask_inconsistent"
 
 
 def rank_of(n_good: int) -> int:

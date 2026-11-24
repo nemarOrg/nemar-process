@@ -50,6 +50,7 @@ COLUMNS = (
     Column("device", "str"),
     Column("device_reason", "str"),
     Column("fallback", "str"),
+    Column("asr_burst_fraction", "float", 6),
     Column("record_content_sha256", "str"),
 )
 
@@ -59,6 +60,7 @@ ITERATION_EDGES = (0, 50, 100, 250, 500, 1000, 2000, 4000)
 DISTRIBUTIONS = (
     Distribution("icaRank", "rank", RANK_EDGES),
     Distribution("icaIterations", "iterations", ITERATION_EDGES),
+    Distribution("asrBurstFraction", "asr_burst_fraction", steps.BURST_FRACTION_EDGES),
 )
 
 

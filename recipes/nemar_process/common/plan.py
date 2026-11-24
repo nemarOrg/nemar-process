@@ -148,21 +148,6 @@ PARAMETER_TYPES: dict[str, dict[str, Any]] = {
         "useriemannian": "str",
         "maxmem": "int",
         "return_state": "bool",
-        # nemar-ica cuts the bursts ASR finds: the eegprep call that does it, recorded with ASR
-        "burst_rejection": {
-            "function": "str",
-            "FlatlineCriterion": "str",
-            "Highpass": "str",
-            "ChannelCriterion": "str",
-            "LineNoiseCriterion": "str",
-            "WindowCriterion": "str",
-            "BurstCriterion": "float",
-            "BurstCriterionRefMaxBadChns": "float",
-            "BurstCriterionRefTolerances": "floats",
-            "BurstRejection": "bool",
-            "MaxMem": "int",
-            "Distance": "str",
-        },
     },
     "eegprep.pop_reref": {"ref": "any"},
     "eegprep.pop_runica": {

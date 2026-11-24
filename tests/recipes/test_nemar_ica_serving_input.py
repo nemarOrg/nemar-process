@@ -3,8 +3,8 @@
 
 The decomposition gets the same preprocessing on both inputs (the floor's channel removal with
 RANSAC at 0.85, a 0.5 Hz FIR high-pass and the line-noise band-stop, ASR with the owner's cutoff of 30
-whose bursts are cut, the average reference), and pAMICA runs with AMICA's sample rejection and its
-convergence stops on. On the serving copy the product adds the browser's
+repairing, the share of samples it repairs measured, the average reference), and pAMICA runs with
+AMICA's convergence stops on and its sample rejection off (its schedule recorded). On the serving copy the product adds the browser's
 matrix, ``_servingunmixing.tsv``: the unmixing with the average reference over the kept channels and
 the store unit's factor to microvolts folded in, so that the browser multiplies the store's physical
 values of the kept channels by it and applies no preprocessing.
@@ -23,11 +23,10 @@ only the two external hosts):
   channels, the unit, the reference) and ``browser_transform``;
 * the chain on the serving copy: ASR runs with its state, the line-noise band-stop runs, no step is
   skipped for the input; the plan hash follows the ASR cutoff and the rejection switch;
-* the rejection settings and the convergence stops reach pAMICA's backend, which makes its
-  rejection passes;
-* the bursts ASR finds are cut from the fit's input by eegprep's ``clean_artifacts``, whose repair
-  is the one the recorded state makes, and the spans are rows of ``_badsegments.tsv`` and
-  ``_samplemask.tsv`` and of the record;
+* the rejection schedule and the convergence stops reach pAMICA's backend, which rejects nothing;
+* ASR repairs and nothing is cut; the share of samples it repairs (``asrBurstFraction``) follows
+  eegprep's own rule for what a repair changed, and its spans are flagged rows of
+  ``_badsegments.tsv`` and ``_samplemask.tsv``, the record, the summary and the table;
 * the floor runs with nemar-ica's 0.5 Hz FIR high-pass and RANSAC's 0.85, and the floor itself keeps
   its own;
 * the rank: the decomposition keeps one component fewer than the kept channels, which is the
@@ -394,8 +393,6 @@ def test_the_record_names_the_input_its_store_and_the_browsers_matrix(runs, stan
     for step in record["processingSteps"]:
         if step["name"] in steps.PREPROCESSING_FUNCTIONS:
             shaped.append({"step": step["stepId"], "function": step["name"]})
-            if step["stepId"] == "asr":  # ASR's bursts are cut by clean_artifacts in the same step
-                shaped.append({"step": "asr", "function": "eegprep.clean_artifacts"})
     assert block["decomposition_input"] == {
         "source": "serving_copy",
         "preprocessing": shaped,
@@ -463,7 +460,6 @@ def test_the_serving_copy_gets_the_full_chain(runs):
         ("line_noise_50", "eegprep.pop_eegfiltnew"),
         ("bad_channels", "eegprep.clean_channels"),
         ("asr", "eegprep.clean_asr"),
-        ("asr", "eegprep.clean_artifacts"),
         ("reref", "eegprep.pop_reref"),
     ]
 
@@ -620,73 +616,46 @@ def rows_of(path: Path) -> list[dict[str, str]]:
     return [dict(zip(names, line.split("\t"), strict=True)) for line in lines[1:]]
 
 
-def test_the_bursts_are_cut_from_the_fits_input_and_listed_in_the_floors_tables(runs):
+def test_asr_repairs_cuts_nothing_and_the_record_states_the_share_it_repaired(runs):
     run = runs[STORE]
     record = run.product.record
-    bursts = block_of(run)["burst_rejection"]
+    block = block_of(run)
+    bursts = block["asr_bursts"]
     spans = bursts["spans"]
     assert any(start <= BURST[0] and BURST[1] <= stop for start, stop in spans)
-    removed = sum(stop - start for start, stop in spans)
+    assert int(run.fit.eeg["pnts"]) == z.N_SAMPLES  # nothing is cut
+    repaired = sum(stop - start for start, stop in spans)
     assert bursts["n_samples"] == z.N_SAMPLES
-    assert bursts["n_kept"] == z.N_SAMPLES - removed == int(run.fit.eeg["pnts"])
-    assert bursts["kept_share"] == round(bursts["n_kept"] / z.N_SAMPLES, 6) < 1.0
+    assert bursts["n_repaired"] == repaired
+    assert bursts["fraction"] == block["asr_burst_fraction"] == round(repaired / z.N_SAMPLES, 6)
+    assert 0 < bursts["fraction"] < 1
+    assert bursts["threshold_uv"] == 1e-8
+    nemar = record["extensions"]["nemar"]
+    assert record["summaryMetrics"]["asrBurstFraction"] == bursts["fraction"]
+    assert run.product.row["asr_burst_fraction"] == bursts["fraction"]
     asr = step_of(record, "asr")
+    assert "burst_rejection" not in asr["parameters"]
+    assert asr["qualityMetrics"]["burstFraction"] == bursts["fraction"]
     assert asr["qualityMetrics"]["nBurstSpans"] == len(spans)
-    assert asr["qualityMetrics"]["keptShare"] == bursts["kept_share"]
-    assert asr["parameters"]["burst_rejection"] == {
-        "function": "eegprep.clean_artifacts",
-        "FlatlineCriterion": "off",
-        "Highpass": "off",
-        "ChannelCriterion": "off",
-        "LineNoiseCriterion": "off",
-        "WindowCriterion": "off",
-        "BurstCriterion": 30.0,
-        "BurstCriterionRefMaxBadChns": 0.075,
-        "BurstCriterionRefTolerances": [-3.5, 5.5],
-        "BurstRejection": True,
-        "MaxMem": 1024,
-        "Distance": "euclidian",
-    }
-    masked = [
+    flagged = [
         row for row in rows_of(named(run.directory, "samplemask.tsv")) if row["label"] == "burst"
     ]
-    assert [[int(row["start_sample"]), int(row["stop_sample"])] for row in masked] == spans
-    assert {row["nemar_reason"] for row in masked} == {"asr_burst_rejection"}
+    assert [[int(row["start_sample"]), int(row["stop_sample"])] for row in flagged] == spans
+    assert {row["nemar_reason"] for row in flagged} == {"asr_repaired"}
     segments = [
         row for row in rows_of(named(run.directory, "badsegments.tsv")) if row["label"] == "burst"
     ]
-    assert [
-        [
-            round(float(row["onset"]) * z.RATE),
-            round((float(row["onset"]) + float(row["duration"])) * z.RATE),
-        ]
-        for row in segments
-    ] == spans
-    # the floor's own windows are still there, beside the bursts
+    assert len(segments) == len(spans)
     assert [
         row for row in rows_of(named(run.directory, "samplemask.tsv")) if row["label"] != "burst"
     ]
+    assert nemar["ica"]["browser_transform"]["shaded"]["label"] == "burst"
 
 
-def test_the_cuts_asr_settings_are_the_states():
-    """clean_artifacts passes ASR these settings and leaves the rest at clean_asr's defaults, as the
-    state's own call does: a cut whose ASR differed would cut what the state does not describe, even
-    on data where the two calibrations happen to agree."""
-    asr = pipeline.asr_parameters()
-    call = pipeline.burst_call()
-    assert (
-        call["BurstCriterion"],
-        call["BurstCriterionRefMaxBadChns"],
-        list(call["BurstCriterionRefTolerances"]),
-        call["MaxMem"],
-    ) == (asr["cutoff"], asr["ref_maxbadchannels"], list(asr["ref_tolerances"]), asr["maxmem"])
-    assert (call["Distance"], asr["useriemannian"], asr["use_gpu"]) == ("euclidian", None, False)
-    assert asr["burst_rejection"] == {"function": "eegprep.clean_artifacts", **call}
-
-
-def test_the_cut_is_eegpreps_and_its_repair_is_the_one_the_state_records(stand_in, no_fence_module):
-    """clean_artifacts repairs exactly as the recorded clean_asr call does, so the state describes the
-    repair that decided the cut, and every sample that repair changed is cut."""
+def test_the_share_follows_eegpreps_rule_for_what_a_repair_changed(stand_in, no_fence_module):
+    """The samples counted are those whose repair changed the data, by eegprep's own rule: every one
+    of them is a sample clean_artifacts would cut with BurstRejection, and every sample it would cut
+    is one of them or inside a retained run shorter than 5 samples (its extra rule for a cut)."""
     from eegprep import clean_artifacts
     from nemar_process.common import qc
     from nemar_process.nemar_floor import pipeline as floor
@@ -703,16 +672,30 @@ def test_the_cut_is_eegpreps_and_its_repair_is_the_one_the_state_records(stand_i
         eeg = result.work
         repaired, _state = pipeline.asr_repair(eeg)
         given = {**eeg, "etc": {k: v for k, v in eeg["etc"].items() if k != "clean_sample_mask"}}
-        cut, _highpassed, bur, _removed = clean_artifacts(given, **pipeline.burst_call())
-        recipe_cut, bursts = pipeline.cut_bursts(eeg)
-    assert np.array_equal(repaired["data"], bur["data"])
-    kept = np.asarray(cut["etc"]["clean_sample_mask"], dtype=bool)
-    changed = np.sum(np.abs(np.asarray(eeg["data"]) - repaired["data"]), axis=0) >= 1e-8
-    assert changed.any()
-    assert not np.any(kept & changed)
-    assert bursts["spans"] == [[start, start + length] for start, length in qc.runs(kept)]
-    assert np.array_equal(recipe_cut["data"], cut["data"])
-    assert np.array_equal(recipe_cut["data"], np.asarray(eeg["data"])[:, kept])  # kept as it was
+        asr = pipeline.asr_parameters()
+        cut, _highpassed, bur, _removed = clean_artifacts(
+            given,
+            FlatlineCriterion="off",
+            Highpass="off",
+            ChannelCriterion="off",
+            LineNoiseCriterion="off",
+            WindowCriterion="off",
+            BurstCriterion=asr["cutoff"],
+            BurstCriterionRefMaxBadChns=asr["ref_maxbadchannels"],
+            BurstCriterionRefTolerances=tuple(asr["ref_tolerances"]),
+            BurstRejection=True,
+            MaxMem=asr["maxmem"],
+        )
+    assert np.array_equal(repaired["data"], bur["data"])  # the same repair
+    flagged = qc.asr_repaired(eeg["data"], repaired["data"])
+    dropped = ~np.asarray(cut["etc"]["clean_sample_mask"], dtype=bool)
+    assert flagged.any()
+    assert not np.any(flagged & ~dropped)
+    extra = dropped & ~flagged
+    for _start, length in qc.runs(~extra):  # every extra sample sits in a short retained run
+        assert length < 5
+    share = pipeline.burst_share(eeg["data"], repaired["data"])
+    assert share["n_repaired"] == int(flagged.sum())
 
 
 # ---- the floor's values ------------------------------------------------------------------------
@@ -831,3 +814,13 @@ def test_the_command_writes_the_browsers_matrix_on_the_zarr_input(commanded):
     assert (out / block["browser_transform"]["matrix"]).is_file()
     assert "asr" in [step["stepId"] for step in record["processingSteps"]]
     assert records.check(record, sj.validator()) == []
+    # the share ASR repaired is a column of the table and a distribution of the dataset record
+    lines = (out / "desc-nemarica_recordings.tsv").read_text(encoding="utf-8").splitlines()
+    names = lines[0].split("\t")
+    table = [dict(zip(names, line.split("\t"), strict=True)) for line in lines[1:]]
+    assert all(0 < float(row["asr_burst_fraction"]) < 1 for row in table)
+    dataset = json.loads((out / "desc-nemarica_signalJourney.json").read_text(encoding="utf-8"))
+    share = dataset["summaryMetrics"]["asrBurstFraction"]
+    assert share["n"] == 2
+    assert share["histogram"]["edges"] == list(steps.BURST_FRACTION_EDGES)
+    assert dataset["summaryMetrics"]["icaIterations"]["histogram"]["edges"][-1] == 4000
