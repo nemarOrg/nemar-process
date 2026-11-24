@@ -1,0 +1,56 @@
+{
+  "source": "nemarOrg/neuroschema views/vectors/view-digest.v1.json at 98bb0da6d8112c87919b08b6eb6f743d2e2ed9b7",
+  "spec": "docs/views/view-digest.md",
+  "description": "Three of neuroschema's nemar.view-digest.v1 cases, copied unchanged (member order by UTF-16 code units, string escapes, literals and nesting): the cases within what common.determinism.jcs canonicalizes, which has no floats. Each case's canonical is the RFC 8785 text and sha256 the digest of its UTF-8 bytes.",
+  "cases": [
+    {
+      "name": "key_order_utf16",
+      "covers": "Sorted by UTF-16 code units: U+1F600 (D83D DE00) before U+FF61, which code point order reverses.",
+      "declaration": {
+        "\uff61": 4,
+        "\ud83d\ude00": 3,
+        "\u00e9": 2,
+        "\u0080": 5,
+        "z": 1
+      },
+      "canonical": "{\"z\":1,\"\u0080\":5,\"\u00e9\":2,\"\ud83d\ude00\":3,\"\uff61\":4}",
+      "sha256": "7026c262205639fac0bfeb86d45135605bded53afa257189acb5b799575fdafe"
+    },
+    {
+      "name": "escapes",
+      "covers": "Only quote, backslash and U+0000 to U+001F are escaped, short forms where JSON has them; '/', U+007F, U+2028 and non-ASCII are written as UTF-8.",
+      "declaration": {
+        "s": "q\" b\\ s/ t\t n\n r\r b\b f\f nul\u0000 us\u001f del\u007f ls\u2028 e\u00e9 smile\ud83d\ude00",
+        "tab\tkey": "\u00b5V"
+      },
+      "canonical": "{\"s\":\"q\\\" b\\\\ s/ t\\t n\\n r\\r b\\b f\\f nul\\u0000 us\\u001f del\u007f ls\u2028 e\u00e9 smile\ud83d\ude00\",\"tab\\tkey\":\"\u00b5V\"}",
+      "sha256": "a00413f708a72885ce5ab00179bb119ccdc7620987f8b09dcfbe93d22ab817e7"
+    },
+    {
+      "name": "literals_and_nesting",
+      "covers": "true, false, null, empty containers and nested arrays keep their order.",
+      "declaration": {
+        "e": {},
+        "a": [
+          true,
+          false,
+          null,
+          [],
+          {},
+          [
+            1,
+            [
+              2,
+              {
+                "d": "c",
+                "c": "d"
+              }
+            ]
+          ]
+        ]
+      },
+      "canonical": "{\"a\":[true,false,null,[],{},[1,[2,{\"c\":\"d\",\"d\":\"c\"}]]],\"e\":{}}",
+      "sha256": "6321dd46247ec04b5cea4b18e455393aa63d57c3deee800ea036072d83ac6f0b"
+    }
+  ]
+}

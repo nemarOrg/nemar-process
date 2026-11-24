@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from nemar_process.common import device, io, qc
+from nemar_process.common import determinism, device, io, qc
 from nemar_process.common.determinism import rounded
 from nemar_process.common.errors import (
     ICA_DEGENERATE,
@@ -238,8 +238,10 @@ def channel_types(result: floor.FloorResult) -> list[list[str | None]]:
 
 
 def types_sha256(typed: list[list[str | None]]) -> str:
-    """The SHA-256 of the rows' labels and types as canonical JSON (``canonical_text``)."""
-    return hashlib.sha256(canonical_text({"channel_types": typed}).encode("utf-8")).hexdigest()
+    """The SHA-256 of the UTF-8 bytes of ``{"channel_types": [[label, type], ...]}`` in RFC 8785's
+    canonical form (``determinism.jcs``, neuroschema's ``nemar.view-digest.v1`` form), so a browser or
+    another language recomputes it from the record."""
+    return hashlib.sha256(determinism.jcs({"channel_types": typed}).encode("utf-8")).hexdigest()
 
 
 def decomposition_input(
