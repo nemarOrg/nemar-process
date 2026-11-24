@@ -140,9 +140,7 @@ def zarr_run_recording(
 ) -> RecordingProduct:
     """Read the store whole (unless a loaded recording is handed in, as tests do), process, write."""
     source = context.source
-    # each row typed as the store states it (an interim until eegprep-lean types them,
-    # sccn/eegprep#669): a row of a known non-EEG type is never decomposed
-    loaded = loaded if loaded is not None else source.load(recording.path, channel_types=True)
+    loaded = loaded if loaded is not None else source.load(recording.path)
     return outputs.produce(
         recording,
         context,

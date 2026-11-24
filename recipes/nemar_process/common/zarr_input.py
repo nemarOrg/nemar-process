@@ -1085,7 +1085,7 @@ class ZarrSource:
 
     # -- the reads
 
-    def load(self, path: str, *, channel_types: bool = False) -> io.Loaded:
+    def load(self, path: str) -> io.Loaded:
         """Read one whole recording (level 0, physical units) as a loaded EEGLAB dictionary.
 
         A store whose read would pass ``max_bytes`` is skipped as ``too_large`` before any signal
@@ -1101,11 +1101,11 @@ class ZarrSource:
         from inside a data file), and the count is the BIDS route's (``qc.count_located``). The loaded
         recording names its store (``Loaded.serving``, a ``ServingStore``).
 
-        With ``channel_types`` (nemar-ica's read, an interim measure until eegprep-lean's ``to_eeg``
-        types the channels, sccn/eegprep#669) the group's metadata is read once more and each row of
-        ``chanlocs`` takes the ``channel_type`` the store states for that row, row by row: a row with
-        no stated type stays untyped, and no row's type is ever taken from another row. A row whose
-        label is not the window's is ``convert_failed`` (``channel_types_mismatch``).
+        Each row of ``chanlocs`` takes the ``channel_type`` the store states for that row, row by row
+        (the group's metadata is read once more; an interim measure until eegprep-lean's ``to_eeg``
+        types the channels, sccn/eegprep#669): a row with no stated type stays untyped, and no row's
+        type is ever taken from another row. A row whose label is not the window's is
+        ``convert_failed`` (``channel_types_mismatch``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -1128,7 +1128,7 @@ class ZarrSource:
                     transport=self.transport,
                     index=self.index,
                 )
-                stated = self._stated_types(store, window) if channel_types else None
+                stated = self._stated_types(store, window)
             except MemoryError as error:
                 raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
             except Exception as error:
@@ -1161,8 +1161,7 @@ class ZarrSource:
             reader_locations = copy.deepcopy(eeg["etc"]["nemar"].get("locations"))
             eeg = eeg_checkset(eeg)
             eeg, notes = io.normalize(eeg)
-            if stated is not None:
-                apply_types(eeg, stated)
+            apply_types(eeg, stated)
             located = qc.count_located(eeg["chanlocs"])
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error

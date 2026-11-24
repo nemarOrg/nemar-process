@@ -239,7 +239,7 @@ class Run:
 def decompose(served, path: str, directory: Path) -> Run:
     """Read the store as nemar-ica's Zarr input reads it, process it and write its product."""
     source = opened(served, path)
-    loaded = source.load(path, channel_types=True)  # as nemar-ica's Zarr input reads it
+    loaded = source.load(path)
     context = run_context(source)
     settings = Settings.from_options(context.options)
     recording = source.recording(source.index.store(path))
@@ -585,11 +585,20 @@ def test_the_types_digest_is_hashed_in_the_plan(runs):
     assert plans.plan_hash(changed) != stored
 
 
-def test_the_floors_own_read_leaves_the_rows_untyped(stand_in, no_fence_module):
-    """Only nemar-ica's read types the rows (an interim until sccn/eegprep#669); the floor's is
-    unchanged."""
+def test_the_floors_own_read_types_the_rows_too_and_leaves_the_ecg_row_out(
+    stand_in, no_fence_module
+):
+    """Every Zarr read types the rows the same way (an interim until sccn/eegprep#669), so nemar-floor
+    on its own leaves the ECG row out of its signal channels too."""
+    from nemar_process.nemar_floor import pipeline as floor
+
     loaded = opened(stand_in, TYPED).load(TYPED)
-    assert all("type" not in chanloc for chanloc in loaded.eeg["chanlocs"])
+    assert [chanloc.get("type") for chanloc in loaded.eeg["chanlocs"]] == list(TYPES)
+    with determinism.pinned_threads(1), command.quiet():
+        result = floor.process(loaded)
+    assert "E5" not in result.signal_names
+    assert "E3" in result.signal_names
+    assert result.plan.has_step("signal_channels")
 
 
 def test_signal_channels_are_chosen_row_by_row():
