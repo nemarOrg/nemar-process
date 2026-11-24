@@ -239,7 +239,7 @@ jobs:
       - name: Podman version
         run: podman version
       - name: Launch end to end (real rootless Podman)
-        run: uv run --frozen pytest tests/launcher/test_podman_e2e.py -m podman -v -rs
+        run: uv run --frozen pytest tests/launcher/test_podman_e2e.py -m podman -v -rs -s
 
   static:
     # The former `images` and `deploy` jobs as one required check, in this order: the images group (the

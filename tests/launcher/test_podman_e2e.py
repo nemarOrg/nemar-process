@@ -173,7 +173,9 @@ def user_files(**files: str):
 
 
 def sudo(*argv: str, stdin: bytes | None = None) -> None:
-    subprocess.run(["sudo", "-n", *argv], input=stdin, check=True, timeout=60)
+    subprocess.run(
+        ["sudo", "-n", *argv], input=stdin, stdout=subprocess.DEVNULL, check=True, timeout=60
+    )
 
 
 @contextlib.contextmanager
