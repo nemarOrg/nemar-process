@@ -291,8 +291,10 @@ class Direct:
 
     def create_bypassed(self) -> None:
         """``create`` and ``init`` with the launcher's flags and binds, WITHOUT the prevention."""
-        assert self.argv[1:3] == ["--default-mounts-file=/dev/null", self.argv[2]]
-        bare = [self.argv[0], *self.argv[3:]]
+        assert self.engine.prevention is not None
+        flags = self.engine.prevention.flags()
+        bare = [part for part in self.argv if part not in flags]
+        assert bare[1] == "create"
         subprocess.run(bare, check=True, capture_output=True, timeout=120, env=base_env())
         subprocess.run(
             [self.argv[0], "init", self.name],

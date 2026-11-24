@@ -24,7 +24,7 @@ from harness import spec_text
 from nemar_launch import run, runtime, settings, spec
 from nemar_launch.codes import Env, Failure
 from nemar_launch.provenance import Log
-from test_runtime_docker import LIMITS, Engine, entry_spec, launch, runtime_dir
+from test_runtime_docker import LIMITS, REFERENCE, RUNNER, Engine, entry_spec, launch, runtime_dir
 
 
 @pytest.fixture
@@ -380,3 +380,54 @@ def test_docker_beside_it_is_unaffected(rig):
     assert len(docker.runs()) == 1
     assert docker.runs()[0]["argv"][0] == "run"
     assert "CONTAINERS_CONF" not in docker.runs()[0]["environ"]
+
+
+def test_the_check_itself_removes_a_refused_container_before_raising(rig, podman):
+    """`verify_podman` on its own (as the end-to-end test calls it on a container made without the
+    prevention): the refusal is logged, the container removed, and only then the failure raised."""
+    oci_extra(podman, mounts=[SECRETS])
+    prevention = make(rig.tmp)
+    engine = runtime.Engine("podman", str(rig.bin_dir / "podman"), prevention)
+    env = Env({b"PATH": str(rig.bin_dir).encode()})
+    work = rig.tmp / "work"
+    work.mkdir()
+    binds = [run.Bind(str(work), "/work", False)]
+    job = spec.parse_text(spec_text(rig.spec(command=["true"])))
+    argv = runtime.build_argv(
+        engine,
+        job,
+        REFERENCE,
+        "nemar-c4-check",
+        binds,
+        settings.Limits(1, 64),
+        RUNNER,
+    )
+    status, _ = runtime._run_argv(argv, engine.environment(env), 30)
+    assert status == 0
+    assert runtime._run(engine, ["init", "nemar-c4-check"], env, 30)[0] == 0
+    log = Log(None)
+    with pytest.raises(Failure) as caught:
+        runtime.verify_podman(engine, "nemar-c4-check", binds, env, None, log)
+    assert caught.value.detail == "runtime_unusable"
+    text = log.snapshot(log.size()).decode()
+    assert "podman_config_refused reason=extra_mount destination=/run/secrets" in text
+    assert [r["argv"] for r in podman.removals()] == [
+        ["rm", "--force", "--volumes", "nemar-c4-check"]
+    ]
+
+
+def test_a_clean_container_passes_the_check_and_is_left_for_the_start(rig, podman):
+    prevention = make(rig.tmp)
+    engine = runtime.Engine("podman", str(rig.bin_dir / "podman"), prevention)
+    env = Env({b"PATH": str(rig.bin_dir).encode()})
+    work = rig.tmp / "work"
+    work.mkdir()
+    binds = [run.Bind(str(work), "/work", False)]
+    job = spec.parse_text(spec_text(rig.spec(command=["true"])))
+    argv = runtime.build_argv(
+        engine, job, REFERENCE, "nemar-c4-ok", binds, settings.Limits(1, 64), RUNNER
+    )
+    log = Log(None)
+    runtime.create_verified(engine, argv, "nemar-c4-ok", binds, env, threading.Event(), log)
+    assert podman.removals() == []
+    assert runtime.start_argv(engine, "nemar-c4-ok")[-3:] == ["start", "--attach", "nemar-c4-ok"]
