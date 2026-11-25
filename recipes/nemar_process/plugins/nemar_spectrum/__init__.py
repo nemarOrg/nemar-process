@@ -17,17 +17,23 @@ decision 5 fixes: Welch's method over windows of ``round(2 * srate)`` samples (t
 each overlapping the next, each window detrended by its own mean and tapered by a symmetric Hamming
 window, the periodograms averaged by their mean, one-sided, as a density in dB re 1 uV^2/Hz, with no
 zero padding. The periodograms are eegprep's ``compute_spectra``: each window, its mean taken out, is
-one epoch of a 3-D call that averages the epochs' linear power, because ``compute_spectra`` itself
-does not detrend (EEGLAB's ``spectopo`` does not); the windows are cut here exactly as Welch's method
-cuts them (scipy's ``welch`` with ``detrend="constant"``, against which the tests hold every cell). The
-windows go through in batches of at most ``BATCH_VALUES`` samples, and the batches' mean linear
-powers are averaged by their window counts.
+one epoch of a 3-D call that averages the epochs' linear power (``mean_power``), because
+``compute_spectra`` itself does not detrend (EEGLAB's ``spectopo`` does not) and takes no argument to
+(sccn/eegprep#TBD asks for a ``detrend`` argument, and for a home for ``compute_spectra`` that does
+not import matplotlib; a strict xfail in the tests turns green once it lands, and this cutting then
+goes). The windows are cut here exactly as Welch's method cuts them (scipy's ``welch`` with
+``detrend="constant"``, against which the tests hold every cell). They go through in batches of at
+most ``BATCH_VALUES`` samples, and the batches' mean linear powers are averaged by their window
+counts.
 
-The rows are the frequencies ``k / window_s`` for ``k = 1, 2, ...`` (no 0 Hz row: the mean detrend
-makes it meaningless) up to ``upper_hz``, which is 125 Hz unless the recording's Nyquist frequency is
-lower, and then that frequency. The view's parameters, recorded per recording, are what was computed:
+The rows are the periodogram's bins ``k = 1, 2, ..., kmax`` (no 0 Hz row: the mean detrend makes it
+meaningless), each at ``k * srate / length`` Hz, one product and one division, with
+``kmax = floor(upper_hz * length / srate + 1e-9)``, so the last row is ``upper_hz`` itself whenever
+``upper_hz`` falls on a bin. ``upper_hz`` is 125 Hz unless the recording's Nyquist frequency is lower,
+and then that frequency. The view's parameters, recorded per recording, are what was computed:
 ``window_s`` is the window's length in samples over the rate (2.0 at an integer rate) and
-``overlap`` the overlapping samples over the window's, so the rows lie exactly on the grid they state.
+``overlap`` the overlapping samples over the window's, so each row is ``k / window_s`` to within the
+rounding of one binary64 division.
 """
 
 from __future__ import annotations
@@ -77,12 +83,13 @@ def segment_length(srate: float) -> int:
     return max(2, round(SEGMENT_S * srate))
 
 
-def mean_power(
-    data: np.ndarray, srate: float, length: int, overlap: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """The mean periodogram of the mean-detrended windows, channels by frequencies, linear power, and
-    the frequencies: Welch's windows (``length`` samples, a new one every ``length - overlap``)
-    handed to eegprep's ``compute_spectra`` as epochs, one window each."""
+def mean_power(data: np.ndarray, srate: float, length: int, overlap: int) -> np.ndarray:
+    """The mean periodogram of the mean-detrended windows, channels by bins ``k = 0 .. length // 2``
+    (bin k at ``k * srate / length`` Hz), linear power: Welch's windows (``length`` samples, a new one
+    every ``length - overlap``) handed to eegprep's ``compute_spectra`` as epochs, one window each.
+
+    The cutting and the mean removal stand in for a ``detrend`` argument ``compute_spectra`` lacks
+    (sccn/eegprep#TBD)."""
     from eegprep.functions.sigprocfunc.spectopo import compute_spectra
 
     channels, samples = data.shape
@@ -91,20 +98,18 @@ def mean_power(
     cut = np.lib.stride_tricks.sliding_window_view(data, length, axis=1)[:, ::step, :]
     batch = max(1, BATCH_VALUES // (channels * length))
     total: np.ndarray | None = None
-    freqs: np.ndarray | None = None
     for start in range(0, count, batch):
         part = cut[:, start : start + batch, :]
         detrended = part - part.mean(axis=2, keepdims=True)
         epochs = np.ascontiguousarray(detrended.transpose(0, 2, 1))  # channels, samples, epochs
-        decibels, freqs, _ = compute_spectra(
+        decibels, _, _ = compute_spectra(
             epochs, length, srate, winsize=length, overlap=0, wintype=TAPER
         )
         power = np.power(10.0, decibels / 10.0) * part.shape[1]
         total = power if total is None else total + power
     # count >= 1, checked by the caller
     assert total is not None
-    assert freqs is not None
-    return total / count, np.asarray(freqs, dtype=np.float64)
+    return total / count
 
 
 def spectrum(data: np.ndarray, srate: float) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
@@ -115,17 +120,19 @@ def spectrum(data: np.ndarray, srate: float) -> tuple[np.ndarray, np.ndarray, di
     overlap = math.floor(OVERLAP * length)
     if data.shape[1] < length:
         raise ShorterThanOneSegment(data.shape[1])
-    power, freqs = mean_power(data, srate, length, overlap)
-    # compute_spectra has floored each batch's power at the tiniest float before its decibels
-    decibels = 10.0 * np.log10(power)
+    power = mean_power(data, srate, length, overlap)
     upper = min(UPPER_HZ, srate / 2.0)
-    keep = (freqs > 0) & (freqs <= upper)
+    # bins 1 .. kmax: no 0 Hz row, and the last at most upper (the 1e-9 keeps a bin that is upper)
+    kmax = math.floor(upper * length / srate + 1e-9)
+    freqs = np.arange(1, kmax + 1, dtype=np.float64) * srate / length
+    # compute_spectra has floored each batch's power at the tiniest float before its decibels
+    decibels = 10.0 * np.log10(power[:, 1 : kmax + 1])
     computed = {
         "window_s": float(length / srate),
         "overlap": float(overlap / length),
         "upper_hz": float(upper),
     }
-    return freqs[keep], np.ascontiguousarray(decibels[:, keep].T), computed
+    return freqs, np.ascontiguousarray(decibels.T), computed
 
 
 def initial_maps(line_hz: Any, upper: float) -> list[int | float]:

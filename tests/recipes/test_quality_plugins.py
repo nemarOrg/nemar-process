@@ -314,6 +314,12 @@ def read_values(view):
     return plugins.TableArray(header, np.array([[float(c) for c in row] for row in rows]))
 
 
+def expected_rows(srate, length, upper):
+    """The rows the plugin states: bins 1 .. kmax at k * srate / length Hz, the last at most upper."""
+    kmax = int(np.floor(upper * length / srate + 1e-9))
+    return np.arange(1, kmax + 1, dtype=np.float64) * srate / length
+
+
 def welch_reference(data, srate):
     """scipy's Welch estimate as presets.md states it, in dB: two-second symmetric Hamming windows,
     half overlapping, each detrended by its mean, averaged by the mean, one-sided, no padding."""
@@ -342,10 +348,11 @@ def test_the_spectrum_is_welchs_with_a_mean_detrend_on_the_decompositions_input(
     values = read_values(view)
     freqs, reference, length = welch_reference(fit.eeg["data"], srate)
     upper = min(125.0, srate / 2)
-    keep = (freqs > 0) & (freqs <= upper)
+    rows = expected_rows(srate, length, upper)
     assert values.header == ("freq_hz", *fit.good_channels)
-    assert np.array_equal(values.values[:, 0], freqs[keep])
-    assert np.max(np.abs(values.values[:, 1:] - reference[:, keep].T)) < 1e-9
+    assert np.array_equal(values.values[:, 0], rows)
+    assert np.allclose(rows, freqs[1 : rows.size + 1], rtol=0, atol=1e-9)
+    assert np.max(np.abs(values.values[:, 1:] - reference[:, 1 : rows.size + 1].T)) < 1e-9
     window_s = length / srate
     rows = np.arange(1, values.values.shape[0] + 1) / window_s
     assert np.allclose(values.values[:, 0], rows, rtol=0, atol=1e-12)
@@ -381,7 +388,9 @@ def test_the_upper_bound_is_125_hz_unless_the_nyquist_frequency_is_lower(
         assert all(type(v) in (int, float) for v in numbers), parameters
 
 
-@pytest.mark.parametrize("srate", [500 / 7, 128.5, 1000.0])
+# 100.81 Hz: the Nyquist bin (101 of a 202-sample window) is the bound, and 50.405 * 202 / 100.81
+# is 100.99999999999999 in binary64, so kmax needs the 1e-9 to keep it
+@pytest.mark.parametrize("srate", [500 / 7, 100.81, 128.5, 1000.0])
 def test_at_any_rate_the_rows_lie_on_the_grid_the_recorded_window_states(
     loaded, decomposition, recording, srate
 ):
@@ -394,10 +403,51 @@ def test_at_any_rate_the_rows_lie_on_the_grid_the_recorded_window_states(
     assert parameters["window_s"] == length / srate
     assert parameters["overlap"] == (length // 2) / length
     freqs, reference, _ = welch_reference(fit.eeg["data"], srate)
-    keep = (freqs > 0) & (freqs <= min(125.0, srate / 2))
+    rows = expected_rows(srate, length, min(125.0, srate / 2))
     values = read_values(view)
-    assert np.array_equal(values.values[:, 0], freqs[keep])
-    assert np.max(np.abs(values.values[:, 1:] - reference[:, keep].T)) < 1e-9
+    assert np.array_equal(values.values[:, 0], rows)
+    assert np.allclose(rows, freqs[1 : rows.size + 1], rtol=0, atol=1e-9)
+    assert np.max(np.abs(values.values[:, 1:] - reference[:, 1 : rows.size + 1].T)) < 1e-9
+
+
+def test_at_250_5_hz_the_rows_are_every_half_hertz_up_to_exactly_125(
+    loaded, decomposition, recording
+):
+    """A 501-sample window at 250.5 Hz: bins every 0.5 Hz, the Nyquist frequency (125.25 Hz) above
+    the 125 Hz bound, so 250 rows, each exactly k / 2 and the last exactly 125."""
+    fit, line_hz = decomposition
+    srate = 250.5
+    inputs = host_inputs(fit, line_hz, srate=srate)
+    _, run = run_both(loaded, fit, host_of(fit, recording.path, srate=srate), inputs)
+    view = prepared(run, "nemar-spectrum", "spectrum")
+    rows = read_values(view).values[:, 0]
+    assert rows.size == 250
+    assert rows[-1] == 125.0
+    assert np.array_equal(rows, np.arange(1, 251) / 2)
+    assert view.declaration["parameters"]["upper_hz"] == 125.0
+    assert view.declaration["parameters"]["window_s"] == 501 / 250.5
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "eegprep's compute_spectra has no detrend argument (sccn/eegprep#TBD), so nemar-spectrum "
+        "cuts and mean-detrends Welch's windows itself; this test passes, and so fails as strict, "
+        "once compute_spectra accepts detrend, and the plugin's cutting can go"
+    ),
+)
+def test_compute_spectra_detrends_each_window_by_its_mean_when_asked(decomposition):
+    from eegprep.functions.sigprocfunc.spectopo import compute_spectra
+
+    fit, _ = decomposition
+    data, srate = fit.eeg["data"], float(fit.eeg["srate"])
+    length = round(2 * srate)
+    decibels, _, _ = compute_spectra(
+        data, 0, srate, winsize=length, overlap=length // 2, wintype="hamming", detrend="constant"
+    )
+    _, reference, _ = welch_reference(data, srate)
+    assert np.max(np.abs(decibels - reference)) < 1e-9
 
 
 def test_batches_of_windows_give_the_spectrum_of_one(loaded, decomposition, recording, monkeypatch):
