@@ -190,7 +190,8 @@ COUNT = (0, None)
 # The floor's recipe metrics (ADR 0137 C6): each recording's record holds them as neuroschema
 # ``qualityMetric`` objects with the recipe as producer (``extensions.nemar.metrics``), valued by
 # ``metric_values``; the four with a column and edges are summarized over the dataset. The line-noise
-# metrics are the excess at the stronger line frequency, the value the table holds; the record's
+# metrics are the excess, before and after the filters, at the line frequency with the larger excess
+# before them (the table's ``line_hz``), the value the table holds; the record's
 # ``summaryMetrics`` keeps the excess at each frequency.
 RECIPE_METRICS = (
     RecipeMetric("nChannelsInput", "count", "Channels in the recording, of every type.", COUNT),
@@ -226,7 +227,8 @@ RECIPE_METRICS = (
     RecipeMetric(
         "lineNoiseBeforeDb",
         "dB",
-        "Line-noise excess at the stronger of 50 and 60 Hz, before the band-stop filters.",
+        "Line-noise excess before the band-stop filters, at whichever of 50 and 60 Hz had the "
+        "larger excess before them.",
         None,
         "line_db_before",
         DB_EDGES,
@@ -234,7 +236,8 @@ RECIPE_METRICS = (
     RecipeMetric(
         "lineNoiseAfterDb",
         "dB",
-        "Line-noise excess at the stronger of 50 and 60 Hz, after the band-stop filters.",
+        "Line-noise excess after the band-stop filters, at whichever of 50 and 60 Hz had the "
+        "larger excess before them.",
         None,
         "line_db_after",
         DB_EDGES,
