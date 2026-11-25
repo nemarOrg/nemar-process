@@ -7,7 +7,8 @@ the recording (``tests/fixtures/ica-views/index.json``: the converter keeps 200 
 ceiling). What a backend and a renderer read of the product is checked as they read it:
 
 * the product tree: the files of one recording and of the dataset, TSV and JSON only, and the file
-  count against the registry's ``maxFiles`` for nemar-ica;
+  count against nemar-ica's ``maxFiles`` in the registry of the nemar-cli checkout ``NEMAR_CLI_DIR``
+  names (skipped, saying so, without one);
 * the views: the recipe's three, then the plugins' two, each declaration valid, each file it names in
   the product with its declared size and SHA-256 and an output of a step of the record, the serving
   copy's group the one the index lists, the window chosen on that grid;
@@ -18,8 +19,10 @@ ceiling). What a backend and a renderer read of the product is checked as they r
 
 The produced product is the source of the fixtures of nemar-cli's backend (B1, B2) and of the website:
 a copy is kept in ``tests/fixtures/ica-views/product/`` with the index it was given, and the test
-holds the copy to a fresh run (the same files, plan, views and declared structure; the numbers differ
-by platform, the copy was made on one machine) and to the same checks. ``NEMAR_ICA_VIEWS_PRODUCT`` names
+holds the copy to a fresh run (the skeleton of every JSON file with its floats and what a machine or a
+release changes masked, every TSV header, the plan and plugins, the store inputs, view parameters,
+captions and bases, the metric names and units and the dataQuality shape; the digits differ by
+platform, and the copy was made on one machine) and runs a backend's checks on it. ``NEMAR_ICA_VIEWS_PRODUCT`` names
 a directory to write the fresh product and its index into, which is how the copy is made again
 (tests/fixtures/ica-views/README.md).
 """
@@ -29,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,7 +41,7 @@ from pathlib import Path
 import pytest
 from recipe_support import DATASET, DATASET_ID, DATASET_VERSION, ROOT, require_runtime
 from test_floor_launch import STANDIN_COMMAND
-from views_support import check_view_files, product_files
+from views_support import check_view_files, max_files_of, product_files
 
 FIXTURE = ROOT / "tests" / "fixtures" / "ica-views"
 INDEX = FIXTURE / "index.json"
@@ -100,10 +104,27 @@ VIEWS = [
     ("icclasses", "nemar.ic-classes", "plugin"),
     ("spectrum", "nemar.spectrum", "plugin"),
 ]
-# nemar-cli's registry (shared/compute-recipes.ts): nemar-ica's resultLimits.maxFiles, and the dataset
-# size its estimate holds headroom for
-MAX_FILES = 25_000
+# The dataset size nemar-cli's estimate of nemar-ica's maxFiles holds headroom for (its registry,
+# shared/compute-recipes.ts, read from the checkout NEMAR_CLI_DIR names: ``registry_max_files``).
 RECORDINGS_HELD = 1_000
+
+
+def registry_max_files() -> int:
+    """nemar-ica's ``resultLimits.maxFiles`` in the registry of the nemar-cli checkout that
+    ``NEMAR_CLI_DIR`` names, or skip, saying why: without a checkout the count is not compared here
+    (``views_support.NEMAR_ICA_MAX_FILES``, the fallback, is held to the registry at the progress pin by
+    tests/contract/test_progress_drift.py)."""
+    given = os.environ.get("NEMAR_CLI_DIR")
+    registry = Path(given) / "shared" / "compute-recipes.ts" if given else None
+    if registry is None or not registry.is_file():
+        pytest.skip(
+            "NEMAR_CLI_DIR names no nemar-cli checkout with shared/compute-recipes.ts, so nemar-ica's "
+            "file count is not compared with the registry's maxFiles here (the fallback literal is "
+            "held to the registry at the progress pin by tests/contract/test_progress_drift.py)"
+        )
+    found = max_files_of(registry.read_text(encoding="utf-8"), "nemar-ica")
+    assert found is not None, "the registry declares no maxFiles for nemar-ica"
+    return found
 
 
 def run_recipe(out: Path) -> subprocess.CompletedProcess:
@@ -200,8 +221,8 @@ def test_the_file_count_holds_the_registrys_max_files_for_a_thousand_recordings(
     dataset of a thousand recordings, and the dataset's, are within the registry's maxFiles."""
     per_recording = len([name for name in product_files(produced) if name.startswith(STEM)])
     assert per_recording == len(RECORDING_FILES) == 17
-    assert per_recording * RECORDINGS_HELD + len(DATASET_FILES) <= MAX_FILES
-    assert (MAX_FILES - len(DATASET_FILES)) // per_recording >= 1_470
+    max_files = registry_max_files()
+    assert per_recording * RECORDINGS_HELD + len(DATASET_FILES) <= max_files
 
 
 def test_the_serving_index_lists_the_recording_on_the_grid_the_floor_read(produced):
@@ -373,56 +394,159 @@ def test_the_dataset_data_quality_document_holds_the_plugins_metric(produced):
 # ---- the kept copy: the source of nemar-cli's backend fixtures -----------------------------------------
 
 
-def structure(root: Path) -> dict:
-    """What a product is apart from its numbers: its files, its plan, and each view's key, kind,
-    source, roles, columns, dimensions, inputs' roles and the files it names (by location)."""
+# What differs between two products of the recipe made on different machines or at different releases,
+# and is masked in a skeleton: clocks; the digests and sizes of files (the digits of the numbers they
+# hold); the release bot's nemar-process version and the source commit it was read from; the interpreter's
+# patch release, the thread pools and environment found, and torch's local version tag (``+cpu`` on
+# Linux); and the counts and samples ASR, pAMICA and ICLabel derive from floating-point sums (the spans
+# ASR repaired, the best iteration, a class count, a histogram bin). Every float is masked too.
+CLOCKS = frozenset({"executionDate", "executionDateTime", "started_utc", "finished_utc"})
+MACHINE = frozenset(
+    {
+        "size",
+        "python",
+        "threadpools",
+        "environment",
+        "torch",
+        "torch_version",
+        "n_repaired",
+        "spans",
+        "nBurstSpans",
+        "best_iter",
+    }
+)
+RELEASE = (("process", "version"), ("process", "commit"))
+DIGEST = re.compile(r"(?:sha256:)?[0-9a-f]{64}")
+
+
+def skeleton(value, path=()):
+    """A JSON value with what ``MACHINE``, ``CLOCKS``, ``RELEASE`` and ``DIGEST`` name masked and every
+    float replaced by its type: the keys, the texts, the integers and the shape of every list kept."""
+    key = path[-1] if path else None
+    if key in CLOCKS:
+        return "<clock>"
+    if key in MACHINE or path[-2:] in RELEASE:
+        return "<machine>"
+    if key == "counts" and isinstance(value, list):
+        return "<counts>"
+    if isinstance(value, float):
+        return "<float>"
+    if isinstance(value, str):
+        return "<sha256>" if DIGEST.fullmatch(value) else value
+    if isinstance(value, list):
+        return [skeleton(item, (*path, "[]")) for item in value]
+    if isinstance(value, dict):
+        return {
+            ("<sha256>" if DIGEST.fullmatch(name) else name): skeleton(item, (*path, name))
+            for name, item in value.items()
+        }
+    return value
+
+
+def described(root: Path) -> dict:
+    """What a product is apart from the digits its numbers depend on: the skeleton of every JSON file,
+    the header of every TSV file, and from the recording's record, as a backend and a renderer read
+    them: each view's store inputs (group, profile, content digest), parameters, caption, base and base
+    version, each metric's name and unit (the recipe's and the plugins'), and the shape of the dataset
+    dataQuality document."""
+    files = {}
+    for name in product_files(root):
+        text = (root / name).read_text(encoding="utf-8")
+        files[name] = (
+            skeleton(json.loads(text)) if name.endswith(".json") else text.split("\n", 1)[0]
+        )
     record = record_of(root)
     nemar = record["extensions"]["nemar"]
-    described = []
-    for view in nemar["views"]:
-        described.append(
-            {
-                "key": view["key"],
-                "kind": view["kind"],
-                "source": view["source"],
-                "data": [
-                    {
-                        "role": entry["role"],
-                        "location": entry["location"],
-                        "columns": entry.get("columns"),
-                        "dims": entry.get("dims"),
-                    }
-                    for entry in view.get("data", [])
-                ],
-                "inputs": [
-                    {"role": item["role"], "file": item.get("file", {}).get("location")}
-                    for item in view.get("inputs", [])
-                ],
-            }
-        )
+    stores = {
+        view["key"]: [
+            {k: item["store"][k] for k in ("group", "profile", "content_sha256")}
+            for item in view.get("inputs", [])
+            if "store" in item
+        ]
+        for view in nemar["views"]
+    }
+    shown = {
+        view["key"]: {
+            "parameters": view.get("parameters"),
+            "caption": view["caption"],
+            "base": (view.get("base"), view.get("base_version")),
+        }
+        for view in nemar["views"]
+    }
+    entry = record_entry(root)
+    metrics = {name: metric["unit"] for name, metric in entry["metrics"].items()}
+    quality = read_json(root / "desc-nemarica_dataquality.json")
     return {
-        "files": product_files(root),
+        "files": files,
         "plan_hash": nemar["plan_hash"],
-        "views": described,
-        "views_skipped": nemar.get("views_skipped"),
         "plugins": [(p["name"], p["version"], p["tree_sha256"]) for p in nemar["plugins"]],
+        "stores": stores,
+        "views": shown,
+        "views_skipped": nemar.get("views_skipped"),
+        "metrics": metrics,
+        "data_quality": skeleton(quality),
     }
 
 
 def test_the_kept_copy_is_this_recipes_product(produced):
-    """The copy in tests/fixtures/ica-views/product is a product of the recipe as it is: the same
-    files, plan, views and declared structure as a fresh run. A change to the recipe, its plugins or
-    their views fails here until the copy is made again (its README)."""
-    assert structure(SNAPSHOT) == structure(produced)
+    """The copy in tests/fixtures/ica-views/product is a product of the recipe as it is: a fresh run
+    has the same files, the same skeleton of every JSON file (floats and what a machine or a release
+    changes masked), the same TSV headers, plan and plugins, and the same store inputs, view parameters,
+    captions, bases, metric names and units and dataQuality shape. A change to the recipe, its plugins
+    or their views fails here until the copy is made again (its README)."""
+    kept, fresh = described(SNAPSHOT), described(produced)
+    assert sorted(kept["files"]) == sorted(fresh["files"])
+    for name in kept["files"]:
+        assert kept["files"][name] == fresh["files"][name], name
+    assert kept == fresh
+
+
+def test_the_skeleton_masks_only_what_a_machine_or_a_release_changes():
+    """Floats, clocks, digests, sizes and the listed machine and release values are masked; the keys,
+    texts, integers and list shapes stay, so any other difference is a difference of the product."""
+    value = {
+        "rank": 18,
+        "final_ll": -2.7,
+        "executionDate": "2026-11-25T18:29:40Z",
+        "sha256": "a" * 64,
+        "plan_hash": "sha256:" + "b" * 64,
+        "process": {"version": "0.1.2-dev2", "build": "source"},
+        "pamica": {"version": "0.4.0", "torch": "2.12.1"},
+        "group": "eeg_200hz",
+        "histogram": {"counts": [0, 1], "edges": [0, 10]},
+        "spans": [[0, 4]],
+        "outputs": [{"size": 12, "shape": [18, 19]}],
+    }
+    assert skeleton(value) == {
+        "rank": 18,
+        "final_ll": "<float>",
+        "executionDate": "<clock>",
+        "sha256": "<sha256>",
+        "plan_hash": "<sha256>",
+        "process": {"version": "<machine>", "build": "source"},
+        "pamica": {"version": "0.4.0", "torch": "<machine>"},
+        "group": "eeg_200hz",
+        "histogram": {"counts": "<counts>", "edges": [0, 10]},
+        "spans": "<machine>",
+        "outputs": [{"size": "<machine>", "shape": [18, 19]}],
+    }
 
 
 def test_the_kept_copy_passes_the_checks_a_backend_makes(produced):
-    from nemar_process.common import dataquality, records, views
+    from nemar_process import sj
+    from nemar_process.common import contract, dataquality, records, views
 
     record = record_of(SNAPSHOT)
+    validator = sj.validator()
+    assert records.problems_of(record, validator) == []  # the schema, references, views, metrics
+    dataset = read_json(SNAPSHOT / "desc-nemarica_signalJourney.json")
+    assert records.problems_of(dataset, validator) == []
     check_view_files(SNAPSHOT, record)
-    assert records.views_problems(record) == []
-    assert views.record_findings("nemar-ica", record_entry(SNAPSHOT)) == []
+    entry = record_entry(SNAPSHOT)
+    document = {"level": "record", "recipes": {"nemar-ica": entry}}
+    schema = contract.bundle_validator("nsc:/extensions/dataQuality.schema.json#/$defs/record")
+    assert sorted(error.message for error in schema.iter_errors(document)) == []
+    assert views.record_findings("nemar-ica", entry) == []
     assert dataquality.problems(read_json(SNAPSHOT / "desc-nemarica_dataquality.json")) == []
     assert record["extensions"]["nemar"]["ica"]["serving_index"]["sha256"] == (
         hashlib.sha256(INDEX.read_bytes()).hexdigest()

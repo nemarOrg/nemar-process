@@ -267,6 +267,37 @@ def test_the_recipe_progress_schema_is_what_the_launchers_reader_bounds():
     assert running["maxLength"] == progress._RUNNING_PATH_MAX
 
 
+def test_the_max_files_reader_reads_the_recipes_own_entry():
+    """``max_files_of`` reads the named recipe's ``resultLimits``, never another's, and None for an
+    entry without one or a recipe the registry does not hold."""
+    from views_support import max_files_of
+
+    source = """
+    Object.freeze({
+      name: "nemar-floor",
+      resultLimits: Object.freeze({ maxFiles: 25_000 }),
+    }),
+    Object.freeze({
+      name: "nemar-ica",
+      resultLimits: Object.freeze({ maxFiles: 30_000 }),
+    }),
+    Object.freeze({
+      name: "nemar-other",
+    }),
+    """
+    assert max_files_of(source, "nemar-floor") == 25_000
+    assert max_files_of(source, "nemar-ica") == 30_000
+    assert max_files_of(source, "nemar-other") is None
+    assert max_files_of(source, "nemar-absent") is None
+
+
+def test_nemar_icas_max_files_fallback_is_nemar_clis():
+    """The e2e's fallback literal for nemar-ica's ``maxFiles`` is the registry's at the pin."""
+    from views_support import NEMAR_ICA_MAX_FILES, max_files_of
+
+    assert max_files_of(ts_source("recipes"), "nemar-ica") == NEMAR_ICA_MAX_FILES
+
+
 def test_the_plugin_steps_and_their_column_are_nemar_clis():
     from nemar_launch import checkpoints as rules
 

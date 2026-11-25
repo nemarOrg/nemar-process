@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 RECORDING = "sub-01/eeg/sub-01_task-rest_eeg.set"
@@ -160,3 +161,22 @@ def serving_index_of(rows, *, dataset_id: str, source_commit: str):
 
     text = serving_index_text(rows, dataset_id=dataset_id, source_commit=source_commit)
     return serving_index.parse(text.encode("utf-8"))
+
+
+# nemar-cli's registry (shared/compute-recipes.ts): nemar-ica's resultLimits.maxFiles. The literal is a
+# fallback only: tests/contract/test_progress_drift.py holds it to the registry at the progress pin, and
+# tests/e2e/test_nemar_ica_views_e2e.py reads the registry of the checkout NEMAR_CLI_DIR names.
+NEMAR_ICA_MAX_FILES = 25_000
+
+
+def max_files_of(source: str, recipe: str) -> int | None:
+    """The ``maxFiles`` a recipe's entry of nemar-cli's ``shared/compute-recipes.ts`` declares (its
+    ``resultLimits``), or None: read from the text between its ``name: "<recipe>",`` and the next
+    recipe's name."""
+    start = source.find('name: "{}",'.format(recipe))
+    if start < 0:
+        return None
+    following = source.find('name: "', start + 1)
+    block = source[start : following if following > 0 else len(source)]
+    found = re.search(r"\bmaxFiles: ([0-9][0-9_]*)\b", block)
+    return None if found is None else int(found.group(1).replace("_", ""))
