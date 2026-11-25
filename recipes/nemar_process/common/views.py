@@ -105,6 +105,51 @@ FILE_MISMATCH = "file_mismatch"
 # the good channels, the components, the classes or the sampling rate. Never left unchecked.
 HOST_MISSING = "host_missing"
 
+# Every word the writer refuses with: a closed list, the only text besides a class name that a skip's
+# detail may carry (``plugins.RUNNER_WORDS``). tests/recipes/test_views.py holds every refusal of this
+# module to it.
+WORDS = frozenset(
+    {
+        ROLE_MISSING,
+        ROLE_EXTRA,
+        ROLE_UNPROVIDED,
+        NOT_FINITE,
+        DIM_MISMATCH,
+        HEADER_MISMATCH,
+        FREQ_NOT_INCREASING,
+        FREQ_OUT_OF_RANGE,
+        FREQ_OFF_GRID,
+        X_NOT_INCREASING,
+        UNITS_DIFFER,
+        VIEW_TOO_LARGE,
+        JSON_INVALID,
+        COUNTS_LENGTH,
+        EDGES_NOT_INCREASING,
+        VARIANCE_LENGTH,
+        COMPONENTS_TOTAL,
+        DECLARATION_INVALID,
+        TSV_ENCODING,
+        TSV_LINE_ENDINGS,
+        TSV_HEADER_REPEATED,
+        TSV_RAGGED,
+        CAP_EXCEEDED,
+        COLUMN_REPEATED,
+        COLUMN_MISSING,
+        CELL_NOT_NUMBER,
+        CELL_NOT_FINITE,
+        CELL_NOT_INTEGER,
+        DURATION_NOT_POSITIVE,
+        CHANNEL_STATUS_UNKNOWN,
+        TABLE_LOCATION_MISMATCH,
+        CHANNEL_SET_MISMATCH,
+        COORDS_LENGTH,
+        FILE_MISMATCH,
+        HOST_MISSING,
+        contract.VIEW_REPEATED,
+        contract.SUFFIX_RESERVED,
+    }
+)
+
 
 # Why a view a run declares is absent for one recording (docs/views.md, Views a run skipped).
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
@@ -194,7 +239,7 @@ _SUFFIX = re.compile(r"[a-z0-9]+")
 
 
 class ViewRefused(Exception):
-    """A view, or a role of it, that the writer will not write: ``word`` says why (the constants above)."""
+    """A view, or a role of it, that the writer will not write: ``word`` says why (``WORDS``)."""
 
     def __init__(self, word: str, detail: str = "") -> None:
         super().__init__("{}: {}".format(word, detail) if detail else word)

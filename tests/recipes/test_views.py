@@ -2051,3 +2051,77 @@ def test_n_a_is_a_missing_place_only_in_a_layout_or_positions_role():
     with pytest.raises(views.ViewRefused) as refused:
         views.data_role("table", file, columns)
     assert refused.value.word == "cell_not_number"
+
+
+# ---- round 2 of the review of #90: the reviewer's repros, adopted ---------------------------------------
+
+
+class ClaimingScalar(np.float64):
+    """A NumPy scalar of the plugin's own class whose ``__class__`` raises one of the writer's words:
+    read by ``isinstance`` in the checks, it would put that word, or any text, in the record."""
+
+    word = "not_finite"
+    read: list[str] = []  # noqa: RUF012  (a test's record of what ran)
+
+    @property
+    def __class__(self):
+        ClaimingScalar.read.append(type(self).word)
+        raise views.ViewRefused(type(self).word)
+
+
+def test_a_numpy_scalar_subclass_is_foreign_and_never_runs(loaded, capsys):
+    """The copy keeps only NumPy's own scalar types, by ``type()``: a subclass of ``np.float64`` is a
+    foreign value, refused by the check's own word, and its ``__class__`` is never read."""
+    ClaimingScalar.read.clear()
+    content = {**CLASSES, "n_components": ClaimingScalar(4.0)}
+    plugin, plan, result = run_returning(
+        loaded["fx-views"], plugins.PluginResult(metrics={}, views=views_of(classes=content))
+    )
+    assert_refused(plugin, plan, result, "json_invalid", capsys)
+    assert ClaimingScalar.read == []
+    assert type(plugins.plain(np.float64(1.5))) is np.float64  # NumPy's own type is kept
+    assert type(plugins.plain(ClaimingScalar(1.5))).__name__ == "_Foreign"
+
+
+def test_a_forged_word_never_reaches_the_record_or_the_log(loaded, capsys):
+    class Loud(ClaimingScalar):
+        word = "forged\nplugin_skipped: other code=ok detail=none"
+
+    content = {**CLASSES, "n_components": Loud(4.0)}
+    _, _, result = run_returning(
+        loaded["fx-views"], plugins.PluginResult(metrics={}, views=views_of(classes=content))
+    )
+    (outcome,) = result.outcomes
+    assert outcome.detail == "json_invalid"
+    assert capsys.readouterr().err.count("\n") == 1
+    # and a refusal whose word is not the runner's own is named by its class, whatever raised it
+    assert plugins._skip_detail(views.ViewRefused("forged\nword")) == "ViewRefused"
+    assert plugins._skip_detail(views.ViewRefused("not_a_runner_word")) == "ViewRefused"
+    assert plugins._skip_detail(views.ViewRefused("not_finite")) == "not_finite"
+
+
+def test_every_refusal_word_is_on_the_runners_closed_list():
+    """Each ``ViewRefused`` of the writer and each ``_OutputRefused`` of the runner raises a word of
+    ``plugins.RUNNER_WORDS``: the list is closed and complete, so no check's word becomes a class name."""
+    import ast
+    import inspect
+
+    found: set[str] = set()
+    for module in (views, plugins):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            if node.func.id not in ("ViewRefused", "_OutputRefused") or not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant):
+                found.add(str(first.value))
+            elif isinstance(first, ast.Name):
+                found.add(getattr(views, first.id))
+            elif isinstance(first, ast.Attribute):
+                found.add(getattr(contract, first.attr))
+            # a computed word (FREQ_NOT_INCREASING if ... else X_NOT_INCREASING) is named below
+    found |= {views.FREQ_NOT_INCREASING, views.X_NOT_INCREASING}
+    assert len(found) > 40
+    assert found <= plugins.RUNNER_WORDS, sorted(found - plugins.RUNNER_WORDS)

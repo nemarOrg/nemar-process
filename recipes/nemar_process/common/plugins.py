@@ -34,9 +34,9 @@ word ``plugin_failed`` (so the recordings table's existing ``skipped_steps`` cel
 plan's skips, holds ``<plugin>:plugin_failed``), its metrics are absent (not null-filled), a fixed-word
 line names the plugin, and the rest of the recording is kept. Nothing a plugin returned is published unless all of it passed.
 What ``run`` returned is copied into plain values (``plain``) inside the same ``try`` as ``run``, so
-anything the plugin's code raises, there or in ``run``, is named by its class: a plugin cannot pass its
-failure off as one of the runner's words. Only the checks that follow, which run no plugin code, give
-a word.
+anything the plugin's code raises, there or in ``run``, is named by its class. The checks that follow
+see only built-in and NumPy values and the runner's own classes, and a skip's detail is one of the
+runner's own words (``RUNNER_WORDS``) or a class name, never other text.
 """
 
 from __future__ import annotations
@@ -362,6 +362,25 @@ class _OutputRefused(Exception):
         self.word = word
 
 
+# The words of the runner's own checks of a result (``_OutputRefused``), before the writer's.
+OUTPUT_WORDS = frozenset(
+    {
+        "result_not_a_plugin_result",
+        "metrics_differ",
+        "metric_not_a_number",
+        "metric_not_finite",
+        "metric_out_of_bounds",
+        "metric_invalid",
+        "views_differ",
+        "view_malformed",
+        "parameters_invalid",
+    }
+)
+# Every word a skip's detail may be; anything else is named by its class (``_skip_detail``).
+RUNNER_WORDS = OUTPUT_WORDS | writer.WORDS
+_REFUSALS = (_OutputRefused, writer.ViewRefused)
+
+
 def _metric_value(value: Any, declared: Mapping[str, Any]) -> float | None:
     if value is None:
         return None
@@ -511,28 +530,33 @@ class _Foreign:
     __slots__ = ()
 
 
-_PLAIN_SCALARS = (type(None), bool, int, float, str, bytes)
+_PLAIN_SCALARS = frozenset({type(None), bool, int, float, str, bytes})
+# NumPy's own scalar types, exactly: a subclass of one (np.float64 among them) is the plugin's class.
+_NUMPY_SCALARS = frozenset(np.sctypeDict.values())
 
 
 def plain(value: Any) -> Any:
     """A structural copy of what a plugin returned, made while the plugin's own code may still run
     (inside the same ``try`` as ``run``, so what it raises is named by its class): mappings become
     ``dict``, lists ``list`` and tuples ``tuple``, a ``PluginResult`` and a ``TableArray`` new ones
-    of the same parts, a NumPy array a base-class copy; the built-in scalars (by exact type) and NumPy's
-    own scalars are kept; anything else becomes a ``_Foreign``. Keys are copied the same way. After
-    it, the checks run on values whose every method is Python's or NumPy's, never the plugin's."""
-    if type(value) in _PLAIN_SCALARS or isinstance(value, np.generic):
+    of the same parts, a NumPy array a base-class copy; the built-in scalars and NumPy's own scalars are
+    kept by their exact type; anything else, a subclass of any of them included, becomes a
+    ``_Foreign``. Keys are copied the same way. Every test reads ``type(value)``, never the value's
+    ``__class__`` (which a plugin's class may make a property), so a value is classed by what it is.
+    After it, the checks see only built-in and NumPy values and the runner's own classes."""
+    kind = type(value)
+    if kind in _PLAIN_SCALARS or kind in _NUMPY_SCALARS:
         return value
-    if type(value) is PluginResult:
+    if kind is PluginResult:
         return PluginResult(plain(value.metrics), plain(value.views))
-    if type(value) is TableArray:
+    if kind is TableArray:
         return TableArray(plain(value.header), plain(value.values))
-    if isinstance(value, np.ndarray):
+    if issubclass(kind, np.ndarray):
         return np.array(value, copy=True, subok=False)
-    if isinstance(value, Mapping):
+    if issubclass(kind, Mapping):
         return {plain(key): plain(item) for key, item in value.items()}
-    if type(value) is list or type(value) is tuple:
-        return type(value)(plain(item) for item in value)
+    if kind is list or kind is tuple:
+        return kind(plain(item) for item in value)
     return _Foreign()
 
 
@@ -566,9 +590,12 @@ def _checked_views(
 
 
 def _skip_detail(error: Exception) -> str:
-    """The word of a check the runner made, or the class name of anything else."""
-    if isinstance(error, (_OutputRefused, writer.ViewRefused)):
-        return error.word
+    """The word of a check the runner made, if it is one of the runner's own (``RUNNER_WORDS``), or
+    the exception's class name: no text but a closed list of words, or a plain identifier, ever reaches
+    the record or the log line."""
+    word = getattr(error, "word", None) if type(error) in _REFUSALS else None
+    if type(word) is str and word in RUNNER_WORDS:
+        return word
     return _exception_detail(error)
 
 
