@@ -9,7 +9,10 @@ writers (``files.matrix_text``, ``.17g``, and ``files.json_text``, sorted keys),
 SHA-256 in a declaration that validates against ``nsc:/definitions/view.schema.json#/$defs/view``.
 
 What a plugin's view is checked for, in this order (each refusal is a word, ``ViewRefused``; the runner
-skips the plugin with ``plugin_failed`` and that word, and keeps the recording):
+skips the plugin with ``plugin_failed`` and that word, and keeps the recording). A check the host gives
+nothing to check against refuses the view (``host_missing``: the names of a ``sensor``, ``component``
+or ``class`` dimension, the sampling rate of a frequency axis, the classes and components of an
+ic-classes view), never passes it unchecked:
 
 1. its roles: every produced role returned (``role_missing``), nothing else (``role_extra``), and every
    ``{"from": "recipe"}`` role one the host has for this recording (``role_unprovided``);
@@ -22,12 +25,14 @@ skips the plugin with ``plugin_failed`` and that word, and keeps the recording):
    sensors, a frequency within 0 and the lower of ``upper_hz`` and the Nyquist frequency
    (``freq_out_of_range``) and a spectrum's rows on Welch's grid (``freq_off_grid``); its columns' types
    and units from the manifest (``header_mismatch``, ``units_differ``); then its text within the byte
-   caps (``view_too_large``) and its file named apart from the recipe's own (``view_repeated``);
+   caps (``view_too_large``) and its file named apart from the reserved names (``suffix_reserved``,
+   ``RESERVED_SUFFIXES``, case-folded) and the host's (``view_repeated``);
 3. each produced JSON role, a mapping: strict I-JSON (``json_invalid``), valid against the kind's content
    schema in the bundle (``json_invalid``), a histogram's counts and edges (``counts_length``,
-   ``edges_not_increasing``), the ic-classes rules (``variance_length``, ``components_total``, and the
+   ``edges_not_increasing``, and the model's caps on the total, widths and densities:
+   ``view_too_large``), the ic-classes rules (``variance_length``, ``components_total``, and the
    classes and components of the host), within the byte caps (``view_too_large``) and named apart
-   (``view_repeated``);
+   (``suffix_reserved``, ``view_repeated``);
 4. the declaration, valid against the bundle (``declaration_invalid``), with every ``{role, column}``
    coordinate naming a role of the view that declares that column.
 

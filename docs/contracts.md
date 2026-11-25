@@ -182,7 +182,7 @@ The lead's ruling of 2026-11-24 settles what the manifest, the plugin and the ru
 - The manifest carries no parameters for a view: what varies per recording (a spectrum's `upper_hz`, the Nyquist frequency of that recording) can only come from the run.
 - For a registered preset, `base` and `base_version` come from the view registry (`contract.kind_entry`), never from the plugin or the manifest; a plugin may declare only a registered kind (`kind_unregistered` otherwise).
 - For a generic kind (`nemar.lines`, `nemar.heatmap`, `nemar.table`), the runner takes the dimension coordinates from each `TableArray`'s header and the units from the manifest role: the role's `unit` (nemar-cli #2358, at the pin 1788c5d2), which a column's own `columns[].unit` overrides for that column; neither comes from the plugin.
-  For a kind whose role needs a value unit, read from the vendored registry as a generic kind's (`base` null) role with open dimensions (`dims` null), the loader refuses a produced role with neither a role `unit` nor `columns` that each carry one (`unit_undeclared`, after `format_unwritable`).
+  For a kind whose role needs a value unit, read from the vendored registry as a generic kind's (`base` null) role with open dimensions (`dims` null), the loader refuses a produced role with neither a role `unit` nor `columns` that each carry one and name a value column beside the column that holds the rows' coordinates (`unit_undeclared`, after `format_unwritable`): a role whose only declared column is its time in seconds states no value unit.
 
 What is built, and when:
 
