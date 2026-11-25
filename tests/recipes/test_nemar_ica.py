@@ -94,6 +94,17 @@ def tiny(tmp_path_factory):
     return directory, fit, product, context
 
 
+def test_every_file_nemar_ica_writes_for_a_recording_is_a_reserved_view_name(tiny):
+    """No plugin's view file may take a name of nemar-ica's own (views.RESERVED_SUFFIXES): each file
+    the recipe writes for a recording, the record's included, is one of them."""
+    from nemar_process.common import views
+
+    _, _, product, _ = tiny
+    for name in product.files:
+        suffix = name.rsplit("/", 1)[-1].rsplit("_", 1)[1].split(".")[0]
+        assert suffix.casefold() in views.RESERVED_SUFFIXES, name
+
+
 def block_of(product) -> dict:
     return product.record["extensions"]["nemar"]["ica"]
 

@@ -540,6 +540,7 @@ def test_the_view_problems_are_checked_in_their_declared_order():
             "nemar.spectrum",
             roles={"layout": recipe, "values": produced(dims=["freq", "sensor"], format="json")},
         ),
+        view("nemar.sensor-field", roles={"layout": recipe, "values": produced(dims=["sensor"])}),
         SPECTRUM,
     ]
     assert [contract.view_problem(case, ()) for case in cases] == list(contract.VIEW_PROBLEMS)
@@ -561,9 +562,73 @@ def test_a_format_the_registry_allows_but_the_runner_cannot_write_is_refused(mon
 
 
 def test_a_lines_role_takes_any_dimensions(plugin_dir):
-    lines = view("nemar.lines", roles={"values": produced(dims=["time", "contact"])})
+    lines = view("nemar.lines", roles={"values": produced(dims=["time", "contact"], unit="uV")})
     write_plugin(plugin_dir, "liner", with_views("liner", {"v": lines}))
     load_one("liner")
+
+
+# ---- a generic kind's value role states its unit (nemar-cli #2358, the lead's ruling of 2026-11-24) -------
+
+UNITLESS = ("nemar.lines", "nemar.heatmap", "nemar.sensor-field")
+
+
+@pytest.mark.parametrize("kind", UNITLESS)
+def test_a_generic_value_role_without_a_unit_is_refused(plugin_dir, kind):
+    declared = view(kind, roles={"values": produced(dims=["sensor", "map"])})
+    write_plugin(plugin_dir, "unitless", with_views("unitless", {"v": declared}))
+    refused("unit_undeclared", lambda: load_one("unitless"))
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        produced(dims=["sensor", "map"], unit="uV"),
+        produced(
+            dims=["sensor", "map"],
+            columns=[
+                {"name": "a", "type": "number", "unit": "uV"},
+                {"name": "b", "type": "number", "unit": "uV"},
+            ],
+        ),
+        produced(dims=["sensor", "map"], unit="uV", columns=[{"name": "a", "type": "number"}]),
+    ],
+    ids=["role_unit", "every_column_a_unit", "role_unit_beside_columns"],
+)
+@pytest.mark.parametrize("kind", UNITLESS)
+def test_a_generic_value_role_states_its_unit_on_the_role_or_every_column(kind, role):
+    assert contract.view_problem(view(kind, roles={"values": role}), ()) is None
+
+
+def test_columns_that_leave_one_without_a_unit_do_not_state_the_roles_unit():
+    role = produced(
+        dims=["time", "contact"],
+        columns=[{"name": "t", "type": "number", "unit": "s"}, {"name": "LA1", "type": "number"}],
+    )
+    assert (
+        contract.view_problem(view("nemar.lines", roles={"values": role}), ()) == "unit_undeclared"
+    )
+
+
+def test_the_unit_rule_reads_the_registry_and_spares_presets_tables_and_json():
+    """Only a generic kind's open-dimension role needs a unit: a preset's units are its schema's, a
+    table's and a layout's columns are the kind's, and a histogram states its unit in its content."""
+    needing = {
+        (entry["kind"], role)
+        for entry in contract.views_registry()["kinds"]
+        for role in entry["roles"]
+        if contract.needs_value_unit(entry, role)
+    }
+    assert needing == {
+        ("nemar.lines", "values"),
+        ("nemar.heatmap", "values"),
+        ("nemar.sensor-field", "values"),
+    }
+    for kind, roles in (
+        ("nemar.table", {"table": produced()}),
+        ("nemar.histogram", {"histogram": produced(format="json")}),
+        ("nemar.spectrum", {"values": produced(dims=["freq", "sensor"])}),
+    ):
+        assert contract.view_problem(view(kind, roles=roles), ()) is None, kind
 
 
 def test_a_view_key_two_plugins_declare_is_refused(plugin_dir):
@@ -596,6 +661,59 @@ def test_a_view_key_the_host_recipe_writes_is_refused(plugin_dir):
             recipe_views=("icmaps",),
             package="tmp_plugins",
         ),
+    )
+
+
+# ---- what would fail a recording once its plugins ran is refused at load (review of #90) -------------
+
+
+def load_pins(names, recipe_views=()):
+    return plugins.load(
+        [(name, "1.0.0") for name in names],
+        checkpoints=dict.fromkeys(names, "quality"),
+        provides=["nemar-floor"],
+        recipe_views=recipe_views,
+        recipe_roles=(),
+        steps=(),
+        package="tmp_plugins",
+    )
+
+
+def test_two_keys_of_one_file_name_are_refused(plugin_dir):
+    """``erp`` and ``e_rp`` both write ``_erp.tsv``: the writer drops ``_`` from a key."""
+    write_plugin(plugin_dir, "twins", with_views("twins", {"erp": view(), "e_rp": view()}))
+    refused("view_repeated", lambda: load_one("twins"))
+
+
+def test_a_key_and_a_key_with_a_role_of_one_file_name_are_refused(plugin_dir):
+    """A view of two produced roles names each file key plus role: ``a`` with ``values`` is the file
+    of a view keyed ``avalues``."""
+    two = view(
+        "nemar.sensor-field",
+        roles={
+            "values": produced(dims=["sensor", "map"], unit="uV"),
+            "layout": produced(dims=["sensor"]),
+        },
+    )
+    write_plugin(plugin_dir, "first", with_views("first", {"a": two}))
+    write_plugin(plugin_dir, "second", with_views("second", {"avalues": view()}))
+    load_pins(["first"])
+    refused("view_repeated", lambda: load_pins(["first", "second"]))
+
+
+@pytest.mark.parametrize("key", ["signaljourney", "events", "chan_nels", "mixing", "chanlocs"])
+def test_a_view_that_would_take_a_reserved_file_name_is_refused(plugin_dir, key):
+    write_plugin(plugin_dir, "taker", with_views("taker", {key: view()}))
+    refused("suffix_reserved", lambda: load_one("taker"))
+
+
+def test_more_views_than_a_recording_holds_are_refused(plugin_dir):
+    sixteen = {"v{:02d}".format(n): view() for n in range(16)}
+    write_plugin(plugin_dir, "many", with_views("many", sixteen))
+    load_pins(["many"], recipe_views=["r{:02d}".format(n) for n in range(16)])  # 32: the most
+    refused(
+        "views_too_many",
+        lambda: load_pins(["many"], recipe_views=["r{:02d}".format(n) for n in range(17)]),
     )
 
 

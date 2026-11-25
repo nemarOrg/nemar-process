@@ -37,6 +37,14 @@
             "dims": [
               "freq",
               "sensor"
+            ],
+            "unit": "dB",
+            "columns": [
+              {
+                "name": "freq_hz",
+                "type": "number",
+                "unit": "Hz"
+              }
             ]
           },
           "layout": {

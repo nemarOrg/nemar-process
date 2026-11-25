@@ -11,6 +11,7 @@ refused. The plugins here are real modules (``tests/plugin_fixtures``).
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -19,6 +20,7 @@ from nemar_process.common import contract, naming, plugins
 from nemar_process.common import plan as plans
 from nemar_process.nemar_floor import outputs
 from recipe_support import DATASET, PINNED_ICA_RECIPE_VERSION, make_context
+from views_support import make_host
 
 PINS = [
     ("fx-metrics", "0.1.0"),
@@ -381,17 +383,21 @@ CLASSES = {
 }
 
 
+# The fixture's recording: one good channel, Fz, decomposed into six components, at 250 Hz.
+HOST = make_host(("Fz",), components=6)
+
+
 def ica_input(parameters=None):
     return {
         "classes": CLASSES,
-        "spectrum": np.array([[1.0, -3.0], [2.0, -4.0]]),
+        "spectrum": np.array([[0.5, -3.0], [1.0, -4.0]]),
         "spectrum_parameters": SPECTRUM_PARAMETERS if parameters is None else parameters,
     }
 
 
-def run_views(plugin, ica):
+def run_views(plugin, ica, host=HOST):
     plan = fresh_plan()
-    result = plugins.run_checkpoint([plugin], "quality", {"nemar-ica": ica}, plan)
+    result = plugins.run_checkpoint([plugin], "quality", {"nemar-ica": ica}, plan, host=host)
     return plan, result
 
 
@@ -401,13 +407,48 @@ def test_a_plugins_views_are_checked_and_handed_to_the_writer(loaded):
     assert [step.step_id for step in plan.steps] == ["fx-views"]
     views = {view.key: view for view in result.views["fx-views"]}
     assert list(views) == ["icclasses", "spectrum"]  # manifest order
-    assert views["spectrum"].parameters == SPECTRUM_PARAMETERS
-    assert views["icclasses"].parameters == {}
-    table = views["spectrum"].roles["values"]
-    assert isinstance(table, plugins.TableArray)
-    assert table.header == ("freq_hz", "Fz")
-    assert dict(views["icclasses"].roles["histogram"])["n_components"] == 6
+    assert views["spectrum"].declaration["parameters"] == SPECTRUM_PARAMETERS
+    assert "parameters" not in views["icclasses"].declaration
+    (values, layout) = views["spectrum"].declaration["data"]
+    assert [column["name"] for column in values["columns"]] == ["freq_hz", "Fz"]
+    assert layout == HOST.roles["layout"].entry()  # the recipe's file, never written again
+    assert [f.suffix for f in views["spectrum"].files] == ["spectrum"]
+    assert json.loads(views["icclasses"].files[0].text)["n_components"] == 6
     assert result.summary_metrics == {}
+    assert result.views_skipped == []
+
+
+def test_a_checkpoint_whose_plugins_declare_views_needs_a_host(loaded):
+    plan = fresh_plan()
+    with pytest.raises(ValueError, match="no host"):
+        plugins.run_checkpoint([loaded["fx-views"]], "quality", {"nemar-ica": ica_input()}, plan)
+    assert plan.steps == []
+    assert plan.skipped == []  # refused before any plugin ran
+    # a checkpoint of plugins without views needs none
+    _, result = run_one(loaded["fx-metrics"], {"share": 1, "level": 1})
+    assert [o.status for o in result.outcomes] == ["ran"]
+
+
+def test_a_skipped_plugins_views_are_listed_as_skipped(loaded, capsys):
+    plan, result = run_views(loaded["fx-views"], ica_input({}))
+    assert_skipped(plan, result, loaded["fx-views"], "parameters_invalid", capsys)
+    assert result.views == {}
+    assert result.views_skipped == [
+        {"key": "icclasses", "kind": "nemar.ic-classes", "reason": "plugin_failed"},
+        {"key": "spectrum", "kind": "nemar.spectrum", "reason": "plugin_failed"},
+    ]
+
+
+def test_a_word_raised_inside_run_is_reported_as_its_class(loaded, capsys):
+    """A plugin cannot pass its own failure off as one of the runner's words."""
+    from nemar_process.common import views as writer
+
+    def run(inputs, parameters):
+        raise writer.ViewRefused("role_missing")
+
+    plugin = replace(loaded["fx-views"], run=run)
+    plan, result = run_views(plugin, {})
+    assert_skipped(plan, result, plugin, "ViewRefused", capsys)
 
 
 def test_a_plugin_without_views_hands_none(loaded):
@@ -512,8 +553,13 @@ def test_a_view_of_the_wrong_shape_skips_the_plugin(loaded, capsys, views, word)
 
 
 def test_a_view_with_valid_parameters_and_its_roles_passes(loaded):
+    table = plugins.TableArray(("freq_hz", "Fz"), np.array([[0.5, -3.0]]))
+
     def returns():
-        return plugins.PluginResult(metrics={}, views=_views(parameters=SPECTRUM_PARAMETERS))
+        return plugins.PluginResult(
+            metrics={},
+            views=_views(roles={"values": table}, parameters=SPECTRUM_PARAMETERS),
+        )
 
     _, result = run_views(echo(loaded["fx-views"], returns), {})
     assert [o.status for o in result.outcomes] == ["ran"]

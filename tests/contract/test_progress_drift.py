@@ -128,6 +128,20 @@ VIEWS = {
         "shared/contract/compute-naming-vectors.json",
         "tests/contract/compute-naming-vectors.json",
     ),
+    # neuroschema 0.6.0's reference checks, vendored by nemar-cli N1a beside the bundle: the views
+    # writer's tests replay them (tests/recipes/test_views.py) rather than restate their rules.
+    "record_checks_vectors": (
+        "shared/contract/neuroschema/views/vectors/record-checks.v1.json",
+        "tests/contract/neuroschema-views/record-checks.v1.json",
+    ),
+    "preset_checks_vectors": (
+        "shared/contract/neuroschema/views/vectors/preset-checks.v1.json",
+        "tests/contract/neuroschema-views/preset-checks.v1.json",
+    ),
+    "view_digest_vectors": (
+        "shared/contract/neuroschema/views/vectors/view-digest.v1.json",
+        "tests/contract/neuroschema-views/view-digest.v1.json",
+    ),
 }
 COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle", *STANDALONE, *VIEWS)
 
