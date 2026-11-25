@@ -19,7 +19,7 @@ window, the periodograms averaged by their mean, one-sided, as a density in dB r
 zero padding. The periodograms are eegprep's ``compute_spectra``: each window, its mean taken out, is
 one epoch of a 3-D call that averages the epochs' linear power (``mean_power``), because
 ``compute_spectra`` itself does not detrend (EEGLAB's ``spectopo`` does not) and takes no argument to
-(sccn/eegprep#TBD asks for a ``detrend`` argument, and for a home for ``compute_spectra`` that does
+(sccn/eegprep#689 asks for a ``detrend`` argument, and for a home for ``compute_spectra`` that does
 not import matplotlib; a strict xfail in the tests turns green once it lands, and this cutting then
 goes). The windows are cut here exactly as Welch's method cuts them (scipy's ``welch`` with
 ``detrend="constant"``, against which the tests hold every cell). They go through in batches of at
@@ -89,7 +89,7 @@ def mean_power(data: np.ndarray, srate: float, length: int, overlap: int) -> np.
     every ``length - overlap``) handed to eegprep's ``compute_spectra`` as epochs, one window each.
 
     The cutting and the mean removal stand in for a ``detrend`` argument ``compute_spectra`` lacks
-    (sccn/eegprep#TBD)."""
+    (sccn/eegprep#689)."""
     from eegprep.functions.sigprocfunc.spectopo import compute_spectra
 
     channels, samples = data.shape

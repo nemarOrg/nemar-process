@@ -432,7 +432,7 @@ def test_at_250_5_hz_the_rows_are_every_half_hertz_up_to_exactly_125(
     strict=True,
     raises=TypeError,
     reason=(
-        "eegprep's compute_spectra has no detrend argument (sccn/eegprep#TBD), so nemar-spectrum "
+        "eegprep's compute_spectra has no detrend argument (sccn/eegprep#689), so nemar-spectrum "
         "cuts and mean-detrends Welch's windows itself; this test passes, and so fails as strict, "
         "once compute_spectra accepts detrend, and the plugin's cutting can go"
     ),
