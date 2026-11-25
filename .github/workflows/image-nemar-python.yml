@@ -1,12 +1,12 @@
 name: image-nemar-python
 
 # The nemar-python runtime image in two flavors, `cpu` and `cuda` (a matrix in the test, publish and
-# sign jobs): built from the root lock, smoke-tested as a container image (the CPU flavor also as a
-# Singularity Image Format (SIF) file under Apptainer), and, on a version tag or a manual dispatch from
-# main, pushed to GHCR, smoke-tested again by digest, signed with cosign (keyless), recorded in a
-# release asset per flavor. The CPU flavor is also turned into a SIF from its digest, pushed again as an
-# OCI artifact and signed again; the CUDA flavor publishes no SIF (none exists, and the runner refuses
-# one built by hand), so it runs under Docker or Podman by its verified digest.
+# sign jobs): built from the root lock, smoke-tested as a container image and as a Singularity Image
+# Format (SIF) file under Apptainer, and, on a version tag or a manual dispatch from main, pushed to
+# GHCR, smoke-tested again by digest, signed with cosign (keyless), recorded in a release asset per
+# flavor. Each flavor is also turned into a SIF from its signed digest, smoke-tested as one, pushed
+# again as an OCI artifact and signed again: that artifact's layer is the only SIF the runner runs
+# under Apptainer (it refuses one built by hand).
 #
 #   pull request              the `test` job only: build both flavors without pushing, smoke test.
 #                             No job that pushes, signs or releases runs on a pull request.
@@ -65,6 +65,10 @@ env:
   UV_VERSION: "0.13.4"
   # What a signature must say about who made it: this workflow, from a version tag or from main.
   SIGNING_IDENTITY: '^https://github\.com/nemarOrg/nemar-process/\.github/workflows/image-nemar-python\.yml@refs/(tags/image-nemar-python-v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'
+  # The SIF size gate. GHCR takes at most 10 GB in one layer and a SIF artifact is one layer, so a SIF
+  # of this many bytes or more (90% of the limit, under it whether GB or GiB is meant) fails right
+  # after its build, before any tag check or push (docs/images.md, "The SIF's size").
+  SIF_MAX_BYTES: "9000000000"
 
 jobs:
   test:
@@ -230,8 +234,31 @@ jobs:
           docker image inspect --format '{{json .Config.Labels}}' nemar-python:ci > image-labels.json
           python3 scripts/check_image_build.py --build dev --version "$VERSION" --commit "$GITHUB_SHA" --labels image-labels.json --build-file image-build.json
 
+      # Both flavors are built into a SIF and smoke-tested as one; only the `cpu` leg then runs the
+      # launch end to end in it. Apptainer unpacks the image in its temporary directory and keeps what
+      # it converts in its cache, so both go on the filesystem with the most space available. `df`
+      # prints the disk here, before Apptainer is installed, and again after the build.
+      - name: Put Apptainer's directories on the largest filesystem
+        id: apptainer-dirs
+        run: |
+          set -euo pipefail
+          df -h
+          base="$RUNNER_TEMP"
+          if [ -d /mnt ]; then
+            mnt_avail="$(df --output=avail /mnt | tail -n 1 | tr -d ' ')"
+            temp_avail="$(df --output=avail "$RUNNER_TEMP" | tail -n 1 | tr -d ' ')"
+            if [ "$mnt_avail" -gt "$temp_avail" ]; then
+              base=/mnt/nemar-apptainer
+              sudo mkdir -p "$base"
+              sudo chown "$(id -u):$(id -g)" "$base"
+            fi
+          fi
+          mkdir -p "${base}/apptainer-tmp" "${base}/apptainer-cache"
+          echo "Apptainer's temporary directory and cache are under ${base}"
+          echo "tmpdir=${base}/apptainer-tmp" >> "$GITHUB_OUTPUT"
+          echo "cachedir=${base}/apptainer-cache" >> "$GITHUB_OUTPUT"
+
       - name: Install Apptainer
-        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -241,19 +268,55 @@ jobs:
           sudo apt-get install -y ./apptainer.deb
           apptainer --version
 
+      # The exported archive is as large as the image, so it is removed as soon as the SIF exists.
       - name: Build a SIF from the local image
-        if: matrix.flavor == 'cpu'
+        env:
+          APPTAINER_TMPDIR: ${{ steps.apptainer-dirs.outputs.tmpdir }}
+          APPTAINER_CACHEDIR: ${{ steps.apptainer-dirs.outputs.cachedir }}
         run: |
           set -euo pipefail
           docker save nemar-python:ci --output nemar-python.tar
           apptainer build nemar-python.sif docker-archive:nemar-python.tar
+          du -sh nemar-python.tar nemar-python.sif "$APPTAINER_CACHEDIR"
+          df -h
+          rm -f nemar-python.tar
 
-      - name: Smoke test the SIF under Apptainer, isolated as the launcher runs it
-        if: matrix.flavor == 'cpu'
+      # The registry's limit, read on every pull request: SIF_MAX_BYTES (above). The same step follows
+      # the SIF build of `sign`, where it stops the leg before the SIF tag is checked or pushed.
+      - name: Refuse a SIF at or over the size gate
+        env:
+          FLAVOR: ${{ matrix.flavor }}
         run: |
           set -euo pipefail
-          apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
-          python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json
+          size="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_size)' nemar-python.sif)"
+          echo "SIF size (${FLAVOR}): ${size} bytes"
+          if [ "$size" -ge "$SIF_MAX_BYTES" ]; then
+            echo "::error::the ${FLAVOR} SIF is ${size} bytes, at or over the gate of ${SIF_MAX_BYTES} bytes (90% of the registry's 10 GB per-layer limit)"
+            exit 1
+          fi
+
+      # The SIF as the launcher runs it, with no GPU. The launcher passes `--nv` only for a job the
+      # runner put on the GPU, so the `cuda` leg runs the command line of a job kept off it (a hosted
+      # runner has no driver either): torch must see no GPU, and the CPU fit must run.
+      - name: Smoke test the SIF under Apptainer, isolated as the launcher runs it
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          set -euo pipefail
+          case "$FLAVOR" in
+            cpu)
+              apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
+              python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json
+              ;;
+            cuda)
+              apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py --no-gpu > smoke-sif.json
+              python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-sif.json
+              ;;
+            *)
+              echo "::error::no SIF smoke test is defined for the flavor '${FLAVOR}'"
+              exit 1
+              ;;
+          esac
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         if: matrix.flavor == 'cpu'
@@ -414,7 +477,7 @@ jobs:
           cache-from: ${{ matrix.cache_from }}
 
   sign:
-    name: sign the ${{ matrix.flavor }} image (the cpu leg also builds the SIF and signs it)
+    name: sign the ${{ matrix.flavor }} image and its SIF
     needs: publish
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -510,8 +573,10 @@ jobs:
             --certificate-identity-regexp "$SIGNING_IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
+      # From here each leg turns its own signed digest into a SIF and publishes it, in one order and
+      # with the same steps: nothing differs by flavor but what the matrix gives (FLAVOR and the
+      # digest). Every step runs after the image digest is signed and verified above.
       - name: Install Apptainer
-        if: matrix.flavor == 'cpu'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -521,25 +586,52 @@ jobs:
           sudo apt-get install -y ./apptainer.deb
           apptainer --version
 
+      # The disk after the build is read here as `test` reads it: the SIF, Apptainer's cache and `/`.
       - name: Build the SIF from the image digest
-        if: matrix.flavor == 'cpu'
         env:
           APPTAINER_DOCKER_USERNAME: ${{ github.actor }}
           APPTAINER_DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          APPTAINER_CACHEDIR: ${{ runner.temp }}/apptainer-cache
         run: |
           set -euo pipefail
+          mkdir -p "$APPTAINER_CACHEDIR"
           apptainer build nemar-python.sif "docker://ghcr.io/nemarorg/nemar-python@${IMAGE_DIGEST}"
+          du -sh nemar-python.sif "$APPTAINER_CACHEDIR"
+          df -h /
 
-      - name: Smoke test the SIF under Apptainer (SIF form)
-        if: matrix.flavor == 'cpu'
+      # The size gate of `test`, in the same words: before the SIF tag is checked or anything pushed.
+      - name: Refuse a SIF at or over the size gate
         run: |
           set -euo pipefail
-          apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
-          python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json
+          size="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_size)' nemar-python.sif)"
+          echo "SIF size (${FLAVOR}): ${size} bytes"
+          if [ "$size" -ge "$SIF_MAX_BYTES" ]; then
+            echo "::error::the ${FLAVOR} SIF is ${size} bytes, at or over the gate of ${SIF_MAX_BYTES} bytes (90% of the registry's 10 GB per-layer limit)"
+            exit 1
+          fi
+
+      # The SIF smoke test of `test`, in the same words: the `cuda` leg runs with `--no-gpu` and no
+      # `--nv`, as a job the runner kept off the GPU.
+      - name: Smoke test the SIF under Apptainer (SIF form)
+        run: |
+          set -euo pipefail
+          case "$FLAVOR" in
+            cpu)
+              apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py > smoke-sif.json
+              python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json
+              ;;
+            cuda)
+              apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif python /opt/smoke.py --no-gpu > smoke-sif.json
+              python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-sif.json
+              ;;
+            *)
+              echo "::error::no SIF smoke test is defined for the flavor '${FLAVOR}'"
+              exit 1
+              ;;
+          esac
 
       # The same rule for the SIF's tag, which is the image digest.
       - name: Refuse to overwrite an existing SIF tag
-        if: matrix.flavor == 'cpu'
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -548,17 +640,26 @@ jobs:
           python3 scripts/check_tag_absent.py nemarorg/nemar-python-sif "sha256-${IMAGE_DIGEST#sha256:}"
 
       # The artifact is tagged with the image digest, because the SIF file is named by it: the launcher
-      # looks for <64 hex digits of the image digest>.sif under NEMAR_SIF_ROOT.
+      # looks for <64 hex digits of the image digest>.sif under NEMAR_SIF_ROOT. GHCR gives an upload
+      # 10 minutes, so the push prints its wall time beside the SIF's size, whether it passed or not.
       - name: Push the SIF to GHCR as an OCI artifact
         id: push-sif
-        if: matrix.flavor == 'cpu'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           hex="${IMAGE_DIGEST#sha256:}"
+          size="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_size)' nemar-python.sif)"
           echo "$GITHUB_TOKEN" | apptainer registry login --username "$GITHUB_ACTOR" --password-stdin oras://ghcr.io
-          apptainer push nemar-python.sif "oras://ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}"
+          status=0
+          started="$(date +%s)"
+          apptainer push nemar-python.sif "oras://ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}" || status=$?
+          finished="$(date +%s)"
+          echo "SIF push (${FLAVOR}): ${size} bytes in $((finished - started)) seconds"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::apptainer push of the ${FLAVOR} SIF failed with exit status ${status}"
+            exit "$status"
+          fi
           sif_digest="$(oras manifest fetch --descriptor "ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')"
           if ! [[ "$sif_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::no SIF digest: ${sif_digest}"
@@ -566,8 +667,37 @@ jobs:
           fi
           echo "digest=${sif_digest}" >> "$GITHUB_OUTPUT"
 
+      # Sign what was built: the artifact the next step signs, fetched by that digest, must be one layer
+      # whose digest is the SHA-256 of the SIF this leg built, sized and smoke-tested. Anything else
+      # under the tag between the push and the signature is refused before it is signed.
+      - name: Refuse a pushed SIF artifact that is not the file built here
+        env:
+          SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
+        run: |
+          set -euo pipefail
+          oras manifest fetch "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}" > sif-manifest.json
+          python3 - sif-manifest.json nemar-python.sif <<'PY'
+          import hashlib
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          with open(sys.argv[2], "rb") as handle:
+              built = "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+          layers = manifest.get("layers") if isinstance(manifest, dict) else None
+          if not isinstance(layers, list) or len(layers) != 1:
+              count = len(layers) if isinstance(layers, list) else "no"
+              print("::error::the pushed SIF artifact has {} layers, not exactly one".format(count))
+              sys.exit(1)
+          found = layers[0].get("digest") if isinstance(layers[0], dict) else None
+          if found != built:
+              print("::error::the pushed SIF artifact's layer is {}, not {}, the SIF built here".format(found, built))
+              sys.exit(1)
+          print("the pushed SIF artifact is one layer, {}, the SIF built here".format(built))
+          PY
+
       - name: Sign the SIF artifact digest and verify the signature
-        if: matrix.flavor == 'cpu'
         env:
           SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
         run: |
@@ -577,8 +707,10 @@ jobs:
             --certificate-identity-regexp "$SIGNING_IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-      - name: Write the digest record (cpu)
-        if: matrix.flavor == 'cpu'
+      # Each flavor's record names its image digest, its signed SIF artifact and file, and what the
+      # SIF's own smoke document says the image holds (for the CUDA flavor also torch's CUDA build and
+      # the GPU architectures it lists).
+      - name: Write the digest record
         env:
           SIF_DIGEST: ${{ steps.push-sif.outputs.digest }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -586,34 +718,15 @@ jobs:
           set -euo pipefail
           python3 scripts/make_image_digests.py \
             --version "$VERSION" \
-            --flavor cpu \
+            --flavor "$FLAVOR" \
             --image-digest "$IMAGE_DIGEST" \
             --sif-digest "$SIF_DIGEST" \
             --sif-file nemar-python.sif \
             --smoke smoke-sif.json \
             --run-url "$RUN_URL" \
             --commit "$GITHUB_SHA" \
-            --output "nemar-python-${VERSION}-cpu-digests.json"
-          cat "nemar-python-${VERSION}-cpu-digests.json"
-
-      # The CUDA flavor publishes no SIF and its record names none: the record is of the image digest,
-      # its smoke document (the container form, run with no GPU visible) and the GPU architectures
-      # torch lists.
-      - name: Write the digest record (cuda)
-        if: matrix.flavor == 'cuda'
-        env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          python3 scripts/make_image_digests.py \
-            --version "$VERSION" \
-            --flavor cuda \
-            --image-digest "$IMAGE_DIGEST" \
-            --smoke smoke-container.json \
-            --run-url "$RUN_URL" \
-            --commit "$GITHUB_SHA" \
-            --output "nemar-python-${VERSION}-cuda-digests.json"
-          cat "nemar-python-${VERSION}-cuda-digests.json"
+            --output "nemar-python-${VERSION}-${FLAVOR}-digests.json"
+          cat "nemar-python-${VERSION}-${FLAVOR}-digests.json"
 
       # One artifact per flavor: a name may be used once per run.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
