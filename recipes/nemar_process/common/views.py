@@ -105,7 +105,7 @@ HOST_MISSING = "host_missing"
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
 # A recipe view the builder refuses for its size is skipped with ``cap_exceeded``; any other refusal of
 # a recipe's own view is a fault of the recipe, never of the data.
-SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded"}
+SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded", CAP_EXCEEDED: "cap_exceeded"}
 
 # How many views, and views skipped, one recording's entry holds (dataQuality ``maxItems``).
 MAX_VIEWS = 32

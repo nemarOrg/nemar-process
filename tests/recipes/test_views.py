@@ -1942,3 +1942,17 @@ def test_the_histogram_model_s_caps(content):
         "histogram",
         {"edges": [0, 1], "counts": [2**53 - 2], "underflow": 1, "overflow": 0},
     )  # at the cap
+
+
+def test_a_long_floor_table_skips_its_view(loaded):
+    """70,000 bad segments, 280,000 cells: over the cap, so the view is skipped (``cap_exceeded``),
+    never a failure of the recipe."""
+    rows = [[float(n), 0.5, "bad_window", "clean_windows"] for n in range(70_000)]
+    view_set = views.ViewSet("nemar-ica", "1.0.0-b2")
+    view_set.add_recipe_view(
+        "midsegment", "nemar.signal-window", lambda: signal_window(segments=segments_file(rows))
+    )
+    assert view_set.skipped == [
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "cap_exceeded"}
+    ]
+    assert view_set.views == []
