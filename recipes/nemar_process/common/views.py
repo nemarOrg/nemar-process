@@ -1331,12 +1331,10 @@ def check_floor_tables(
 
 
 def _read_matrix(data: bytes, limits: Mapping[str, int]) -> tuple[tuple[str, ...], int]:
-    """The browser's matrix read as a renderer reads it (ic-activity.md, check 8): at most
-    ``bytes_per_role`` bytes, the TSV grammar, a data row (``empty``), at most ``entries_per_dim``
-    rows and columns and ``cells_per_role`` cells (``cap_exceeded``), then every cell a finite number,
-    column by column; its header and its number of rows."""
-    if len(data) > limits["bytes_per_role"]:
-        raise ViewRefused(CAP_EXCEEDED, "bytes")
+    """The browser's matrix read as a renderer reads it (ic-activity.md, check 8; its bytes are
+    within the cap already, ``_verified``): the TSV grammar, a data row (``empty``), at most
+    ``entries_per_dim`` rows and columns and ``cells_per_role`` cells (``cap_exceeded``), then every
+    cell a finite number, column by column; its header and its number of rows."""
     header, rows = read_tsv(data)
     if not rows:
         raise ViewRefused(EMPTY)
@@ -1351,6 +1349,17 @@ def _read_matrix(data: bytes, limits: Mapping[str, int]) -> tuple[tuple[str, ...
         for row in rows:
             cell_number(row[position])
     return header, len(rows)
+
+
+def _verified(
+    target: Mapping[str, Any], read: Mapping[str, bytes], limits: Mapping[str, int]
+) -> bytes:
+    """A file input's bytes as a renderer fetches them (ic-activity.md, check 4): its declared size
+    within ``bytes_per_role`` (``cap_exceeded``, before the file is read), then the file named
+    (``file_mismatch``)."""
+    if target["size"] > limits["bytes_per_role"]:
+        raise ViewRefused(CAP_EXCEEDED, "declared size")
+    return _read_file(target, read)
 
 
 def _check_decomposition_store(declaration: Mapping[str, Any]) -> None:
@@ -1380,8 +1389,9 @@ def check_ic_activity(
     order a renderer checks it: the transform's ``matrix`` is the ``unmixing`` input and
     ``shaded.files[0]`` the ``badsegments`` input, and the three tables (``unmixing``, ``components``,
     ``badsegments``) are the recording's under the view's recipe (``table_location_mismatch``); the
-    decomposition's store is the signal's (``store_mismatch``); each file is the one named
-    (``file_mismatch``); the matrix within the caps with numbers in every cell
+    decomposition's store is the signal's (``store_mismatch``); each file, the matrix, then the
+    components, then the bad segments, declares at most ``bytes_per_role`` bytes (``cap_exceeded``)
+    and is the one named (``file_mismatch``); the matrix within the caps with numbers in every cell
     (``_read_matrix``); the components table within the cap on cells, with its column ``component``
     and one row per matrix row (``coords_length``); the bad segments as the floor's tables are read;
     and the matrix's header is the transform's ``columns`` and ``decomposition_input.channels``
@@ -1399,7 +1409,7 @@ def check_ic_activity(
     )
     _check_decomposition_store(declaration)
     data = {
-        role: _read_file(inputs[role], read)
+        role: _verified(inputs[role], read, limits)
         for role in ("unmixing", "components", "badsegments")
         if role in inputs
     }

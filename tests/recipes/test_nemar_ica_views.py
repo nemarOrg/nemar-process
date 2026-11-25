@@ -179,7 +179,9 @@ SEGMENTS = files.tsv_text(
 )
 
 
-def activity(*, matrix=None, components_label=LABEL, store=None, decomposition_store=None):
+def activity(
+    *, matrix=None, components_label=LABEL, store=None, decomposition_store=None, files_out=None
+):
     """An activation view on the serving copy over three channels and two components; each keyword
     replaces one part with a faulty one."""
     unmixing = product_file(
@@ -230,6 +232,8 @@ def activity(*, matrix=None, components_label=LABEL, store=None, decomposition_s
         "components": table,
         "badsegments": segments,
     }
+    if files_out is not None:
+        files_out.update(named)
     return outputs.icactivity_view(HOST, block, signal, named)
 
 
@@ -293,6 +297,29 @@ def test_an_activation_view_is_the_browsers_matrix_on_the_store_it_names():
 def test_an_activation_views_writer_rules(changes, word):
     with pytest.raises(views.ViewRefused) as refused:
         activity(**changes)
+    assert refused.value.word == word
+
+
+@pytest.mark.parametrize(
+    ("tampered", "word"),
+    [(steps.SERVING_UNMIXING, "file_mismatch"), ("badsegments", "cap_exceeded")],
+    ids=["matrix_file_before_components_size", "components_size_before_segments_file"],
+)
+def test_each_files_declared_size_is_checked_before_it_is_read_in_order(tampered, word):
+    """Neuroschema's check 4: the matrix, then the components, then the bad segments, each its declared
+    size within the cap on bytes, then the file named. Two faults, each pair in both orders of
+    discovery: a matrix that is not the one named before a components table over the cap, and a
+    components table over the cap before bad segments that are not the ones named."""
+    named = {}
+    view = activity(files_out=named)
+    sizes = {key: file.size for key, file in named.items()}
+    assert sizes[steps.SERVING_UNMIXING] < sizes["components"]
+    limits = {**views.caps(), "bytes_per_role": sizes["components"] - 1}
+    read = {file.location: file.text.encode("utf-8") for file in named.values()}
+    location = named[tampered].location
+    read[location] = read[location].replace(b"1", b"7", 1)
+    with pytest.raises(views.ViewRefused) as refused:
+        views.check_ic_activity(view.declaration, read, limits)
     assert refused.value.word == word
 
 
