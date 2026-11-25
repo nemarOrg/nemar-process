@@ -181,10 +181,12 @@ The lead's ruling of 2026-11-24 settles what the manifest, the plugin and the ru
   Parameters must also be strict JSON: finite numbers and string keys.
 - The manifest carries no parameters for a view: what varies per recording (a spectrum's `upper_hz`, the Nyquist frequency of that recording) can only come from the run.
 - For a registered preset, `base` and `base_version` come from the view registry (`contract.kind_entry`), never from the plugin or the manifest; a plugin may declare only a registered kind (`kind_unregistered` otherwise).
-- For a generic kind (`nemar.lines`, `nemar.heatmap`, `nemar.table`), the runner takes the dimension coordinates from each `TableArray`'s header and the units from the manifest role's declared columns (`columns[].unit`); neither comes from the plugin.
+- For a generic kind (`nemar.lines`, `nemar.heatmap`, `nemar.table`), the runner takes the dimension coordinates from each `TableArray`'s header and the units from the manifest role: the role's `unit` (nemar-cli #2358, at the pin 1788c5d2), which a column's own `columns[].unit` overrides for that column; neither comes from the plugin.
+  For a kind whose role needs a value unit, read from the vendored registry as a generic kind's (`base` null) role with open dimensions (`dims` null), the loader refuses a produced role with neither a role `unit` nor `columns` that each carry one (`unit_undeclared`, after `format_unwritable`).
 
 What is built, and when:
 
 - Phase 5 P2 (this pin): the `PluginResult` shape, the loader's static checks of declared views against the registry (`kind_unregistered`, `role_unregistered`, `dims_unregistered`, `format_unwritable`, `role_unprovided`, `view_repeated`), and the run-time checks of shape and parameters (`views_differ`, `view_malformed`, `parameters_invalid`).
-  The checked views are handed back in `CheckpointRun.views`; nothing writes them yet.
-- Phase 5 P3: writing the arrays and JSON roles as files, validating them (finite values, the declared dimensions and coordinates, the caps), and building the declarations neuroschema validates.
+  At P2 the checked views were handed back unwritten; P3 writes them.
+- Phase 5 P3 (`common/views.py`): writing the arrays and JSON roles as files, validating them (finite values, the declared dimensions and coordinates, the caps, the content schemas), and building the declarations neuroschema validates; `CheckpointRun.views` now hands back checked views (`views.PreparedView`) and `views_skipped`, and `write_product(view_set=...)` writes them into the record ([plugins.md](plugins.md#as-built-loading-running-rendering)).
+  The record checks are a port of `neuroschema.records.check_record` (`views.record_findings`), replayed against neuroschema's vectors with its preset-check and view-digest vectors (`tests/contract/neuroschema-views/`).
