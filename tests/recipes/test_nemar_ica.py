@@ -156,6 +156,7 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
         for name in (
             "asr.json",
             "badsegments.tsv",
+            "chanlocs.tsv",
             "channels.tsv",
             "components.tsv",
             "filters.json",
@@ -533,7 +534,12 @@ def test_labels_that_cannot_head_columns_give_no_browser_matrix_and_say_why(tiny
     (the matrices fall back to Ch001 and so on) are never published as its columns: the transform is
     null with the reason labels_unusable and no _servingunmixing.tsv is written."""
     _, fit, _, context = tiny
-    spoiled = dataclasses.replace(fit, good_channels=spoil(list(fit.good_channels)))
+    labels = spoil(list(fit.good_channels))
+    # the decomposition's own chanlocs carry the same labels, as a recording with them would
+    chanlocs = [
+        {**entry, "labels": label} for entry, label in zip(fit.eeg["chanlocs"], labels, strict=True)
+    ]
+    spoiled = dataclasses.replace(fit, good_channels=labels, eeg={**fit.eeg, "chanlocs": chanlocs})
     (recording,) = io.discover(DATASET)
     with command.quiet():
         product = outputs.write_product(
