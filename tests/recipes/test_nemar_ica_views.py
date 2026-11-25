@@ -1,0 +1,1049 @@
+"""nemar-ica's own quality views (ADR 0137, phase P5): the layout ``_chanlocs.tsv`` and the views
+``icmaps``, ``icactivity`` and ``midsegment``.
+
+Two halves. The writer's checks of the three views run on small files and a fixture host
+(``views_support.make_host``), and neuroschema's own vectors are replayed through them: the
+``nemar.ic-activity.v1`` cases and refusals and the ``nemar.ic-maps`` and ``nemar.signal-window``
+preset checks (``tests/contract/neuroschema-views/``, pinned by the progress pin), both against the
+checks alone and rebuilt through the builder (``views.recipe_view``). Then the views of a real product:
+the repository's EEG fixture cut to ten channels and 60 seconds (``Pg1`` has no position), decomposed
+with five iterations on the CPU, on a dataset directory; the serving copy's are in
+``test_nemar_ica_serving_input.py``, which has the stand-in. Nothing of the writer or the recipe is
+replaced.
+"""
+
+from __future__ import annotations
+
+import copy
+import dataclasses
+import json
+import math
+import random
+
+import numpy as np
+import pytest
+from nemar_process import cli as command
+from nemar_process.common import determinism, device, files, io, records, views
+from nemar_process.common.errors import RecordingError
+from nemar_process.nemar_floor import outputs as floor_outputs
+from nemar_process.nemar_ica import RECIPE, outputs, pipeline, steps
+from nemar_process.nemar_ica.options import Settings
+from recipe_support import DATASET, ROOT, copy_fixture, loaded_fixture, make_context, write_set
+from views_support import (
+    ICLABEL,
+    LABEL,
+    RECORDING,
+    SENSORS,
+    check_view_files,
+    layout,
+    make_host,
+    product_files,
+)
+
+VECTORS = ROOT / "tests" / "contract" / "neuroschema-views"
+HOST = make_host()  # five good channels in layout order, four components, ICLabel, 250 Hz
+CLASSES = [outputs.class_column(name) for name in ICLABEL]
+# the cut: Fp1 to P4, O2 and Pg1, which has no position (so its places are n/a), 60 seconds
+CUT_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 9, 19]
+CUT_SECONDS = 60.0
+ARCHIVE_GROUP = "eeg_200hz"
+
+
+def vectors(name):
+    return json.loads((VECTORS / "{}.v1.json".format(name)).read_text(encoding="utf-8"))
+
+
+# ---- the writer's checks of an ic-maps view, on a fixture host -------------------------------------
+
+
+def product_file(suffix, text, step_id="ica"):
+    return views.view_file(RECORDING, LABEL, suffix, "tsv", text, step_id, suffix)
+
+
+def mixing_file(sensors=SENSORS, components=HOST.components):
+    values = np.arange(len(sensors) * len(components), dtype=np.float64).reshape(len(sensors), -1)
+    return product_file("mixing", files.matrix_text(values / 7, list(components)))
+
+
+def components_file(names=HOST.components, columns=("component", "variance_pct", *CLASSES)):
+    rows = [[name, 10.0, *([0.5] * (len(columns) - 2))] for name in names]
+    decimals = {"variance_pct": 4, **dict.fromkeys(columns[2:], 6)}
+    return product_file("components", files.tsv_text(columns, rows, decimals), "iclabel")
+
+
+def icmaps(mixing=None, places=None, components=None, sensors=SENSORS, host=HOST):
+    return outputs.icmaps_view(
+        host,
+        mixing_file() if mixing is None else mixing,
+        layout(sensors, places=places),
+        components_file() if components is None else components,
+        CLASSES,
+    )
+
+
+def test_an_ic_maps_view_is_the_mixing_matrix_on_the_layout_with_the_components_as_text():
+    view = icmaps()
+    declaration = view.declaration
+    assert views.declaration_errors(declaration) == []
+    assert (declaration["kind"], declaration["base"], declaration["base_version"]) == (
+        "nemar.ic-maps",
+        "nemar.sensor-field",
+        1,
+    )
+    assert declaration["source"] == {"recipe": {"name": "nemar-ica", "version": "1.0.0-b2"}}
+    assert "parameters" not in declaration  # version 1 takes none
+    values, placed, table = declaration["data"]
+    assert [entry["role"] for entry in declaration["data"]] == ["values", "layout", "components"]
+    assert [column["name"] for column in values["columns"]] == list(HOST.components)
+    assert values["dims"][0]["coords"] == {"role": "layout", "column": "name"}
+    assert values["dims"][1] == {
+        "name": "component",
+        "axis": "columns",
+        "type": "string",
+        "coords": {"header": True},
+    }
+    assert (placed["coordinate_system"], placed["position_source"]) == ("CapTrak", "measured")
+    assert "cap_model" not in placed  # a layout carries neither
+    assert "reference" not in placed
+    assert [column["name"] for column in table["columns"]] == [
+        "component",
+        "variance_pct",
+        *CLASSES,
+    ]
+    assert table["columns"][1]["unit"] == "%"
+    assert view.files == ()  # every file it names is a product the recipe writes anyway
+
+
+@pytest.mark.parametrize(
+    ("build", "word"),
+    [
+        (
+            lambda: icmaps(components=components_file(names=HOST.components[::-1])),
+            "components_mismatch",
+        ),
+        (
+            lambda: icmaps(components=components_file(names=HOST.components[:3])),
+            "components_mismatch",
+        ),
+        (
+            lambda: icmaps(components=components_file(names=[*HOST.components, "IC005"])),
+            "components_mismatch",
+        ),
+        (
+            lambda: icmaps(components=components_file(names=["IC1", "IC2", "IC3", "IC4"])),
+            "components_mismatch",
+        ),
+        (lambda: icmaps(mixing=mixing_file(sensors=SENSORS[:4])), "coords_length"),
+        (
+            lambda: icmaps(
+                mixing=mixing_file(sensors=("Fz", "C3", "Cz", "C4", "Fz")),
+                sensors=("Fz", "C3", "Cz", "C4", "Fz"),
+            ),
+            "sensors_repeated",
+        ),
+        (
+            lambda: icmaps(components=components_file(columns=("name", "variance_pct"))),
+            "column_missing",
+        ),
+    ],
+    ids=["reordered", "short", "long", "renamed", "layout_longer", "sensor_twice", "no_component"],
+)
+def test_an_ic_maps_views_writer_rules(build, word):
+    with pytest.raises(views.ViewRefused) as refused:
+        build()
+    assert refused.value.word == word
+
+
+def test_an_ic_maps_view_reads_the_files_it_names():
+    view = icmaps()
+    read = {entry["location"]: b"" for entry in view.declaration["data"]}
+    read.update(
+        {
+            mixing_file().location: mixing_file().text.encode("utf-8"),
+            layout().file.location: layout().file.text.encode("utf-8"),
+        }
+    )
+    with pytest.raises(views.ViewRefused) as refused:  # the components file is not the one named
+        views.check_ic_maps(view.declaration, read)
+    assert refused.value.word == "file_mismatch"
+
+
+# ---- the writer's checks of an activation view -----------------------------------------------------
+
+CHANNELS = ["Fz", "Cz", "Pz"]
+DIGEST = "a" * 64
+SEGMENTS = files.tsv_text(
+    floor_outputs.SEGMENT_COLUMNS,
+    [[1.0, 0.5, "bad_window", "clean_windows"], [3.0, 0.25, "burst", "asr_repaired"]],
+    floor_outputs.SEGMENT_DECIMALS,
+)
+
+
+def activity(*, matrix=None, components_label=LABEL, store=None, decomposition_store=None):
+    """An activation view on the serving copy over three channels and two components; each keyword
+    replaces one part with a faulty one."""
+    unmixing = product_file(
+        steps.SERVING_UNMIXING,
+        files.matrix_text(np.arange(6.0).reshape(2, 3), CHANNELS) if matrix is None else matrix,
+    )
+    table = views.view_file(
+        RECORDING,
+        components_label,
+        "components",
+        "tsv",
+        files.tsv_text(
+            ("component", "variance_pct"), [["IC001", 1.0], ["IC002", 2.0]], {"variance_pct": 4}
+        ),
+        "iclabel",
+        "components",
+    )
+    segments = product_file("badsegments", SEGMENTS)
+    signal = store or views.store_input(
+        "signal", recording=RECORDING, group="eeg_250hz", content_sha256=DIGEST, profile="serving"
+    )
+    block = {
+        "browser_transform": {
+            "matrix": unmixing.location,
+            "applies_to": steps.BROWSER_APPLIES_TO,
+            "note": steps.BROWSER_NOTE,
+            "match": "store_row",
+            "rows": [0, 1, 2],
+            "columns": list(CHANNELS),
+            "unit": "uV",
+            "caption": None,
+            "shaded": {"label": "burst", "files": [segments.location]},
+        },
+        "decomposition_input": {
+            "source": "serving_copy",
+            "preprocessing": [{"step": "asr", "function": "eegprep.clean_asr"}],
+            "channels": list(CHANNELS),
+            "channel_types": [[name, "EEG"] for name in CHANNELS],
+            "channel_types_sha256": "b" * 64,
+            "reference": "average",
+            "unit": "uV",
+            "store": decomposition_store
+            or {"path": RECORDING, "group": "eeg_250hz", "content_sha256": DIGEST},
+        },
+    }
+    named = {
+        steps.SERVING_UNMIXING: unmixing,
+        "components": table,
+        "badsegments": segments,
+    }
+    return outputs.icactivity_view(HOST, block, signal, named)
+
+
+def test_an_activation_view_is_the_browsers_matrix_on_the_store_it_names():
+    view = activity()
+    declaration = view.declaration
+    assert views.declaration_errors(declaration) == []
+    assert [item["role"] for item in declaration["inputs"]] == [
+        "unmixing",
+        "signal",
+        "components",
+        "badsegments",
+    ]
+    assert declaration["parameters"]["display_filter"] == {"highpass_hz": 1, "order": 2}
+    assert declaration["parameters"]["max_window_s"] == 30
+    assert declaration["caption"] == steps.ICACTIVITY_CAPTIONS["serving_copy"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "word"),
+    [
+        ({"components_label": "nemarfloor"}, "table_location_mismatch"),
+        (
+            {
+                "decomposition_store": {
+                    "path": RECORDING,
+                    "group": "eeg_250hz",
+                    "content_sha256": "c" * 64,
+                }
+            },
+            "store_mismatch",
+        ),
+        (
+            {"decomposition_store": {"path": RECORDING, "group": "eeg", "content_sha256": DIGEST}},
+            "store_mismatch",
+        ),
+        (
+            {
+                "decomposition_store": {
+                    "path": "sub-02/eeg/x_eeg.edf",
+                    "group": "eeg_250hz",
+                    "content_sha256": DIGEST,
+                }
+            },
+            "store_mismatch",
+        ),
+        ({"matrix": "Fz\tCz\tPz\n"}, "empty"),
+        ({"matrix": "Fz\tCz\tPz\n1\t2\tx\n3\t4\t5\n"}, "cell_not_number"),
+        ({"matrix": "Fz\tCz\tPz\n1\t2\t1e999\n3\t4\t5\n"}, "cell_not_finite"),
+    ],
+    ids=[
+        "components_of_another_recipe",
+        "digest",
+        "group",
+        "path",
+        "empty",
+        "text_cell",
+        "overflow",
+    ],
+)
+def test_an_activation_views_writer_rules(changes, word):
+    with pytest.raises(views.ViewRefused) as refused:
+        activity(**changes)
+    assert refused.value.word == word
+
+
+def test_an_activation_matrix_over_the_caps_is_skipped_as_too_large():
+    """A matrix wider than the cap on entries per dimension (more than 1,024 channels) is no view a
+    renderer draws: the recipe skips it with cap_exceeded, never declares it."""
+    wide = ["c{}".format(n) for n in range(1025)]
+    matrix = files.matrix_text(np.zeros((2, 1025)), wide)
+    with pytest.raises(views.ViewRefused) as refused:
+        activity(matrix=matrix)
+    assert refused.value.word == "cap_exceeded"
+    found = views.ViewSet("nemar-ica", "1.0.0-b2")
+    found.add_recipe_view("icactivity", "nemar.ic-activity", lambda: activity(matrix=matrix))
+    assert found.skipped == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "cap_exceeded"}
+    ]
+
+
+# ---- neuroschema's vectors, through the writer's checks and the builder -----------------------------
+
+# A vector's word as the writer names it (the writer says file_mismatch for every file fault).
+WRITER_WORD = {
+    "file_missing": "file_mismatch",
+    "file_size_mismatch": "file_mismatch",
+    "file_digest_mismatch": "file_mismatch",
+}
+# The checks only a renderer can make: they need the store (its digest, rate, rows and units), the
+# window it asks for, the record's fact of whether ASR repaired a span, or a kind the recipe never
+# declares; the writer passes those vectors.
+RENDERER_WORDS = {
+    "store_digest_mismatch",
+    "rate_invalid",
+    "window_outside_store",
+    "window_too_long",
+    "unit_unknown",
+    "filter_out_of_range",
+    "label_unmatched",
+}
+# channel_set_mismatch refusals the writer cannot see: the store's rows and labels.
+STORE_ROW_REFUSALS = {
+    "store_row_label_differs",
+    "store_row_out_of_range",
+    "channel_label_unmatched",
+    "label_case",
+    "label_duplicate",
+    "store_unlabeled",
+    "order_match_before_unit",
+}
+# Refusals of two faults whose first only a renderer sees: the writer names the second.
+WRITER_SEES_THE_SECOND = {
+    "order_window_before_matrix": "cell_not_number",
+    "order_digest_before_matrix": "cell_not_number",
+}
+
+
+def _activity_word(case):
+    view = case["view"]
+    data = {location: item["text"].encode("utf-8") for location, item in case["files"].items()}
+    limits = {**views.caps(), **case.get("caps", {})}
+    if views.declaration_errors(view):
+        return "declaration_invalid"
+    try:
+        views.check_ic_activity(view, data, limits)
+    except views.ViewRefused as refused:
+        return refused.word
+    return None
+
+
+def _expected_activity_word(case):
+    name, word = case["name"], case.get("word")
+    if name in WRITER_SEES_THE_SECOND:
+        return WRITER_SEES_THE_SECOND[name]
+    if word is None or word in RENDERER_WORDS or name in STORE_ROW_REFUSALS:
+        return None
+    return WRITER_WORD.get(word, word)
+
+
+def test_the_activation_vectors_replay_against_the_writers_checks():
+    """Every case neuroschema draws passes the writer, and every refusal the writer can see (its
+    declaration, the tables' locations and stems, the decomposition's store, the files, the matrix,
+    the components, the bad segments, the matrix's channels) is refused with the vector's word; the
+    rest need the store or the window, which only a renderer has."""
+    found = vectors("ic-activity")
+    replayed = 0
+    for case in found["cases"]:
+        assert _activity_word(case) is None, case["name"]
+        replayed += 1
+    for case in found["refusals"]:
+        if case["word"] == "kind_unsupported":
+            continue  # the writer declares nemar.ic-activity version 1 and nothing else
+        assert _activity_word(case) == _expected_activity_word(case), case["name"]
+        replayed += 1
+    assert replayed >= 90
+
+
+def _view_file(location, text):
+    """A product file at a vector's location, as the writer holds one."""
+    name = location.rsplit("/", 1)[-1]
+    suffix, form = name.rsplit("_", 1)[-1].split(".")
+    return views.ViewFile(suffix, form, location, text, "ica", suffix)
+
+
+def _vector_host(view):
+    recipe = view["source"]["recipe"]
+    store = next(item["store"] for item in view.get("inputs", ()) if "store" in item)
+    return dataclasses.replace(
+        HOST,
+        recipe_id=recipe["name"],
+        recipe_version=recipe["version"],
+        recording=store["recording"],
+    )
+
+
+def test_every_activation_case_rebuilt_through_the_builder_is_neuroschemas_declaration():
+    """The builder writes each drawable case's declaration exactly: the inputs, the transform and the
+    parameters it is given, the base and version the registry gives, and the files it reads."""
+    for case in vectors("ic-activity")["cases"]:
+        view = case["view"]
+        built = views.recipe_view(
+            _vector_host(view),
+            key=view["key"],
+            kind=view["kind"],
+            kind_version=view["kind_version"],
+            caption=view["caption"],
+            inputs=view["inputs"],
+            parameters=view["parameters"],
+            transform=view["transform"],
+            files_read={
+                location: _view_file(location, item["text"])
+                for location, item in case["files"].items()
+            },
+        )
+        assert built.declaration == view, case["name"]
+
+
+def test_the_channel_types_digests_are_nemar_icas():
+    found = vectors("ic-activity")["channel_types_digests"]
+    assert len(found) >= 3
+    for case in found:
+        assert pipeline.types_sha256(case["channel_types"]) == case["sha256"]
+        assert determinism.jcs({"channel_types": case["channel_types"]}) == case["canonical"]
+
+
+def _preset_cases(kind):
+    return [case for case in vectors("preset-checks")["cases"] if case["view"]["kind"] == kind]
+
+
+def test_the_ic_maps_preset_vectors_replay_against_the_writers_checks():
+    """The writer refuses each ic-maps case neuroschema's preset check refuses, with its word (the
+    writer says file_mismatch for a file that is not the one named), and passes the one it draws."""
+    cases = _preset_cases("nemar.ic-maps")
+    assert len(cases) >= 10
+    for case in cases:
+        data = {location: item["text"].encode("utf-8") for location, item in case["files"].items()}
+        limits = {**views.caps(), **case.get("caps", {})}
+        assert views.declaration_errors(case["view"]) == []
+        word = None
+        try:
+            views.check_ic_maps(case["view"], data, limits)
+        except views.ViewRefused as refused:
+            word = refused.word
+        expected = case["expected"]["word"]
+        assert word == WRITER_WORD.get(expected, expected), case["name"]
+
+
+def _ic_maps_roles(case, entries):
+    """The three roles of an ic-maps case, read from its files by the recipe's builder
+    (``data_role``), the components table declaring the vector's columns its header holds."""
+    roles = []
+    for role in ("values", "layout", "components"):
+        entry = entries[role]
+        text = case["files"][entry["location"]]["text"]
+        columns = entry["columns"]
+        if role == "components":
+            header = text.split("\n", 1)[0].split("\t")
+            columns = [c for c in columns if c["name"] == "component" or c["name"] in header]
+        sensor = {k: entry[k] for k in ("coordinate_system", "position_source") if k in entry}
+        roles.append(
+            views.data_role(
+                role, _view_file(entry["location"], text), columns, entry["dims"], sensor
+            )
+        )
+    return roles
+
+
+def test_the_ic_maps_vectors_declare_component_columns_their_file_lacks():
+    """neuroschema 0.6.0's ic-maps cases declare the seven ICLabel classes on a components table that
+    holds two of them, which the writer refuses (it declares only columns in the file's header:
+    docs/views/sensor-field.md, What the writer enforces). A neuroschema follow-up; this fails once the
+    vectors are fixed, and the builder replay below then declares the vector's columns as they are."""
+    (case,) = [c for c in _preset_cases("nemar.ic-maps") if c["name"] == "ic_maps"]
+    entry = next(e for e in case["view"]["data"] if e["role"] == "components")
+    file = _view_file(entry["location"], case["files"][entry["location"]]["text"])
+    with pytest.raises(views.ViewRefused) as refused:
+        views.data_role("components", file, entry["columns"], entry["dims"])
+    assert (refused.value.word, str(refused.value)) == ("column_missing", "column_missing: muscle")
+
+
+def test_the_ic_maps_cases_rebuilt_through_the_builder():
+    """Each ic-maps case whose files are the ones named and under the registry's caps, rebuilt from
+    its files with the recipe's own builder (``data_role``, then ``recipe_view``): the drawable one is
+    neuroschema's declaration (with the component columns its file holds), and each other is refused
+    with the vector's word."""
+    rebuilt = 0
+    for case in _preset_cases("nemar.ic-maps"):
+        view, expected = case["view"], case["expected"]["word"]
+        if "caps" in case or expected == "file_digest_mismatch":
+            continue  # a lowered cap, or bytes other than those named: the direct replay above
+        entries = {entry["role"]: entry for entry in view["data"]}
+        recipe = view["source"]["recipe"]
+        word = None
+        try:
+            roles = _ic_maps_roles(case, entries)
+            built = views.recipe_view(
+                dataclasses.replace(
+                    HOST, recipe_id=recipe["name"], recipe_version=recipe["version"]
+                ),
+                key=view["key"],
+                kind=view["kind"],
+                kind_version=view["kind_version"],
+                caption=view["caption"],
+                data=roles,
+            )
+            expected_view = copy.deepcopy(view)
+            expected_view["data"][2]["columns"] = roles[2].entry()["columns"]
+            assert built.declaration == expected_view, case["name"]
+        except views.ViewRefused as refused:
+            word = refused.word
+        assert word == expected, case["name"]
+        rebuilt += 1
+    assert rebuilt >= 7
+
+
+# Signal-window words only a renderer checks: the store's digest, rate and rows, and the window.
+SIGNAL_RENDERER_WORDS = {
+    "store_digest_mismatch",
+    "rate_invalid",
+    "bad_channel_unknown",
+    "channel_row_missing",
+    "window_outside",
+}
+
+
+# Signal-window refusals of two faults whose first only a renderer sees: the writer names the second.
+SIGNAL_WRITER_SEES_THE_SECOND = {
+    "signal_window_order_rate_before_tables": "channel_status_unknown",
+    "signal_window_order_digest_before_tables": "column_missing",
+}
+
+
+def test_the_signal_window_cases_rebuilt_through_the_builder():
+    """Each signal-window case rebuilt with the recipe's builder from its inputs, parameters and files:
+    the ones a renderer draws, and those only a renderer can refuse, are neuroschema's declaration
+    exactly; every other is refused with the vector's word (file_mismatch for a file fault)."""
+    rebuilt = 0
+    for case in _preset_cases("nemar.signal-window"):
+        view, expected = case["view"], case["expected"]["word"]
+        if "caps" in case:
+            continue  # a lowered cap: tests/recipes/test_views.py replays these against the check
+        word = None
+        try:
+            built = views.recipe_view(
+                _vector_host(view),
+                key=view["key"],
+                kind=view["kind"],
+                kind_version=view["kind_version"],
+                caption=view["caption"],
+                inputs=view["inputs"],
+                parameters=view["parameters"],
+                files_read={
+                    location: _view_file(location, item["text"])
+                    for location, item in case["files"].items()
+                },
+            )
+            assert built.declaration == view, case["name"]
+        except views.ViewRefused as refused:
+            word = refused.word
+        if case["name"] in SIGNAL_WRITER_SEES_THE_SECOND:
+            expected = SIGNAL_WRITER_SEES_THE_SECOND[case["name"]]
+        elif expected in SIGNAL_RENDERER_WORDS:
+            expected = None
+        assert word == WRITER_WORD.get(expected, expected), case["name"]
+        rebuilt += 1
+    assert rebuilt >= 40
+
+
+# ---- the window -----------------------------------------------------------------------------------
+
+
+def brute_force(good, rate, duration):
+    """Every window that fits, and the one nearest the middle: the definition, sample by sample."""
+    count = good.size
+    best = None
+    for first in range(count):
+        stop = first
+        while stop < count and stop / rate < first / rate + duration:
+            stop += 1
+        if stop / rate < first / rate + duration:
+            break  # the window runs past the recording
+        if good[first:stop].all():
+            key = (abs(2 * first + duration * rate - count), first)
+            best = key if best is None or key < best else best
+    return None if best is None else best[1]
+
+
+@pytest.mark.parametrize("rate", [250.0, 128.0, 500 / 7, 1000 / 3])
+def test_the_window_is_the_one_nearest_the_middle_inside_the_mask(rate):
+    generator = random.Random(int(rate * 7))
+    for _ in range(40):
+        count = generator.randint(1, 1500)
+        good = np.ones(count, dtype=bool)
+        for _ in range(generator.randint(0, 6)):
+            start = generator.randrange(count)
+            good[start : start + generator.randint(1, 400)] = False
+        found = pipeline.midsegment(good, rate, 2.0)
+        expected = brute_force(good, rate, 2.0)
+        if expected is None:
+            assert found is None
+            continue
+        assert found is not None
+        assert found["first"] == expected
+        first, stop = found["first"], found["first"] + found["count"]
+        assert good[first:stop].all()  # inside the mask
+        assert stop <= count
+        assert found["start_s"] == first / rate
+        assert found["duration_s"] == 2.0
+        # the renderer's samples: every k with start_s <= k / rate < start_s + duration_s
+        chosen = [k for k in range(count) if found["start_s"] <= k / rate < found["start_s"] + 2.0]
+        assert chosen == list(range(first, stop))
+
+
+def test_no_window_fits_a_mask_with_no_two_good_seconds():
+    rate = 100.0
+    assert pipeline.midsegment(np.zeros(1000, dtype=bool), rate, 2.0) is None
+    assert pipeline.midsegment(np.ones(199, dtype=bool), rate, 2.0) is None  # under two seconds
+    good = np.ones(1000, dtype=bool)
+    good[::150] = False  # no run of 200 good samples
+    assert pipeline.midsegment(good, rate, 2.0) is None
+    exact = np.zeros(1000, dtype=bool)
+    exact[100:300] = True  # exactly two seconds, far from the middle
+    assert pipeline.midsegment(exact, rate, 2.0) == {
+        "start_s": 1.0,
+        "duration_s": 2.0,
+        "first": 100,
+        "count": 200,
+    }
+
+
+def test_the_window_stops_where_a_renderer_stops_it_from_times():
+    """At 500/7 Hz the product 2 * rate rounds above the count the times give: the window is the
+    times' (docs/views/presets.md), never ceil(duration * rate)."""
+    rate = 500 / 7
+    for first in range(0, 2000, 37):
+        stop = pipeline.window_stop(first, rate, 2.0)
+        assert (stop - 1) / rate < first / rate + 2.0 <= stop / rate
+
+
+def test_the_good_sample_mask_leaves_out_the_floors_bad_windows_and_asrs_repairs(fixture_fit):
+    fit = fixture_fit
+    good = pipeline.good_sample_mask(fit.floor_result, fit.bursts)
+    assert good.size == int(fit.floor_result.work["pnts"])
+    floor_mask = fit.floor_result.sample_mask
+    assert floor_mask is not None
+    assert not good[~floor_mask].any()  # every bad window
+    for start, stop in fit.bursts["spans"]:
+        assert not good[start:stop].any()  # every span ASR repaired
+    assert good.sum() == (floor_mask & ~_repaired(fit)).sum()
+
+
+def _repaired(fit):
+    repaired = np.zeros(int(fit.floor_result.work["pnts"]), dtype=bool)
+    for start, stop in fit.bursts["spans"]:
+        repaired[start:stop] = True
+    return repaired
+
+
+# ---- a real product ----------------------------------------------------------------------------------
+
+
+def cut_fixture():
+    loaded = loaded_fixture()
+    eeg = loaded.eeg
+    samples = round(CUT_SECONDS * eeg["srate"])
+    eeg["data"] = np.ascontiguousarray(eeg["data"][CUT_CHANNELS, :samples])
+    eeg["nbchan"] = len(CUT_CHANNELS)
+    eeg["pnts"] = samples
+    eeg["xmax"] = (samples - 1) / eeg["srate"]
+    eeg["chanlocs"] = [eeg["chanlocs"][index] for index in CUT_CHANNELS]
+    return loaded
+
+
+def run_context():
+    options = RECIPE.option_values({"ica_max_iter": 5})
+    with determinism.pinned_threads(1):
+        engine = determinism.engine_info(1, RECIPE.engine_extra(options))
+    return dataclasses.replace(make_context(), engine=engine, options=options)
+
+
+@pytest.fixture(scope="module")
+def recording():
+    (found,) = io.discover(DATASET)
+    return found
+
+
+@pytest.fixture(scope="module")
+def fixture_fit():
+    settings = Settings.from_options(RECIPE.option_values({"ica_max_iter": 5}))
+    with determinism.pinned_threads(1), command.quiet():
+        return pipeline.process(cut_fixture(), settings, device.resolve("cpu"))
+
+
+def write(recording, fit, directory, **given):
+    with determinism.pinned_threads(1), command.quiet():
+        return outputs.write_product(
+            recording,
+            run_context(),
+            directory,
+            fit,
+            [],
+            profile=steps.INPUT_PROFILES["bids"],
+            **given,
+        )
+
+
+@pytest.fixture(scope="module")
+def archive(recording, fixture_fit, tmp_path_factory):
+    """The product with the serving copy's group named: every view of the recipe."""
+    directory = tmp_path_factory.mktemp("archive")
+    return directory, write(recording, fixture_fit, directory, archive_group=ARCHIVE_GROUP)
+
+
+@pytest.fixture(scope="module")
+def unnamed(recording, fixture_fit, tmp_path_factory):
+    """The product of a dataset directory as the command writes it: no store is named."""
+    directory = tmp_path_factory.mktemp("unnamed")
+    return directory, write(recording, fixture_fit, directory)
+
+
+def views_of(product):
+    return {view["key"]: view for view in product.record["extensions"]["nemar"]["views"]}
+
+
+def read_table(path):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header = lines[0].split("\t")
+    return header, [line.split("\t") for line in lines[1:]]
+
+
+def named(directory, suffix):
+    (found,) = sorted(directory.rglob("*_desc-nemarica_{}".format(suffix)))
+    return found
+
+
+def test_the_layouts_names_are_the_unmixing_header_in_its_order(archive, fixture_fit):
+    directory, _ = archive
+    header, rows = read_table(named(directory, "chanlocs.tsv"))
+    assert tuple(header) == steps.CHANLOCS_COLUMNS
+    unmixing, _ = read_table(named(directory, "unmixing.tsv"))
+    _, mixing = read_table(named(directory, "mixing.tsv"))
+    assert [row[0] for row in rows] == unmixing == list(fixture_fit.good_channels)
+    assert len(rows) == len(mixing)  # one map value per layout row
+    # each row's type is the floor's _channels.tsv's for that channel
+    _, channels = read_table(named(directory, "channels.tsv"))
+    kinds = {row[0]: row[1] for row in channels}
+    assert [row[1] for row in rows] == [kinds[row[0]] for row in rows]
+
+
+def test_the_positions_are_eegpreps_after_loading_and_n_a_where_it_has_none(archive, fixture_fit):
+    directory, _ = archive
+    _, rows = read_table(named(directory, "chanlocs.tsv"))
+    loaded = {entry["labels"]: entry for entry in cut_fixture().eeg["chanlocs"]}
+    for name, _kind, *places in rows:
+        entry = loaded[name]
+        expected = [entry.get(key) for key in outputs.PLACE_FIELDS]
+        if name == "Pg1":
+            assert places == ["n/a"] * 5
+            continue
+        assert places == [format(float(value), ".17g") for value in expected], name
+    # the electrodes file is RAS in millimeters (MNI305): eegprep holds x toward the nose, y left
+    electrodes = (DATASET / "sub-CUCOV076/eeg/sub-CUCOV076_electrodes.tsv").read_text().splitlines()
+    ras = {line.split("\t")[0]: line.split("\t")[1:4] for line in electrodes[1:]}
+    by_name = {row[0]: row for row in rows}
+    x_ras, y_ras, z_ras = (float(value) for value in ras["Fp1"])
+    assert [float(v) for v in by_name["Fp1"][4:]] == [y_ras, -x_ras, z_ras]
+
+
+def test_the_frame_unit_and_source_are_the_loaders(archive, fixture_fit):
+    """The layout's frame and the record's positions block come from the coordsystem file eegprep
+    read beside the electrodes file (the fixture's MNI305 in millimeters)."""
+    _, product = archive
+    assert fixture_fit.positions == {
+        "source": "electrodes.tsv",
+        "coordinate_system": "MNI305",
+        "coordinate_units": "mm",
+    }
+    assert product.record["extensions"]["nemar"]["ica"]["positions"] == fixture_fit.positions
+    placed = views_of(product)["icmaps"]["data"][1]
+    assert (placed["coordinate_system"], placed["position_source"]) == ("MNI305", "measured")
+
+
+@pytest.mark.parametrize(
+    ("coordsystem", "scale", "expected"),
+    [
+        (
+            {"EEGCoordinateSystem": "CapTrak", "EEGCoordinateUnits": "cm"},
+            1.0,
+            {"source": "electrodes.tsv", "coordinate_system": "CapTrak", "coordinate_units": "cm"},
+        ),
+        (
+            {"EEGCoordinateSystem": "Other", "EEGCoordinateUnits": "n/a"},
+            1e-3,
+            {"source": "electrodes.tsv", "coordinate_system": "Other", "coordinate_units": None},
+        ),
+        (
+            None,
+            1e-3,
+            {"source": "electrodes.tsv", "coordinate_system": None, "coordinate_units": None},
+        ),
+    ],
+    ids=["captrak_cm", "unit_n_a", "no_coordsystem"],
+)
+def test_the_positions_block_says_what_the_dataset_stated(tmp_path, coordsystem, scale, expected):
+    """What the dataset stated beside its electrodes file, never what eegprep assumed: with a unit of
+    n/a or no coordsystem file, eegprep guesses the unit from the size of the positions (here meters)
+    and, with no file, assumes a frame, and the block says neither was stated."""
+    name = "sub-CUCOV076_coordsystem.json"
+    tree = copy_fixture(tmp_path / "dataset", without=(name,) if coordsystem is None else ())
+    eeg_dir = tree / "sub-CUCOV076" / "eeg"
+    if coordsystem is not None:
+        (eeg_dir / name).write_text(json.dumps(coordsystem))
+    electrodes = eeg_dir / "sub-CUCOV076_electrodes.tsv"
+    lines = electrodes.read_text().splitlines()
+    rows = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split("\t")
+        cells[1:4] = [cell if cell == "n/a" else repr(float(cell) * scale) for cell in cells[1:4]]
+        rows.append("\t".join(cells))
+    electrodes.write_text("\n".join(rows) + "\n")
+    (found,) = io.discover(tree)
+    loaded = io.load(found)
+    assert pipeline.position_facts(loaded) == expected
+    # eegprep holds the positions in millimeters whatever unit the dataset states (or it guessed)
+    fp1 = next(entry for entry in loaded.eeg["chanlocs"] if entry["labels"] == "Fp1")
+    factor = 10.0 if coordsystem is not None and coordsystem["EEGCoordinateUnits"] == "cm" else 1.0
+    assert (fp1["X"], fp1["Y"], fp1["Z"]) == pytest.approx((77 * factor, 32 * factor, 19 * factor))
+
+
+def test_positions_embedded_in_a_set_state_no_frame(tmp_path):
+    names = ["Fp1", "Fp2", "C3", "C4"]
+    path = write_set(
+        tmp_path / "sub-01" / "eeg" / "sub-01_task-rest_eeg.set",
+        np.zeros((4, 500)),
+        labels=names,
+        types=["EEG"] * 4,
+        locations={name: (1.0 + i, 2.0, 3.0) for i, name in enumerate(names)},
+        all_coordinates=True,
+    )
+    (found,) = io.discover(tmp_path)
+    assert found.abs_path == path
+    facts = pipeline.position_facts(io.load(found))
+    assert facts == {"source": "embedded", "coordinate_system": None, "coordinate_units": None}
+
+
+@pytest.mark.parametrize(
+    ("stated", "frame"),
+    [("MNI305", "MNI305"), ("CapTrak", "CapTrak"), (None, "n/a"), ("MNI 305", "n/a"), ("", "n/a")],
+)
+def test_the_layouts_frame_is_the_stated_name_or_n_a(fixture_fit, stated, frame):
+    fit = dataclasses.replace(
+        fixture_fit, positions={**fixture_fit.positions, "coordinate_system": stated}
+    )
+    assert outputs.layout_frame(fit) == frame
+
+
+def test_a_dataset_directory_names_no_store_so_declares_only_the_component_maps(unnamed):
+    directory, product = unnamed
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps"]
+    assert "views_skipped" not in nemar  # no recording of such a run declares the other two
+    assert records.views_problems(product.record) == []
+    check_view_files(directory, product.record)
+    product_files(directory)  # TSV and JSON only
+
+
+def test_with_its_group_named_an_archive_run_declares_the_views_of_the_serving_copy(
+    archive, recording
+):
+    """Open question 1: on the archive, the activations are declared with no store digest, matched
+    by label and captioned as not checked against the decomposition's input."""
+    directory, product = archive
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icactivity", "midsegment"]
+    activity = views_of(product)["icactivity"]
+    (signal,) = [item["store"] for item in activity["inputs"] if item["role"] == "signal"]
+    assert signal == {
+        "recording": recording.path,
+        "group": ARCHIVE_GROUP,
+        "content_sha256": None,
+        "profile": "archive",
+    }
+    transform = activity["transform"]["parameters"]
+    block = nemar["ica"]
+    assert transform == block["browser_transform"]
+    assert (transform["match"], transform["caption"]) == ("label", steps.BROWSER_CAPTION_UNCHECKED)
+    assert activity["parameters"]["decomposition_input"] == block["decomposition_input"]
+    assert activity["caption"] == steps.ICACTIVITY_CAPTIONS["archive"]
+    assert [item["role"] for item in activity["inputs"]] == [
+        "unmixing",
+        "signal",
+        "components",
+        "badsegments",
+    ]
+    assert records.views_problems(product.record) == []
+    found = check_view_files(directory, product.record)
+    assert named(directory, "servingunmixing.tsv").relative_to(directory).as_posix() in found
+
+
+def test_the_signal_window_lies_inside_the_good_sample_mask(archive, fixture_fit):
+    """The window the record declares holds, by the renderer's times rule, only samples outside every
+    row of the product's _badsegments.tsv, and it is the one nearest the middle."""
+    directory, product = archive
+    window = views_of(product)["midsegment"]["parameters"]
+    assert window["duration_s"] == 2
+    assert window["bad_segment_table"] is True
+    grid = product.record["extensions"]["nemar"]["mask_grid"]
+    rate, count = grid["rate"], grid["n_samples"]
+    chosen = [k for k in range(count) if window["start_s"] <= k / rate < window["start_s"] + 2]
+    assert len(chosen) == round(2 * rate)
+    _, segments = read_table(named(directory, "badsegments.tsv"))
+    assert segments  # the fixture has bad windows and bursts
+    for onset, duration, _label, _reason in segments:
+        start, end = float(onset), float(onset) + float(duration)
+        assert all(not (start <= k / rate < end) for k in chosen)
+    good = pipeline.good_sample_mask(fixture_fit.floor_result, fixture_fit.bursts)
+    assert good[chosen].all()
+    assert window["start_s"] == fixture_fit.window["start_s"]
+    assert pipeline.midsegment(good, rate, 2) == fixture_fit.window
+
+
+def test_labels_that_fall_back_skip_the_activations_with_a_word(recording, fixture_fit, tmp_path):
+    """Labels that cannot head columns (two of one name: the matrices fall back to Ch001 and so on)
+    match no channel of the serving copy, so the activations are not declared, and the record says
+    why; the maps and the window, which need no label, are."""
+    labels = list(fixture_fit.good_channels)
+    labels[1] = labels[0]
+    chanlocs = [
+        {**entry, "labels": label}
+        for entry, label in zip(fixture_fit.eeg["chanlocs"], labels, strict=True)
+    ]
+    spoiled = dataclasses.replace(
+        fixture_fit, good_channels=labels, eeg={**fixture_fit.eeg, "chanlocs": chanlocs}
+    )
+    product = write(recording, spoiled, tmp_path, archive_group=ARCHIVE_GROUP)
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "midsegment"]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "labels_unusable"}
+    ]
+    _, rows = read_table(named(tmp_path, "chanlocs.tsv"))
+    assert rows[0][0] == "Ch001"  # the layout's names are the unmixing's header, whatever it is
+    assert records.views_problems(product.record) == []
+
+
+def test_no_good_window_skips_the_signal_window_with_a_word(recording, fixture_fit, tmp_path):
+    product = write(
+        recording,
+        dataclasses.replace(fixture_fit, window=None),
+        tmp_path,
+        archive_group=ARCHIVE_GROUP,
+    )
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icactivity"]
+    assert nemar["views_skipped"] == [
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "no_good_window"}
+    ]
+    assert records.views_problems(product.record) == []
+
+
+def test_a_view_the_writer_refuses_fails_the_recording_and_writes_nothing(
+    recording, fixture_fit, tmp_path
+):
+    given = copy.deepcopy(fixture_fit.decomposition_input)
+    given["channels"] = given["channels"][::-1]
+    spoiled = dataclasses.replace(fixture_fit, decomposition_input=given)
+    with pytest.raises(RecordingError) as failed:
+        write(recording, spoiled, tmp_path, archive_group=ARCHIVE_GROUP)
+    assert (failed.value.code, failed.value.step, failed.value.detail) == (
+        "internal_error",
+        "record",
+        "channel_set_mismatch",
+    )
+    assert product_files(tmp_path) == []
+
+
+def test_the_views_name_the_floors_tables_by_the_bytes_written(archive, fixture_fit, recording):
+    directory, _ = archive
+    tables = outputs.floor_tables(recording, fixture_fit)
+    for suffix in ("channels", "badsegments"):
+        assert named(directory, suffix + ".tsv").read_text(encoding="utf-8") == tables[suffix].text
+    spans = [(a, b, steps.BURST_LABEL, steps.BURST_REASON) for a, b in fixture_fit.bursts["spans"]]
+    texts = floor_outputs.segment_texts(fixture_fit.floor_result, spans)
+    assert texts is not None
+    assert named(directory, "samplemask.tsv").read_text(encoding="utf-8") == texts[1]
+
+
+def test_the_floor_writes_its_tables_as_the_texts_it_names(tmp_path, recording):
+    """The floor's own product: its tables are exactly ``channels_text`` and ``segment_texts``."""
+    from nemar_process.nemar_floor.pipeline import process
+
+    result = process(io.load(recording))
+    product = floor_outputs.write_product(
+        recording, make_context(), tmp_path, result, io.load(recording).inputs
+    )
+    (channels,) = [name for name in product.files if name.endswith("_channels.tsv")]
+    assert (tmp_path / channels).read_text(encoding="utf-8") == floor_outputs.channels_text(result)
+    texts = floor_outputs.segment_texts(result)
+    assert texts is not None
+    for name, text in zip(("_badsegments.tsv", "_samplemask.tsv"), texts, strict=True):
+        (found,) = [item for item in product.files if item.endswith(name)]
+        assert (tmp_path / found).read_text(encoding="utf-8") == text
+    assert "views" not in product.record["extensions"]["nemar"]
+
+
+def test_the_same_fit_gives_the_same_layout_and_views(recording, fixture_fit, archive, tmp_path):
+    directory, first = archive
+    second = write(recording, fixture_fit, tmp_path, archive_group=ARCHIVE_GROUP)
+    assert (
+        named(tmp_path, "chanlocs.tsv").read_bytes()
+        == named(directory, "chanlocs.tsv").read_bytes()
+    )
+    assert views_of(second) == views_of(first)
+
+
+def test_the_host_is_the_decompositions_channels_components_and_classes(recording, fixture_fit):
+    chanlocs = outputs.chanlocs_file(recording, fixture_fit)
+    placed = outputs.layout_role(chanlocs, fixture_fit)
+    host = outputs.view_host(recording, fixture_fit, placed)
+    assert host.sensors == tuple(fixture_fit.good_channels)
+    assert host.components == tuple(outputs.component_labels(fixture_fit.rank))
+    assert host.classes == tuple(fixture_fit.classes) == ICLABEL
+    assert host.srate_hz == fixture_fit.floor_result.srate_hz
+    assert host.roles == {"layout": placed}
+    assert host.sidecar == {"reference": "common"}  # the fixture's eeg.json states no cap model
+    assert placed.cells("name") == list(fixture_fit.good_channels)
+    assert steps.CHANLOCS in host.reserved
+    assert chanlocs.step_id == "iclabel"
+
+
+def test_a_place_is_a_finite_number_or_none():
+    assert outputs._place(1.5) == 1.5
+    assert outputs._place(np.float64(-2.0)) == -2.0
+    assert outputs._place(np.array([3.0])) == 3.0
+    for missing in (np.array([]), None, float("nan"), math.inf, True, "1", np.array(["x"])):
+        assert outputs._place(missing) is None

@@ -1003,3 +1003,82 @@ def test_the_command_writes_the_browsers_matrix_on_the_zarr_input(commanded):
     assert share["n"] == 2
     assert share["histogram"]["edges"] == list(steps.BURST_FRACTION_EDGES)
     assert dataset["summaryMetrics"]["icaIterations"]["histogram"]["edges"][-1] == 4000
+
+
+# ---- the views of the serving copy (ADR 0137 P5) -----------------------------------------------------
+
+
+def views_of(record: dict) -> dict[str, dict]:
+    return {view["key"]: view for view in record["extensions"]["nemar"]["views"]}
+
+
+def signal_of(view: dict) -> dict:
+    (found,) = [item["store"] for item in view["inputs"] if item["role"] == "signal"]
+    return found
+
+
+def test_a_zarr_runs_views_name_the_store_its_decomposition_read(commanded, stand_in):
+    """On the serving copy every view of the recipe is declared, and the store its activations and its
+    window read is the one the decomposition read: its group and its digest are the dataset record's
+    ``stores_content`` row, which is the store's own content digest."""
+    _, _, out = commanded
+    dataset = json.loads((out / "desc-nemarica_signalJourney.json").read_text(encoding="utf-8"))
+    (row,) = [
+        row
+        for row in dataset["extensions"]["nemar"]["input"]["stores_content"]
+        if row["path"] == STORE
+    ]
+    stem = STORE.removesuffix("_eeg.edf")
+    record = json.loads(
+        (out / "{}_desc-nemarica_signalJourney.json".format(stem)).read_text(encoding="utf-8")
+    )
+    found = views_of(record)
+    assert list(found) == ["icmaps", "icactivity", "midsegment"]
+    assert "views_skipped" not in record["extensions"]["nemar"]
+    expected = {
+        "recording": STORE,
+        "group": row["group"],
+        "content_sha256": row["content_sha256"],
+        "profile": "serving",
+    }
+    assert row["content_sha256"] == reference_content_sha256(stand_in, STORE)
+    for key in ("icactivity", "midsegment"):
+        assert signal_of(found[key]) == expected, key
+    given = found["icactivity"]["parameters"]["decomposition_input"]
+    assert given["store"] == {
+        "path": STORE,
+        "group": row["group"],
+        "content_sha256": row["content_sha256"],
+    }
+    transform = found["icactivity"]["transform"]["parameters"]
+    assert transform == record["extensions"]["nemar"]["ica"]["browser_transform"]
+    assert (transform["match"], transform["caption"]) == ("store_row", None)
+    assert found["icactivity"]["caption"] == steps.ICACTIVITY_CAPTIONS["serving_copy"]
+    assert records.views_problems(record) == []
+    assert records.check(record, sj.validator()) == []
+
+
+@pytest.mark.parametrize("path", [STORE, STORE_MV])
+def test_the_layout_on_the_serving_copy_is_the_stores_positions(runs, path):
+    """The layout's names are the matrix's columns in store row order, its frame the one the store's
+    root attributes state (CapTrak, millimeters), and its places those positions as eegprep holds them
+    (EEGLAB's frame: x toward the nose, y left), read by eegprep-lean."""
+    run = runs[path]
+    rows = named(run.directory, "chanlocs.tsv").read_text(encoding="utf-8").splitlines()
+    header = rows[0].split("\t")
+    assert header == list(steps.CHANLOCS_COLUMNS)
+    cells = [row.split("\t") for row in rows[1:]]
+    columns, _ = matrix_of(run, "unmixing.tsv")
+    assert [cell[0] for cell in cells] == columns == run.fit.good_channels
+    for name, kind, _theta, _radius, x, y, z_cell in cells:
+        right, front, up = z.POSITIONS[name]
+        assert kind == "EEG"
+        assert (float(x), float(y), float(z_cell)) == (front, -right, up), name
+    block = block_of(run)
+    assert block["positions"] == {
+        "source": "electrodes.tsv",
+        "coordinate_system": "CapTrak",
+        "coordinate_units": "mm",
+    }
+    placed = views_of(run.product.record)["icmaps"]["data"][1]
+    assert (placed["coordinate_system"], placed["position_source"]) == ("CapTrak", "measured")
