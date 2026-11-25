@@ -1906,3 +1906,39 @@ def test_the_checks_see_only_a_plain_copy(loaded):
     assert type(table) is plugins.TableArray
     assert type(table.values) is np.ndarray
     assert plugins.plain((1, [2.5, "x", None])) == (1, [2.5, "x", None])
+
+
+def test_a_histogram_total_beyond_2_53_is_refused(loaded, capsys):
+    big = 2**53 - 1
+
+    def views_change(returned):
+        content = {"edges": [0, 10, 20], "counts": [big, big], "underflow": 0, "overflow": 0}
+        returned["amplitude"] = {"roles": {"histogram": {**content, "unit": "uV"}}}
+        return returned
+
+    assert_refused(*generic_run(loaded, views_change=views_change), "view_too_large", capsys)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"categories": ["a", "b"], "counts": [2**53 - 1, 1]},
+        {"categories": ["a"], "counts": [2**53 - 1], "missing": 1},
+        {"edges": [0, 1], "counts": [2**53 - 1], "underflow": 1, "overflow": 0},
+        {"edges": [-1.5e308, 1.5e308], "counts": [1], "underflow": 0, "overflow": 0},
+        {"edges": [0, 5e-324], "counts": [2**53 - 1], "underflow": 0, "overflow": 0},
+    ],
+    ids=["categories_total", "missing_total", "underflow_total", "width", "density"],
+)
+def test_the_histogram_model_s_caps(content):
+    entry = contract.kind_entry("nemar.histogram", 1)
+    assert entry is not None
+    with pytest.raises(views.ViewRefused) as refused:
+        views.check_content("nemar.histogram", entry, "histogram", content)
+    assert refused.value.word == "view_too_large"
+    views.check_content(
+        "nemar.histogram",
+        entry,
+        "histogram",
+        {"edges": [0, 1], "counts": [2**53 - 2], "underflow": 1, "overflow": 0},
+    )  # at the cap

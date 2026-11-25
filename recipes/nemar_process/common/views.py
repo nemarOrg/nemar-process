@@ -132,6 +132,9 @@ ONE_VALUE_UNIT = frozenset({LINES, "nemar.heatmap", "nemar.sensor-field"})
 # A spectrum's rows are Welch's frequencies k / window_s for k = 1, 2, ...: equal to these within this
 # share of the frequency (the binary64 rounding of the plugin's arithmetic, never a coarser grid).
 GRID_TOLERANCE = 1e-9
+# The histogram model's caps (neuroschema's ``models._histogram`` and ``_check_total``): a total a
+# binary64 sum holds exactly, and finite widths and densities.
+HISTOGRAM_TOTAL_MAX = JSON_SAFE_INTEGER
 
 # The file names a plugin's view may never take, compared case-folded (a case-insensitive file system
 # holds one file for ``_signalJourney.json`` and ``_signaljourney.json``): the record, the suffixes
@@ -870,19 +873,37 @@ def table_role(context: _Context, role: str, declared: Mapping[str, Any], data: 
     return RoleData(role, written, tuple(columns), tuple(dims), fields)
 
 
+def _check_total(total: int) -> None:
+    """A histogram's total, as a binary64 sum holds it exactly (``view_too_large`` beyond 2^53 - 1)."""
+    if total > HISTOGRAM_TOTAL_MAX:
+        raise ViewRefused(VIEW_TOO_LARGE, "total")
+
+
 def _histogram_checks(content: Mapping[str, Any]) -> None:
-    """``nemar.histogram`` (docs/views/generic-kinds.md): one count per category, or one fewer than
-    the edges (``counts_length``), and edges that rise strictly (``edges_not_increasing``)."""
-    counts = content["counts"]
+    """``nemar.histogram`` as its model reads it (docs/views/generic-kinds.md; a port of neuroschema's
+    ``models._histogram`` and ``_check_total``): by category, one count per category
+    (``counts_length``); by edges, edges that rise strictly (``edges_not_increasing``) and one count
+    fewer than the edges (``counts_length``); a total of every count, the underflow, the overflow and
+    the missing within 2^53 - 1, and by edges each bin's width and density finite as binary64
+    (``view_too_large``: a renderer refuses them as ``cap_exceeded``)."""
+    counts = [int(count) for count in content["counts"]]
+    missing = int(content.get("missing", 0))
     if "categories" in content:
         if len(counts) != len(content["categories"]):
             raise ViewRefused(COUNTS_LENGTH)
+        _check_total(sum(counts) + missing)
         return
-    edges = content["edges"]
+    edges = [float(edge) + 0.0 for edge in content["edges"]]
     if any(not later > earlier for earlier, later in itertools.pairwise(edges)):
         raise ViewRefused(EDGES_NOT_INCREASING)
     if len(counts) != len(edges) - 1:
         raise ViewRefused(COUNTS_LENGTH)
+    _check_total(sum(counts) + int(content["underflow"]) + int(content["overflow"]) + missing)
+    widths = [high - low for low, high in itertools.pairwise(edges)]
+    if not all(math.isfinite(width) for width in widths):
+        raise ViewRefused(VIEW_TOO_LARGE, "a bin wider than binary64 holds")
+    if not all(math.isfinite(count / width) for count, width in zip(counts, widths, strict=True)):
+        raise ViewRefused(VIEW_TOO_LARGE, "a density beyond binary64")
 
 
 def check_ic_classes(content: Mapping[str, Any], host: Host | None = None) -> None:
