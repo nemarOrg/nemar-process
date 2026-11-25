@@ -96,45 +96,6 @@ CHANNEL_SET_MISMATCH = "channel_set_mismatch"
 COORDS_LENGTH = "coords_length"
 FILE_MISMATCH = "file_mismatch"
 
-WORDS = frozenset(
-    {
-        ROLE_MISSING,
-        ROLE_EXTRA,
-        ROLE_UNPROVIDED,
-        NOT_FINITE,
-        DIM_MISMATCH,
-        HEADER_MISMATCH,
-        FREQ_NOT_INCREASING,
-        FREQ_OUT_OF_RANGE,
-        FREQ_OFF_GRID,
-        X_NOT_INCREASING,
-        UNITS_DIFFER,
-        VIEW_TOO_LARGE,
-        JSON_INVALID,
-        COUNTS_LENGTH,
-        EDGES_NOT_INCREASING,
-        VARIANCE_LENGTH,
-        COMPONENTS_TOTAL,
-        DECLARATION_INVALID,
-        TSV_ENCODING,
-        TSV_LINE_ENDINGS,
-        TSV_HEADER_REPEATED,
-        TSV_RAGGED,
-        CAP_EXCEEDED,
-        COLUMN_REPEATED,
-        COLUMN_MISSING,
-        CELL_NOT_NUMBER,
-        CELL_NOT_FINITE,
-        CELL_NOT_INTEGER,
-        DURATION_NOT_POSITIVE,
-        CHANNEL_STATUS_UNKNOWN,
-        TABLE_LOCATION_MISMATCH,
-        CHANNEL_SET_MISMATCH,
-        COORDS_LENGTH,
-        FILE_MISMATCH,
-        contract.VIEW_REPEATED,
-    }
-)
 
 # Why a view a run declares is absent for one recording (docs/views.md, Views a run skipped).
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
@@ -179,7 +140,7 @@ _SUFFIX = re.compile(r"[a-z0-9]+")
 
 
 class ViewRefused(Exception):
-    """A view, or a role of it, that the writer will not write: ``word`` says why (``WORDS``)."""
+    """A view, or a role of it, that the writer will not write: ``word`` says why (the constants above)."""
 
     def __init__(self, word: str, detail: str = "") -> None:
         super().__init__("{}: {}".format(word, detail) if detail else word)

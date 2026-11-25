@@ -1729,3 +1729,45 @@ def test_a_plugins_view_cannot_declare_the_floors_tables():
     with pytest.raises(views.ViewRefused) as refused:
         views.check_floor_tables(declaration, {})
     assert refused.value.word == "table_location_mismatch"
+
+
+# ---- round 1 of the review of #90: the reviewer's repros, adopted ---------------------------------------
+
+
+def test_a_returned_object_cannot_claim_a_runner_word(loaded, capsys):
+    """The result is copied, inside the plugin's own ``try``, before any check: a mapping whose
+    ``items`` raises the writer's exception with one of its words is the plugin's failure, by class."""
+
+    class Raising(dict):
+        def items(self):
+            raise views.ViewRefused("not_finite")
+
+    plugin, plan, result = run_returning(
+        loaded["fx-views"],
+        plugins.PluginResult(metrics={}, views=views_of(classes=Raising(CLASSES))),
+    )
+    assert_refused(plugin, plan, result, "ViewRefused", capsys)
+
+
+def test_the_checks_see_only_a_plain_copy(loaded):
+    """What reaches the checks holds no object of the plugin's: its own types are copied to dict,
+    list, tuple and base arrays, and an object of its own becomes a value no check accepts."""
+
+    class Weird:
+        pass
+
+    class Sub(np.ndarray):
+        pass
+
+    copied = plugins.plain(
+        plugins.PluginResult(
+            metrics={"a": Weird()},
+            views={"v": {"roles": {"r": plugins.TableArray(("x",), np.ones((1, 1)).view(Sub))}}},
+        )
+    )
+    assert type(copied.metrics) is dict
+    assert type(copied.metrics["a"]).__name__ == "_Foreign"
+    table = copied.views["v"]["roles"]["r"]
+    assert type(table) is plugins.TableArray
+    assert type(table.values) is np.ndarray
+    assert plugins.plain((1, [2.5, "x", None])) == (1, [2.5, "x", None])

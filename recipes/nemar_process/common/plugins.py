@@ -33,9 +33,10 @@ declared bounds, a metric neuroschema refuses), skips that plugin: the plan reco
 word ``plugin_failed`` (so the recordings table's existing ``skipped_steps`` cell, built from the
 plan's skips, holds ``<plugin>:plugin_failed``), its metrics are absent (not null-filled), a fixed-word
 line names the plugin, and the rest of the recording is kept. Nothing a plugin returned is published unless all of it passed.
-The detail is a word of the runner's own checks (``OUTPUT_WORDS``, ``views.WORDS``) only for a check the
-runner made after ``run`` returned; anything ``run`` raised is named by its class, so a plugin cannot
-pass its failure off as one of the runner's words.
+What ``run`` returned is copied into plain values (``plain``) inside the same ``try`` as ``run``, so
+anything the plugin's code raises, there or in ``run``, is named by its class: a plugin cannot pass its
+failure off as one of the runner's words. Only the checks that follow, which run no plugin code, give
+a word.
 """
 
 from __future__ import annotations
@@ -342,22 +343,6 @@ class _OutputRefused(Exception):
         self.word = word
 
 
-# The words of the runner's checks of a result (``_OutputRefused``) before the views writer's.
-OUTPUT_WORDS = frozenset(
-    {
-        "result_not_a_plugin_result",
-        "metrics_differ",
-        "metric_not_a_number",
-        "metric_not_finite",
-        "metric_out_of_bounds",
-        "metric_invalid",
-        "views_differ",
-        "view_malformed",
-        "parameters_invalid",
-    }
-)
-
-
 def _metric_value(value: Any, declared: Mapping[str, Any]) -> float | None:
     if value is None:
         return None
@@ -500,6 +485,38 @@ def read_only(value: Any) -> Any:
     raise InputRefused("not an input type: {}".format(type(value).__name__))
 
 
+class _Foreign:
+    """What ``plain`` puts in place of an object of the plugin's own: a value of no type the checks
+    accept, so it is refused with their word and none of its methods ever runs again."""
+
+    __slots__ = ()
+
+
+_PLAIN_SCALARS = (type(None), bool, int, float, str, bytes)
+
+
+def plain(value: Any) -> Any:
+    """A structural copy of what a plugin returned, made while the plugin's own code may still run
+    (inside the same ``try`` as ``run``, so what it raises is named by its class): mappings become
+    ``dict``, lists ``list`` and tuples ``tuple``, a ``PluginResult`` and a ``TableArray`` new ones
+    of the same parts, a NumPy array a base-class copy; the built-in scalars (by exact type) and NumPy's
+    own scalars are kept; anything else becomes a ``_Foreign``. Keys are copied the same way. After
+    it, the checks run on values whose every method is Python's or NumPy's, never the plugin's."""
+    if type(value) in _PLAIN_SCALARS or isinstance(value, np.generic):
+        return value
+    if type(value) is PluginResult:
+        return PluginResult(plain(value.metrics), plain(value.views))
+    if type(value) is TableArray:
+        return TableArray(plain(value.header), plain(value.values))
+    if isinstance(value, np.ndarray):
+        return np.array(value, copy=True, subok=False)
+    if isinstance(value, Mapping):
+        return {plain(key): plain(item) for key, item in value.items()}
+    if type(value) is list or type(value) is tuple:
+        return type(value)(plain(item) for item in value)
+    return _Foreign()
+
+
 def _exception_detail(error: Exception) -> str:
     name = type(error).__name__
     return name if EXCEPTION_NAME.fullmatch(name) else UNNAMED_EXCEPTION
@@ -529,13 +546,11 @@ def _checked_views(
     ]
 
 
-def _skip_detail(error: Exception, known: frozenset[str]) -> str:
-    word = (
-        getattr(error, "word", None)
-        if isinstance(error, (_OutputRefused, writer.ViewRefused))
-        else None
-    )
-    return word if word in known else _exception_detail(error)
+def _skip_detail(error: Exception) -> str:
+    """The word of a check the runner made, or the class name of anything else."""
+    if isinstance(error, (_OutputRefused, writer.ViewRefused)):
+        return error.word
+    return _exception_detail(error)
 
 
 def run_checkpoint(
@@ -558,7 +573,6 @@ def run_checkpoint(
         for plugin in plugins
     ):
         raise ValueError("the plugins of {} declare views and no host was given".format(checkpoint))
-    known = OUTPUT_WORDS | writer.WORDS
     for plugin in plugins:
         if plugin.checkpoint != checkpoint:
             continue
@@ -578,7 +592,7 @@ def run_checkpoint(
             given = {
                 recipe: read_only(inputs[recipe]) for recipe in plugin.manifest["reads"]["recipes"]
             }
-            returned = plugin.run(given, copy.deepcopy(parameters))
+            returned = plain(plugin.run(given, copy.deepcopy(parameters)))
         except Exception as error:  # noqa: BLE001  (a plugin never fails the recording: it is skipped)
             detail = _exception_detail(error)  # what run raised is named by its class, never a word
         else:
@@ -588,7 +602,7 @@ def run_checkpoint(
                 quality = _quality_metrics(plugin, returned.metrics)
                 prepared = _checked_views(plugin, returned, host)
             except Exception as error:  # noqa: BLE001  (an output that fails a check skips the plugin)
-                detail = _skip_detail(error, known)
+                detail = _skip_detail(error)
         if detail is not None:
             outcome.status, outcome.code, outcome.detail = "skipped", PLUGIN_FAILED, detail
             plan.add_skip(plugin.name, plugin.function, PLUGIN_FAILED, plugin=plugin.identity())
