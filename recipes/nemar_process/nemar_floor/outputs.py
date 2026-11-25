@@ -165,6 +165,13 @@ def _strongest_line(result: FloorResult) -> tuple[int | None, float | None, floa
     return best, measured[best], result.line_after.get(best)
 
 
+def line_frequency(result: FloorResult) -> int | None:
+    """The line frequency the floor measured, its table's ``line_hz``: whichever of 50 and 60 Hz had the
+    larger excess before the filters, or None when neither was measured (what nemar-ica hands a quality
+    plugin as the floor's ``line_hz``)."""
+    return _strongest_line(result)[0]
+
+
 # The summary metric names the floor writes (``summary_metrics``): bare names, so a plugin's headline
 # metric, always ``<plugin>:<name>`` (``metric_not_prefixed``), never takes one.
 SUMMARY_METRICS = (

@@ -57,6 +57,7 @@ COLUMNS = (
     Column("pct_good_samples", "float", 4),
     Column("line_db_before", "float", 3),
     Column("pct_brain_components", "float", 4),
+    Column("skipped_steps", "str"),
     Column("record_content_sha256", "str"),
 )
 
@@ -139,10 +140,16 @@ def run_recording(
     *,
     loaded: io.Loaded | None = None,
 ) -> RecordingProduct:
-    """Load (unless a loaded recording is handed in, as tests do), process and write the product."""
+    """Load (unless a loaded recording is handed in, as tests do), process and write the product, with
+    the serving index the run was given, if any (``--serving-index``)."""
     loaded = loaded if loaded is not None else io.load(recording)
     return outputs.produce(
-        recording, context, directory, loaded, profile=steps.INPUT_PROFILES["bids"]
+        recording,
+        context,
+        directory,
+        loaded,
+        profile=steps.INPUT_PROFILES["bids"],
+        serving=context.options.get(options.SERVING_INDEX.name),
     )
 
 
@@ -164,6 +171,14 @@ def zarr_run_recording(
         profile=steps.INPUT_PROFILES["zarr"],
         nemar_extra=source.recording_extras(recording.path),
     )
+
+
+def preflight(given: Mapping[str, Any]) -> None:
+    """Before anything is created: the engine asked for can run (``engines.preflight``, exit 8), and
+    the pinned quality plugins load (``outputs.quality_plugins``; a pin that cannot be loaded is
+    ``plugins.PluginLoadError``, which the command reports and exits on)."""
+    engines.preflight(given)
+    outputs.quality_plugins()
 
 
 def run_facts(context: RunContext) -> dict[str, Any]:
@@ -208,8 +223,8 @@ BIDS_RECIPE = Recipe(
     run_recording=run_recording,
     threads=threads,
     engine_extra=engine_extra,
-    options=(INPUT_OPTION, *options.OPTIONS),
-    preflight=engines.preflight,
+    options=(INPUT_OPTION, *options.OPTIONS, options.SERVING_INDEX),
+    preflight=preflight,
     dataset_extras=dataset_extras,
     checkpoints=steps.CHECKPOINTS,
 )

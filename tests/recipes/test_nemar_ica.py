@@ -97,13 +97,23 @@ def tiny(tmp_path_factory):
 
 def test_every_file_nemar_ica_writes_for_a_recording_is_a_reserved_view_name(tiny):
     """No plugin's view file may take a name of nemar-ica's own (views.RESERVED_SUFFIXES): each file
-    the recipe writes for a recording, the record's included, is one of them."""
+    the recipe writes for a recording, the record's included, is one of them; the others are its
+    plugins' view files, and none of those is reserved."""
     from nemar_process.common import views
 
     _, _, product, _ = tiny
+    plugin_files = {
+        entry["location"]
+        for view in product.record["extensions"]["nemar"]["views"]
+        if "plugin" in view["source"]
+        for entry in view.get("data", [])
+        if entry["role"] != steps.LAYOUT_ROLE  # the spectrum's layout is the recipe's _chanlocs.tsv
+    }
+    assert len(plugin_files) == 2  # _icclasses.json and _spectrum.tsv
     for name in product.files:
         suffix = name.rsplit("/", 1)[-1].rsplit("_", 1)[1].split(".")[0]
-        assert suffix.casefold() in views.RESERVED_SUFFIXES, name
+        reserved = suffix.casefold() in views.RESERVED_SUFFIXES
+        assert reserved is (name not in plugin_files), name
 
 
 def block_of(product) -> dict:
@@ -140,7 +150,11 @@ def test_the_recipe_is_one_recipe_with_two_inputs_and_the_options_the_card_names
         "--ica-threads": 1,
         "--ica-max-iter": 4000,
         "--time-budget-s": None,
+        "--serving-index": None,
     }
+    # the serving index is a dataset directory's: on the serving copy the store read is named
+    zarr_flags = {option.flag for option in RECIPE.reading("zarr").options}
+    assert "--serving-index" not in zarr_flags
     assert RECIPE.reading("zarr").id == "nemar-ica"
     assert RECIPE.seeds == ()
 
@@ -161,11 +175,13 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
             "components.tsv",
             "filters.json",
             "ica.json",
+            "icclasses.json",  # nemar-quality's view
             "mixing.tsv",
             "qc.json",
             "samplemask.tsv",
             "servingunmixing.tsv",
             "signalJourney.json",
+            "spectrum.tsv",  # nemar-spectrum's view
             "sphere.tsv",
             "unmixing.tsv",
             "weights.tsv",
@@ -177,13 +193,17 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
     assert listed == {name.removeprefix(stem) for name in written} - {"signalJourney.json"}
 
 
-def test_the_plan_is_the_floors_steps_then_the_four_of_the_recipe(tiny):
+def test_the_plan_is_the_floors_steps_then_the_four_of_the_recipe_then_its_plugins(tiny):
     _, fit, product, _ = tiny
     plan = [step["stepId"] for step in product.record["processingSteps"]]
-    assert plan[-4:] == list(steps.STEP_ORDER)
+    plugins = [name for name, _ in steps.PLUGINS]
+    assert plan[-2:] == plugins == ["nemar-quality", "nemar-spectrum"]
+    assert plan[-6:-2] == list(steps.STEP_ORDER)
     assert plan[0] == "load"
     assert "flatline" in plan
-    assert "qc" in plan[:-4]
+    assert "qc" in plan[:-6]
+    # the plugins ran on a copy of the plan: the decomposition's own is the recipe's steps alone
+    assert [step.step_id for step in fit.floor_result.plan.steps][-4:] == list(steps.STEP_ORDER)
     assert product.record["pipelineInfo"]["name"] == "nemar-ica"
     # the floor's decisions carry the hash they would have had as the floor's own plan
     nemar = product.record["extensions"]["nemar"]
@@ -327,21 +347,30 @@ def test_the_record_holds_the_floors_and_nemar_icas_metrics_each_produced_by_nem
     assert metrics["percentGoodChannels"]["value"] == product.row["pct_good_channels"]
 
 
-def test_the_row_carries_the_floors_three_metrics_and_no_brain_share_without_its_plugin(tiny):
+def test_the_row_carries_the_floors_three_metrics_and_the_brain_share_of_its_plugin(tiny):
     _, fit, product, _ = tiny
     values = floor_outputs.metric_values(fit.floor_result)
     row = product.row
     assert row["pct_good_channels"] == values["percentGoodChannels"] is not None
     assert row["pct_good_samples"] == values["percentGoodSamples"] is not None
     assert row["line_db_before"] == values["lineNoiseBeforeDb"]
-    # nemar-quality is not wired into the recipe yet: its share is missing, never a recipe value
-    assert row["pct_brain_components"] is None
+    # the share is nemar-quality's metric in the record, never a recipe value
+    (quality,) = [
+        step for step in product.record["processingSteps"] if step["stepId"] == "nemar-quality"
+    ]
+    metric = quality["qualityMetrics"]["nemar-quality:percentBrainComponents"]
+    assert row["pct_brain_components"] == metric["value"] is not None
+    assert (
+        product.record["summaryMetrics"]["nemar-quality:percentBrainComponents"]
+        == (metric["value"])
+    )
     columns = [column.name for column in RECIPE.columns]
-    assert columns[-5:] == [
+    assert columns[-6:] == [
         "pct_good_channels",
         "pct_good_samples",
         "line_db_before",
         "pct_brain_components",
+        "skipped_steps",
         "record_content_sha256",
     ]
     assert set(row) == set(columns)
@@ -749,8 +778,8 @@ def dataset_record_of(out: Path) -> dict:
 
 def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(cli, tmp_path):
     """nemar-ica writes the neuroschema dataset document too: its own three metrics, the floor's three
-    that the legacy summary bounded, and nemar-quality's brain share, missing for every recording
-    until the plugin runs in the recipe."""
+    that the legacy summary bounded, and nemar-quality's brain share, which fills from the plugin's
+    metric in each recording's record (the table's pct_brain_components)."""
     from nemar_process.common import dataquality
 
     dataset = located_dataset(tmp_path / "ds", subjects=2)
@@ -771,18 +800,18 @@ def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(c
         "lineNoiseBeforeDb": "dB",
         "nemar-quality:percentBrainComponents": "%",
     }
+    rows = table_of(out)
+    shares = sorted(float(row["pct_brain_components"]) for row in rows)
     brain = entry["distributions"]["nemar-quality:percentBrainComponents"]
-    assert (brain["n"], brain["histogram"]["missing"]) == (0, 2)
+    assert (brain["n"], brain["histogram"]["missing"]) == (2, 0)
     assert entry["observed_range"]["nemar-quality:percentBrainComponents"] == {
-        "min": None,
-        "max": None,
+        "min": shares[0],
+        "max": shares[-1],
     }
     rank = entry["distributions"]["icaRank"]
     assert rank["n"] == 2
     assert entry["observed_range"]["icaRank"] == {"min": rank["min"], "max": rank["max"]}
-    rows = table_of(out)
     assert {row["rank"] for row in rows} == {str(rank["min"]), str(rank["max"])}
-    assert all(row["pct_brain_components"] == "n/a" for row in rows)
 
 
 @pytest.fixture

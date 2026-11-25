@@ -94,6 +94,7 @@ from nemar_process.common import (
     files,
     io,
     naming,
+    plugins,
     progress,
     records,
     table,
@@ -714,6 +715,11 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         except EngineUnavailable as error:
             print("engine_unavailable: {}".format(error.reason), file=sys.stderr)
             return EXIT_ENGINE_UNAVAILABLE
+        except plugins.PluginLoadError as error:
+            # a pinned plugin of the image that cannot be loaded as declared: a fault of the image,
+            # named by the plugin and the loader's word
+            print("plugin_unloadable: {} {}".format(error.name, error.word), file=sys.stderr)
+            return EXIT_INTERNAL
         # the recipe's seeds and engine fields are checked before anything is created too: a hook
         # that is refused is a fault of the recipe, named by its hook and the class of the refusal
         try:

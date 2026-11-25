@@ -19,16 +19,25 @@ import dataclasses
 import json
 import math
 import random
+from typing import Any
 
 import numpy as np
 import pytest
 from nemar_process import cli as command
-from nemar_process.common import determinism, device, files, io, records, views
+from nemar_process.common import determinism, device, files, io, plugins, records, views
 from nemar_process.common.errors import RecordingError
 from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import RECIPE, outputs, pipeline, steps
 from nemar_process.nemar_ica.options import Settings
-from recipe_support import DATASET, ROOT, copy_fixture, loaded_fixture, make_context, write_set
+from recipe_support import (
+    DATASET,
+    DATASET_ID,
+    ROOT,
+    copy_fixture,
+    loaded_fixture,
+    make_context,
+    write_set,
+)
 from views_support import (
     ICLABEL,
     LABEL,
@@ -38,6 +47,7 @@ from views_support import (
     layout,
     make_host,
     product_files,
+    serving_index_of,
 )
 
 VECTORS = ROOT / "tests" / "contract" / "neuroschema-views"
@@ -46,7 +56,18 @@ CLASSES = [outputs.class_column(name) for name in ICLABEL]
 # the cut: Fp1 to P4, O2 and Pg1, which has no position (so its places are n/a), 60 seconds
 CUT_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 9, 19]
 CUT_SECONDS = 60.0
-ARCHIVE_GROUP = "eeg_200hz"
+# the serving copy's group of the fixture recording, as its serving index lists it (the converter keeps
+# 200 Hz, under its 250 Hz ceiling), and the cut's samples on that grid
+SERVING_GROUP = "eeg_200hz"
+CUT_SAMPLES = 12000
+PLUGIN_VIEWS = ["icclasses", "spectrum"]
+
+
+def index_for(path, *, rate=200.0, samples=CUT_SAMPLES, dataset_id=DATASET_ID, groups=None):
+    """The serving index of the fixture dataset, listing the recording at ``path`` with one EEG group
+    (or ``groups``)."""
+    listed = [(SERVING_GROUP, "EEG", rate, 21, samples)] if groups is None else groups
+    return serving_index_of([(path, listed)], dataset_id=dataset_id)
 
 
 def vectors(name):
@@ -771,14 +792,15 @@ def write(recording, fit, directory, **given):
 
 @pytest.fixture(scope="module")
 def archive(recording, fixture_fit, tmp_path_factory):
-    """The product with the serving copy's group named: every view of the recipe."""
+    """The product of a run given the serving index that lists the recording: every view of the
+    recipe, then the plugins'."""
     directory = tmp_path_factory.mktemp("archive")
-    return directory, write(recording, fixture_fit, directory, archive_group=ARCHIVE_GROUP)
+    return directory, write(recording, fixture_fit, directory, serving=index_for(recording.path))
 
 
 @pytest.fixture(scope="module")
 def unnamed(recording, fixture_fit, tmp_path_factory):
-    """The product of a dataset directory as the command writes it: no store is named."""
+    """The product of a dataset directory's run given no serving index: no store is named."""
     directory = tmp_path_factory.mktemp("unnamed")
     return directory, write(recording, fixture_fit, directory)
 
@@ -940,31 +962,57 @@ def test_the_layouts_frame_is_the_stated_name_or_n_a(fixture_fit, stated, frame)
     assert outputs.layout_frame(fit) == frame
 
 
-def test_a_dataset_directory_names_no_store_so_declares_only_the_component_maps(unnamed):
+def test_without_a_serving_index_the_views_of_the_serving_copy_are_skipped_with_a_word(unnamed):
+    """A run of a dataset directory given no serving index names no store, never one made up: the
+    maps and the plugins' views are declared, and the two views of the serving copy are skipped with
+    no_serving_index; the record says no index was given."""
     directory, product = unnamed
     nemar = product.record["extensions"]["nemar"]
-    assert [view["key"] for view in nemar["views"]] == ["icmaps"]
-    assert "views_skipped" not in nemar  # no recording of such a run declares the other two
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", *PLUGIN_VIEWS]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "no_serving_index"},
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "no_serving_index"},
+    ]
+    assert nemar["ica"]["serving_index"] is None
     assert records.views_problems(product.record) == []
     check_view_files(directory, product.record)
     product_files(directory)  # TSV and JSON only
 
 
-def test_with_its_group_named_an_archive_run_declares_the_views_of_the_serving_copy(
+def test_with_its_row_in_the_serving_index_an_archive_run_declares_the_views_of_the_serving_copy(
     archive, recording
 ):
-    """Open question 1: on the archive, the activations are declared with no store digest, matched
-    by label and captioned as not checked against the decomposition's input."""
+    """Open question 1, as the lead ruled it: on the archive, the activations name the group the
+    serving index lists for the recording, with no store digest, matched by label and captioned as not
+    checked against the decomposition's input; the record names the index and the row it read."""
     directory, product = archive
     nemar = product.record["extensions"]["nemar"]
-    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icactivity", "midsegment"]
+    assert [view["key"] for view in nemar["views"]] == [
+        "icmaps",
+        "icactivity",
+        "midsegment",
+        *PLUGIN_VIEWS,
+    ]
+    assert "views_skipped" not in nemar
     activity = views_of(product)["icactivity"]
     (signal,) = [item["store"] for item in activity["inputs"] if item["role"] == "signal"]
     assert signal == {
         "recording": recording.path,
-        "group": ARCHIVE_GROUP,
+        "group": SERVING_GROUP,
         "content_sha256": None,
         "profile": "archive",
+    }
+    index = index_for(recording.path)
+    assert nemar["ica"]["serving_index"] == {
+        "sha256": index.sha256,
+        "dataset_id": DATASET_ID,
+        "source_commit": "c" * 40,
+        "row": {
+            "path": recording.path,
+            "group": SERVING_GROUP,
+            "rate": 200.0,
+            "n_samples": CUT_SAMPLES,
+        },
     }
     transform = activity["transform"]["parameters"]
     block = nemar["ica"]
@@ -1009,6 +1057,182 @@ def test_the_signal_window_lies_inside_the_good_sample_mask(archive, fixture_fit
     assert pipeline.midsegment(good, rate, 2) == fixture_fit.window
 
 
+def floor_spans(fit):
+    """The spans the good-sample mask leaves out, in seconds on the floor's grid, written out here from
+    the floor's sample mask and ASR's spans (not ``pipeline.bad_intervals``)."""
+    rate = float(fit.floor_result.srate_hz)
+    bad = np.zeros(int(fit.floor_result.work["pnts"]), dtype=bool)
+    if fit.floor_result.sample_mask is not None:
+        bad |= ~np.asarray(fit.floor_result.sample_mask, dtype=bool)
+    for start, stop in fit.bursts["spans"]:
+        bad[start:stop] = True
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], bad.astype(np.int8), [0]))))
+    return [(int(a) / rate, int(b) / rate) for a, b in zip(edges[::2], edges[1::2], strict=True)]
+
+
+@pytest.mark.parametrize(
+    ("rate", "samples"),
+    [(100.0, 6000), (128.0, 7680), (200.0, CUT_SAMPLES), (250.0, 15000)],
+    ids=["resampled_to_100", "resampled_to_128", "as_read", "resampled_up_to_250"],
+)
+def test_on_a_dataset_directory_the_window_is_chosen_on_the_serving_copys_grid(
+    recording, fixture_fit, tmp_path, rate, samples
+):
+    """The renderer draws the window from the serving copy, at the rate and length its index lists
+    (the converter may have resampled): the window's samples on that grid, by the times rule, lie
+    outside every row of _badsegments.tsv as written and every span the floor's mask leaves out, and
+    of the windows that do, it is the one nearest the middle (the definition, sample by sample)."""
+    group = [("eeg_{:g}hz".format(rate), "EEG", rate, 21, samples)]
+    product = write(
+        recording, fixture_fit, tmp_path, serving=index_for(recording.path, groups=group)
+    )
+    window = views_of(product)["midsegment"]["parameters"]
+    _, rows = read_table(named(tmp_path, "badsegments.tsv"))
+    spans = [(float(row[0]), float(row[0]) + float(row[1])) for row in rows]
+    spans += floor_spans(fixture_fit)
+    good = np.array([all(not (a <= k / rate < b) for a, b in spans) for k in range(samples)])
+    first = brute_force(good, rate, 2)
+    assert first is not None
+    assert window["start_s"] == first / rate
+    chosen = [k for k in range(samples) if window["start_s"] <= k / rate < window["start_s"] + 2]
+    assert chosen
+    assert good[chosen].all()
+    assert records.views_problems(product.record) == []
+
+
+def test_the_serving_window_keeps_out_of_the_floors_spans_and_of_every_row_as_written(
+    recording, fixture_fit
+):
+    """Without the table, the window still avoids every span the floor's mask leaves out; a row of
+    the table as written (here one the floor never found, over that window) moves it off the row."""
+    row = index_for(recording.path).row(recording.path, DATASET_ID)
+    assert row is not None
+    rate = row.rate_hz
+    spans = floor_spans(fixture_fit)
+
+    def chosen(window):
+        start = window["start_s"]
+        return [k for k in range(row.n_samples) if start <= k / rate < start + 2]
+
+    alone = outputs.serving_window(fixture_fit, row, None)
+    assert alone is not None
+    assert all(not (a <= k / rate < b) for k in chosen(alone) for a, b in spans)
+    onset = alone["start_s"] + 0.5
+    text = views.table_text(
+        ("onset", "duration", "label", "nemar_reason"), [[onset, 0.25, "bad_window", "x"]]
+    )
+    moved = outputs.serving_window(fixture_fit, row, product_file("badsegments", text))
+    assert moved is not None
+    assert moved["start_s"] != alone["start_s"]
+    assert all(not (onset <= k / rate < onset + 0.25) for k in chosen(moved))
+
+
+def test_the_grid_mask_marks_the_samples_whose_times_fall_in_a_span():
+    """``[low, high)`` in seconds, each sample's time ``k / rate`` as a renderer computes it."""
+    found = pipeline.grid_mask([(0.02, 0.05), (0.095, 1.0)], 100.0, 12)
+    assert found.tolist() == [k / 100.0 < 0.02 or 0.05 <= k / 100.0 < 0.095 for k in range(12)]
+    assert pipeline.grid_mask([], 3.0, 4).all()
+    assert pipeline.grid_mask([(0.0, 10.0)], 3.0, 0).size == 0
+
+
+@pytest.mark.parametrize(
+    ("index", "dataset"),
+    [
+        (lambda path: index_for("sub-X/eeg/sub-X_task-COVID_eeg.edf"), DATASET_ID),
+        (lambda path: index_for(path, dataset_id="xx000002"), DATASET_ID),
+        (lambda path: index_for(path), None),
+        (
+            lambda path: index_for(
+                path,
+                groups=[
+                    (SERVING_GROUP, "EEG", 200.0, 21, CUT_SAMPLES),
+                    ("eeg_100hz", "EEG", 100.0, 21, 6000),
+                ],
+            ),
+            DATASET_ID,
+        ),
+    ],
+    ids=[
+        "another_recording",
+        "another_datasets_index",
+        "a_run_with_no_dataset_id",
+        "two_eeg_groups",
+    ],
+)
+def test_an_index_with_no_row_for_the_recording_skips_the_serving_views_with_a_word(
+    recording, fixture_fit, tmp_path, index, dataset
+):
+    """An index that does not list the recording, as a store of the run's dataset with one EEG group,
+    names no group: the two views of the serving copy are skipped with not_in_serving_index, and the
+    record keeps the index's digest and no row."""
+    given = index(recording.path)
+    context = dataclasses.replace(
+        run_context(), identity=dataclasses.replace(make_context().identity, dataset_id=dataset)
+    )
+    with determinism.pinned_threads(1), command.quiet():
+        product = outputs.write_product(
+            recording,
+            context,
+            tmp_path,
+            fixture_fit,
+            [],
+            profile=steps.INPUT_PROFILES["bids"],
+            serving=given,
+        )
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", *PLUGIN_VIEWS]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "not_in_serving_index"},
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "not_in_serving_index"},
+    ]
+    assert nemar["ica"]["serving_index"]["sha256"] == given.sha256
+    assert nemar["ica"]["serving_index"]["row"] is None
+    assert records.views_problems(product.record) == []
+
+
+def test_a_store_is_named_only_from_a_row_of_the_index(recording, fixture_fit):
+    """``signal_store`` takes a row read from an index, of this recording, and nothing else: no
+    free-text group can be handed to it."""
+    row = index_for(recording.path).row(recording.path, DATASET_ID)
+    assert row is not None
+    store = outputs.signal_store(recording, fixture_fit, row)
+    assert store is not None
+    assert store["store"]["group"] == SERVING_GROUP
+    forgeries: list[Any] = [
+        dataclasses.replace(row, path="sub-02/eeg/sub-02_task-COVID_eeg.edf"),
+        {"group": SERVING_GROUP},
+        SERVING_GROUP,
+    ]
+    for forged in forgeries:
+        with pytest.raises(ValueError, match="row of the serving index"):
+            outputs.signal_store(recording, fixture_fit, forged)
+
+
+def test_the_serving_copy_takes_no_serving_index(recording, fixture_fit, tmp_path):
+    """A recording of the serving copy names the store it read: an index handed to it is the
+    caller's fault, refused before anything is written."""
+    from nemar_process.common.zarr_input import ServingStore
+
+    serving = dataclasses.replace(
+        fixture_fit,
+        decomposition_input={**fixture_fit.decomposition_input, "source": "serving_copy"},
+        serving=ServingStore(
+            recording.path, SERVING_GROUP, "a" * 64, "uV", tuple(fixture_fit.good_channels)
+        ),
+    )
+    with pytest.raises(ValueError, match="not an index"):
+        outputs.write_product(
+            recording,
+            run_context(),
+            tmp_path,
+            serving,
+            [],
+            profile=steps.INPUT_PROFILES["zarr"],
+            serving=index_for(recording.path),
+        )
+    assert list(tmp_path.iterdir()) == []  # refused before anything is written
+
+
 def test_labels_that_fall_back_skip_the_activations_with_a_word(recording, fixture_fit, tmp_path):
     """Labels that cannot head columns (two of one name: the matrices fall back to Ch001 and so on)
     match no channel of the serving copy, so the activations are not declared, and the record says
@@ -1022,9 +1246,9 @@ def test_labels_that_fall_back_skip_the_activations_with_a_word(recording, fixtu
     spoiled = dataclasses.replace(
         fixture_fit, good_channels=labels, eeg={**fixture_fit.eeg, "chanlocs": chanlocs}
     )
-    product = write(recording, spoiled, tmp_path, archive_group=ARCHIVE_GROUP)
+    product = write(recording, spoiled, tmp_path, serving=index_for(recording.path))
     nemar = product.record["extensions"]["nemar"]
-    assert [view["key"] for view in nemar["views"]] == ["icmaps", "midsegment"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "midsegment", *PLUGIN_VIEWS]
     assert nemar["views_skipped"] == [
         {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "labels_unusable"}
     ]
@@ -1036,16 +1260,48 @@ def test_labels_that_fall_back_skip_the_activations_with_a_word(recording, fixtu
 def test_no_good_window_skips_the_signal_window_with_a_word(recording, fixture_fit, tmp_path):
     product = write(
         recording,
-        dataclasses.replace(fixture_fit, window=None),
+        fixture_fit,
         tmp_path,
-        archive_group=ARCHIVE_GROUP,
+        serving=index_for(recording.path, samples=1),  # one sample of the serving copy: no window
     )
     nemar = product.record["extensions"]["nemar"]
-    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icactivity"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icactivity", *PLUGIN_VIEWS]
     assert nemar["views_skipped"] == [
         {"key": "midsegment", "kind": "nemar.signal-window", "reason": "no_good_window"}
     ]
     assert records.views_problems(product.record) == []
+
+
+def test_no_good_window_on_the_serving_copy_skips_the_signal_window_with_a_word(
+    recording, fixture_fit, tmp_path
+):
+    """On the serving copy the window is the one chosen on the grid the floor read (the same grid):
+    without one, the signal window is skipped with no_good_window there too."""
+    from nemar_process.common.zarr_input import ServingStore
+
+    labels = list(fixture_fit.good_channels)
+    store = {"path": recording.path, "group": SERVING_GROUP, "content_sha256": "a" * 64}
+    serving = dataclasses.replace(
+        fixture_fit,
+        decomposition_input={
+            **copy.deepcopy(fixture_fit.decomposition_input),
+            "source": "serving_copy",
+            "store": store,
+        },
+        serving=ServingStore(recording.path, SERVING_GROUP, "a" * 64, "uV", tuple(labels)),
+        store_rows=list(range(len(labels))),
+        window=None,
+    )
+    with determinism.pinned_threads(1), command.quiet():
+        product = outputs.write_product(
+            recording, run_context(), tmp_path, serving, [], profile=steps.INPUT_PROFILES["zarr"]
+        )
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icactivity", *PLUGIN_VIEWS]
+    assert nemar["views_skipped"] == [
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "no_good_window"}
+    ]
+    assert nemar["ica"]["serving_index"] is None
 
 
 def test_a_view_the_writer_refuses_fails_the_recording_and_writes_nothing(
@@ -1055,7 +1311,7 @@ def test_a_view_the_writer_refuses_fails_the_recording_and_writes_nothing(
     given["channels"] = given["channels"][::-1]
     spoiled = dataclasses.replace(fixture_fit, decomposition_input=given)
     with pytest.raises(RecordingError) as failed:
-        write(recording, spoiled, tmp_path, archive_group=ARCHIVE_GROUP)
+        write(recording, spoiled, tmp_path, serving=index_for(recording.path))
     assert (failed.value.code, failed.value.step, failed.value.detail) == (
         "internal_error",
         "record",
@@ -1095,7 +1351,7 @@ def test_the_floor_writes_its_tables_as_the_texts_it_names(tmp_path, recording):
 
 def test_the_same_fit_gives_the_same_layout_and_views(recording, fixture_fit, archive, tmp_path):
     directory, first = archive
-    second = write(recording, fixture_fit, tmp_path, archive_group=ARCHIVE_GROUP)
+    second = write(recording, fixture_fit, tmp_path, serving=index_for(recording.path))
     assert (
         named(tmp_path, "chanlocs.tsv").read_bytes()
         == named(directory, "chanlocs.tsv").read_bytes()
@@ -1112,6 +1368,7 @@ def test_the_host_is_the_decompositions_channels_components_and_classes(recordin
     assert host.classes == tuple(fixture_fit.classes) == ICLABEL
     assert host.srate_hz == fixture_fit.floor_result.srate_hz
     assert host.roles == {"layout": placed}
+    assert host.withheld == {}
     assert host.sidecar == {"reference": "common"}  # the fixture's eeg.json states no cap model
     assert placed.cells("name") == list(fixture_fit.good_channels)
     assert steps.CHANLOCS in host.reserved
@@ -1203,7 +1460,7 @@ def test_labels_that_fall_back_skip_the_activations_on_the_serving_copy_too(
         )
     nemar = product.record["extensions"]["nemar"]
     assert nemar["ica"]["browser_transform"]["match"] == "store_row"
-    assert [view["key"] for view in nemar["views"]] == ["icmaps", "midsegment"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "midsegment", *PLUGIN_VIEWS]
     assert nemar["views_skipped"] == [
         {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "labels_unusable"}
     ]
@@ -1286,7 +1543,7 @@ def rotated(recording, tmp_path_factory):
     with determinism.pinned_threads(1), command.quiet():
         fit = pipeline.process(loaded, settings, device.resolve("cpu"))
     directory = tmp_path_factory.mktemp("ctf-product")
-    return directory, fit, write(found, fit, directory, archive_group=ARCHIVE_GROUP)
+    return directory, fit, write(found, fit, directory, serving=index_for(found.path))
 
 
 def test_turned_positions_draw_no_map_and_write_no_place(rotated):
@@ -1296,10 +1553,15 @@ def test_turned_positions_draw_no_map_and_write_no_place(rotated):
     directory, fit, product = rotated
     nemar = product.record["extensions"]["nemar"]
     assert nemar["ica"]["positions"]["withheld"] == "frame_rotated"
-    assert [view["key"] for view in nemar["views"]] == ["icactivity", "midsegment"]
+    assert [view["key"] for view in nemar["views"]] == ["icactivity", "midsegment", "icclasses"]
     assert nemar["views_skipped"] == [
-        {"key": "icmaps", "kind": "nemar.ic-maps", "reason": "frame_rotated"}
+        {"key": "icmaps", "kind": "nemar.ic-maps", "reason": "frame_rotated"},
+        {"key": "spectrum", "kind": "nemar.spectrum", "reason": "frame_rotated"},
     ]
+    # the spectrum's plugin ran: only its view, on the withheld layout, is skipped
+    statuses = {entry["name"]: entry["status"] for entry in nemar["plugins"]}
+    assert statuses == {"nemar-quality": "ran", "nemar-spectrum": "ran"}
+    assert not list(directory.rglob("*_spectrum.tsv"))
     header, rows = read_table(named(directory, "chanlocs.tsv"))
     assert tuple(header) == steps.CHANLOCS_COLUMNS
     assert [row[0] for row in rows] == list(fit.good_channels)
@@ -1320,8 +1582,14 @@ def test_a_host_with_turned_positions_offers_no_layout(rotated, recording):
             "components": product_file("components", ""),
         },
     )
-    assert found.skipped == [{"key": "icmaps", "kind": "nemar.ic-maps", "reason": "frame_rotated"}]
-    assert outputs.view_host(recording, fit, None).roles == {}
+    assert found.views.skipped[0] == {
+        "key": "icmaps",
+        "kind": "nemar.ic-maps",
+        "reason": "frame_rotated",
+    }
+    assert found.host.roles == {}
+    assert found.host.withheld == {"layout": "frame_rotated"}  # a plugin's view on it says why
+    assert outputs.view_host(recording, fit, None).withheld == {}
 
 
 def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
@@ -1347,10 +1615,27 @@ def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
         fixture_fit,
         block,
         {**made.named, **outputs.floor_tables(recording, fixture_fit), steps.CHANLOCS: big},
-        archive_group=ARCHIVE_GROUP,
+        serving_row=index_for(recording.path).row(recording.path, DATASET_ID),
     )
-    assert found.skipped == [{"key": "icmaps", "kind": "nemar.ic-maps", "reason": "cap_exceeded"}]
-    assert [view.key for view in found.views] == ["icactivity", "midsegment"]
+    assert found.views.skipped == [
+        {"key": "icmaps", "kind": "nemar.ic-maps", "reason": "cap_exceeded"}
+    ]
+    assert [view.key for view in found.views.views] == ["icactivity", "midsegment"]
+    assert found.host.withheld == {"layout": "cap_exceeded"}
+    # nemar-spectrum's view on that layout is skipped with the same word, and the plugin ran
+    plan = copy.deepcopy(fixture_fit.floor_result.plan)
+    run = plugins.run_checkpoint(
+        outputs.quality_plugins(),
+        "quality",
+        outputs.plugin_inputs(fixture_fit, found.host),
+        plan,
+        host=found.host,
+    )
+    assert [outcome.status for outcome in run.outcomes] == ["ran", "ran"]
+    assert run.views_skipped == [
+        {"key": "spectrum", "kind": "nemar.spectrum", "reason": "cap_exceeded"}
+    ]
+    assert list(run.views) == ["nemar-quality"]
 
 
 def test_the_serving_copys_positions_in_those_frames_are_read_as_stated():

@@ -1,5 +1,5 @@
 """``nemar-ica``'s command-line options (``--ica-engine``, ``--ica-device``, ``--ica-threads``,
-``--ica-max-iter``) and the settings a run takes from them.
+``--ica-max-iter``, and on a dataset directory ``--serving-index``) and the settings a run takes from them.
 
 Only the registry's invocation is dispatched by the platform: ``pamica``, up to 4000 iterations, one
 thread, device ``auto``. The options that change values (engine, iterations, threads) are for
@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from nemar_process.common import device
+from nemar_process.common import device, serving_index
 from nemar_process.common.recipe import TIME_BUDGET_S, Option
 from nemar_process.nemar_ica import steps
 
@@ -60,6 +60,20 @@ MAX_ITER = Option(
 )
 
 OPTIONS = (ENGINE, DEVICE, THREADS, MAX_ITER, TIME_BUDGET_S)
+
+# On a dataset directory only: the serving copy's index, as a file, from which the views of the serving
+# copy take each recording's channel group (``common/serving_index.py``). Without it those views are
+# skipped with ``no_serving_index``. Read and checked once, while the arguments are parsed: a file that
+# is not a serving index is a usage error (exit 2), before anything is created.
+SERVING_INDEX = Option(
+    "serving_index",
+    "--serving-index",
+    serving_index.serving_index,
+    None,
+    "the serving copy's index.json, as a file (dataset directories only): the views of the serving "
+    "copy (activations, signal window) name each recording's EEG group as it lists it, and are "
+    "skipped with a word when it is not given or does not list the recording",
+)
 
 
 @dataclass(frozen=True)
