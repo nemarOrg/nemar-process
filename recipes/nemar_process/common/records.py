@@ -8,10 +8,11 @@ record and the distributions to summarize (``recipe.py``).
 
 What the schema cannot say goes in ``extensions.nemar`` (docs/upstream.md; signalJourney/signalJourney#7 to #9): the
 checksum of every output file (``outputTargets`` has no checksum field), the identity of the run,
-the engine, the plan hash, and the recording's quality views (``views`` and ``views_skipped``,
-neuroschema 0.6.0 declarations, ADR 0137). The PyPI validator checks neither timestamps nor non-finite
-numbers nor references, and knows nothing of views, so ``check`` does (``TIMESTAMP``; the writer
-refuses NaN; ``references_problems``; ``views_problems``).
+the engine, the plan hash, the recording's quality views (``views`` and ``views_skipped``,
+neuroschema 0.6.0 declarations, ADR 0137) and its recipe metrics (``metrics``, neuroschema
+``qualityMetric`` objects whose producer is the recipe). The PyPI validator checks neither timestamps nor non-finite
+numbers nor references, and knows nothing of views or metrics, so ``check`` does (``TIMESTAMP``; the
+writer refuses NaN; ``references_problems``; ``views_problems``; ``metrics_problems``).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import bisect
 import copy
 import hashlib
+import math
 import re
 import statistics
 from collections.abc import Mapping, Sequence
@@ -26,12 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nemar_process.common import build, files, naming, views
+from nemar_process.common import build, contract, files, naming, views
 from nemar_process.common import plan as plans
 from nemar_process.common.determinism import canonical_json, rounded, utc_now
 from nemar_process.common.errors import TIME_BUDGET
 from nemar_process.common.io import Recording
-from nemar_process.common.recipe import Recipe, RecipeInfo, RunContext
+from nemar_process.common.recipe import BARE_METRIC_RE, Recipe, RecipeInfo, RecipeMetric, RunContext
 
 SJ_VERSION = "0.1.0"
 SCHEMA_VERSION = "0.1.0"
@@ -354,6 +356,7 @@ def problems_of(record: Mapping[str, Any], validator: Any) -> list[tuple[str, st
     found += [("timestamp", problem) for problem in timestamp_problems(record)]
     found += [("reference", problem) for problem in references_problems(record)]
     found += [("views", problem) for problem in views_problems(record)]
+    found += [("metrics", problem) for problem in metrics_problems(record)]
     if record.get("extensions", {}).get("nemar", {}).get("profile") == "recording":
         found += [("plan_hash", problem) for problem in plans.verify(dict(record))]
     return found
@@ -367,33 +370,120 @@ def check(record: Mapping[str, Any], validator: Any) -> list[str]:
 # ---- the dataset record -----------------------------------------------------------------------
 
 
-def distribution(values: Sequence[float], edges: Sequence[float]) -> dict[str, Any]:
-    """The count, min, median and max of the values and a histogram with fixed edges.
+def distribution(
+    values: Sequence[float | None],
+    edges: Sequence[float],
+    unit: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """The count, min, median and max of the values, their unit, and a histogram with fixed edges.
 
     A value belongs to the bin ``[edge_i, edge_i+1)``; the last bin is closed; a value outside the
-    edges is counted under ``underflow`` or ``overflow``.
+    edges is counted under ``underflow`` or ``overflow``, and a value that is missing (None) or not
+    finite is in no bin and not in ``n``, counted under ``missing``. So ``n`` is the sum of the bins,
+    ``underflow`` and ``overflow``, and min, median and max are None exactly when ``n`` is 0
+    (neuroschema 0.6.0 ``dataQuality`` ``distribution``). The median is rounded to four decimals and
+    kept within min and max.
     """
+    present: list[float] = []
+    missing = 0
+    for value in values:
+        if value is None or not math.isfinite(value):
+            missing += 1
+        else:
+            present.append(value)
     counts = [0] * (len(edges) - 1)
     underflow = overflow = 0
-    for value in values:
+    for value in present:
         if value < edges[0]:
             underflow += 1
         elif value > edges[-1]:
             overflow += 1
         else:
             counts[min(bisect.bisect_right(edges, value) - 1, len(counts) - 1)] += 1
-    return {
-        "n": len(values),
-        "min": min(values) if values else None,
-        "median": rounded(statistics.median(values), 4) if values else None,
-        "max": max(values) if values else None,
+    low: float | None = None
+    high: float | None = None
+    median: float | None = None
+    if present:
+        low, high = min(present), max(present)
+        # rounded to four decimals, and never past the extremes the rounding could carry it over
+        # (a share of 0.00004 and 0.00006 has the median 0.0001 rounded, above both)
+        middle = rounded(statistics.median(present), 4)
+        median = high if middle is None else min(max(middle, low), high)
+    summary: dict[str, Any] = {
+        "n": len(present),
+        "unit": unit,
+        "min": low,
+        "median": median,
+        "max": high,
         "histogram": {
             "edges": list(edges),
             "counts": counts,
             "underflow": underflow,
             "overflow": overflow,
+            "missing": missing,
         },
     }
+    if description is not None:
+        summary["description"] = description
+    return summary
+
+
+def recipe_metrics(
+    metrics: Sequence[tuple[RecipeMetric, Any]], recipe_id: str, recipe_version: str
+) -> dict[str, dict[str, Any]]:
+    """``extensions.nemar.metrics``: each recipe metric with its value as a neuroschema
+    ``qualityMetric`` whose producer is the recipe (ADR 0137 C6).
+
+    A value is a finite number or None (could not be computed); a bool, a text, a non-finite number
+    or a value outside the metric's bounds is a fault of the recipe (``ValueError``), and so is a
+    name given twice.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    for metric, value in metrics:
+        if metric.name in found:
+            raise ValueError("{} is given twice".format(metric.name))
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("{} is not a number".format(metric.name))
+            if not math.isfinite(value):
+                raise ValueError("{} is not finite".format(metric.name))
+            low, high = metric.bounds if metric.bounds is not None else (None, None)
+            if (low is not None and value < low) or (high is not None and value > high):
+                raise ValueError("{} is outside its bounds".format(metric.name))
+        entry: dict[str, Any] = {
+            "value": value,
+            "unit": metric.unit,
+            "description": metric.description,
+            "recipe": {"name": recipe_id, "version": recipe_version},
+        }
+        if metric.bounds is not None:
+            entry["bounds"] = {"min": metric.bounds[0], "max": metric.bounds[1]}
+        found[metric.name] = entry
+    return found
+
+
+def metrics_problems(record: Mapping[str, Any]) -> list[str]:
+    """What is wrong with a record's recipe metrics (``extensions.nemar.metrics``), or nothing when
+    it has none: each is a neuroschema ``qualityMetric`` under a bare name whose producer is the
+    record's recipe, name and version (the record checks' ``metric_producer_mismatch`` and more)."""
+    nemar = record.get("extensions", {}).get("nemar", {})
+    if "metrics" not in nemar:
+        return []
+    metrics = nemar["metrics"]
+    if not isinstance(metrics, dict):
+        return ["metrics is not an object"]
+    recipe = nemar.get("recipe", {})
+    producer = {"name": recipe.get("id"), "version": recipe.get("version")}
+    problems: list[str] = []
+    for name, metric in metrics.items():
+        if not isinstance(name, str) or not BARE_METRIC_RE.fullmatch(name) or len(name) > 128:
+            problems.append("metric {!r} is not a bare metric name".format(name))
+        elif contract.quality_metric_errors(metric):
+            problems.append("metric {} is not a quality metric".format(name))
+        elif metric.get("recipe") != producer:
+            problems.append("metric_producer_mismatch at metrics/{}".format(name))
+    return problems
 
 
 def skipped_by_step(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
@@ -418,8 +508,8 @@ def _summary(recipe: Recipe, rows: Sequence[Mapping[str, Any]], counts: Mapping[
     }
     succeeded = [row for row in rows if row["status"] == "succeeded"]
     for spec in recipe.distributions:
-        values = [row[spec.column] for row in succeeded if row.get(spec.column) is not None]
-        metrics[spec.name] = distribution(values, spec.edges)
+        values = [row.get(spec.column) for row in succeeded]
+        metrics[spec.name] = distribution(values, spec.edges, spec.unit, spec.description)
     return metrics
 
 

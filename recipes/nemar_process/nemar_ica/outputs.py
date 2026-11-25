@@ -36,7 +36,7 @@ from nemar_process.common import device, files, naming, records, versions
 from nemar_process.common.determinism import installed_versions
 from nemar_process.common.io import Loaded, Recording
 from nemar_process.common.params import jsonable
-from nemar_process.common.recipe import RecipeInfo, RecordingProduct, RunContext
+from nemar_process.common.recipe import RecipeInfo, RecipeMetric, RecordingProduct, RunContext
 from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import pipeline, steps, tally
 from nemar_process.nemar_ica.options import Settings
@@ -361,11 +361,69 @@ def serving_products(
     ]
 
 
+RANK_EDGES = (0, 8, 16, 24, 32, 40, 48, 56, 64)
+ITERATION_EDGES = (0, 50, 100, 250, 500, 1000, 2000, 4000)
+
+# nemar-ica's recipe metrics, beside the floor's (``floor_outputs.RECIPE_METRICS``, which its record
+# also holds, produced by nemar-ica): each a neuroschema ``qualityMetric`` with the recipe as producer
+# (ADR 0137 C6). The log-likelihood and the convergence flag stay summary metrics only: one has no
+# unit a reader can compare across recordings, the other is not a number.
+RECIPE_METRICS = (
+    RecipeMetric(
+        "icaRank",
+        "count",
+        "Rank of the decomposition: one less than the good channels, for the average reference.",
+        (0, None),
+        "rank",
+        RANK_EDGES,
+    ),
+    RecipeMetric(
+        "icaIterations",
+        "count",
+        "Iterations the decomposition ran.",
+        (0, None),
+        "iterations",
+        ITERATION_EDGES,
+    ),
+    RecipeMetric(
+        "asrBurstFraction",
+        "fraction",
+        "Share of the samples artifact subspace reconstruction repaired.",
+        (0, 1),
+        "asr_burst_fraction",
+        steps.BURST_FRACTION_EDGES,
+    ),
+)
+
+# The share of brain components is nemar-quality's metric, never a recipe value (ADR 0137 C6): the
+# table's ``pct_brain_components`` is its value in the recording's record when the plugin ran.
+# TODO(P7): nemar-ica's PLUGINS and CHECKPOINTS do not run nemar-quality yet, so the column is null
+# until P7 wires the plugin into the recipe; nothing here computes the share itself.
+BRAIN_PLUGIN = "nemar-quality"
+BRAIN_METRIC = "nemar-quality:percentBrainComponents"
+
+
+def plugin_metric(record: Mapping[str, Any], step_id: str, name: str) -> Any:
+    """The value of a plugin's metric in a recording's record (its step's ``qualityMetrics``), or
+    None when the plugin did not run or was skipped."""
+    for step in record.get("processingSteps", []):
+        if step.get("stepId") == step_id:
+            metric = (step.get("qualityMetrics") or {}).get(name)
+            return metric.get("value") if isinstance(metric, Mapping) else None
+    return None
+
+
 def table_row(
-    recording: Recording, fit: pipeline.Decomposition, block: Mapping[str, Any], content: str
+    recording: Recording,
+    fit: pipeline.Decomposition,
+    block: Mapping[str, Any],
+    content: str,
+    record: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """The recording's row of the table; the floor's columns are not this recipe's."""
+    """The recording's row of the table; the floor's columns are not this recipe's, except the
+    floor's metrics the dataset summarizes (``floor_outputs.metric_values``)."""
     metrics = fit.floor_result.metrics
+    floor_values = floor_outputs.metric_values(fit.floor_result)
     return {
         "path": recording.path,
         "datatype": "eeg",
@@ -390,6 +448,10 @@ def table_row(
         "device_reason": block["device_reason"],
         "fallback": str(block["fallback"]).lower(),
         "asr_burst_fraction": block["asr_burst_fraction"],
+        "pct_good_channels": floor_values["percentGoodChannels"],
+        "pct_good_samples": floor_values["percentGoodSamples"],
+        "line_db_before": floor_values["lineNoiseBeforeDb"],
+        "pct_brain_components": plugin_metric(record, BRAIN_PLUGIN, BRAIN_METRIC),
         "record_content_sha256": content,
     }
 
@@ -452,13 +514,23 @@ def write_product(
         ],
         extra_segments_step="asr",
         summary_extra=summary,
+        extra_metrics=[
+            (metric, value)
+            for metric, value in zip(
+                RECIPE_METRICS,
+                (block["rank"], block["iterations"], block["asr_burst_fraction"]),
+                strict=True,
+            )
+        ],
         nemar_extra={
             **(nemar_extra or {}),
             "floor_plan_hash": fit.floor_plan_hash,
             "ica": block,
         },
     )
-    product.row = table_row(recording, fit, block, records.content_sha256(product.record))
+    product.row = table_row(
+        recording, fit, block, records.content_sha256(product.record), product.record
+    )
     return product
 
 

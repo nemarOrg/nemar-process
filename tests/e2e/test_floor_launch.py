@@ -134,7 +134,7 @@ def test_the_job_leaves_the_product_tree_under_work_outputs(floor_launch):
     base = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
     assert product_names(product) == sorted(
         [
-            "desc-nemarfloor_qcsummary.json",
+            "desc-nemarfloor_dataquality.json",
             "desc-nemarfloor_recordings.tsv",
             "desc-nemarfloor_signalJourney.json",
             base + "badsegments.tsv",

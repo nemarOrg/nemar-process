@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -85,7 +86,7 @@ def test_a_run_on_the_fixture_exits_zero_and_writes_the_product_tree(first_run):
     base = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
     assert product_files(out) == sorted(
         [
-            "desc-nemarfloor_qcsummary.json",
+            "desc-nemarfloor_dataquality.json",
             "desc-nemarfloor_recordings.tsv",
             "desc-nemarfloor_signalJourney.json",
             base + "badsegments.tsv",
@@ -566,11 +567,9 @@ def test_naming_the_bids_input_changes_nothing(tmp_path, cli):
             assert records.content_sha256(json.loads(plain.read_text())) == records.content_sha256(
                 json.loads(named.read_text())
             ), name
-        elif name == "desc-nemarfloor_qcsummary.json":  # its one value that follows the clock
-            assert {**json.loads(plain.read_text()), "record_sha256": None} == {
-                **json.loads(named.read_text()),
-                "record_sha256": None,
-            }, name
+        elif name == "desc-nemarfloor_dataquality.json":  # its one value that follows the clock
+            digest = re.compile(r'"record_sha256": "[0-9a-f]{64}"')
+            assert digest.sub("", plain.read_text()) == digest.sub("", named.read_text()), name
         else:
             assert plain.read_bytes() == named.read_bytes(), name
 

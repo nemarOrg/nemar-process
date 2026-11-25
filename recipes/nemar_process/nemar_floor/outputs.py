@@ -27,7 +27,7 @@ import numpy as np
 from nemar_process.common import files, io, naming, qc, records, views
 from nemar_process.common.errors import INTERNAL_ERROR, RecordingError
 from nemar_process.common.io import Loaded, Recording
-from nemar_process.common.recipe import RecipeInfo, RecordingProduct, RunContext
+from nemar_process.common.recipe import RecipeInfo, RecipeMetric, RecordingProduct, RunContext
 from nemar_process.nemar_floor import steps
 from nemar_process.nemar_floor.pipeline import FloorResult, process
 
@@ -182,6 +182,89 @@ SUMMARY_METRICS = (
 )
 
 
+PERCENT_EDGES = tuple(range(0, 101, 10))
+DB_EDGES = (-10, -5, 0, 5, 10, 15, 20, 30, 40)
+PERCENT = (0, 100)
+COUNT = (0, None)
+
+# The floor's recipe metrics (ADR 0137 C6): each recording's record holds them as neuroschema
+# ``qualityMetric`` objects with the recipe as producer (``extensions.nemar.metrics``), valued by
+# ``metric_values``; the four with a column and edges are summarized over the dataset. The line-noise
+# metrics are the excess, before and after the filters, at the line frequency with the larger excess
+# before them (the table's ``line_hz``), the value the table holds; the record's
+# ``summaryMetrics`` keeps the excess at each frequency.
+RECIPE_METRICS = (
+    RecipeMetric("nChannelsInput", "count", "Channels in the recording, of every type.", COUNT),
+    RecipeMetric(
+        "nSignalChannels", "count", "Channels typed EEG, the ones the floor assesses.", COUNT
+    ),
+    RecipeMetric("nGoodChannels", "count", "EEG channels the floor judged good.", COUNT),
+    RecipeMetric(
+        "nNoiseOnlyChannels",
+        "count",
+        "EEG channels without coordinates, judged on the noise criterion only.",
+        COUNT,
+    ),
+    RecipeMetric("nNotAssessedChannels", "count", "EEG channels no criterion could judge.", COUNT),
+    RecipeMetric(
+        "percentGoodChannels",
+        "%",
+        "Share of the EEG channels the floor judged good.",
+        PERCENT,
+        "pct_good_channels",
+        PERCENT_EDGES,
+    ),
+    RecipeMetric(
+        "percentGoodSamples",
+        "%",
+        "Share of the samples outside the bad windows the floor found.",
+        PERCENT,
+        "pct_good_samples",
+        PERCENT_EDGES,
+    ),
+    RecipeMetric("durationS", "s", "Duration of the samples the floor read.", (0, None)),
+    RecipeMetric("samplingRateHz", "Hz", "Sampling rate of the samples the floor read.", (0, None)),
+    RecipeMetric(
+        "lineNoiseBeforeDb",
+        "dB",
+        "Line-noise excess before the band-stop filters, at whichever of 50 and 60 Hz had the "
+        "larger excess before them.",
+        None,
+        "line_db_before",
+        DB_EDGES,
+    ),
+    RecipeMetric(
+        "lineNoiseAfterDb",
+        "dB",
+        "Line-noise excess after the band-stop filters, at whichever of 50 and 60 Hz had the "
+        "larger excess before them.",
+        None,
+        "line_db_after",
+        DB_EDGES,
+    ),
+)
+
+
+def metric_values(result: FloorResult) -> dict[str, Any]:
+    """The value of each of ``RECIPE_METRICS`` for one recording, by name: the values its row of the
+    table carries where it has the column (``table_row``)."""
+    channels, samples = result.metrics["channels"], result.metrics["samples"]
+    _, before, after = _strongest_line(result)
+    return {
+        "nChannelsInput": channels["nInput"],
+        "nSignalChannels": channels["nSignal"],
+        "nGoodChannels": channels["nGood"],
+        "nNoiseOnlyChannels": channels["nNoiseOnly"],
+        "nNotAssessedChannels": channels["nNotAssessed"],
+        "percentGoodChannels": channels["percentGood"],
+        "percentGoodSamples": None if samples is None else samples["percentGood"],
+        "durationS": result.metrics["durationS"],
+        "samplingRateHz": result.metrics["samplingRateHz"],
+        "lineNoiseBeforeDb": None if before is None else round(before, 3),
+        "lineNoiseAfterDb": None if after is None else round(after, 3),
+    }
+
+
 def segment_tables_written(result: FloorResult, extra_segments: Sequence[Any] = ()) -> bool:
     """Whether ``_badsegments.tsv`` and ``_samplemask.tsv`` are written: when the window step ran (its
     mask) or a recipe that embeds the floor flagged spans of its own; never empty."""
@@ -229,7 +312,8 @@ def summary_metrics(result: FloorResult) -> dict[str, Any]:
 
 def table_row(recording: Recording, result: FloorResult, content_sha256: str) -> dict[str, Any]:
     channels, samples = result.metrics["channels"], result.metrics["samples"]
-    line_hz, before, after = _strongest_line(result)
+    line_hz, _, _ = _strongest_line(result)
+    values = metric_values(result)
     skipped = ",".join("{}:{}".format(s["step_id"], s["reason"]) for s in result.plan.skipped)
     return {
         "path": recording.path,
@@ -246,8 +330,8 @@ def table_row(recording: Recording, result: FloorResult, content_sha256: str) ->
         "pct_good_channels": channels["percentGood"],
         "pct_good_samples": None if samples is None else samples["percentGood"],
         "line_hz": line_hz,
-        "line_db_before": None if before is None else round(before, 3),
-        "line_db_after": None if after is None else round(after, 3),
+        "line_db_before": values["lineNoiseBeforeDb"],
+        "line_db_after": values["lineNoiseAfterDb"],
         "n_bad_channels": None
         if channels["nBad"] is None
         else channels["nFlatline"] + channels["nBad"],
@@ -305,6 +389,7 @@ def write_product(
     extra_segments: Sequence[tuple[int, int, str, str]] = (),
     extra_segments_step: str | None = None,
     view_set: views.ViewSet | None = None,
+    extra_metrics: Sequence[tuple[RecipeMetric, Any]] = (),
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
@@ -331,8 +416,12 @@ def write_product(
     every other file, each under its step, and the record gains ``extensions.nemar.views`` (and
     ``views_skipped`` when a view was skipped), which ``records.views_problems`` holds to the files
     written. Without it the product is what it always was, byte for byte.
+
+    The record's ``extensions.nemar.metrics`` are the floor's ``RECIPE_METRICS`` with their values
+    (``metric_values``) and then ``extra_metrics``, the embedding recipe's own metrics with theirs,
+    each produced by ``info``'s recipe (``records.recipe_metrics``).
     """
-    for reserved in ("mask_grid", "views", "views_skipped"):
+    for reserved in ("mask_grid", "views", "views_skipped", "metrics"):
         if reserved in (nemar_extra or {}):
             raise ValueError("{} is a key the floor writes".format(reserved))
     if extra_segments and result.sample_mask is None and extra_segments_step is None:
@@ -441,6 +530,12 @@ def write_product(
         if name in metrics:
             raise ValueError("{} is a summary metric of the floor".format(name))
     metrics.update(summary_extra or {})
+    values = metric_values(result)
+    quality = records.recipe_metrics(
+        [*((metric, values[metric.name]) for metric in RECIPE_METRICS), *extra_metrics],
+        info.id,
+        info.version,
+    )
     record = records.build_recording_record(
         info,
         result.plan,
@@ -456,12 +551,14 @@ def write_product(
         nemar_extra={
             **(nemar_extra or {}),
             "mask_grid": grid,
+            "metrics": quality,
             **(view_set.extension() if view_set is not None else {}),
         },
     )
     problems = records.problems_of(record, context.validator)
     if problems:
-        # the category (schema, timestamp, reference, plan_hash) says what kind; the text is not kept
+        # the category (schema, timestamp, reference, views, metrics, plan_hash) says what kind; the
+        # text is not kept
         raise RecordingError(INTERNAL_ERROR, "record", problems[0][0])
     record_path = place(views.RECORD_SUFFIX, "json")
     files.write_json(directory / record_path, record)

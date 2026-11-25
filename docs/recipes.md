@@ -58,7 +58,7 @@ nemar-recipe version
   The inputs must also agree about the recipe, the engine stamp and the seeds, and they must have been made by the version of the recipe that is running, because the merged record's steps are that recipe's.
   The merged record states the recipe, the engine and the seeds of its inputs, not those of the process that merges them, which ran none of the steps and may run on another machine.
   Two inputs that name the same recording, or hold the same file, are an error (exit 1, with the path), found before anything is copied; `--resume` is the one exception, for a recording the time budget left out (below).
-  It then copies every per-recording file byte for byte (the sample masks among them) into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, rebuilds the QC summary from the merged table and record (an input's own summary is never copied), and moves everything into place at the end.
+  It then copies every per-recording file byte for byte (the sample masks among them) into a staging directory under `--out`, merges the tables sorted by path, writes the dataset record as `run` would have, rebuilds the dataQuality document from the merged table and record (an input's own is never copied), and moves everything into place at the end.
   The merged summary equals the summary of one run over the same recordings, apart from `record_sha256`.
   A file that cannot be read is exit 6 and a place that cannot be written is exit 5, and neither leaves a product file.
   It sums each input's `ignored_datatypes`, and runs that split a dataset count each file once (see discovery above); with `--resume` the remainder of a cut run is the one input that is left out of the sum (below).
@@ -264,7 +264,7 @@ After a band-stop the spectrum is measured again, so `afterDb` is a measurement 
 product/
   desc-nemarfloor_signalJourney.json              dataset record (at most 256 KB)
   desc-nemarfloor_recordings.tsv                  every recording, one row each
-  desc-nemarfloor_qcsummary.json                  the dataset's QC in one small file (at most 65,536 bytes)
+  desc-nemarfloor_dataquality.json                the dataset's QC in one small file (at most 65,536 bytes)
   sub-<id>/[ses-<id>/]eeg/
     <entities>_desc-nemarfloor_signalJourney.json
     <entities>_desc-nemarfloor_channels.tsv
@@ -373,35 +373,45 @@ A recording without a percentage is left out of the percent-good-channels histog
 `skipped_steps` is `step:reason` joined by commas.
 
 `desc-nemarfloor_signalJourney.json` is a valid signalJourney record whose `processingSteps` are a constant list of the recipe's steps with the recipe-level parameters (never read from a recording), and whose `qualityMetrics` count the recordings that succeeded and the recordings that skipped each step for each reason.
-`summaryMetrics` has the counts and, for percent good channels, percent good samples and the line-noise excess before and after, `n`, `min`, `median`, `max` and a histogram with fixed edges (percentages every 10; dB at -10, -5, 0, 5, 10, 15, 20, 30, 40) where a value belongs to the bin `[edge_i, edge_i+1)`, the last bin is closed and values outside are counted as underflow and overflow.
+`summaryMetrics` has the counts and, for percent good channels, percent good samples and the line-noise excess before and after, `n`, `unit`, `description`, `min`, `median`, `max` and a histogram with fixed edges (percentages every 10; dB at -10, -5, 0, 5, 10, 15, 20, 30, 40) where a value belongs to the bin `[edge_i, edge_i+1)`, the last bin is closed, values outside are counted as underflow and overflow, and a recording with no value (the step that measures it was skipped) is counted as missing, never as a zero.
 `extensions.nemar` holds the identity, `counts`, `plan_hashes` (hash to count), `ignored_datatypes`, the process-report envelope (`process`, `engine_version` as `nemar-floor@1.0.0-b2/eegprep==0.5.0+<commit>/<digest or unknown>`, `source_commit`, `started_utc`, `finished_utc`, the counts, `pending_count` (the number of recordings the time budget left unstarted, 0 for every run that was not cut short, the floor's always, and for a merged product the `time_budget` rows left in it), `resumed` (only in the record of an `aggregate --resume`: how many budget rows that merge replaced), and `records` for the failed and skipped only: each has `path`, `status`, `code`, `step`, `reason` (the table's `detail`) and `attempts`), the table's `location`, `sha256`, `size` and `columns`, and the rows themselves.
 The record is at most 256 KB (262,144 bytes): rows are added in path order while the serialized record stays at or under 200,000 bytes, and the rest are counted in `rows_truncated` and live only in the table file; the report's `records` is capped at 200 entries with `records_truncated`.
 Both caps are deterministic.
 At about 420 bytes a row as indented JSON, roughly 300 rows fit; a larger dataset reads the remaining rows from the table file, and the counts, the distributions and the plan variants cover every recording.
 
-### The QC summary
+### Recipe metrics
 
-`desc-nemarfloor_qcsummary.json` is the dataset's quality control in one small file, so that NEMAR's catalog shows it without parsing the dataset record.
-It is valid against [`schemas/qc-summary.v1.json`](schemas/qc-summary.v1.json) (JSON Schema, draft 2020-12, every object closed) and is at most 65,536 bytes.
+Each recording's record holds the recipe's own metrics in `extensions.nemar.metrics` (ADR 0137 C6), declared once as literals (`RECIPE_METRICS` in `nemar_floor/outputs.py`, and in `nemar_ica/outputs.py` for the ones nemar-ica adds).
+Each is a neuroschema `qualityMetric` under a bare name: `value` (a finite number, or null when it could not be computed), `unit`, a one-sentence `description`, `bounds` when the metric has a valid range (never a quality threshold), and `recipe` (`name` and `version`) as its one producer.
+The floor's are `nChannelsInput`, `nSignalChannels`, `nGoodChannels`, `nNoiseOnlyChannels`, `nNotAssessedChannels` (count), `percentGoodChannels`, `percentGoodSamples` (%, 0 to 100), `durationS` (s), `samplingRateHz` (Hz), and `lineNoiseBeforeDb` and `lineNoiseAfterDb` (dB, the excess before and after the band-stop filters at whichever of 50 and 60 Hz had the larger excess before them, the table's `line_hz`, which is the value the table holds; `summaryMetrics` keeps the excess at each frequency).
+A recipe that embeds the floor writes the floor's metrics as its own, with itself as the producer.
+A value that is not a finite number, or is outside its bounds, is a fault of the recipe and the record is never written; `records.metrics_problems` (in `records.check`) holds each entry to the bundle's `qualityMetric`, a bare name, and the record's recipe and version as the producer (the record checks' `metric_producer_mismatch`).
+A plugin's metric is never here: it is `<plugin>:<name>` in its step's `qualityMetrics`.
+
+### The dataQuality document
+
+`desc-<label>_dataquality.json` (for the floor, `desc-nemarfloor_dataquality.json`) is the dataset's quality control in one small file, so that NEMAR's backend shows it without parsing the dataset record.
+Every recipe writes one (`common/dataquality.py`); it replaced the floor's `qc-summary.v1`, whose schema is retired.
+It is neuroschema 0.6.0's `dataQuality` at `level: dataset`, valid against the vendored bundle (`nsc:/extensions/dataQuality.schema.json`, closed at every level), and at most 65,536 bytes.
 `run` writes it after the dataset record, and `aggregate` rebuilds it from the merged table and record.
-It holds:
+It is `{"level": "dataset", "recipes": {<recipe>: entry}}`, one entry, the run's recipe, which holds:
 
-- `format` (`nemar.qc-summary.v1`) and the identity: `dataset_id`, `dataset_version` (null when not given: identity is never guessed), `recipe`, `recipe_version`, `input_kind` (`bids` or `zarr`) and `profile` (`archive` or `serving`);
-- `describes`, one of two exact sentences, which the schema binds to the input.
-  For the Zarr input: "QC describes NEMAR's Zarr serving copy (EEG capped at 250 Hz, 16-bit), not the archived recordings."
-  For a dataset directory: "QC describes the dataset's recordings as archived."
-  Nothing in the file states an archived recording's rate: for a directory the floor read the archived files themselves, so each recording's `mask_grid` rate is the rate of what was read, and for the Zarr input it is the serving rate;
-- `counts`: `discovered`, `succeeded`, `failed` and `skipped`;
-- `distributions`: the four of the dataset record (`percentGoodChannels`, `percentGoodSamples`, `lineNoiseBeforeDb`, `lineNoiseAfterDb`), each with `n`, `min`, `median`, `max` and the same histogram bins, over every recording;
-- `not_processed`: the `path`, `status` and `code` of the recordings that failed or were skipped, in table order, at most 200 of them (fewer when long paths would pass the byte limit, cut where the next entry would not fit) with `not_processed_truncated` counting the rest;
-- `record_sha256`: the SHA-256 of the dataset record file's bytes.
+- `recipe_version`, `dataset_version` (null when not given: identity is never guessed), `input_kind` (`bids` or `zarr`) and `profile` (`archive` for a dataset directory, `serving` for the Zarr input; the schema binds the two);
+- `record_sha256`: the SHA-256 of the dataset record file's bytes;
+- `counts`: `passed`, `failed`, `skipped` and `total`, the record's `succeeded`, `failed`, `skipped` and `discovered`;
+- `distributions`: the dataset record's, by metric name, each with `n`, `unit`, `description`, `min`, `median`, `max` and the histogram (`edges`, `counts`, `underflow`, `overflow`, `missing`) over the recordings that passed.
+  The floor's four are `percentGoodChannels`, `percentGoodSamples`, `lineNoiseBeforeDb` and `lineNoiseAfterDb`; nemar-ica's are `icaRank`, `icaIterations`, `asrBurstFraction`, the floor's `percentGoodChannels`, `percentGoodSamples` and `lineNoiseBeforeDb`, and nemar-quality's `nemar-quality:percentBrainComponents` (the table's `pct_brain_components`, the plugin's value in the recording's record; missing until the plugin runs in the recipe);
+- `observed_range`: each distribution's `min` and `max`, null and null when it has no value;
+- `not_processed`: the `path`, `status` and `code` of the recordings that failed or were skipped, in table order, at most 200 of them (fewer when long paths would pass the byte limit, cut where the next entry would not fit), and `not_processed_truncated` counting every one left out.
+  A path that is not a neuroschema `relativeLocation` (a `%`, `?` or `#`, an empty or `.` segment, a space at either end, a control or bidirectional character) or a code that is not a `failureCode` is never listed, only counted.
 
-The summary holds no sampling rate at all, because a dataset's recordings can have been acquired at several rates: a rate lives only in each recording's `mask_grid`.
+`common/dataquality.py` refuses to write a document that breaks the schema or a rule the schema cannot state: counts that add up (`passed + failed + skipped = total`), the listed and the left out exactly the failed and the skipped, for each distribution one count fewer than the edges, strictly ascending finite edges, `n` the sum of the bins, `underflow` and `overflow` (a value that is missing or not finite is in none of them: it is counted under `missing`), `min`, `median` and `max` null exactly when `n` is 0 and ordered otherwise, `observed_range` exactly the distributions' minimums and maximums, every integer within 2^53 - 1, and the byte limit.
+The document holds no sampling rate at all, because a dataset's recordings can have been acquired at several rates: a rate lives only in each recording's `mask_grid`.
 It holds no clock either, but `record_sha256` is the digest of a file that does (the record's `executionDate`, `started_utc`, `finished_utc` and `run_id`), so it is the one value that differs between two runs of the same recordings, and between a merged product and one run over the same recordings.
 
 ### Determinism
 
-Two runs on one machine and one image are byte-identical in every TSV (the sample masks included), `_filters.json`, `_qc.json`, the recordings table, the QC summary apart from its `record_sha256` (the digest of a record file that holds the clock), and each JSON record after the clock and the run id are removed: `pipelineInfo.executionDate`, every `executionDateTime`, `extensions.nemar.run_id`, and in the dataset record `started_utc` and `finished_utc`.
+Two runs on one machine and one image are byte-identical in every TSV (the sample masks included), `_filters.json`, `_qc.json`, the recordings table, the dataQuality document apart from its `record_sha256` (the digest of a record file that holds the clock), and each JSON record after the clock and the run id are removed: `pipelineInfo.executionDate`, every `executionDateTime`, `extensions.nemar.run_id`, and in the dataset record `started_utc` and `finished_utc`.
 Nothing else in any file varies.
 `tests/recipes/test_determinism_runs.py` runs the command in separate processes, once more with different thread variables in the environment, and compares.
 
@@ -443,7 +453,7 @@ A published image that predates the change (`0.1.0-cpu`) still has the old name 
   `--input zarr` chooses it.
   For `zarr`, `--dataset-dir` is refused and `--zarr-base` (an `https://` origin that is exactly the Zarr host of one NEMAR environment) and `--dataset-id`, `--dataset-version` and `--source-commit` are required (exit 2); `aggregate` is not offered (`aggregate nemar-floor --input zarr` is exit 2), because a merged record would have no input of its own to state.
 - **The chain is the floor's.** Per store the recipe reads the level-0 recording in physical units with eegprep-lean (`load_recording`, then `to_eeg`), runs `eegprep.eeg_checkset` and the floor's `process` and `write_product` with the floor's parameters.
-  The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` and `_samplemask.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv`, `desc-nemarfloor_signalJourney.json` and `desc-nemarfloor_qcsummary.json` for the dataset.
+  The files are the floor's, under its label `nemarfloor`, keyed by the store's source path in the index (`sub-01/eeg/sub-01_task-rest_desc-nemarfloor_channels.tsv`): `_channels.tsv`, `_badsegments.tsv` and `_samplemask.tsv` (when the window step ran), `_filters.json`, `_qc.json` and `_signalJourney.json` per store, and `desc-nemarfloor_recordings.tsv`, `desc-nemarfloor_signalJourney.json` and `desc-nemarfloor_dataquality.json` for the dataset.
   A store's `mask_grid` names the serving rate and the profile `serving`, so a mask index counts the serving copy's level-0 samples.
   Nothing is written outside `--out`, and there is no cache directory.
   **Locations.** A store whose dataset has an applicable electrodes file carries that file's positions, with the coordinate system and units of its coordsystem file, in its root attributes (`electrode_positions`, `electrode_coordinate_system`, `electrode_coordinate_units`, and the converter's provenance `electrode_positions_source`, `electrode_positions_file`, `electrode_coordsystem_file` when it writes them).
@@ -743,7 +753,9 @@ The record's `outputs` entry of each matrix carries its `shape`, `dtype`, `rowLa
 `_asr.json` is `json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=True)` plus one newline, so its digest is stable.
 `variance_pct` is the percent of the data's variance each component accounts for on its own (eegprep's `eeg_pvaf`), and the probabilities are ICLabel's, to six decimals.
 `LLt`, the per-frame log-likelihood the binary writes, is never stored.
-The recordings table has the columns `path`, `datatype`, `status`, `code`, `step`, `detail`, `n_channels`, `n_good_channels`, `duration_s`, `srate_hz`, `plan_hash`, `engine`, `rank`, `iterations`, `stop_reason`, `did_converge`, `final_ll`, `device`, `device_reason`, `fallback`, `asr_burst_fraction` and `record_content_sha256`.
+The recordings table has the columns `path`, `datatype`, `status`, `code`, `step`, `detail`, `n_channels`, `n_good_channels`, `duration_s`, `srate_hz`, `plan_hash`, `engine`, `rank`, `iterations`, `stop_reason`, `did_converge`, `final_ll`, `device`, `device_reason`, `fallback`, `asr_burst_fraction`, `pct_good_channels`, `pct_good_samples`, `line_db_before`, `pct_brain_components` and `record_content_sha256`.
+The floor's three are its values for the recording (the floor's table has the same columns), and `pct_brain_components` is nemar-quality's `nemar-quality:percentBrainComponents` in the recording's record, `n/a` when the plugin did not run (it is not yet wired into the recipe): a recipe never reports a plugin's value as its own (ADR 0137 C6).
+The record's recipe metrics are the floor's and `icaRank`, `icaIterations` and `asrBurstFraction` ("Recipe metrics" above), each produced by `nemar-ica`; `icaFinalLogLikelihood` and `icaDidConverge` stay summary metrics only.
 
 ### What the record says
 

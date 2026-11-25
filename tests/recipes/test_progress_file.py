@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -167,8 +168,8 @@ def product(out: Path) -> dict[str, object]:
         name = path.relative_to(out).as_posix()
         if name.endswith("_signalJourney.json"):  # these hold the time they were written
             found[name] = records.content_sha256(json.loads(path.read_text()))
-        elif name.endswith("_qcsummary.json"):  # its one value that follows the clock
-            found[name] = {**json.loads(path.read_text()), "record_sha256": None}
+        elif name.endswith("_dataquality.json"):  # its one value that follows the clock
+            found[name] = re.sub(r'"record_sha256": "[0-9a-f]{64}"', "", path.read_text())
         else:
             found[name] = path.read_bytes()
     return found

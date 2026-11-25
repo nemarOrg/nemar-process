@@ -23,7 +23,9 @@ from nemar_process.common.recipe import (
     Recipe,
     RecordingProduct,
     RunContext,
+    distributions_of,
 )
+from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_floor import recipe as floor
 from nemar_process.nemar_floor import zarr_recipe
 from nemar_process.nemar_ica import engines, options, outputs, pipeline, steps, tally
@@ -51,16 +53,29 @@ COLUMNS = (
     Column("device_reason", "str"),
     Column("fallback", "str"),
     Column("asr_burst_fraction", "float", 6),
+    Column("pct_good_channels", "float", 4),
+    Column("pct_good_samples", "float", 4),
+    Column("line_db_before", "float", 3),
+    Column("pct_brain_components", "float", 4),
     Column("record_content_sha256", "str"),
 )
 
-RANK_EDGES = (0, 8, 16, 24, 32, 40, 48, 56, 64)
-ITERATION_EDGES = (0, 50, 100, 250, 500, 1000, 2000, 4000)
-
+# What the dataset record and the dataset dataQuality document summarize: nemar-ica's metrics, the
+# floor's three that the legacy summary bounded (good channels, good data, line noise before), and
+# nemar-quality's share of brain components, whose unit and description are its manifest's.
 DISTRIBUTIONS = (
-    Distribution("icaRank", "rank", RANK_EDGES),
-    Distribution("icaIterations", "iterations", ITERATION_EDGES),
-    Distribution("asrBurstFraction", "asr_burst_fraction", steps.BURST_FRACTION_EDGES),
+    *distributions_of(outputs.RECIPE_METRICS, ("icaRank", "icaIterations", "asrBurstFraction")),
+    *distributions_of(
+        floor_outputs.RECIPE_METRICS,
+        ("percentGoodChannels", "percentGoodSamples", "lineNoiseBeforeDb"),
+    ),
+    Distribution(
+        outputs.BRAIN_METRIC,
+        "pct_brain_components",
+        floor_outputs.PERCENT_EDGES,
+        "%",
+        "Share of components whose most probable ICLabel class is Brain.",
+    ),
 )
 
 
