@@ -641,13 +641,26 @@ def test_no_window_fits_a_mask_with_no_two_good_seconds():
     }
 
 
-def test_the_window_stops_where_a_renderer_stops_it_from_times():
-    """At 500/7 Hz the product 2 * rate rounds above the count the times give: the window is the
-    times' (docs/views/presets.md), never ceil(duration * rate)."""
-    rate = 500 / 7
-    for first in range(0, 2000, 37):
-        stop = pipeline.window_stop(first, rate, 2.0)
-        assert (stop - 1) / rate < first / rate + 2.0 <= stop / rate
+def exact_stop(first, rate, duration):
+    """The sample after the window, by the definition: the least k above ``first`` whose time is
+    not before ``first / rate + duration``."""
+    stop = first + 1
+    while stop / rate < first / rate + duration:
+        stop += 1
+    return stop
+
+
+@pytest.mark.parametrize(
+    ("rate", "first", "count"),
+    [(100.0, 28, 201), (250.0, 64, 501), (200.0, 56, 401), (1000.0, 131, 2001), (500 / 7, 7, 143)],
+)
+def test_the_window_stops_where_a_renderer_stops_it_from_times(rate, first, count):
+    """A renderer finds a window's samples from times (docs/views/presets.md), and the binary64 sum
+    ``first / rate + 2`` can put one more sample in it than ``ceil(2 * rate)``: at 100 Hz from sample 28
+    the window holds 201 samples. The window stops where the times say, never at a rounded product."""
+    assert pipeline.window_stop(first, rate, 2.0) - first == count
+    for start in range(0, 3000, 7):
+        assert pipeline.window_stop(start, rate, 2.0) == exact_stop(start, rate, 2.0), start
 
 
 def test_the_good_sample_mask_leaves_out_the_floors_bad_windows_and_asrs_repairs(fixture_fit):
@@ -660,6 +673,18 @@ def test_the_good_sample_mask_leaves_out_the_floors_bad_windows_and_asrs_repairs
     for start, stop in fit.bursts["spans"]:
         assert not good[start:stop].any()  # every span ASR repaired
     assert good.sum() == (floor_mask & ~_repaired(fit)).sum()
+
+
+def test_the_spans_asr_repaired_are_out_of_the_mask_without_a_window_step(fixture_fit):
+    """With the window step skipped (no floor mask), the mask is every sample but the spans ASR
+    repaired, each ``[start, stop)``."""
+    spans = [[100, 250], [4000, 4100]]
+    result = dataclasses.replace(fixture_fit.floor_result, sample_mask=None)
+    good = pipeline.good_sample_mask(result, {"spans": spans})
+    assert int((~good).sum()) == 250
+    assert not good[100:250].any()
+    assert not good[4000:4100].any()
+    assert good[[99, 250, 3999, 4100]].all()
 
 
 def _repaired(fit):
@@ -920,7 +945,11 @@ def test_the_signal_window_lies_inside_the_good_sample_mask(archive, fixture_fit
     grid = product.record["extensions"]["nemar"]["mask_grid"]
     rate, count = grid["rate"], grid["n_samples"]
     chosen = [k for k in range(count) if window["start_s"] <= k / rate < window["start_s"] + 2]
-    assert len(chosen) == round(2 * rate)
+    assert chosen == list(
+        range(
+            fixture_fit.window["first"], fixture_fit.window["first"] + fixture_fit.window["count"]
+        )
+    )
     _, segments = read_table(named(directory, "badsegments.tsv"))
     assert segments  # the fixture has bad windows and bursts
     for onset, duration, _label, _reason in segments:
@@ -1047,3 +1076,94 @@ def test_a_place_is_a_finite_number_or_none():
     assert outputs._place(np.array([3.0])) == 3.0
     for missing in (np.array([]), None, float("nan"), math.inf, True, "1", np.array(["x"])):
         assert outputs._place(missing) is None
+
+
+def test_chanlocs_that_are_not_the_decompositions_channels_are_the_recipes_fault(fixture_fit):
+    """The layout is the decomposition's own chanlocs, row for row: a fit whose chanlocs are not its
+    channels in order is refused before a row is written, never laid out by position."""
+    reordered = dataclasses.replace(fixture_fit, good_channels=fixture_fit.good_channels[::-1])
+    with pytest.raises(ValueError, match="chanlocs are not its channels"):
+        outputs.chanlocs_rows(reordered)
+
+
+@pytest.mark.parametrize(
+    ("location", "suffix", "found"),
+    [
+        ("sub-01/eeg/sub-01_task-rest_desc-nemarica_badsegments.tsv", "badsegments", True),
+        ("sub-01/eeg/sub-01_task-rest_desc-nemarica_components.tsv", None, True),
+        ("sub-01/eeg/sub-01_task-rest_desc-nemarica_channels.tsv", "badsegments", False),
+        ("sub-01/eeg/sub-01_task-rest_run-2_desc-nemarica_badsegments.tsv", None, False),
+        ("sub-01/eeg/sub-01_task-restingstate_desc-nemarica_badsegments.tsv", None, False),
+        ("sub-01/eeg/sub-01_task-rest_desc-preproc_desc-nemarica_badsegments.tsv", None, False),
+        ("sub-01/eeg/sub-01_task-rest_desc-nemarfloor_badsegments.tsv", None, False),
+        ("sub-02/eeg/sub-01_task-rest_desc-nemarica_badsegments.tsv", None, False),
+        ("sub-01/eeg/sub-01_task-rest_desc-nemarica_badsegments.json", None, False),
+    ],
+    ids=[
+        "the_floors",
+        "any_suffix",
+        "another_suffix",
+        "another_run",
+        "another_task",
+        "a_sibling",
+        "another_recipe",
+        "another_directory",
+        "not_a_table",
+    ],
+)
+def test_a_table_is_the_recordings_under_the_views_recipe(location, suffix, found):
+    """A port of neuroschema's ``presets.table_stem``: the recording's directory, its stem under the
+    recipe's label exactly, and the suffix when one is asked for."""
+    recording = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    assert views.table_stem_ok(location, recording, LABEL, suffix) is found
+
+
+def test_labels_that_fall_back_skip_the_activations_on_the_serving_copy_too(
+    recording, fixture_fit, tmp_path
+):
+    """On the serving copy the browser's matrix is matched by store row, so it is written even when
+    the labels fall back to Ch001; but its columns would then name no store row's label, so the
+    activations are skipped as labels_unusable there too, never declared and refused by a renderer."""
+    from nemar_process.common.zarr_input import ServingStore
+
+    labels = list(fixture_fit.good_channels)
+    labels[1] = labels[0]
+    chanlocs = [
+        {**entry, "labels": label}
+        for entry, label in zip(fixture_fit.eeg["chanlocs"], labels, strict=True)
+    ]
+    store = {"path": recording.path, "group": "eeg_200hz", "content_sha256": "a" * 64}
+    given = {
+        **copy.deepcopy(fixture_fit.decomposition_input),
+        "source": "serving_copy",
+        "channels": labels,
+        "store": store,
+    }
+    serving = dataclasses.replace(
+        fixture_fit,
+        good_channels=labels,
+        eeg={**fixture_fit.eeg, "chanlocs": chanlocs},
+        decomposition_input=given,
+        serving=ServingStore(
+            recording.path, store["group"], store["content_sha256"], "uV", tuple(labels)
+        ),
+        store_rows=list(range(len(labels))),
+    )
+    with determinism.pinned_threads(1), command.quiet():
+        product = outputs.write_product(
+            recording, run_context(), tmp_path, serving, [], profile=steps.INPUT_PROFILES["zarr"]
+        )
+    nemar = product.record["extensions"]["nemar"]
+    assert nemar["ica"]["browser_transform"]["match"] == "store_row"
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "midsegment"]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "labels_unusable"}
+    ]
+    window = views_of(product)["midsegment"]
+    assert [item["store"] for item in window["inputs"] if item["role"] == "signal"] == [
+        {
+            "recording": recording.path,
+            **{k: store[k] for k in ("group", "content_sha256")},
+            "profile": "serving",
+        }
+    ]
