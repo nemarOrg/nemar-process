@@ -1143,6 +1143,25 @@ def test_the_serving_window_keeps_out_of_the_floors_spans_and_of_every_row_as_wr
     assert all(not (onset <= k / rate < onset + 0.25) for k in chosen(moved))
 
 
+def test_a_bad_segment_table_over_the_caps_skips_the_serving_views_and_keeps_the_recording(
+    recording, fixture_fit, tmp_path
+):
+    """More rows of _badsegments.tsv than a renderer reads (its cells over the registry's cap): the
+    window is still chosen off every row, and the two views that read the table are skipped with
+    cap_exceeded by their own builders; the recording is kept."""
+    bursts = copy.deepcopy(fixture_fit.bursts)
+    rows = views.caps()["cells_per_role"] // len(views.SEGMENT_COLUMNS) + 1
+    bursts["spans"] = sorted([*bursts["spans"], *([[0, 1]] * rows)])
+    crowded = dataclasses.replace(fixture_fit, bursts=bursts)
+    product = write(recording, crowded, tmp_path, serving=index_for(recording.path))
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", *PLUGIN_VIEWS]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "cap_exceeded"},
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "cap_exceeded"},
+    ]
+
+
 def test_the_grid_mask_marks_the_samples_whose_times_fall_in_a_span():
     """``[low, high)`` in seconds, each sample's time ``k / rate`` as a renderer computes it."""
     found = pipeline.grid_mask([(0.02, 0.05), (0.095, 1.0)], 100.0, 12)

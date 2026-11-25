@@ -631,13 +631,18 @@ def serving_window(
     seconds nearest the middle (``pipeline.midsegment``) whose samples' times lie outside every span the
     good-sample mask leaves out (``pipeline.bad_intervals``) and outside every row of
     ``_badsegments.tsv`` as written (``segments``, ``[onset, onset + duration)`` in its rounded
-    seconds), so the window is good whichever a reader takes. None when no such window fits."""
+    seconds), so the window is good whichever a reader takes. None when no such window fits.
+
+    The table is read by its grammar alone, never by a renderer's caps: a table over them still has
+    its spans kept out of the window, and the views that read it are skipped as ``cap_exceeded`` by
+    their own builders, never the recording failed here."""
     intervals = pipeline.bad_intervals(fit.floor_result, fit.bursts)
     if segments is not None:
-        rows = views.read_table(
-            segments.text.encode("utf-8"), views.SEGMENT_COLUMNS, ("onset", "duration")
-        )
-        intervals += [(row["onset"], row["onset"] + row["duration"]) for row in rows]
+        header, rows = views.read_tsv(segments.text.encode("utf-8"))
+        onset, duration = header.index("onset"), header.index("duration")
+        for cells in rows:
+            start = views.cell_number(cells[onset])
+            intervals.append((start, start + views.cell_number(cells[duration])))
     good = pipeline.grid_mask(intervals, row.rate_hz, row.n_samples)
     return pipeline.midsegment(good, row.rate_hz, steps.MIDSEGMENT_DURATION_S)
 
