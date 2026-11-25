@@ -157,8 +157,9 @@ SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped
 # a recipe's own view is a fault of the recipe, never of the data.
 SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded", CAP_EXCEEDED: "cap_exceeded"}
 
-# How many views, and views skipped, one recording's entry holds (dataQuality ``maxItems``).
-MAX_VIEWS = 32
+# How many views, and views skipped, one recording's entry holds (dataQuality ``maxItems``): the
+# contract's one number, which the loader holds the plugins and the recipe to together.
+MAX_VIEWS = contract.MAX_VIEWS
 # I-JSON: nesting at most 64 deep; integers the writer keeps exact (every JSON reader holds them).
 MAX_DEPTH = 64
 JSON_SAFE_INTEGER = 2**53 - 1

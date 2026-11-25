@@ -60,7 +60,7 @@ VIEW_REPEATED = "view_repeated"
 # views than one recording's entry holds (32, plugins' and the host recipe's together).
 SUFFIX_RESERVED = "suffix_reserved"
 VIEWS_TOO_MANY = "views_too_many"
-MAX_VIEWS = 32
+MAX_VIEWS = 32  # dataQuality's maxItems for views and views_skipped; views.MAX_VIEWS is this one
 VIEW_PROBLEMS = (
     KIND_UNREGISTERED,
     ROLE_UNREGISTERED,

@@ -2153,3 +2153,18 @@ def test_a_single_series_with_its_unit_loads_and_is_written():
     # along a dimension the registry reserves no unit for, the declared column is a value column
     role["dims"] = ["lag", "series"]
     assert contract.view_problem(view, ()) is None
+
+
+def test_one_number_caps_a_recordings_views():
+    """The writer's cap is the contract's, by assignment, not a second literal that could drift."""
+    import ast
+    import inspect
+
+    (assigned,) = [
+        node.value
+        for node in ast.walk(ast.parse(inspect.getsource(views)))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "MAX_VIEWS" for t in node.targets)
+    ]
+    assert ast.unparse(assigned) == "contract.MAX_VIEWS"
+    assert views.MAX_VIEWS == contract.MAX_VIEWS == 32
