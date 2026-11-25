@@ -270,16 +270,17 @@ def test_a_recipe_role_the_host_lacks_for_this_recording_is_refused(loaded, caps
 
 
 def test_a_file_over_the_roles_byte_cap_is_refused(loaded, capsys):
-    """A JSON role over its manifest's ``max_bytes`` (icclasses: 65536), with no host classes to stop
-    it first."""
+    """A JSON role over its manifest's ``max_bytes`` (icclasses: 65536), of a classifier of 1,024
+    classes the host has."""
+    categories = ["c{:04d}{}".format(i, "y" * 100) for i in range(1024)]
     big = {
         "classifier": "Mine",
-        "categories": ["c{:04d}{}".format(i, "y" * 100) for i in range(1024)],
+        "categories": categories,
         "counts": [1] + [0] * 1023,
         "summed_variance_pct": [0.0] * 1024,
         "n_components": 1,
     }
-    host = replace(HOST, classes=None, components=None)
+    host = replace(HOST, classes=tuple(categories), components=("IC001",))
     plugin, plan, result = run_returning(
         loaded["fx-views"], plugins.PluginResult(metrics={}, views=views_of(classes=big)), host=host
     )
@@ -1422,7 +1423,7 @@ def test_a_frequency_axis_needs_the_hosts_sampling_rate(loaded, capsys):
         plugins.PluginResult(metrics={}, views=views_of()),
         host=replace(HOST, srate_hz=None),
     )
-    assert_refused(plugin, plan, result, "freq_out_of_range", capsys)
+    assert_refused(plugin, plan, result, "host_missing", capsys)
 
 
 def generic_run(loaded, change=None, views_change=None, sensors=SENSORS):
@@ -1827,6 +1828,45 @@ def test_two_files_of_one_folded_name_are_refused(fixture_result, recording, tmp
             extra_products=[shadow],
         )
     assert refused.value.detail == "duplicate_file"
+
+
+@pytest.mark.parametrize(
+    ("change", "dim"),
+    [
+        (lambda host: replace(host, sensors=None), "sensor"),
+        (lambda host: replace(host, classes=None), "class"),
+        (lambda host: replace(host, components=None), "component"),
+    ],
+    ids=["no_sensors", "no_classes", "no_components"],
+)
+def test_a_host_without_the_names_refuses_the_view(loaded, capsys, change, dim):
+    """A host that lacks the names a dimension or an ic-classes view is checked against refuses the
+    view (``host_missing``): no check is switched off by a default."""
+    plugin, plan, result = run_returning(
+        loaded["fx-views"], plugins.PluginResult(metrics={}, views=views_of()), host=change(HOST)
+    )
+    assert_refused(plugin, plan, result, "host_missing", capsys)
+
+
+def test_sensor_names_in_a_header_are_never_unchecked(loaded, capsys):
+    returned = loaded["fx-generic"].run(plugins.read_only(generic_inputs()), {})
+    erp = returned.views["erp"]["roles"]["values"]
+    spoofed = plugins.TableArray(("time_s", "NotA", "Real", "Sensor", "At", "All"), erp.values)
+    changed = {**returned.views, "erp": {"roles": {"values": spoofed}}}
+    plugin, plan, result = run_returning(
+        loaded["fx-generic"],
+        plugins.PluginResult(metrics={}, views=changed),
+        host=replace(HOST, sensors=None),
+    )
+    assert_refused(plugin, plan, result, "host_missing", capsys)
+
+
+def test_maps_along_the_rows_are_the_hosts_good_channels_in_layout_order(loaded, capsys):
+    """A layout whose rows are not the host's good channels in order places maps on other sensors."""
+    host = replace(HOST, roles={"layout": layout(SENSORS[::-1])})
+    returned = loaded["fx-generic"].run(plugins.read_only(generic_inputs()), {})
+    plugin, plan, result = run_returning(loaded["fx-generic"], returned, host=host)
+    assert_refused(plugin, plan, result, "header_mismatch", capsys)
 
 
 def test_a_returned_object_cannot_claim_a_runner_word(loaded, capsys):

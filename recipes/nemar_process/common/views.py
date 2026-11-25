@@ -95,6 +95,10 @@ TABLE_LOCATION_MISMATCH = "table_location_mismatch"
 CHANNEL_SET_MISMATCH = "channel_set_mismatch"
 COORDS_LENGTH = "coords_length"
 FILE_MISMATCH = "file_mismatch"
+# A dimension or a view the host recipe gives the writer nothing to check against: a ``sensor``,
+# ``component`` or ``class`` dimension, a frequency axis or an ic-classes view on a host that lacks
+# the good channels, the components, the classes or the sampling rate. Never left unchecked.
+HOST_MISSING = "host_missing"
 
 
 # Why a view a run declares is absent for one recording (docs/views.md, Views a run skipped).
@@ -167,6 +171,9 @@ RECIPE_SUFFIXES = (
 RESERVED_SUFFIXES = frozenset(
     name.casefold() for name in (RECORD_SUFFIX, *BIDS_SUFFIXES, *RECIPE_SUFFIXES)
 )
+
+# The dimensions whose names the host gives (C5): checked against them, never without them.
+HOST_DIMS = ("sensor", "component", "class")
 # The floor's tables (docs/views/presets.md, The floor's tables): their columns, and the statuses BIDS
 # allows a channel, compared as exact strings.
 SEGMENT_COLUMNS = ("onset", "duration", "label")
@@ -688,15 +695,25 @@ def _rising(values: np.ndarray) -> bool:
     return bool(np.all(np.diff(values) > 0))
 
 
-def _check_names(expected: tuple[str, ...] | None, names: Sequence[str]) -> None:
-    """A dimension the host knows: as many entries (``dim_mismatch``), then the same names in the same
-    order (``header_mismatch``)."""
-    if expected is None:
-        return
+def _check_names(expected: Sequence[str], names: Sequence[str]) -> None:
+    """As many entries (``dim_mismatch``), then the same names in the same order
+    (``header_mismatch``)."""
     if len(names) != len(expected):
         raise ViewRefused(DIM_MISMATCH, "count")
     if tuple(names) != tuple(expected):
         raise ViewRefused(HEADER_MISMATCH, "names")
+
+
+def _check_host_names(host: Host, dim: str, names: Sequence[str]) -> None:
+    """A ``sensor``, ``component`` or ``class`` dimension has the host's names (``_check_names``); a
+    host that has none for it refuses the view (``host_missing``) rather than leave it unchecked. Any
+    other dimension's names are the plugin's."""
+    if dim not in HOST_DIMS:
+        return
+    expected = host.expected(dim)
+    if expected is None:
+        raise ViewRefused(HOST_MISSING, dim)
+    _check_names(expected, names)
 
 
 def _check_freq(context: _Context, freqs: np.ndarray) -> None:
@@ -706,7 +723,7 @@ def _check_freq(context: _Context, freqs: np.ndarray) -> None:
     it (docs/views/presets.md)."""
     srate = context.host.srate_hz
     if srate is None or not math.isfinite(srate) or srate <= 0:
-        raise ViewRefused(FREQ_OUT_OF_RANGE, "no sampling rate")
+        raise ViewRefused(HOST_MISSING, "sampling rate")
     upper = srate / 2
     if "upper_hz" in context.parameters:
         upper = min(upper, float(context.parameters["upper_hz"]))
@@ -768,7 +785,7 @@ def table_role(context: _Context, role: str, declared: Mapping[str, Any], data: 
             names = sensor.cells("name")
             if rows != len(names):
                 raise ViewRefused(DIM_MISMATCH, "rows")
-            _check_names(context.host.expected(name), names)
+            _check_host_names(context.host, name, names)
             coords: dict[str, Any] = {"role": sensor.role, "column": "name"}
             dims.append({"name": name, "axis": "rows", "type": "string", "coords": coords})
         elif name in NAMED_DIMS:
@@ -804,7 +821,7 @@ def table_role(context: _Context, role: str, declared: Mapping[str, Any], data: 
             coords = {"role": sensor.role, "column": "name"}
         else:
             coords = {"header": True}
-        _check_names(context.host.expected(name), value_names)
+        _check_host_names(context.host, name, value_names)
         dims.append({"name": name, "axis": "columns", "type": "string", "coords": coords})
     if dim_names and dim_names[0] == "freq" and coordinate is not None:
         _check_freq(context, values[:, 0])  # after the sensors, as a renderer checks the preset
@@ -872,15 +889,18 @@ def check_ic_classes(content: Mapping[str, Any], host: Host | None = None) -> No
     """``nemar.ic-classes`` beyond its content schema (docs/views/presets.md): one summed variance per
     category (``variance_length``), counts that sum to ``n_components`` (``components_total``); and,
     with a host, the classifier's classes (``dim_mismatch``, ``header_mismatch``) and as many
-    components as the decomposition has (``dim_mismatch``)."""
+    components as the decomposition has (``dim_mismatch``), a host without either refusing the view
+    (``host_missing``). Without a host (neuroschema's vectors) only the content's own rules run."""
     if len(content["summed_variance_pct"]) != len(content["categories"]):
         raise ViewRefused(VARIANCE_LENGTH)
     if sum(int(count) for count in content["counts"]) != content["n_components"]:
         raise ViewRefused(COMPONENTS_TOTAL)
     if host is None:
         return
-    _check_names(host.classes, content["categories"])
-    if host.components is not None and content["n_components"] != len(host.components):
+    _check_host_names(host, "class", content["categories"])
+    if host.components is None:
+        raise ViewRefused(HOST_MISSING, "component")
+    if content["n_components"] != len(host.components):
         raise ViewRefused(DIM_MISMATCH, "components")
 
 
