@@ -1,0 +1,41 @@
+{
+  "format": "nemar.plugin-manifest.v1",
+  "name": "nemar-quality",
+  "version": "0.1.0",
+  "entry": "nemar_process.plugins.nemar_quality",
+  "checkpoint": "quality",
+  "reads": {
+    "dataset": false,
+    "recipes": [
+      "nemar-ica"
+    ]
+  },
+  "parameters": {},
+  "outputs": {
+    "metrics": {
+      "nemar-quality:percentBrainComponents": {
+        "unit": "%",
+        "description": "Share of components whose most probable ICLabel class is Brain.",
+        "bounds": {
+          "min": 0,
+          "max": 100
+        },
+        "headline": true
+      }
+    },
+    "views": {
+      "icclasses": {
+        "kind": "nemar.ic-classes",
+        "kind_version": 1,
+        "caption": "Independent components counted by their most probable ICLabel class. Beside each class X is the summed variance of components classed X: the sum of each component's own share of the data's variance, not the variance the class explains, since the components are not orthogonal.",
+        "roles": {
+          "histogram": {
+            "format": "json",
+            "max_bytes": 65536,
+            "dims": []
+          }
+        }
+      }
+    }
+  }
+}
