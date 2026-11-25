@@ -1984,3 +1984,70 @@ def test_a_map_of_named_columns_with_their_units_needs_no_role_unit():
     assert contract.view_problem(view, ()) == "unit_undeclared"  # rows of a column: alpha is it
     view["roles"]["layout"] = {"from": "recipe"}
     assert contract.view_problem(view, ["layout"]) is None
+
+
+def test_a_coordinate_from_another_role_names_a_role_and_a_column_it_declares():
+    """``{role, column}`` names a role of the view that declares the column, and no role is given
+    twice (the writer's rule; the envelope of a kind the registry does not list says neither)."""
+    text = views.table_text(("a", "b"), [[1, 2]])
+    file = views.view_file(RECORDING, LABEL, "custom", "tsv", text, "qc", "x")
+    columns = [{"name": "a", "type": "integer"}, {"name": "b", "type": "integer"}]
+
+    def declare(coords, roles=("values",)):
+        dims = [{"name": "row", "axis": "rows", "type": "string", "coords": coords}]
+        data = [
+            views.data_role(role, file, columns, dims if role == "values" else ()) for role in roles
+        ]
+        return views.recipe_view(
+            HOST, key="custom", kind="nemar.custom", kind_version=1, caption="x", data=data
+        )
+
+    declare({"role": "labels", "column": "a"}, roles=("values", "labels"))  # passes
+    for coords, roles in (
+        ({"role": "ghost", "column": "a"}, ("values",)),
+        ({"role": "labels", "column": "zz"}, ("values", "labels")),
+        ({"column": "a"}, ("values", "values")),
+    ):
+        with pytest.raises(views.ViewRefused) as refused:
+            declare(coords, roles)
+        assert refused.value.word == "declaration_invalid", (coords, roles)
+
+
+def test_a_metric_credited_to_the_wrong_kind_of_producer_is_found():
+    """A ``<plugin>:<name>`` metric whose producer is a recipe, and a bare metric whose producer is a
+    plugin: each a ``metric_producer_mismatch``, read without assuming the producer is there."""
+    entry = {
+        "metrics": {
+            "nemar-quality:share": {"recipe": {"name": "nemar-ica", "version": "1"}},
+            "icaRank": {"plugin": {"name": "nemar-quality", "version": "1"}},
+            "nemar-quality:other": {},
+        }
+    }
+    assert views.record_findings("nemar-ica", entry) == [
+        {"word": "metric_producer_mismatch", "at": "metrics/nemar-quality:share"},
+        {"word": "metric_producer_mismatch", "at": "metrics/icaRank"},
+        {"word": "metric_producer_mismatch", "at": "metrics/nemar-quality:other"},
+    ]
+
+
+def test_welchs_grid_is_held_to_one_part_in_a_billion(loaded, capsys):
+    assert views.GRID_TOLERANCE == 1e-9
+    off = spectrum(freqs=(0.5, 1.0, 1.5 * (1 + 1e-6), 2.0))
+    plugin, plan, result = run_returning(
+        loaded["fx-views"], plugins.PluginResult(metrics={}, views=views_of(values=off))
+    )
+    assert_refused(plugin, plan, result, "freq_off_grid", capsys)
+
+
+def test_n_a_is_a_missing_place_only_in_a_layout_or_positions_role():
+    text = views.table_text(("name", "theta_deg"), [["Fz", None]])
+    file = views.view_file(RECORDING, LABEL, "places", "tsv", text, "qc", "x")
+    columns = [
+        {"name": "name", "type": "string"},
+        {"name": "theta_deg", "type": "number", "unit": "deg"},
+    ]
+    for role in ("layout", "positions"):
+        views.data_role(role, file, columns)
+    with pytest.raises(views.ViewRefused) as refused:
+        views.data_role("table", file, columns)
+    assert refused.value.word == "cell_not_number"
