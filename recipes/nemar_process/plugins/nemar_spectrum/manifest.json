@@ -1,0 +1,46 @@
+{
+  "format": "nemar.plugin-manifest.v1",
+  "name": "nemar-spectrum",
+  "version": "0.1.0",
+  "entry": "nemar_process.plugins.nemar_spectrum",
+  "checkpoint": "quality",
+  "reads": {
+    "dataset": false,
+    "recipes": [
+      "nemar-floor",
+      "nemar-ica"
+    ]
+  },
+  "parameters": {},
+  "outputs": {
+    "metrics": {},
+    "views": {
+      "spectrum": {
+        "kind": "nemar.spectrum",
+        "kind_version": 1,
+        "caption": "Power spectral density of each good channel of the decomposition's input (Welch's method, in dB re 1 µV²/Hz), with scalp maps at chosen frequencies.",
+        "roles": {
+          "values": {
+            "format": "tsv",
+            "max_bytes": 4194304,
+            "dims": [
+              "freq",
+              "sensor"
+            ],
+            "unit": "dB",
+            "columns": [
+              {
+                "name": "freq_hz",
+                "type": "number",
+                "unit": "Hz"
+              }
+            ]
+          },
+          "layout": {
+            "from": "recipe"
+          }
+        }
+      }
+    }
+  }
+}
