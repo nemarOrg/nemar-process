@@ -1057,6 +1057,21 @@ def test_the_signal_window_lies_inside_the_good_sample_mask(archive, fixture_fit
     assert pipeline.midsegment(good, rate, 2) == fixture_fit.window
 
 
+# A span ASR repaired over the cut's middle (samples 5501 to 5893 at 200 Hz, 27.505 to 29.465 s): the
+# window nearest the middle then starts where the span ends, a time that falls between the samples of a
+# resampled grid, so each grid chooses its own start.
+MIDDLE_BURST = [5501, 5893]
+
+
+@pytest.fixture(scope="module")
+def burst_fit(fixture_fit):
+    """The decomposition with one more span ASR repaired, over the middle: its mask, its bad
+    segments and every view of it say so, as for any span ASR repaired."""
+    bursts = copy.deepcopy(fixture_fit.bursts)
+    bursts["spans"] = sorted([*bursts["spans"], MIDDLE_BURST])
+    return dataclasses.replace(fixture_fit, bursts=bursts)
+
+
 def floor_spans(fit):
     """The spans the good-sample mask leaves out, in seconds on the floor's grid, written out here from
     the floor's sample mask and ASR's spans (not ``pipeline.bad_intervals``)."""
@@ -1076,22 +1091,22 @@ def floor_spans(fit):
     ids=["resampled_to_100", "resampled_to_128", "as_read", "resampled_up_to_250"],
 )
 def test_on_a_dataset_directory_the_window_is_chosen_on_the_serving_copys_grid(
-    recording, fixture_fit, tmp_path, rate, samples
+    recording, burst_fit, tmp_path, rate, samples
 ):
     """The renderer draws the window from the serving copy, at the rate and length its index lists
     (the converter may have resampled): the window's samples on that grid, by the times rule, lie
     outside every row of _badsegments.tsv as written and every span the floor's mask leaves out, and
     of the windows that do, it is the one nearest the middle (the definition, sample by sample)."""
     group = [("eeg_{:g}hz".format(rate), "EEG", rate, 21, samples)]
-    product = write(
-        recording, fixture_fit, tmp_path, serving=index_for(recording.path, groups=group)
-    )
+    product = write(recording, burst_fit, tmp_path, serving=index_for(recording.path, groups=group))
     window = views_of(product)["midsegment"]["parameters"]
     _, rows = read_table(named(tmp_path, "badsegments.tsv"))
     spans = [(float(row[0]), float(row[0]) + float(row[1])) for row in rows]
-    spans += floor_spans(fixture_fit)
+    spans += floor_spans(burst_fit)
     good = np.array([all(not (a <= k / rate < b) for a, b in spans) for k in range(samples)])
     first = brute_force(good, rate, 2)
+    # the window starts where the span over the middle ends, on this grid
+    assert first == math.ceil(MIDDLE_BURST[1] / 200 * rate - 1e-9)
     assert first is not None
     assert window["start_s"] == first / rate
     chosen = [k for k in range(samples) if window["start_s"] <= k / rate < window["start_s"] + 2]
@@ -1101,27 +1116,28 @@ def test_on_a_dataset_directory_the_window_is_chosen_on_the_serving_copys_grid(
 
 
 def test_the_serving_window_keeps_out_of_the_floors_spans_and_of_every_row_as_written(
-    recording, fixture_fit
+    recording, burst_fit
 ):
     """Without the table, the window still avoids every span the floor's mask leaves out; a row of
     the table as written (here one the floor never found, over that window) moves it off the row."""
     row = index_for(recording.path).row(recording.path, DATASET_ID)
     assert row is not None
     rate = row.rate_hz
-    spans = floor_spans(fixture_fit)
+    spans = floor_spans(burst_fit)
 
     def chosen(window):
         start = window["start_s"]
         return [k for k in range(row.n_samples) if start <= k / rate < start + 2]
 
-    alone = outputs.serving_window(fixture_fit, row, None)
+    alone = outputs.serving_window(burst_fit, row, None)
     assert alone is not None
+    assert alone["start_s"] == MIDDLE_BURST[1] / 200  # off the span over the middle
     assert all(not (a <= k / rate < b) for k in chosen(alone) for a, b in spans)
     onset = alone["start_s"] + 0.5
     text = views.table_text(
         ("onset", "duration", "label", "nemar_reason"), [[onset, 0.25, "bad_window", "x"]]
     )
-    moved = outputs.serving_window(fixture_fit, row, product_file("badsegments", text))
+    moved = outputs.serving_window(burst_fit, row, product_file("badsegments", text))
     assert moved is not None
     assert moved["start_s"] != alone["start_s"]
     assert all(not (onset <= k / rate < onset + 0.25) for k in chosen(moved))
