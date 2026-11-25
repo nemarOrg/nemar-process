@@ -240,7 +240,7 @@ NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
 # The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
 # import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
 # description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees
-# (sccn/eegprep#TBD; eegprep-lean, the serving copy's reader, reads them as stated). nemar-ica withholds
+# (sccn/eegprep#692; eegprep-lean, the serving copy's reader, reads them as stated). nemar-ica withholds
 # such positions (``pipeline.position_facts``): ``_chanlocs.tsv`` holds no place and ``icmaps`` is
 # skipped with this word, never drawn on positions known to be turned. ICLabel still classified on them
 # (nemarOrg/nemar-process#94).

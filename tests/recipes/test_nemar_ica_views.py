@@ -1245,7 +1245,7 @@ def als_copy(destination, system, description=None):
 @pytest.mark.parametrize("system", ["CTF", "4DBti", "KitYokogawa"])
 def test_positions_in_a_frame_eegprep_turns_are_withheld(tmp_path, system):
     """eegprep's BIDS import reads these ALS frames as RAS and turns them by 90 degrees: Fp1, stated
-    at (77, 32, 19), is held at (32, -77, 19), right of the nose (sccn/eegprep#TBD). The positions
+    at (77, 32, 19), is held at (32, -77, 19), right of the nose (sccn/eegprep#692). The positions
     are withheld; this test fails once eegprep reads them as stated, and the withholding goes."""
     (found,) = io.discover(als_copy(tmp_path / "dataset", system))
     loaded = io.load(found)

@@ -325,7 +325,7 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
     it reads as stated. Its BIDS import reads every frame but EEGLAB's as RAS (unless the
     coordsystem's description is ``EEGLAB``), so on a dataset directory positions in the frames BIDS
     defines as ALS (``steps.ROTATED_FRAMES``: CTF, 4DBti, KitYokogawa) come out turned by 90 degrees
-    (sccn/eegprep#TBD). ``withheld`` is then ``frame_rotated`` (``steps.FRAME_ROTATED``), and the
+    (sccn/eegprep#692). ``withheld`` is then ``frame_rotated`` (``steps.FRAME_ROTATED``), and the
     recipe writes no place of them and draws no map on them; otherwise it is None. eegprep-lean, the
     serving copy's reader, reads those frames as stated, so nothing is withheld there.
     """
