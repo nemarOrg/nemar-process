@@ -304,6 +304,74 @@ def test_the_class_view_is_held_to_the_hosts_components(loaded, decomposition, r
     assert (outcome.status, outcome.detail) == ("skipped", views.DIM_MISMATCH)
 
 
+# ---- a layout the host withholds (nemar-ica's turned positions, a layout over the caps) -------------
+
+
+@pytest.mark.parametrize("reason", ["frame_rotated", "cap_exceeded"])
+def test_a_withheld_layout_skips_the_spectrum_view_with_the_hosts_word_and_the_plugin_runs(
+    loaded, decomposition, recording, capsys, reason
+):
+    """The host has no layout for this recording and says why (``Host.withheld``): the spectrum, whose
+    layout is the recipe's, is skipped with that word, never refused as role_unprovided; the plugin
+    ran, its step is in the plan, and nemar-quality's view and metric are kept."""
+    fit, line_hz = decomposition
+    host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": reason})
+    plan, run = run_both(loaded, fit, host, host_inputs(fit, line_hz))
+    assert [(o.name, o.status) for o in run.outcomes] == [
+        ("nemar-quality", "ran"),
+        ("nemar-spectrum", "ran"),
+    ]
+    assert run.views_skipped == [{"key": "spectrum", "kind": "nemar.spectrum", "reason": reason}]
+    assert list(run.views) == ["nemar-quality"]
+    assert plan.has_step("nemar-spectrum")
+    assert plan.skipped == []
+    assert "plugin_skipped" not in capsys.readouterr().err
+    assert run.summary_metrics.keys() == {nemar_quality.METRIC}
+
+
+def test_a_plugins_fault_is_still_its_own_when_its_layout_is_withheld(
+    loaded, decomposition, recording, capsys
+):
+    """The roles the plugin produced are checked before the withheld role is: a spectrum that is not
+    finite skips the plugin with the writer's word whatever the host holds."""
+    fit, line_hz = decomposition
+    data = np.array(fit.eeg["data"], dtype=np.float64)
+    data[0, 100:300] = np.nan
+    host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": "frame_rotated"})
+    _, run = run_both(loaded, fit, host, host_inputs(fit, line_hz, data=data))
+    spectrum = run.outcomes[1]
+    assert (spectrum.status, spectrum.code, spectrum.detail) == (
+        "skipped",
+        "plugin_failed",
+        views.NOT_FINITE,
+    )
+    assert run.views_skipped == [
+        {"key": "spectrum", "kind": "nemar.spectrum", "reason": "plugin_failed"}
+    ]
+    assert "nemar-spectrum code=plugin_failed detail=not_finite" in capsys.readouterr().err
+
+
+def test_without_a_layout_or_a_word_for_it_the_spectrum_is_refused(
+    loaded, decomposition, recording, capsys
+):
+    """A host that neither gives the layout nor says why is the recipe's fault: role_unprovided."""
+    fit, line_hz = decomposition
+    host = replace(host_of(fit, recording.path), roles={})
+    _, run = run_both(loaded, fit, host, host_inputs(fit, line_hz))
+    spectrum = run.outcomes[1]
+    assert (spectrum.status, spectrum.detail) == ("skipped", views.ROLE_UNPROVIDED)
+    capsys.readouterr()
+
+
+def test_a_withheld_role_is_a_skip_reason_and_never_also_given(decomposition, recording):
+    fit, _ = decomposition
+    host = host_of(fit, recording.path)
+    with pytest.raises(ValueError, match="skip reason"):
+        replace(host, roles={}, withheld={"layout": "no_layout_today"})
+    with pytest.raises(ValueError, match="both given and withheld"):
+        replace(host, withheld={"layout": "frame_rotated"})
+
+
 # ---- nemar-spectrum on the decomposition ----------------------------------------------------------
 
 

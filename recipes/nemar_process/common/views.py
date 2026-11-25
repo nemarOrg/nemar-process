@@ -15,7 +15,9 @@ or ``class`` dimension, the sampling rate of a frequency axis, the classes and c
 ic-classes view), never passes it unchecked:
 
 1. its roles: every produced role returned (``role_missing``), nothing else (``role_extra``), and every
-   ``{"from": "recipe"}`` role one the host has for this recording (``role_unprovided``);
+   ``{"from": "recipe"}`` role one the host has for this recording (``role_unprovided``), unless the host
+   withholds it with a reason (``Host.withheld``): the produced roles are then checked all the same and
+   the view is skipped with the host's reason (``ViewWithheld``), never refused;
 2. each produced TSV role, a ``TableArray``: a 2-D float64 array as wide as its header and within the
    caps (``dim_mismatch``, ``view_too_large``), a header of unique column names (``header_mismatch``),
    finite cells (``not_finite``), its dimensions (C5): ``sensor`` the host's good channels in layout
@@ -170,9 +172,12 @@ WORDS = frozenset(
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
 # nemar-process's own reasons beside neuroschema's, which dataQuality admits ("another word, which a
 # renderer shows as it is"): a signal window with no two seconds of the recording inside the
-# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``), and component maps whose
-# positions the loader is known to have turned (nemar-ica's ``icmaps``, ``steps.FRAME_ROTATED``).
-OWN_SKIP_REASONS = ("no_good_window", "frame_rotated")
+# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``); views drawn on positions the
+# loader is known to have turned (nemar-ica's ``icmaps``, and a plugin view on its layout,
+# ``steps.FRAME_ROTATED``); and the views of the serving copy of a dataset directory's run given no
+# serving index, or one with no row for the recording (``steps.NO_SERVING_INDEX``,
+# ``steps.NOT_IN_SERVING_INDEX``).
+OWN_SKIP_REASONS = ("no_good_window", "frame_rotated", "no_serving_index", "not_in_serving_index")
 # A recipe view the builder refuses for its size is skipped with ``cap_exceeded``; any other refusal of
 # a recipe's own view is a fault of the recipe, never of the data.
 SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded", CAP_EXCEEDED: "cap_exceeded"}
@@ -267,6 +272,17 @@ class ViewRefused(Exception):
     def __init__(self, word: str, detail: str = "") -> None:
         super().__init__("{}: {}".format(word, detail) if detail else word)
         self.word = word
+
+
+class ViewWithheld(Exception):
+    """A plugin's view whose ``{"from": "recipe"}`` role the host withholds for this recording, with
+    the host's reason (``Host.withheld``): the view is skipped with that reason, and the plugin, whose
+    own roles passed every check, is not (``plugins.run_checkpoint``). Not a refusal: nothing is wrong
+    with what the plugin returned."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def caps() -> Mapping[str, int]:
@@ -389,7 +405,11 @@ class Host:
     ``sensors`` are the good channels in layout order (the decomposition's channels, the unmixing's
     header), ``components`` the component labels (as many as the rank), ``classes`` the classifier's
     classes in its order; each None when the recipe has none. ``roles`` are the data entries the recipe
-    gives a plugin's ``{"from": "recipe"}`` role (its layout); ``sidecar`` the recording's
+    gives a plugin's ``{"from": "recipe"}`` role (its layout); ``withheld`` the roles it gives for other
+    recordings and not for this one, each with why, a skip reason (``SKIP_REASONS`` or
+    ``OWN_SKIP_REASONS``: nemar-ica's layout of positions known to be turned, ``frame_rotated``, or over
+    the caps, ``cap_exceeded``), so a plugin view on that role is skipped with the reason
+    (``ViewWithheld``) and never refused as ``role_unprovided``; ``sidecar`` the recording's
     ``cap_model`` and ``reference`` (``sidecar_fields``); ``reserved`` the suffixes of the recipe's own
     product files, which no plugin's view file may take (``view_repeated``).
     """
@@ -405,6 +425,14 @@ class Host:
     roles: Mapping[str, RoleData] = field(default_factory=dict)
     sidecar: Mapping[str, str] = field(default_factory=dict)
     reserved: frozenset[str] = frozenset()
+    withheld: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for role, reason in self.withheld.items():
+            if role in self.roles:
+                raise ValueError("the role {} is both given and withheld".format(role))
+            if reason not in (*SKIP_REASONS, *OWN_SKIP_REASONS):
+                raise ValueError("a withheld role's reason is a skip reason: {!r}".format(reason))
 
     def expected(self, dim: str) -> tuple[str, ...] | None:
         """The names a dimension the host knows must have, in order (C5), or None."""
@@ -1110,6 +1138,11 @@ def plugin_view(
     ``plugin`` is the plugin's ``{name, version}`` (its step id is its name), ``declared`` the manifest's
     view, ``roles`` and ``parameters`` what the run returned (``parameters`` already valid against the
     kind's schema, ``plugins._plugin_views``). Raises ``ViewRefused``.
+
+    A ``{"from": "recipe"}`` role the host withholds for this recording (``Host.withheld``) does not
+    refuse the view: every role the plugin produced is checked as it would be (with no sensor role,
+    its sensors are the host's), and then ``ViewWithheld`` carries the host's reason, so the view is
+    skipped with it and a fault of the plugin is still a refusal, whatever the host holds.
     """
     kind, version = declared["kind"], declared["kind_version"]
     entry = contract.kind_entry(kind, version)
@@ -1122,8 +1155,12 @@ def plugin_view(
     if any(role not in produced for role in roles):
         raise ViewRefused(ROLE_EXTRA)
     provided: dict[str, RoleData] = {}
+    held: str | None = None
     for role in recipe:
         found = host.roles.get(role)
+        if found is None and role in host.withheld:
+            held = held or host.withheld[role]
+            continue
         if found is None or found.role != role:
             raise ViewRefused(ROLE_UNPROVIDED)
         provided[role] = found
@@ -1145,10 +1182,14 @@ def plugin_view(
         if role in provided:
             data.append(provided[role])
             continue
+        if role in recipe:  # withheld for this recording
+            continue
         build = json_role if spec["format"] == "json" else table_role
         made = build(context, role, spec, roles[role])
         data.append(made)
         written.append(made.file)
+    if held is not None:
+        raise ViewWithheld(held)
     declaration = _declare(
         key=key,
         kind=kind,
