@@ -7,8 +7,8 @@ the recording (``tests/fixtures/ica-views/index.json``: the converter keeps 200 
 ceiling). What a backend and a renderer read of the product is checked as they read it:
 
 * the product tree: the files of one recording and of the dataset, TSV and JSON only, and the file
-  count against nemar-ica's ``maxFiles`` in the registry of the nemar-cli checkout ``NEMAR_CLI_DIR``
-  names (skipped, saying so, without one);
+  count against nemar-ica's ``maxFiles`` (``views_support.NEMAR_ICA_MAX_FILES``, which
+  tests/contract/test_progress_drift.py holds to nemar-cli's registry at the progress pin);
 * the views: the recipe's three, then the plugins' two, each declaration valid, each file it names in
   the product with its declared size and SHA-256 and an output of a step of the record, the serving
   copy's group the one the index lists, the window chosen on that grid;
@@ -41,7 +41,7 @@ from pathlib import Path
 import pytest
 from recipe_support import DATASET, DATASET_ID, DATASET_VERSION, ROOT, require_runtime
 from test_floor_launch import STANDIN_COMMAND
-from views_support import check_view_files, max_files_of, product_files
+from views_support import NEMAR_ICA_MAX_FILES, check_view_files, product_files
 
 FIXTURE = ROOT / "tests" / "fixtures" / "ica-views"
 INDEX = FIXTURE / "index.json"
@@ -104,27 +104,8 @@ VIEWS = [
     ("icclasses", "nemar.ic-classes", "plugin"),
     ("spectrum", "nemar.spectrum", "plugin"),
 ]
-# The dataset size nemar-cli's estimate of nemar-ica's maxFiles holds headroom for (its registry,
-# shared/compute-recipes.ts, read from the checkout NEMAR_CLI_DIR names: ``registry_max_files``).
+# The dataset size nemar-cli's estimate of nemar-ica's maxFiles holds headroom for.
 RECORDINGS_HELD = 1_000
-
-
-def registry_max_files() -> int:
-    """nemar-ica's ``resultLimits.maxFiles`` in the registry of the nemar-cli checkout that
-    ``NEMAR_CLI_DIR`` names, or skip, saying why: without a checkout the count is not compared here
-    (``views_support.NEMAR_ICA_MAX_FILES``, the fallback, is held to the registry at the progress pin by
-    tests/contract/test_progress_drift.py)."""
-    given = os.environ.get("NEMAR_CLI_DIR")
-    registry = Path(given) / "shared" / "compute-recipes.ts" if given else None
-    if registry is None or not registry.is_file():
-        pytest.skip(
-            "NEMAR_CLI_DIR names no nemar-cli checkout with shared/compute-recipes.ts, so nemar-ica's "
-            "file count is not compared with the registry's maxFiles here (the fallback literal is "
-            "held to the registry at the progress pin by tests/contract/test_progress_drift.py)"
-        )
-    found = max_files_of(registry.read_text(encoding="utf-8"), "nemar-ica")
-    assert found is not None, "the registry declares no maxFiles for nemar-ica"
-    return found
 
 
 def run_recipe(out: Path) -> subprocess.CompletedProcess:
@@ -218,11 +199,11 @@ def test_the_product_is_one_recordings_files_and_the_datasets(produced):
 
 def test_the_file_count_holds_the_registrys_max_files_for_a_thousand_recordings(produced):
     """nemar-cli's estimate for nemar-ica: the files of a recording, the record's among them, times a
-    dataset of a thousand recordings, and the dataset's, are within the registry's maxFiles."""
+    dataset of a thousand recordings, and the dataset's, are within the registry's maxFiles
+    (``NEMAR_ICA_MAX_FILES``, held to the registry at the progress pin by the drift test)."""
     per_recording = len([name for name in product_files(produced) if name.startswith(STEM)])
     assert per_recording == len(RECORDING_FILES) == 17
-    max_files = registry_max_files()
-    assert per_recording * RECORDINGS_HELD + len(DATASET_FILES) <= max_files
+    assert per_recording * RECORDINGS_HELD + len(DATASET_FILES) <= NEMAR_ICA_MAX_FILES
 
 
 def test_the_serving_index_lists_the_recording_on_the_grid_the_floor_read(produced):

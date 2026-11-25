@@ -71,7 +71,8 @@ SERVING_INDEX = Option(
     serving_index.serving_index,
     None,
     "the serving copy's index.json, as a file (dataset directories only): the views of the serving "
-    "copy (activations, signal window) name each recording's EEG group as it lists it, and are "
+    "copy (activations, signal window) name each recording's EEG group as it lists it, used only when "
+    "the index's source_commit is exactly --source-commit (else serving_index_stale), and are "
     "skipped with a word when it is not given or does not list the recording",
 )
 

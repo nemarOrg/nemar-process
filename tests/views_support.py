@@ -163,9 +163,9 @@ def serving_index_of(rows, *, dataset_id: str, source_commit: str):
     return serving_index.parse(text.encode("utf-8"))
 
 
-# nemar-cli's registry (shared/compute-recipes.ts): nemar-ica's resultLimits.maxFiles. The literal is a
-# fallback only: tests/contract/test_progress_drift.py holds it to the registry at the progress pin, and
-# tests/e2e/test_nemar_ica_views_e2e.py reads the registry of the checkout NEMAR_CLI_DIR names.
+# nemar-cli's registry (shared/compute-recipes.ts): nemar-ica's resultLimits.maxFiles, which
+# tests/e2e/test_nemar_ica_views_e2e.py holds the product's file count to, and which
+# tests/contract/test_progress_drift.py holds to the registry at the progress pin.
 NEMAR_ICA_MAX_FILES = 25_000
 
 

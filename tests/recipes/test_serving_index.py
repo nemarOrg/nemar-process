@@ -148,6 +148,22 @@ def test_a_row_is_used_only_with_the_index_it_was_read_from_as_it_lists_it():
     assert not other.lists(row)
 
 
+def test_a_resolution_is_a_row_or_a_word_never_both_nor_neither():
+    index = parsed()
+    row = index.resolve(PATH, DATASET, COMMIT).row
+    assert row is not None
+    assert serving_index.Resolution(row, None).reason is None
+    assert serving_index.Resolution(None, "serving_index_stale").row is None
+    for row_given, word in (
+        (row, "serving_index_stale"),
+        (None, None),
+        (None, "no_such_word"),
+        (row, "not_in_serving_index"),
+    ):
+        with pytest.raises(ValueError, match="resolution"):
+            serving_index.Resolution(row_given, word)
+
+
 def test_the_words_are_nemar_icas():
     from nemar_process.nemar_ica import steps
 

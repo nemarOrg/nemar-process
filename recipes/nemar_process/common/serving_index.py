@@ -68,10 +68,16 @@ class ServingRow:
 @dataclass(frozen=True)
 class Resolution:
     """A recording's row of the serving index, or None with the word for why (``NOT_LISTED``,
-    ``STALE``): exactly one of the two is set."""
+    ``STALE``): exactly one of the two is set (``ValueError`` otherwise)."""
 
     row: ServingRow | None
     reason: str | None
+
+    def __post_init__(self) -> None:
+        if (self.row is None) == (self.reason is None):
+            raise ValueError("a resolution is a row or the word for why there is none, never both")
+        if self.reason is not None and self.reason not in (NOT_LISTED, STALE):
+            raise ValueError("a resolution's word is {} or {}".format(NOT_LISTED, STALE))
 
 
 @dataclass(frozen=True)
