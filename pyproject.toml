@@ -151,6 +151,7 @@ include = [
     "scripts/measure_ica_time.py",
     "recipes/nemar_process/**",
     "tests/recipes/**",
+    "tests/plugin_fixtures/**",
     "tests/recipe_plugin.py",
     "tests/recipe_support.py",
     "tests/zarr_support.py",

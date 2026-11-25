@@ -9,13 +9,16 @@ its manifest ``reads`` and never a path; it writes nothing itself.
 A view is data a browser draws, never an image (ADR 0137). The loader refuses a declared view whose
 kind is not in the vendored registry, whose role or dimensions the registry does not list for that
 kind, whose format the runner cannot write, or whose role is taken from a recipe that does not provide
-it, and a view key that two plugins, or a plugin and its host recipe, declare. A run's view value is
+it, a produced role of a generic kind that states no value unit, and a view key that two plugins, or
+a plugin and its host recipe, declare. A run's view value is
 ``{"roles": {role: TableArray | Mapping}, "parameters": {...}}`` (``parameters`` optional): the
 runner checks its shape and validates the parameters against the kind's schema in the bundle; the
 manifest carries no parameters, a preset's ``base`` comes from the registry, and a generic kind's
-coordinates and units come from the array headers and the manifest role, never from the plugin
-(``docs/contracts.md``). The checked views are handed back in ``CheckpointRun.views``; writing them and
-checking their arrays is the views writer's.
+coordinates come from the array headers and its units from the manifest role (a column's own unit
+overriding the role's), never from the plugin (``docs/contracts.md``). Then the views writer
+(``views.plugin_view``) checks the arrays against the recording the host describes (``views.Host``) and
+makes the files and declarations, which ``CheckpointRun.views`` hands to the recipe's product writer; a
+skipped plugin's views are listed in ``CheckpointRun.views_skipped`` with the reason ``plugin_failed``.
 
 What runs is fixed in the image: a recipe declares ``PLUGINS = ((name, version), ...)`` beside its
 step order, and ``load`` refuses a plugin whose entry, name, version, checkpoint or reads differ from
@@ -30,6 +33,9 @@ declared bounds, a metric neuroschema refuses), skips that plugin: the plan reco
 word ``plugin_failed`` (so the recordings table's existing ``skipped_steps`` cell, built from the
 plan's skips, holds ``<plugin>:plugin_failed``), its metrics are absent (not null-filled), a fixed-word
 line names the plugin, and the rest of the recording is kept. Nothing a plugin returned is published unless all of it passed.
+The detail is a word of the runner's own checks (``OUTPUT_WORDS``, ``views.WORDS``) only for a check the
+runner made after ``run`` returned; anything ``run`` raised is named by its class, so a plugin cannot
+pass its failure off as one of the runner's words.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ import numpy as np
 
 from nemar_process.common import contract, progress
 from nemar_process.common import plan as plans
+from nemar_process.common import views as writer
 
 PACKAGE = "nemar_process.plugins"
 # A plugin's name is a step word without ``.``: its package is the name with ``-`` as ``_``, so a dot
@@ -75,16 +82,8 @@ class PluginLoadError(Exception):
         self.word = word
 
 
-@dataclass(frozen=True)
-class TableArray:
-    """One produced table role of a view: the column names and a 2-D float64 array of the cells.
-
-    The runner reads a generic kind's dimension coordinates from ``header``; checking the array
-    (finite, shape, the declared coordinates) and writing it is the views writer's.
-    """
-
-    header: tuple[str, ...]
-    values: np.ndarray
+# A plugin returns its table roles as ``TableArray``s (``views.TableArray``, where the writer checks them).
+TableArray = writer.TableArray
 
 
 @dataclass(frozen=True)
@@ -166,12 +165,14 @@ class PluginView:
 
 @dataclass
 class CheckpointRun:
-    """What one checkpoint's plugins gave: outcomes in order, the headline numbers, and the checked
-    views of each plugin that ran, by plugin name, for the views writer."""
+    """What one checkpoint's plugins gave: outcomes in order, the headline numbers, the views of each
+    plugin that ran, by plugin name, checked and ready to write (``views.PreparedView``), and the views
+    of each plugin that was skipped, ``{key, kind, reason: plugin_failed}``, in pinned order."""
 
     outcomes: list[PluginOutcome] = field(default_factory=list)
     summary_metrics: dict[str, Any] = field(default_factory=dict)
-    views: dict[str, list[PluginView]] = field(default_factory=dict)
+    views: dict[str, list[writer.PreparedView]] = field(default_factory=dict)
+    views_skipped: list[dict[str, str]] = field(default_factory=list)
 
 
 def module_name(name: str, package: str = PACKAGE) -> str:
@@ -341,6 +342,22 @@ class _OutputRefused(Exception):
         self.word = word
 
 
+# The words of the runner's checks of a result (``_OutputRefused``) before the views writer's.
+OUTPUT_WORDS = frozenset(
+    {
+        "result_not_a_plugin_result",
+        "metrics_differ",
+        "metric_not_a_number",
+        "metric_not_finite",
+        "metric_out_of_bounds",
+        "metric_invalid",
+        "views_differ",
+        "view_malformed",
+        "parameters_invalid",
+    }
+)
+
+
 def _metric_value(value: Any, declared: Mapping[str, Any]) -> float | None:
     if value is None:
         return None
@@ -494,18 +511,54 @@ def _log_skip(plugin: Plugin, detail: str) -> None:
     )
 
 
+def _checked_views(
+    plugin: Plugin, returned: PluginResult, host: writer.Host | None
+) -> list[writer.PreparedView]:
+    """The views of a result: their shape and parameters, then the writer's checks of their data."""
+    checked = _plugin_views(plugin, returned.views)
+    if not checked:
+        return []
+    assert host is not None  # run_checkpoint refused a checkpoint of views with no host
+    declared = plugin.manifest["outputs"]["views"]
+    identity = {"name": plugin.name, "version": plugin.version}
+    return [
+        writer.plugin_view(
+            identity, view.key, declared[view.key], view.roles, view.parameters, host
+        )
+        for view in checked
+    ]
+
+
+def _skip_detail(error: Exception, known: frozenset[str]) -> str:
+    word = (
+        getattr(error, "word", None)
+        if isinstance(error, (_OutputRefused, writer.ViewRefused))
+        else None
+    )
+    return word if word in known else _exception_detail(error)
+
+
 def run_checkpoint(
     plugins: Sequence[Plugin],
     checkpoint: str,
     inputs: Mapping[str, Any],
     plan: plans.Plan,
+    host: writer.Host | None = None,
 ) -> CheckpointRun:
     """Run the plugins of ``checkpoint`` in pinned order, adding each as a plan step or a skip.
 
     ``inputs`` maps a recipe id to the read-only view of its outputs the host built; a plugin gets the
-    ones its manifest reads. A plugin's step id is its name.
+    ones its manifest reads. A plugin's step id is its name. ``host`` describes the recording the views
+    are of (``views.Host``); a checkpoint whose plugins declare views needs one (``ValueError`` before
+    any plugin runs: a fault of the recipe, never of a plugin).
     """
     result = CheckpointRun()
+    if host is None and any(
+        plugin.checkpoint == checkpoint and plugin.manifest["outputs"]["views"]
+        for plugin in plugins
+    ):
+        raise ValueError("the plugins of {} declare views and no host was given".format(checkpoint))
+    known = OUTPUT_WORDS | writer.WORDS
     for plugin in plugins:
         if plugin.checkpoint != checkpoint:
             continue
@@ -519,23 +572,33 @@ def run_checkpoint(
             "ran",
         )
         parameters = copy.deepcopy(plugin.manifest["parameters"])
+        detail: str | None = None
         try:
             # a recipe the host did not hand over is a KeyError here, and skips the plugin
             given = {
                 recipe: read_only(inputs[recipe]) for recipe in plugin.manifest["reads"]["recipes"]
             }
             returned = plugin.run(given, copy.deepcopy(parameters))
-            if not isinstance(returned, PluginResult):
-                raise _OutputRefused("result_not_a_plugin_result")
-            quality = _quality_metrics(plugin, returned.metrics)
-            views = _plugin_views(plugin, returned.views)
         except Exception as error:  # noqa: BLE001  (a plugin never fails the recording: it is skipped)
-            detail = error.word if isinstance(error, _OutputRefused) else _exception_detail(error)
+            detail = _exception_detail(error)  # what run raised is named by its class, never a word
+        else:
+            try:
+                if not isinstance(returned, PluginResult):
+                    raise _OutputRefused("result_not_a_plugin_result")
+                quality = _quality_metrics(plugin, returned.metrics)
+                prepared = _checked_views(plugin, returned, host)
+            except Exception as error:  # noqa: BLE001  (an output that fails a check skips the plugin)
+                detail = _skip_detail(error, known)
+        if detail is not None:
             outcome.status, outcome.code, outcome.detail = "skipped", PLUGIN_FAILED, detail
             plan.add_skip(plugin.name, plugin.function, PLUGIN_FAILED, plugin=plugin.identity())
             _log_skip(plugin, detail)
             plan.add_plugin_outcome(outcome.entry())
             result.outcomes.append(outcome)
+            result.views_skipped += [
+                {"key": key, "kind": view["kind"], "reason": PLUGIN_FAILED}
+                for key, view in plugin.manifest["outputs"]["views"].items()
+            ]
             continue
         plan.add_step(
             plugin.name,
@@ -552,8 +615,8 @@ def run_checkpoint(
         for name, metric in quality.items():
             if declared[name].get("headline"):
                 result.summary_metrics[name] = metric["value"]
-        if views:
-            result.views[plugin.name] = views
+        if prepared:
+            result.views[plugin.name] = prepared
         plan.add_plugin_outcome(outcome.entry())
         result.outcomes.append(outcome)
     return result
