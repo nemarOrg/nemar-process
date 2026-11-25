@@ -1,0 +1,147 @@
+"""The serving copy's index, read from a file, for a run of a dataset directory (ADR 0137 open question 1,
+as the lead ruled it on 2026-11-24).
+
+A recipe that read a dataset directory read no store of the serving copy, so the views it declares of
+the serving copy (nemar-ica's activations and signal window) take the store's channel group, rate and
+length from the serving copy's own index: the document the Zarr input reads over the network
+(``<zarr base>/<dataset id>/zarr/index.json``, ``zarr_input``), handed to the run as a file
+(``--serving-index``). Never from a naming rule: the converter names a group after its resampling
+(``eeg_250hz``), which nothing here pins, so a name made up from the recording's rate would be a guess.
+
+The file is read once, at most ``zarr_input.MAX_INDEX_BYTES``, as strict JSON (a repeated member name is
+refused), checked for shape by the Zarr input's own ``validate_document``, and named by the SHA-256 of
+its bytes. A recording's row (``ServingIndex.row``) is the store whose source path is the recording's
+path, in an index of the run's dataset, with exactly one EEG group: its path, the group's name, rate and
+sample count. Anything else (an index of another dataset, or of none; no store at that path, or two;
+no EEG group, or two) gives no row, and the views of the serving copy are skipped with a word, never
+declared on a guess. ``ServingRow`` is made here only, so a caller has nothing to pass but a row read from
+an index.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from nemar_process.common import zarr_input
+
+
+class IndexUnusable(ValueError):
+    """The file cannot serve as a serving index: the message is a fixed phrase, naming no path."""
+
+
+@dataclass(frozen=True)
+class ServingRow:
+    """One recording's row of the serving index: the store's source path (the recording's), its one EEG
+    group's name, rate in Hz and length in samples, and the SHA-256 of the index it was read from."""
+
+    path: str
+    group: str
+    rate_hz: float
+    n_samples: int
+    index_sha256: str
+
+    def facts(self) -> dict[str, Any]:
+        """The row as a record states it (``extensions.nemar.ica.serving_index.row``)."""
+        return {
+            "path": self.path,
+            "group": self.group,
+            "rate": self.rate_hz,
+            "n_samples": self.n_samples,
+        }
+
+
+@dataclass(frozen=True)
+class ServingIndex:
+    """A serving index read from a file: its digest, the dataset and commit it names (None when it names
+    none), and each store's EEG groups by the store's source path, ``(name, rate, n_samples)``."""
+
+    sha256: str
+    dataset_id: str | None
+    source_commit: str | None
+    stores: Mapping[str, tuple[tuple[tuple[str, float, int], ...], ...]] = field(repr=False)
+
+    def row(self, path: str, dataset_id: str | None) -> ServingRow | None:
+        """The row of the recording at ``path`` of the dataset ``dataset_id``, or None: an index that
+        names no dataset or another one, no store at the path or more than one, or a store with no EEG
+        group or more than one, has no row for it."""
+        if self.dataset_id is None or dataset_id is None or self.dataset_id != dataset_id:
+            return None
+        found = self.stores.get(path, ())
+        if len(found) != 1 or len(found[0]) != 1:
+            return None
+        ((name, rate, count),) = found[0]
+        return ServingRow(path, name, rate, count, self.sha256)
+
+    def facts(self, row: ServingRow | None) -> dict[str, Any]:
+        """What a record says of the index it was given (``extensions.nemar.ica.serving_index``)."""
+        return {
+            "sha256": self.sha256,
+            "dataset_id": self.dataset_id,
+            "source_commit": self.source_commit,
+            "row": None if row is None else row.facts(),
+        }
+
+
+def _strict(text: str) -> Any:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        names = [name for name, _ in items]
+        if len(set(names)) != len(names):
+            raise ValueError("duplicate_name")
+        return dict(items)
+
+    def constant(_: str) -> Any:
+        raise ValueError("constant")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def parse(data: bytes) -> ServingIndex:
+    """A serving index from its bytes, or ``IndexUnusable``."""
+    if len(data) > zarr_input.MAX_INDEX_BYTES:
+        raise IndexUnusable("the serving index is larger than the index cap")
+    try:
+        document = _strict(data.decode("utf-8"))
+        zarr_input.validate_document(document)
+    except zarr_input.IndexInvalid as error:
+        raise IndexUnusable("the serving index is not usable ({})".format(error)) from error
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise IndexUnusable("the serving index is not strict JSON") from error
+    stores: dict[str, list[tuple[tuple[str, float, int], ...]]] = {}
+    for entry in document["stores"]:
+        eeg = tuple(
+            (group["name"], float(group["rate"]), int(group["n_samples"]))
+            for group in entry["groups"]
+            if group["modality"].upper() == zarr_input.EEG
+        )
+        stores.setdefault(entry["path"], []).append(eeg)
+    return ServingIndex(
+        sha256=hashlib.sha256(data).hexdigest(),
+        dataset_id=_text(document.get("dataset_id")),
+        source_commit=_text(document.get("source_commit")),
+        stores={path: tuple(found) for path, found in stores.items()},
+    )
+
+
+def read(path: Path) -> ServingIndex:
+    """The serving index in the file at ``path``, read at most one byte past the cap, or
+    ``IndexUnusable`` (a file that cannot be read included)."""
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(zarr_input.MAX_INDEX_BYTES + 1)
+    except OSError as error:
+        raise IndexUnusable("the serving index cannot be read") from error
+    return parse(data)
+
+
+def serving_index(text: str) -> ServingIndex:
+    """``--serving-index``'s value: the index in the file it names (a refusal is a usage error)."""
+    return read(Path(text))

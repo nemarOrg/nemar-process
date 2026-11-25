@@ -116,3 +116,46 @@ def check_view_files(root: Path, record: dict) -> dict[str, bytes]:
 
 def read_record(root: Path, record_path: str) -> dict:
     return json.loads((root / record_path).read_text(encoding="utf-8"))
+
+
+def serving_index_text(rows, *, dataset_id: str, source_commit: str = "c" * 40) -> str:
+    """A serving index in the contract's shape (``zarr_input.validate_document``), as its file holds it:
+    one store per row ``(path, groups)``, each group ``(name, modality, rate, n_channels, n_samples)``,
+    under reserved example hosts."""
+    stores = [
+        {
+            "path": path,
+            "zarr": path.rsplit(".", 1)[0] + ".zarr",
+            "groups": [
+                {
+                    "name": name,
+                    "modality": modality,
+                    "rate": rate,
+                    "n_channels": channels,
+                    "n_samples": samples,
+                }
+                for name, modality, rate, channels, samples in groups
+            ],
+        }
+        for path, groups in rows
+    ]
+    document = {
+        "format": "nemar-zarr-index",
+        "format_version": 3,
+        "dataset_id": dataset_id,
+        "contract_base": "https://zarr.example.org/{}/zarr/".format(dataset_id),
+        "data_base": "https://data.example.org/{}/zarr/".format(dataset_id),
+        "source_commit": source_commit,
+        "engine_version": "3",
+        "store_count": len(stores),
+        "stores": stores,
+    }
+    return json.dumps(document, indent=1) + "\n"
+
+
+def serving_index_of(rows, *, dataset_id: str, source_commit: str = "c" * 40):
+    """``serving_index_text`` read as a run reads its ``--serving-index`` file."""
+    from nemar_process.common import serving_index
+
+    text = serving_index_text(rows, dataset_id=dataset_id, source_commit=source_commit)
+    return serving_index.parse(text.encode("utf-8"))
