@@ -33,6 +33,7 @@ from recipe_support import (
     DATASET,
     DATASET_ID,
     ROOT,
+    SOURCE_COMMIT,
     copy_fixture,
     loaded_fixture,
     make_context,
@@ -63,11 +64,27 @@ CUT_SAMPLES = 12000
 PLUGIN_VIEWS = ["icclasses", "spectrum"]
 
 
-def index_for(path, *, rate=200.0, samples=CUT_SAMPLES, dataset_id=DATASET_ID, groups=None):
+def index_for(
+    path,
+    *,
+    rate=200.0,
+    samples=CUT_SAMPLES,
+    dataset_id=DATASET_ID,
+    groups=None,
+    source_commit=SOURCE_COMMIT,
+):
     """The serving index of the fixture dataset, listing the recording at ``path`` with one EEG group
-    (or ``groups``)."""
+    (or ``groups``), built from the commit the test runs say they read (or ``source_commit``)."""
     listed = [(SERVING_GROUP, "EEG", rate, 21, samples)] if groups is None else groups
-    return serving_index_of([(path, listed)], dataset_id=dataset_id)
+    return serving_index_of([(path, listed)], dataset_id=dataset_id, source_commit=source_commit)
+
+
+def resolved_row(recording):
+    """The fixture recording's row of its serving index, as a run of the fixture resolves it."""
+    index = index_for(recording.path)
+    row = index.resolve(recording.path, DATASET_ID, SOURCE_COMMIT).row
+    assert row is not None
+    return index, row
 
 
 def vectors(name):
@@ -1006,13 +1023,14 @@ def test_with_its_row_in_the_serving_index_an_archive_run_declares_the_views_of_
     assert nemar["ica"]["serving_index"] == {
         "sha256": index.sha256,
         "dataset_id": DATASET_ID,
-        "source_commit": "c" * 40,
+        "source_commit": SOURCE_COMMIT,
         "row": {
             "path": recording.path,
             "group": SERVING_GROUP,
             "rate": 200.0,
             "n_samples": CUT_SAMPLES,
         },
+        "reason": None,
     }
     transform = activity["transform"]["parameters"]
     block = nemar["ica"]
@@ -1120,8 +1138,7 @@ def test_the_serving_window_keeps_out_of_the_floors_spans_and_of_every_row_as_wr
 ):
     """Without the table, the window still avoids every span the floor's mask leaves out; a row of
     the table as written (here one the floor never found, over that window) moves it off the row."""
-    row = index_for(recording.path).row(recording.path, DATASET_ID)
-    assert row is not None
+    _, row = resolved_row(recording)
     rate = row.rate_hz
     spans = floor_spans(burst_fit)
 
@@ -1222,25 +1239,72 @@ def test_an_index_with_no_row_for_the_recording_skips_the_serving_views_with_a_w
     ]
     assert nemar["ica"]["serving_index"]["sha256"] == given.sha256
     assert nemar["ica"]["serving_index"]["row"] is None
+    assert nemar["ica"]["serving_index"]["reason"] == "not_in_serving_index"
+    assert records.views_problems(product.record) == []
+
+
+@pytest.mark.parametrize(
+    ("built_from", "run"),
+    [("b" * 40, SOURCE_COMMIT), (SOURCE_COMMIT, None)],
+    ids=["an_index_of_another_commit", "a_run_with_no_source_commit"],
+)
+def test_a_stale_serving_index_skips_the_serving_views_with_its_own_word(
+    recording, fixture_fit, tmp_path, built_from, run
+):
+    """The lead's ruling, exact commit match: an index built from another commit than the run's
+    --source-commit (or a run that names none) may describe another serving copy than the data the run
+    read, so it names no group even for the store it lists. The two views of the serving copy are
+    skipped with serving_index_stale, and the record keeps the index's digest, its commit and why."""
+    given = index_for(recording.path, source_commit=built_from)
+    context = dataclasses.replace(
+        run_context(), identity=dataclasses.replace(make_context().identity, source_commit=run)
+    )
+    with determinism.pinned_threads(1), command.quiet():
+        product = outputs.write_product(
+            recording,
+            context,
+            tmp_path,
+            fixture_fit,
+            [],
+            profile=steps.INPUT_PROFILES["bids"],
+            serving=given,
+        )
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", *PLUGIN_VIEWS]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "serving_index_stale"},
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "serving_index_stale"},
+    ]
+    assert nemar["ica"]["serving_index"] == {
+        "sha256": given.sha256,
+        "dataset_id": DATASET_ID,
+        "source_commit": built_from,
+        "row": None,
+        "reason": "serving_index_stale",
+    }
     assert records.views_problems(product.record) == []
 
 
 def test_a_store_is_named_only_from_a_row_of_the_index(recording, fixture_fit):
-    """``signal_store`` takes a row read from an index, of this recording, and nothing else: no
-    free-text group can be handed to it."""
-    row = index_for(recording.path).row(recording.path, DATASET_ID)
-    assert row is not None
-    store = outputs.signal_store(recording, fixture_fit, row)
+    """``signal_store`` takes a row of this recording that the index the run read gives as it is, and
+    nothing else: no free-text group, no row with its group replaced, no row of another index."""
+    index, row = resolved_row(recording)
+    store = outputs.signal_store(recording, fixture_fit, row, index)
     assert store is not None
     assert store["store"]["group"] == SERVING_GROUP
+    other = index_for(recording.path, rate=100.0, samples=6000)  # another file, same store
     forgeries: list[Any] = [
-        dataclasses.replace(row, path="sub-02/eeg/sub-02_task-COVID_eeg.edf"),
-        {"group": SERVING_GROUP},
-        SERVING_GROUP,
+        (dataclasses.replace(row, group="eeg_999hz"), index),  # the group replaced
+        (dataclasses.replace(row, n_samples=1), index),
+        (dataclasses.replace(row, path="sub-02/eeg/sub-02_task-COVID_eeg.edf"), index),
+        (row, other),  # a row of one index used with another
+        (row, None),
+        ({"group": SERVING_GROUP}, index),
+        (SERVING_GROUP, index),
     ]
-    for forged in forgeries:
+    for forged, read in forgeries:
         with pytest.raises(ValueError, match="row of the serving index"):
-            outputs.signal_store(recording, fixture_fit, forged)
+            outputs.signal_store(recording, fixture_fit, forged, read)
 
 
 def test_the_serving_copy_takes_no_serving_index(recording, fixture_fit, tmp_path):
@@ -1645,12 +1709,14 @@ def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
         steps.CHANLOCS_STEP,
         "1,025 channels",
     )
+    index = index_for(recording.path)
     found = outputs.recipe_views(
         recording,
         fixture_fit,
         block,
         {**made.named, **outputs.floor_tables(recording, fixture_fit), steps.CHANLOCS: big},
-        serving_row=index_for(recording.path).row(recording.path, DATASET_ID),
+        serving=index,
+        resolved=index.resolve(recording.path, DATASET_ID, SOURCE_COMMIT),
     )
     assert found.views.skipped == [
         {"key": "icmaps", "kind": "nemar.ic-maps", "reason": "cap_exceeded"}

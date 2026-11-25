@@ -33,6 +33,8 @@ SMOKE_SET = ROOT / "tests" / "fixtures" / "smoke" / "smoke.set"
 RECORDING = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
 DATASET_ID = "on007823"
 DATASET_VERSION = "v1.0.0"
+# The commit a test run says it read (``--source-commit``), which a serving index of the same data names.
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 # The versions the tests pin. A bump of the recipe, of the common layer or of eegprep is an edit of
 # these lines (and of the places that declare them), not a search through the tests.
 PINNED_RECIPE_VERSION = "1.0.0-b2"
@@ -359,7 +361,7 @@ def make_context(**identity):
     values = {
         "dataset_id": DATASET_ID,
         "dataset_version": DATASET_VERSION,
-        "source_commit": "0123456789abcdef0123456789abcdef01234567",
+        "source_commit": SOURCE_COMMIT,
         "image_digest": "sha256:" + "b" * 64,
         "run_id": "run-under-test",
     }

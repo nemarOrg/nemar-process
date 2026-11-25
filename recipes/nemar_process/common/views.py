@@ -175,9 +175,15 @@ SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped
 # good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``); views drawn on positions the
 # loader is known to have turned (nemar-ica's ``icmaps``, and a plugin view on its layout,
 # ``steps.FRAME_ROTATED``); and the views of the serving copy of a dataset directory's run given no
-# serving index, or one with no row for the recording (``steps.NO_SERVING_INDEX``,
-# ``steps.NOT_IN_SERVING_INDEX``).
-OWN_SKIP_REASONS = ("no_good_window", "frame_rotated", "no_serving_index", "not_in_serving_index")
+# serving index, one with no row for the recording, or one built from another commit
+# (``steps.NO_SERVING_INDEX``, ``steps.NOT_IN_SERVING_INDEX``, ``steps.SERVING_INDEX_STALE``).
+OWN_SKIP_REASONS = (
+    "no_good_window",
+    "frame_rotated",
+    "no_serving_index",
+    "not_in_serving_index",
+    "serving_index_stale",
+)
 # A recipe view the builder refuses for its size is skipped with ``cap_exceeded``; any other refusal of
 # a recipe's own view is a fault of the recipe, never of the data.
 SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded", CAP_EXCEEDED: "cap_exceeded"}

@@ -253,12 +253,15 @@ MIDSEGMENT_DURATION_S = 2
 # nemar-process's own, which dataQuality admits beside neuroschema's and a renderer shows as it is.
 NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
 # Why a recording of a dataset directory has no view of the serving copy (``icactivity`` and
-# ``midsegment``): the run was given no serving index (``--serving-index``), or the index it was given
-# has no row for the recording (``serving_index.ServingIndex.row``: another dataset's index, no store at
-# the recording's path, or not exactly one EEG group). The serving copy's channel group is read from its
-# index, never guessed from a naming rule (the lead's ruling, 2026-11-24). Words of nemar-process's own.
+# ``midsegment``): the run was given no serving index (``--serving-index``); the index it was given has no
+# row for the recording (``serving_index.ServingIndex.resolve``: another dataset's index, no store at the
+# recording's path, or not exactly one EEG group); or the index was built from another commit than the
+# run's ``--source-commit``, or one of them names none (the commit must match exactly, the lead's ruling).
+# The serving copy's channel group is read from its index, never guessed from a naming rule (the lead's
+# ruling, 2026-11-24). Words of nemar-process's own; the last two are ``serving_index``'s.
 NO_SERVING_INDEX = "no_serving_index"  # views.OWN_SKIP_REASONS
-NOT_IN_SERVING_INDEX = "not_in_serving_index"  # views.OWN_SKIP_REASONS
+NOT_IN_SERVING_INDEX = "not_in_serving_index"  # views.OWN_SKIP_REASONS, serving_index.NOT_LISTED
+SERVING_INDEX_STALE = "serving_index_stale"  # views.OWN_SKIP_REASONS, serving_index.STALE
 # The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
 # import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
 # description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees

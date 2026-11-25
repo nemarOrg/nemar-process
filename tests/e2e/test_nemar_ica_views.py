@@ -264,6 +264,7 @@ def test_the_views_of_the_serving_copy_name_the_group_the_index_lists(produced):
         "dataset_id": DATASET_ID,
         "source_commit": read_json(INDEX)["source_commit"],
         "row": {"path": RECORDING, "group": GROUP, "rate": 200.0, "n_samples": 56_400},
+        "reason": None,
     }
     window = found["midsegment"]["parameters"]
     rows = views.read_table(

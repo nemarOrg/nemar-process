@@ -10,16 +10,21 @@ length from the serving copy's own index: the document the Zarr input reads over
 
 The file is read once, at most ``zarr_input.MAX_INDEX_BYTES``, as strict JSON (a repeated member name is
 refused), checked for shape by the Zarr input's own ``validate_document``, and named by the SHA-256 of
-its bytes. A recording's row (``ServingIndex.row``) is the store whose source path is the recording's
-path, in an index of the run's dataset, with exactly one EEG group: its path, the group's name, rate and
-sample count. Anything else (an index of another dataset, or of none; no store at that path, or two;
-no EEG group, or two) gives no row, and the views of the serving copy are skipped with a word, never
-declared on a guess. ``ServingRow`` is made here only, so a caller has nothing to pass but a row read from
-an index.
+its bytes. A recording's row (``ServingIndex.resolve``) is the store whose source path is the recording's
+path, in an index of the run's dataset built from the run's own commit, with exactly one EEG group: its
+path, the group's name, rate and sample count. The commit must match exactly (the lead's ruling): an
+index built from another commit than the run's ``--source-commit``, or a run or an index that names none,
+is stale (``serving_index_stale``), because the serving copy it describes may not be the data the run
+read. Anything else (an index of another dataset, or of none; no store at that path, or two; no EEG
+group, or two) has no row for the recording (``not_in_serving_index``). Without a row the views of the
+serving copy are skipped with the word, never declared on a guess. ``ServingRow`` is made here only, and a
+row is used only with the index it was read from (``ServingIndex.lists``), so a caller has nothing to
+pass but a row of the index the run read.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from collections.abc import Mapping
@@ -28,6 +33,11 @@ from pathlib import Path
 from typing import Any
 
 from nemar_process.common import zarr_input
+
+# Why a recording has no row (``Resolution.reason``): the index lists no single EEG store of the run's
+# dataset at its path, or it was built from another commit than the run's (or one of them names none).
+NOT_LISTED = "not_in_serving_index"
+STALE = "serving_index_stale"
 
 
 class IndexUnusable(ValueError):
@@ -56,6 +66,15 @@ class ServingRow:
 
 
 @dataclass(frozen=True)
+class Resolution:
+    """A recording's row of the serving index, or None with the word for why (``NOT_LISTED``,
+    ``STALE``): exactly one of the two is set."""
+
+    row: ServingRow | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
 class ServingIndex:
     """A serving index read from a file: its digest, the dataset and commit it names (None when it names
     none), and each store's EEG groups by the store's source path, ``(name, rate, n_samples)``."""
@@ -65,25 +84,42 @@ class ServingIndex:
     source_commit: str | None
     stores: Mapping[str, tuple[tuple[tuple[str, float, int], ...], ...]] = field(repr=False)
 
-    def row(self, path: str, dataset_id: str | None) -> ServingRow | None:
-        """The row of the recording at ``path`` of the dataset ``dataset_id``, or None: an index that
-        names no dataset or another one, no store at the path or more than one, or a store with no EEG
-        group or more than one, has no row for it."""
+    def resolve(self, path: str, dataset_id: str | None, source_commit: str | None) -> Resolution:
+        """The row of the recording at ``path`` of the run's dataset ``dataset_id`` and commit
+        ``source_commit``, or why there is none: an index that names no dataset or another one is
+        ``not_in_serving_index``; then an index built from another commit, or a run or an index that
+        names none, is ``serving_index_stale``; then no store at the path or more than one, or a store
+        with no EEG group or more than one, is ``not_in_serving_index``."""
         if self.dataset_id is None or dataset_id is None or self.dataset_id != dataset_id:
-            return None
+            return Resolution(None, NOT_LISTED)
+        # another commit, or a run that names none; an index that names none never matches, even a
+        # run that names none
+        if self.source_commit is None or self.source_commit != source_commit:
+            return Resolution(None, STALE)
         found = self.stores.get(path, ())
         if len(found) != 1 or len(found[0]) != 1:
-            return None
+            return Resolution(None, NOT_LISTED)
         ((name, rate, count),) = found[0]
-        return ServingRow(path, name, rate, count, self.sha256)
+        return Resolution(ServingRow(path, name, rate, count, self.sha256), None)
 
-    def facts(self, row: ServingRow | None) -> dict[str, Any]:
-        """What a record says of the index it was given (``extensions.nemar.ica.serving_index``)."""
+    def lists(self, row: ServingRow) -> bool:
+        """Whether ``row`` is one this index gives: read from these bytes (its digest), and its store's
+        one EEG group as the index lists it (name, rate and samples), nothing replaced."""
+        if type(row) is not ServingRow or row.index_sha256 != self.sha256:
+            return False
+        found = self.stores.get(row.path, ())
+        return len(found) == 1 and found[0] == ((row.group, row.rate_hz, row.n_samples),)
+
+    def facts(self, resolved: Resolution) -> dict[str, Any]:
+        """What a record says of the index it was given (``extensions.nemar.ica.serving_index``): its
+        digest, the dataset and commit it names, and the recording's row, or null with the word for
+        why there is none."""
         return {
             "sha256": self.sha256,
             "dataset_id": self.dataset_id,
             "source_commit": self.source_commit,
-            "row": None if row is None else row.facts(),
+            "row": None if resolved.row is None else resolved.row.facts(),
+            "reason": resolved.reason,
         }
 
 
@@ -143,5 +179,9 @@ def read(path: Path) -> ServingIndex:
 
 
 def serving_index(text: str) -> ServingIndex:
-    """``--serving-index``'s value: the index in the file it names (a refusal is a usage error)."""
-    return read(Path(text))
+    """``--serving-index``'s value: the index in the file it names. A refusal is a usage error whose
+    message is the refusal's fixed phrase (``argparse.ArgumentTypeError``), so the operator reads why."""
+    try:
+        return read(Path(text))
+    except IndexUnusable as error:
+        raise argparse.ArgumentTypeError(str(error)) from error

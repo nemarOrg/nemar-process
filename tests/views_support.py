@@ -118,10 +118,11 @@ def read_record(root: Path, record_path: str) -> dict:
     return json.loads((root / record_path).read_text(encoding="utf-8"))
 
 
-def serving_index_text(rows, *, dataset_id: str, source_commit: str = "c" * 40) -> str:
+def serving_index_text(rows, *, dataset_id: str, source_commit: str) -> str:
     """A serving index in the contract's shape (``zarr_input.validate_document``), as its file holds it:
     one store per row ``(path, groups)``, each group ``(name, modality, rate, n_channels, n_samples)``,
-    under reserved example hosts."""
+    under reserved example hosts, built from ``source_commit`` (a run uses its rows only when that is its
+    own ``--source-commit``)."""
     stores = [
         {
             "path": path,
@@ -153,7 +154,7 @@ def serving_index_text(rows, *, dataset_id: str, source_commit: str = "c" * 40) 
     return json.dumps(document, indent=1) + "\n"
 
 
-def serving_index_of(rows, *, dataset_id: str, source_commit: str = "c" * 40):
+def serving_index_of(rows, *, dataset_id: str, source_commit: str):
     """``serving_index_text`` read as a run reads its ``--serving-index`` file."""
     from nemar_process.common import serving_index
 

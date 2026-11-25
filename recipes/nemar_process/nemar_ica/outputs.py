@@ -201,7 +201,8 @@ def facts(
 
     ``served`` is what the run says of the serving index it was given on a dataset directory
     (``serving_index.ServingIndex.facts``: its digest, the dataset and commit it names, and the
-    recording's row or null); null on the serving copy, and on a dataset directory given no index.
+    recording's row, or null with the word for why there is none); null on the serving copy, and on a
+    dataset directory given no index.
 
     For pAMICA the settings and the account of the fit are ``EEG['etc']['pamica']`` as eegprep wrote
     it, copied whole under ``pamica``, and the top-level ``seed``, ``n_models``, ``n_mix``,
@@ -587,14 +588,17 @@ def signal_store(
     recording: Recording,
     fit: pipeline.Decomposition,
     row: serving_index.ServingRow | None = None,
+    index: serving_index.ServingIndex | None = None,
 ) -> dict[str, Any] | None:
     """The recording's store in the serving copy, as a view's ``signal`` input, or None.
 
     On the serving copy it is the store the decomposition read, with its group and its digest (the
     dataset record's ``stores_content`` row). On a dataset directory no store was read: its channel
-    group is the one the serving index lists for the recording (``row``, read from an index by
-    ``serving_index.ServingIndex.row``, never a name made up), with no digest and the profile
-    ``archive``; without a row the recipe names no store, so declares no view of the serving copy.
+    group is the one the serving index the run read lists for the recording (``row``, resolved from
+    ``index`` by ``ServingIndex.resolve``, never a name made up): a row of this recording that the index
+    gives as it is (``ServingIndex.lists``: its digest, and its group, rate and samples), else
+    ``ValueError``. The store has no digest and the profile ``archive``; without a row the recipe names
+    no store, so declares no view of the serving copy.
     """
     serving = fit.serving
     if serving is not None:
@@ -608,7 +612,12 @@ def signal_store(
         )
     if row is None:
         return None
-    if type(row) is not serving_index.ServingRow or row.path != recording.path:
+    if (
+        type(index) is not serving_index.ServingIndex
+        or type(row) is not serving_index.ServingRow
+        or row.path != recording.path
+        or not index.lists(row)
+    ):
         raise ValueError(
             "the store of a dataset directory's recording is its row of the serving index"
         )
@@ -800,8 +809,8 @@ def recipe_views(
     block: Mapping[str, Any],
     named: Mapping[str, views.ViewFile],
     *,
-    serving_row: serving_index.ServingRow | None = None,
-    serving_reason: str = steps.NO_SERVING_INDEX,
+    serving: serving_index.ServingIndex | None = None,
+    resolved: serving_index.Resolution | None = None,
 ) -> RecipeViews:
     """nemar-ica's own views of one recording, in ``steps.RECIPE_VIEWS`` order, and the ones it
     skipped, with why; and the host its plugins get.
@@ -813,19 +822,20 @@ def recipe_views(
     with ``cap_exceeded``. ``icactivity`` and ``midsegment`` read the serving copy, so they are declared
     when the recipe names its store (``signal_store``): on the serving copy the store the decomposition
     read, with the window chosen on the grid the floor read (``fit.window``, the same grid), and on a
-    dataset directory the row the serving index lists for the recording (``serving_row``), with the
-    window chosen on that row's grid (``serving_window``); without a row both are skipped with
-    ``serving_reason`` (``no_serving_index``, ``not_in_serving_index``). ``icactivity`` is skipped with
+    dataset directory the row the serving index the run read (``serving``) gives the recording
+    (``resolved``), with the window chosen on that row's grid (``serving_window``); without an index
+    both are skipped with ``no_serving_index``, and without a row with the resolution's word
+    (``not_in_serving_index``, ``serving_index_stale``). ``icactivity`` is skipped with
     ``labels_unusable`` when the channel labels cannot head the matrix's columns (they fell back to
     ``Ch001`` and so on, so no column could be matched to the serving copy's), and ``midsegment`` with
     ``no_good_window`` when no two seconds lie inside the good-sample mask. A view over the caps is
     skipped with ``cap_exceeded`` (``ViewSet.add_recipe_view``); any other refusal is the recipe's
     fault and raises ``views.ViewRefused``.
     """
-    if fit.serving is not None and serving_row is not None:
-        raise ValueError(
-            "a recording of the serving copy names the store it read, not an index row"
-        )
+    if fit.serving is not None and serving is not None:
+        raise ValueError("a recording of the serving copy names the store it read, not an index")
+    if (serving is None) != (resolved is None):
+        raise ValueError("a serving index comes with the recording's resolution in it")
     classes = [class_column(name) for name in fit.classes]
     found = views.ViewSet(INFO.id, INFO.version)
     layout: views.RoleData | None = None
@@ -850,12 +860,14 @@ def recipe_views(
         )
     if fit.serving is not None:
         store, window = signal_store(recording, fit), fit.window
-    elif serving_row is not None:
-        store = signal_store(recording, fit, serving_row)
-        window = serving_window(fit, serving_row, named.get("badsegments"))
+    elif resolved is not None and resolved.row is not None:
+        store = signal_store(recording, fit, resolved.row, serving)
+        window = serving_window(fit, resolved.row, named.get("badsegments"))
     else:
-        found.skip(steps.ICACTIVITY_VIEW, views.IC_ACTIVITY, serving_reason)
-        found.skip(steps.MIDSEGMENT_VIEW, views.SIGNAL_WINDOW, serving_reason)
+        reason = steps.NO_SERVING_INDEX if resolved is None else resolved.reason
+        assert reason is not None  # a resolution without a row says why
+        found.skip(steps.ICACTIVITY_VIEW, views.IC_ACTIVITY, reason)
+        found.skip(steps.MIDSEGMENT_VIEW, views.SIGNAL_WINDOW, reason)
         return RecipeViews(found, host)
     assert store is not None
     if block["browser_transform"] is None or channel_labels(fit.good_channels) != list(
@@ -1063,11 +1075,13 @@ def write_product(
 
     The record declares the recipe's views (``recipe_views``) over the files written, by their bytes.
     ``serving`` is the serving index a run of a dataset directory was given (``--serving-index``): the
-    row it lists for the recording (``ServingIndex.row``, of the run's dataset) names the serving
-    copy's channel group, rate and length, and the views of the serving copy are declared on it
-    (``signal_store``, ``serving_window``); with no index, or no row, they are skipped with
-    ``no_serving_index`` or ``not_in_serving_index``, and the record says what the index was
-    (``extensions.nemar.ica.serving_index``). A run of the serving copy takes none (``ValueError``).
+    row it lists for the recording (``ServingIndex.resolve``, in an index of the run's dataset built
+    from the run's ``--source-commit``) names the serving copy's channel group, rate and length, and
+    the views of the serving copy are declared on it (``signal_store``, ``serving_window``); with no
+    index they are skipped with ``no_serving_index``, and with no row with ``not_in_serving_index`` or
+    ``serving_index_stale`` (another commit, or none named), and the record says what the index was and
+    why it gave no row (``extensions.nemar.ica.serving_index``). A run of the serving copy takes none
+    (``ValueError``).
 
     Then the recipe's quality plugins run at ``quality`` on a copy of the plan (``quality_plugins``,
     ``plugin_inputs``, ``plugins.run_checkpoint``) with the host the recipe's views were built on: their
@@ -1084,8 +1098,12 @@ def write_product(
         )
     if serving is not None and fit.serving is not None:
         raise ValueError("a recording of the serving copy names the store it read, not an index")
-    row = None if serving is None else serving.row(recording.path, context.identity.dataset_id)
-    reason = steps.NO_SERVING_INDEX if serving is None else steps.NOT_IN_SERVING_INDEX
+    identity = context.identity
+    resolved = (
+        None
+        if serving is None
+        else serving.resolve(recording.path, identity.dataset_id, identity.source_commit)
+    )
     spans = fit.bursts["spans"]
     written = floor_outputs.segment_tables_written(fit.floor_result, spans)
     block = facts(
@@ -1093,7 +1111,7 @@ def write_product(
         profile,
         browser_transform(recording, fit, written),
         browser_unavailable(fit),
-        None if serving is None else serving.facts(row),
+        None if serving is None or resolved is None else serving.facts(resolved),
     )
     values = (
         block["rank"],
@@ -1110,8 +1128,8 @@ def write_product(
             fit,
             block,
             {**made.named, **floor_tables(recording, fit)},
-            serving_row=row,
-            serving_reason=reason,
+            serving=serving,
+            resolved=resolved,
         )
     except views.ViewRefused as refused:
         raise RecordingError(INTERNAL_ERROR, "record", refused.word) from refused

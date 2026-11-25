@@ -9,6 +9,8 @@ replaced, and the command is run in this process.
 
 from __future__ import annotations
 
+import argparse
+import dataclasses
 import hashlib
 import json
 
@@ -19,41 +21,44 @@ from views_support import serving_index_text
 PATH = "sub-01/eeg/sub-01_task-rest_eeg.set"
 OTHER = "sub-02/eeg/sub-02_task-rest_eeg.set"
 DATASET = "xx000001"
+COMMIT = "a" * 40  # the commit the index was built from, and the run's --source-commit
 EEG = ("eeg_250hz", "EEG", 250.0, 32, 75_000)
 
 
-def text(rows=((PATH, (EEG,)),), dataset_id=DATASET, **given) -> str:
-    return serving_index_text(rows, dataset_id=dataset_id, **given)
+def text(rows=((PATH, (EEG,)),), dataset_id=DATASET, source_commit=COMMIT) -> str:
+    return serving_index_text(rows, dataset_id=dataset_id, source_commit=source_commit)
 
 
-def parsed(rows=((PATH, (EEG,)),), dataset_id=DATASET) -> serving_index.ServingIndex:
-    return serving_index.parse(text(rows, dataset_id).encode("utf-8"))
+def parsed(rows=((PATH, (EEG,)),), dataset_id=DATASET, source_commit=COMMIT):
+    return serving_index.parse(text(rows, dataset_id, source_commit).encode("utf-8"))
 
 
 def test_a_row_is_the_recordings_store_and_its_one_eeg_group():
     data = text().encode("utf-8")
     index = serving_index.parse(data)
     assert index.sha256 == hashlib.sha256(data).hexdigest()  # of the bytes, not a re-serialization
-    assert (index.dataset_id, index.source_commit) == (DATASET, "c" * 40)
-    row = index.row(PATH, DATASET)
-    assert row == serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 75_000, index.sha256)
-    assert index.facts(row) == {
+    assert (index.dataset_id, index.source_commit) == (DATASET, COMMIT)
+    resolved = index.resolve(PATH, DATASET, COMMIT)
+    row = serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 75_000, index.sha256)
+    assert resolved == serving_index.Resolution(row, None)
+    assert index.lists(row)
+    assert index.facts(resolved) == {
         "sha256": index.sha256,
         "dataset_id": DATASET,
-        "source_commit": "c" * 40,
+        "source_commit": COMMIT,
         "row": {"path": PATH, "group": "eeg_250hz", "rate": 250.0, "n_samples": 75_000},
+        "reason": None,
     }
-    assert index.facts(None)["row"] is None
 
 
 def test_groups_of_other_modalities_are_not_the_recordings():
     index = parsed([(PATH, [("emg_250hz", "EMG", 250.0, 2, 500), EEG])])
-    row = index.row(PATH, DATASET)
+    row = index.resolve(PATH, DATASET, COMMIT).row
     assert row is not None
     assert row.group == "eeg_250hz"
     # the modality is compared as the Zarr input compares it, case folded to EEG
     lower = parsed([(PATH, [("eeg_200hz", "eeg", 200.0, 8, 4_000)])])
-    assert lower.row(PATH, DATASET) == serving_index.ServingRow(
+    assert lower.resolve(PATH, DATASET, COMMIT).row == serving_index.ServingRow(
         PATH, "eeg_200hz", 200.0, 4_000, lower.sha256
     )
 
@@ -78,7 +83,42 @@ def test_groups_of_other_modalities_are_not_the_recordings():
     ],
 )
 def test_anything_else_has_no_row_and_nothing_is_guessed(rows, dataset_id, asked):
-    assert parsed(rows, dataset_id).row(PATH, asked) is None
+    index = parsed(rows, dataset_id)
+    resolved = index.resolve(PATH, asked, COMMIT)
+    assert resolved == serving_index.Resolution(None, "not_in_serving_index")
+    assert index.facts(resolved)["row"] is None
+    assert index.facts(resolved)["reason"] == "not_in_serving_index"
+
+
+@pytest.mark.parametrize(
+    ("built_from", "run"),
+    [("b" * 40, COMMIT), (COMMIT, None), (None, COMMIT), (None, None)],
+    ids=[
+        "another_commit",
+        "a_run_with_no_source_commit",
+        "an_index_that_names_no_commit",
+        "neither_names_a_commit",
+    ],
+)
+def test_an_index_of_another_commit_is_stale_and_has_no_row(built_from, run):
+    """The lead's ruling: the index must be built from the run's own commit, exactly. An index of
+    another commit, or a run or an index that names none, gives no row, even for a store it lists."""
+    if built_from is None:
+        document = json.loads(text())
+        del document["source_commit"]
+        index = serving_index.parse(json.dumps(document).encode("utf-8"))
+    else:
+        index = parsed(source_commit=built_from)
+    resolved = index.resolve(PATH, DATASET, run)
+    assert resolved == serving_index.Resolution(None, "serving_index_stale")
+    assert index.facts(resolved)["reason"] == "serving_index_stale"
+
+
+def test_another_datasets_index_is_not_the_recordings_whatever_its_commit():
+    """The dataset is read first: another dataset's index of another commit has no row for the
+    recording (not_in_serving_index), never a stale one of its own."""
+    index = parsed(dataset_id="xx000002", source_commit="b" * 40)
+    assert index.resolve(PATH, DATASET, COMMIT).reason == "not_in_serving_index"
 
 
 def test_an_index_that_names_no_dataset_has_no_row():
@@ -86,7 +126,33 @@ def test_an_index_that_names_no_dataset_has_no_row():
     del document["dataset_id"]
     index = serving_index.parse(json.dumps(document).encode("utf-8"))
     assert index.dataset_id is None
-    assert index.row(PATH, DATASET) is None
+    assert index.resolve(PATH, DATASET, COMMIT).reason == "not_in_serving_index"
+
+
+def test_a_row_is_used_only_with_the_index_it_was_read_from_as_it_lists_it():
+    """``lists``: the row's digest is the index's, and its group, rate and samples are the ones the
+    index lists for its store; a row with any of them replaced is not the index's."""
+    index = parsed()
+    row = index.resolve(PATH, DATASET, COMMIT).row
+    assert row is not None
+    assert index.lists(row)
+    for forged in (
+        dataclasses.replace(row, group="eeg_999hz"),
+        dataclasses.replace(row, rate_hz=125.0),
+        dataclasses.replace(row, n_samples=1),
+        dataclasses.replace(row, path=OTHER),
+        dataclasses.replace(row, index_sha256="0" * 64),
+    ):
+        assert not index.lists(forged), forged
+    other = parsed(source_commit="b" * 40)  # another index, listing the same store
+    assert not other.lists(row)
+
+
+def test_the_words_are_nemar_icas():
+    from nemar_process.nemar_ica import steps
+
+    assert serving_index.NOT_LISTED == steps.NOT_IN_SERVING_INDEX
+    assert serving_index.STALE == steps.SERVING_INDEX_STALE
 
 
 def mutated(change) -> bytes:
@@ -135,20 +201,26 @@ def test_an_index_over_the_cap_is_refused_before_it_is_parsed(tmp_path, monkeypa
     with pytest.raises(serving_index.IndexUnusable, match="larger than the index cap"):
         serving_index.read(path)  # read one byte past the cap, never the whole of a large file
     monkeypatch.setattr(zarr_input, "MAX_INDEX_BYTES", len(data))
-    assert serving_index.read(path).row(PATH, DATASET) is not None
+    assert serving_index.read(path).resolve(PATH, DATASET, COMMIT).row is not None
 
 
 def test_a_file_that_cannot_be_read_is_refused_by_a_phrase_that_names_no_path(tmp_path):
     missing = tmp_path / "secret-name" / "index.json"
     with pytest.raises(serving_index.IndexUnusable) as refused:
-        serving_index.serving_index(str(missing))
+        serving_index.read(missing)
     assert "secret-name" not in str(refused.value)
+    # as the option's value, the same phrase is the usage error argparse prints
+    with pytest.raises(argparse.ArgumentTypeError) as usage:
+        serving_index.serving_index(str(missing))
+    assert str(usage.value) == "the serving index cannot be read"
 
 
 # ---- the command ------------------------------------------------------------------------------------
 
 
-def test_a_serving_index_that_is_refused_is_a_usage_error_before_anything_is_made(cli, tmp_path):
+def test_a_serving_index_that_is_refused_is_a_usage_error_before_anything_is_made(
+    cli, capsys, tmp_path
+):
     bad = tmp_path / "index.json"
     bad.write_text("{}", encoding="utf-8")
     out = tmp_path / "o"
@@ -156,6 +228,10 @@ def test_a_serving_index_that_is_refused_is_a_usage_error_before_anything_is_mad
         cli("run", "nemar-ica", "--dataset-dir", tmp_path, "--out", out, "--serving-index", bad)
     assert stopped.value.code == 2
     assert not out.exists()
+    # the operator reads why: the refusal's fixed phrase, and no path
+    err = capsys.readouterr().err
+    assert "argument --serving-index: the serving index is not usable (stores is not a list)" in err
+    assert str(tmp_path) not in err
 
 
 def test_the_serving_copy_takes_no_serving_index(cli, tmp_path):
