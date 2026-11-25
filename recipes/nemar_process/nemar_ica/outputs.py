@@ -397,6 +397,8 @@ RECIPE_METRICS = (
 
 # The share of brain components is nemar-quality's metric, never a recipe value (ADR 0137 C6): the
 # table's ``pct_brain_components`` is its value in the recording's record when the plugin ran.
+# TODO(P7): nemar-ica's PLUGINS and CHECKPOINTS do not run nemar-quality yet, so the column is null
+# until P7 wires the plugin into the recipe; nothing here computes the share itself.
 BRAIN_PLUGIN = "nemar-quality"
 BRAIN_METRIC = "nemar-quality:percentBrainComponents"
 
