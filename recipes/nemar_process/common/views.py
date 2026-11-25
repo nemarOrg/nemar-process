@@ -38,7 +38,8 @@ ic-classes view), never passes it unchecked:
 
 A recipe's own views go through the same builder (``recipe_view``): its data roles are files it writes
 (``table_text`` and ``data_role``), its computed views name file and store inputs, and the floor's tables
-a computed view reads are checked as the renderer will read them (``check_floor_tables``). ``ViewSet``
+a computed view reads are checked as the renderer will read them (``check_floor_tables``), with what the
+writer of a component view makes sure of (``check_ic_maps``, ``check_ic_activity``). ``ViewSet``
 gathers one recording's views and the views it skipped (``views_skipped``, with neuroschema's reasons)
 and holds the record checks (``record_findings``, a port of ``neuroschema.records.check_record``).
 """
@@ -49,6 +50,7 @@ import hashlib
 import itertools
 import json
 import math
+import posixpath
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -100,6 +102,15 @@ TABLE_LOCATION_MISMATCH = "table_location_mismatch"
 CHANNEL_SET_MISMATCH = "channel_set_mismatch"
 COORDS_LENGTH = "coords_length"
 FILE_MISMATCH = "file_mismatch"
+# A component map's text rows (docs/views/presets.md, nemar.ic-maps): the components table's
+# ``component`` cells are not the maps' names, in order; and the sensors a layout places are not
+# uniquely named (docs/views/sensor-field.md, What the writer enforces).
+COMPONENTS_MISMATCH = "components_mismatch"
+SENSORS_REPEATED = "sensors_repeated"
+# An activation view (docs/views/ic-activity.md): its decomposition read another store than the view's
+# signal (path, group or digest), and its matrix has no row.
+STORE_MISMATCH = "store_mismatch"
+EMPTY = "empty"
 # A dimension or a view the host recipe gives the writer nothing to check against: a ``sensor``,
 # ``component`` or ``class`` dimension, a frequency axis or an ic-classes view on a host that lacks
 # the good channels, the components, the classes or the sampling rate. Never left unchecked.
@@ -144,6 +155,10 @@ WORDS = frozenset(
         CHANNEL_SET_MISMATCH,
         COORDS_LENGTH,
         FILE_MISMATCH,
+        COMPONENTS_MISMATCH,
+        SENSORS_REPEATED,
+        STORE_MISMATCH,
+        EMPTY,
         HOST_MISSING,
         contract.VIEW_REPEATED,
         contract.SUFFIX_RESERVED,
@@ -153,6 +168,11 @@ WORDS = frozenset(
 
 # Why a view a run declares is absent for one recording (docs/views.md, Views a run skipped).
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
+# nemar-process's own reasons beside neuroschema's, which dataQuality admits ("another word, which a
+# renderer shows as it is"): a signal window with no two seconds of the recording inside the
+# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``), and component maps whose
+# positions the loader is known to have turned (nemar-ica's ``icmaps``, ``steps.FRAME_ROTATED``).
+OWN_SKIP_REASONS = ("no_good_window", "frame_rotated")
 # A recipe view the builder refuses for its size is skipped with ``cap_exceeded``; any other refusal of
 # a recipe's own view is a fault of the recipe, never of the data.
 SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded", CAP_EXCEEDED: "cap_exceeded"}
@@ -178,6 +198,7 @@ IC_CLASSES = "nemar.ic-classes"
 HISTOGRAM = "nemar.histogram"
 IC_ACTIVITY = "nemar.ic-activity"
 SIGNAL_WINDOW = "nemar.signal-window"
+IC_MAPS = "nemar.ic-maps"
 # The kinds whose values columns share one unit (the renderer's ``value_units_differ``).
 ONE_VALUE_UNIT = frozenset({LINES, "nemar.heatmap", "nemar.sensor-field"})
 # A spectrum's rows are Welch's frequencies k / window_s for k = 1, 2, ...: equal to these within this
@@ -237,6 +258,7 @@ STATUSES = ("good", "bad", "n/a")
 _NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)")
 _SUFFIX = re.compile(r"[a-z0-9]+")
+_TABLE = re.compile(r"(?P<stem>.+)_(?P<suffix>[A-Za-z0-9]+)\.tsv")
 
 
 class ViewRefused(Exception):
@@ -1159,9 +1181,10 @@ def recipe_view(
     """A view the host recipe declares over its own files: the same declaration and checks as a
     plugin's, with the source ``{"recipe": {name, version}}``.
 
-    ``files_read`` are the product files the view names (by location), which a computed view's rules
-    read (``check_floor_tables``, ``check_ic_activity``); ``owned`` are files only this view writes
-    (most of a recipe's view files are products it writes anyway). Raises ``ViewRefused``.
+    ``files_read`` are the product files a computed view names as inputs (by location), which its rules
+    read (``check_floor_tables``, ``check_ic_activity``); a view's data roles carry their own files,
+    which its rules read too (``check_ic_maps``). ``owned`` are files only this view writes (most of a
+    recipe's view files are products it writes anyway). Raises ``ViewRefused``.
     """
     declaration = _declare(
         key=key,
@@ -1174,12 +1197,16 @@ def recipe_view(
         inputs=inputs,
         transform=transform,
     )
-    read = {location: file.text.encode("utf-8") for location, file in (files_read or {}).items()}
+    read = {role.file.location: role.file.text.encode("utf-8") for role in data}
+    read.update(
+        {location: file.text.encode("utf-8") for location, file in (files_read or {}).items()}
+    )
     if kind == SIGNAL_WINDOW:
         check_floor_tables(declaration, read)
     elif kind == IC_ACTIVITY:
-        check_floor_tables(declaration, read)
         check_ic_activity(declaration, read)
+    elif kind == IC_MAPS:
+        check_ic_maps(declaration, read)
     return PreparedView(key, kind, declaration, tuple(owned))
 
 
@@ -1229,6 +1256,59 @@ def read_table(
     return [dict(zip(columns, cells, strict=True)) for cells in zip(*found.values(), strict=True)]
 
 
+def table_stem_ok(location: str, recording: str, label: str, suffix: str | None = None) -> bool:
+    """Whether ``location`` is a table the recipe of ``label`` wrote for ``recording``: in the
+    recording's directory, named ``<stem>_<suffix>.tsv`` (``suffix`` when given), the stem exactly the
+    one ``naming.product_stem`` gives the recording under that label (a port of neuroschema's
+    ``presets.table_stem``). Another recording's table (``_run-2``, a sibling ``_desc-preproc``) or
+    another recipe's (``desc-nemarfloor`` in a nemar-ica view) is not."""
+    where, name = posixpath.split(location)
+    found = _TABLE.fullmatch(name)
+    if where != posixpath.dirname(recording) or found is None:
+        return False
+    if suffix is not None and found["suffix"] != suffix:
+        return False
+    try:
+        return found["stem"] == naming.product_stem(recording, label)
+    except ValueError:  # not a recording's name
+        return False
+
+
+def _check_table_locations(
+    declaration: Mapping[str, Any], roles: Sequence[tuple[str, str | None]]
+) -> None:
+    """Each of ``roles`` (a role and the suffix its table must have, or None for any) the view
+    declares as a file input is the recording's table under the label of the recipe that wrote the
+    view (``table_stem_ok``, ``table_location_mismatch``); a plugin's view names no recipe, so its
+    tables cannot be tied, and are refused."""
+    inputs = _file_inputs(declaration)
+    store = _signal_store(declaration)
+    recipe = declaration.get("source", {}).get("recipe")
+    for role, suffix in roles:
+        if role not in inputs:
+            continue
+        if recipe is None or store is None:
+            raise ViewRefused(TABLE_LOCATION_MISMATCH, role)
+        label = naming.label(recipe["name"])
+        if not table_stem_ok(inputs[role]["location"], store["recording"], label, suffix):
+            raise ViewRefused(TABLE_LOCATION_MISMATCH, role)
+
+
+def _check_channels(data: bytes, limits: Mapping[str, int] | None) -> None:
+    for row in read_table(data, CHANNEL_COLUMNS, (), limits):
+        if row["status"] not in STATUSES:
+            raise ViewRefused(CHANNEL_STATUS_UNKNOWN)
+
+
+def _check_segments(data: bytes, limits: Mapping[str, int] | None) -> None:
+    for row in read_table(data, SEGMENT_COLUMNS, ("onset", "duration"), limits):
+        if not row["duration"] > 0:
+            raise ViewRefused(DURATION_NOT_POSITIVE)
+
+
+FLOOR_TABLES = (("channels", "channels"), ("badsegments", "badsegments"))
+
+
 def check_floor_tables(
     declaration: Mapping[str, Any],
     read: Mapping[str, bytes],
@@ -1242,38 +1322,82 @@ def check_floor_tables(
     each status ``good``, ``bad`` or ``n/a``, compared as exact strings (``channel_status_unknown``);
     the bad segments have ``onset``, ``duration`` (numbers, onset first) and ``label``, every duration
     above 0 (``duration_not_positive``)."""
+    _check_table_locations(declaration, FLOOR_TABLES)
     inputs = _file_inputs(declaration)
-    store = _signal_store(declaration)
-    recipe = declaration.get("source", {}).get("recipe")
-    tables = [(role, role) for role in ("channels", "badsegments") if role in inputs]
-    for role, suffix in tables:
-        if recipe is None or store is None:
-            raise ViewRefused(TABLE_LOCATION_MISMATCH, role)
-        try:
-            expected = naming.product_path(
-                store["recording"], naming.label(recipe["name"]), suffix, "tsv"
-            )
-        except ValueError:
-            raise ViewRefused(TABLE_LOCATION_MISMATCH, role) from None
-        if inputs[role]["location"] != expected:
-            raise ViewRefused(TABLE_LOCATION_MISMATCH, role)
-    data = {role: _read_file(inputs[role], read) for role, _ in tables}
+    data = {role: _read_file(inputs[role], read) for role, _ in FLOOR_TABLES if role in inputs}
     if "channels" in data:
-        for row in read_table(data["channels"], CHANNEL_COLUMNS, (), limits):
-            if row["status"] not in STATUSES:
-                raise ViewRefused(CHANNEL_STATUS_UNKNOWN)
+        _check_channels(data["channels"], limits)
     if "badsegments" in data:
-        for row in read_table(data["badsegments"], SEGMENT_COLUMNS, ("onset", "duration"), limits):
-            if not row["duration"] > 0:
-                raise ViewRefused(DURATION_NOT_POSITIVE)
+        _check_segments(data["badsegments"], limits)
 
 
-def check_ic_activity(declaration: Mapping[str, Any], read: Mapping[str, bytes]) -> None:
-    """What the writer of ``nemar.ic-activity`` makes sure of (docs/views/ic-activity.md): the transform's
-    ``matrix`` is the ``unmixing`` input and ``shaded.files[0]`` the ``badsegments`` input
-    (``table_location_mismatch``); the matrix's header is the transform's ``columns`` and
-    ``decomposition_input.channels`` (``channel_set_mismatch``), with one ``rows`` entry per column for a
-    match by store row; and the components table has one row per matrix row (``coords_length``)."""
+def _read_matrix(data: bytes, limits: Mapping[str, int]) -> tuple[tuple[str, ...], int]:
+    """The browser's matrix read as a renderer reads it (ic-activity.md, check 8; its bytes are
+    within the cap already, ``_verified``): the TSV grammar, a data row (``empty``), at most
+    ``entries_per_dim`` rows and columns and ``cells_per_role`` cells (``cap_exceeded``), then every
+    cell a finite number, column by column; its header and its number of rows."""
+    header, rows = read_tsv(data)
+    if not rows:
+        raise ViewRefused(EMPTY)
+    per_dim = limits["entries_per_dim"]
+    if (
+        len(rows) > per_dim
+        or len(header) > per_dim
+        or len(rows) * len(header) > limits["cells_per_role"]
+    ):
+        raise ViewRefused(CAP_EXCEEDED, "matrix")
+    for position in range(len(header)):
+        for row in rows:
+            cell_number(row[position])
+    return header, len(rows)
+
+
+def _verified(
+    target: Mapping[str, Any], read: Mapping[str, bytes], limits: Mapping[str, int]
+) -> bytes:
+    """A file input's bytes as a renderer fetches them (ic-activity.md, check 4): its declared size
+    within ``bytes_per_role`` (``cap_exceeded``, before the file is read), then the file named
+    (``file_mismatch``)."""
+    if target["size"] > limits["bytes_per_role"]:
+        raise ViewRefused(CAP_EXCEEDED, "declared size")
+    return _read_file(target, read)
+
+
+def _check_decomposition_store(declaration: Mapping[str, Any]) -> None:
+    """For a decomposition of the serving copy, ``decomposition_input.store`` names the view's
+    ``signal`` store (``store_mismatch``, ic-activity.md check 3): its path is the store's ``path``
+    (its ``recording`` when it has none), its group the store's, then its digest the store's; so the
+    digest state a renderer shows is about the store the decomposition read."""
+    given = declaration["parameters"]["decomposition_input"].get("store")
+    signal = _signal_store(declaration)
+    if given is None or signal is None:
+        return
+    if (given["path"], given["group"]) != (
+        signal.get("path", signal["recording"]),
+        signal["group"],
+    ):
+        raise ViewRefused(STORE_MISMATCH, "path or group")
+    if given["content_sha256"] != signal["content_sha256"]:
+        raise ViewRefused(STORE_MISMATCH, "content_sha256")
+
+
+def check_ic_activity(
+    declaration: Mapping[str, Any],
+    read: Mapping[str, bytes],
+    limits: Mapping[str, int] | None = None,
+) -> None:
+    """What the writer of ``nemar.ic-activity`` makes sure of (docs/views/ic-activity.md), in the
+    order a renderer checks it: the transform's ``matrix`` is the ``unmixing`` input and
+    ``shaded.files[0]`` the ``badsegments`` input, and the three tables (``unmixing``, ``components``,
+    ``badsegments``) are the recording's under the view's recipe (``table_location_mismatch``); the
+    decomposition's store is the signal's (``store_mismatch``); each file, the matrix, then the
+    components, then the bad segments, declares at most ``bytes_per_role`` bytes (``cap_exceeded``)
+    and is the one named (``file_mismatch``); the matrix within the caps with numbers in every cell
+    (``_read_matrix``); the components table within the cap on cells, with its column ``component``
+    and one row per matrix row (``coords_length``); the bad segments as the floor's tables are read;
+    and the matrix's header is the transform's ``columns`` and ``decomposition_input.channels``
+    (``channel_set_mismatch``), with one ``rows`` entry per column for a match by store row."""
+    limits = caps() if limits is None else limits
     inputs = _file_inputs(declaration)
     transform = declaration["transform"]["parameters"]
     if transform["matrix"] != inputs["unmixing"]["location"]:
@@ -1281,15 +1405,60 @@ def check_ic_activity(declaration: Mapping[str, Any], read: Mapping[str, bytes])
     shaded = transform["shaded"]["files"]
     if shaded is not None and shaded[0] != inputs.get("badsegments", {}).get("location"):
         raise ViewRefused(TABLE_LOCATION_MISMATCH, "shaded")
-    header, rows = read_tsv(_read_file(inputs["unmixing"], read))
+    _check_table_locations(
+        declaration, (("unmixing", None), ("components", None), ("badsegments", "badsegments"))
+    )
+    _check_decomposition_store(declaration)
+    data = {
+        role: _verified(inputs[role], read, limits)
+        for role in ("unmixing", "components", "badsegments")
+        if role in inputs
+    }
+    header, count = _read_matrix(data["unmixing"], limits)
+    if len(read_table(data["components"], ("component",), (), limits)) != count:
+        raise ViewRefused(COORDS_LENGTH)
+    if "badsegments" in data:
+        _check_segments(data["badsegments"], limits)
     channels = declaration["parameters"]["decomposition_input"]["channels"]
     if list(header) != list(transform["columns"]) or list(header) != list(channels):
         raise ViewRefused(CHANNEL_SET_MISMATCH)
     if transform["match"] == "store_row" and len(transform["rows"]) != len(header):
         raise ViewRefused(CHANNEL_SET_MISMATCH, "rows")
-    components = read_table(_read_file(inputs["components"], read), ("component",), ())
-    if len(components) != len(rows):
+
+
+def _data_entries(declaration: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    return {entry["role"]: entry for entry in declaration.get("data", ())}
+
+
+def check_ic_maps(
+    declaration: Mapping[str, Any],
+    read: Mapping[str, bytes],
+    limits: Mapping[str, int] | None = None,
+) -> None:
+    """What the writer of ``nemar.ic-maps`` makes sure of (docs/views/presets.md and sensor-field.md,
+    What the writer enforces), in the order a renderer checks it: the values, the layout and the
+    components are the files named (``file_mismatch``); the values hold one row per layout row
+    (``coords_length``, the base's check) and the layout names each sensor once
+    (``sensors_repeated``); then the components table, read as a data file within the cap on cells
+    counting every header column (``cap_exceeded``), has its column ``component``
+    (``column_missing``), whose cells, top to bottom, are the values' declared columns in declared
+    order, compared as text (``components_mismatch``): one text row per map, in the maps' order."""
+    entries = _data_entries(declaration)
+    data = {role: _read_file(entries[role], read) for role in ("values", "layout", "components")}
+    _, values = read_tsv(data["values"])
+    layout_header, layout = read_tsv(data["layout"])
+    if len(values) != len(layout):
         raise ViewRefused(COORDS_LENGTH)
+    if "name" not in layout_header:
+        raise ViewRefused(COLUMN_MISSING, "name")
+    names = [row[layout_header.index("name")] for row in layout]
+    if len(set(names)) != len(names):
+        raise ViewRefused(SENSORS_REPEATED)
+    labels = [
+        row["component"] for row in read_table(data["components"], ("component",), (), limits)
+    ]
+    if labels != [column["name"] for column in entries["values"]["columns"]]:
+        raise ViewRefused(COMPONENTS_MISMATCH)
 
 
 # ---- one recording's views ------------------------------------------------------------------------
@@ -1326,9 +1495,14 @@ def record_findings(recipe_id: str, entry: Mapping[str, Any]) -> list[dict[str, 
 
 
 def skipped_view(key: str, kind: str, reason: str) -> dict[str, str]:
-    """A view a run declares and did not write for this recording, with one of ``SKIP_REASONS``."""
-    if reason not in SKIP_REASONS:
-        raise ValueError("a skipped view's reason is one of {}".format(", ".join(SKIP_REASONS)))
+    """A view a run declares and did not write for this recording, with one of ``SKIP_REASONS`` or
+    ``OWN_SKIP_REASONS``."""
+    if reason not in (*SKIP_REASONS, *OWN_SKIP_REASONS):
+        raise ValueError(
+            "a skipped view's reason is one of {}".format(
+                ", ".join((*SKIP_REASONS, *OWN_SKIP_REASONS))
+            )
+        )
     skipped = {"key": key, "kind": kind, "reason": reason}
     if not contract.bundle_validator(VIEW_SKIPPED_ID).is_valid(skipped):
         raise ValueError("not a skipped view: {!r}".format(skipped))

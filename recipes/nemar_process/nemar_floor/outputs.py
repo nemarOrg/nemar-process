@@ -271,6 +271,38 @@ def segment_tables_written(result: FloorResult, extra_segments: Sequence[Any] = 
     return result.sample_mask is not None or bool(extra_segments)
 
 
+def channels_text(result: FloorResult) -> str:
+    """The text of ``_channels.tsv``: every channel of the file, in file order (``channel_rows``)."""
+    return files.tsv_text(CHANNEL_COLUMNS, channel_rows(result))
+
+
+def segment_texts(
+    result: FloorResult, extra_segments: Sequence[tuple[int, int, str, str]] = ()
+) -> tuple[str, str] | None:
+    """The texts of ``_badsegments.tsv`` and ``_samplemask.tsv``, or None when neither is written
+    (``segment_tables_written``): the window step's bad windows and the spans a recipe that embeds the
+    floor flagged (``extra_segments``, sample indices of the samples the floor read, stop exclusive),
+    in time order, in seconds and as sample indices. What ``write_product`` writes, and what a recipe's
+    own view names by its bytes (nemar-ica's activations and signal window)."""
+    if not segment_tables_written(result, extra_segments):
+        return None
+    mask = result.sample_mask
+    windows = mask_rows(mask) if mask is not None else []
+    spans = sorted(
+        [list(row) for row in windows]
+        + [[int(start), int(stop), label, reason] for start, stop, label, reason in extra_segments],
+        key=lambda row: (row[0], row[1], row[2]),
+    )
+    rate = result.srate_hz
+    seconds = [
+        [start / rate, (stop - start) / rate, label, why] for start, stop, label, why in spans
+    ]
+    return (
+        files.tsv_text(SEGMENT_COLUMNS, seconds, SEGMENT_DECIMALS),
+        files.tsv_text(MASK_COLUMNS, spans),
+    )
+
+
 def segment_descriptions(windows: bool, flagged: bool) -> tuple[str, str]:
     """The descriptions of ``_badsegments.tsv`` and ``_samplemask.tsv``, naming only what ran: the
     window step's bad windows (``clean_windows``), the spans the recipe flagged, or both."""
@@ -448,40 +480,30 @@ def write_product(
             # anything is written
             raise RecordingError(INTERNAL_ERROR, "record", "view_file_location")
     # the files in the order they are listed: what each is, the step that produced it, how it is written
+    channels = channels_text(result)
     jobs = [
         Product(
             "channels",
             "tsv",
             "bad_channels" if result.plan.has_step("bad_channels") else "flatline",
             "BIDS channels table with status of every channel",
-            lambda path: files.write_tsv(path, CHANNEL_COLUMNS, channel_rows(result)),
+            lambda path: files.write_text(path, channels),
         )
     ]
-    if segment_tables_written(result, extra_segments):
+    tables = segment_texts(result, extra_segments)
+    if tables is not None:
+        segments, samples = tables
         mask = result.sample_mask
-        windows = mask_rows(mask) if mask is not None else []
-        spans = sorted(
-            [list(row) for row in windows]
-            + [
-                [int(start), int(stop), label, reason]
-                for start, stop, label, reason in extra_segments
-            ],
-            key=lambda row: (row[0], row[1], row[2]),
-        )
-        rate = result.srate_hz
-        seconds = [
-            [start / rate, (stop - start) / rate, label, why] for start, stop, label, why in spans
-        ]
         owner = "bad_windows" if mask is not None else extra_segments_step
         assert owner is not None  # refused above, before anything was written
-        segments_text, mask_text = segment_descriptions(mask is not None, bool(extra_segments))
+        segments_about, mask_about = segment_descriptions(mask is not None, bool(extra_segments))
         jobs.append(
             Product(
                 "badsegments",
                 "tsv",
                 owner,
-                segments_text,
-                lambda path: files.write_tsv(path, SEGMENT_COLUMNS, seconds, SEGMENT_DECIMALS),
+                segments_about,
+                lambda path: files.write_text(path, segments),
             )
         )
         jobs.append(
@@ -489,8 +511,8 @@ def write_product(
                 "samplemask",
                 "tsv",
                 owner,
-                mask_text,
-                lambda path: files.write_tsv(path, MASK_COLUMNS, spans),
+                mask_about,
+                lambda path: files.write_text(path, samples),
             )
         )
     jobs += [

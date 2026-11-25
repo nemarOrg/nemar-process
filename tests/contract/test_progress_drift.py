@@ -142,6 +142,13 @@ VIEWS = {
         "shared/contract/neuroschema/views/vectors/view-digest.v1.json",
         "tests/contract/neuroschema-views/view-digest.v1.json",
     ),
+    # nemar.ic-activity.v1's cases and refusals (ADR 0137 P5): the activation view nemar-ica declares
+    # is held to them (tests/recipes/test_nemar_ica_views.py), and its channel_types digests to
+    # nemar-ica's own (pipeline.types_sha256).
+    "ic_activity_vectors": (
+        "shared/contract/neuroschema/views/vectors/ic-activity.v1.json",
+        "tests/contract/neuroschema-views/ic-activity.v1.json",
+    ),
 }
 COPIES = ("schema", "vectors", "plugin_manifest", "neuroschema_bundle", *STANDALONE, *VIEWS)
 

@@ -201,6 +201,72 @@ BURST_REASON = "asr_repaired"
 # in the dataset record has these edges.
 BURST_FRACTION_EDGES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0)
 
+# The views nemar-ica declares itself (ADR 0137 C11, docs/recipes.md "The views"), by key and kind, in
+# the order each record lists them, every one at version 1 of its kind; a plugin's view never takes one
+# of these keys (``plugins.load``'s ``recipe_views``).
+ICMAPS_VIEW = "icmaps"
+ICACTIVITY_VIEW = "icactivity"
+MIDSEGMENT_VIEW = "midsegment"
+RECIPE_VIEWS = (
+    (ICMAPS_VIEW, "nemar.ic-maps"),
+    (ICACTIVITY_VIEW, "nemar.ic-activity"),
+    (MIDSEGMENT_VIEW, "nemar.signal-window"),
+)
+VIEW_KIND_VERSION = 1
+# The positions of the decomposition's channels, the layout of its component maps (and of a plugin's
+# sensor views): ``_chanlocs.tsv``, one row per column of ``_unmixing.tsv`` in its order, named by that
+# header, each row's type as the floor's ``_channels.tsv`` gives it, EEGLAB's theta and radius, and x,
+# y and z as eegprep holds them after loading (millimeters in what eegprep takes for EEGLAB's frame: +x
+# toward the nose, +y left, +z up), every place n/a when they are known to be misread
+# (``FRAME_ROTATED``). Written at ``iclabel``, the step that classified the components on them.
+CHANLOCS = "chanlocs"
+CHANLOCS_STEP = "iclabel"
+CHANLOCS_COLUMNS = ("name", "sensor_type", "theta_deg", "radius", "x", "y", "z")
+# The positions are the dataset's own (its electrodes file, its data file's channel locations, or the
+# positions the serving copy carries from the electrodes file), which NEMAR does not verify; nemar-ica
+# never places a channel from a template.
+POSITION_SOURCE = "measured"
+# The activations' display filter and window (docs/views/ic-activity.md): a zero-phase Butterworth
+# high-pass of order 2 at 1 Hz, for display only, over windows of at most 30 seconds.
+DISPLAY_HIGHPASS_HZ = 1
+DISPLAY_FILTER_ORDER = 2
+MAX_WINDOW_S = 30
+# The signal window (docs/views/presets.md, nemar.signal-window): two seconds of the floor's good samples,
+# the window nearest the recording's middle inside the good-sample mask (``pipeline.midsegment``).
+MIDSEGMENT_DURATION_S = 2
+# Why a recording has no signal window: no two seconds of it lie inside the good-sample mask. A word of
+# nemar-process's own, which dataQuality admits beside neuroschema's and a renderer shows as it is.
+NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
+# The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
+# import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
+# description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees
+# (sccn/eegprep#692; eegprep-lean, the serving copy's reader, reads them as stated). nemar-ica withholds
+# such positions (``pipeline.position_facts``): ``_chanlocs.tsv`` holds no place and ``icmaps`` is
+# skipped with this word, never drawn on positions known to be turned. ICLabel still classified on them
+# (nemarOrg/nemar-process#94).
+ROTATED_FRAMES = ("CTF", "4DBti", "KitYokogawa")
+FRAME_ROTATED = "frame_rotated"  # views.OWN_SKIP_REASONS
+ICMAPS_CAPTION = (
+    "Scalp maps of the independent components, each with its share of the variance and its ICLabel "
+    "probabilities."
+)
+ICACTIVITY_CAPTIONS = {
+    SERVING_SOURCE: (
+        "Component activations computed in your browser from the serving copy, with no "
+        "preprocessing; they approximate the decomposition's input, the same channels filtered and "
+        "repaired with artifact subspace reconstruction."
+    ),
+    ARCHIVE_SOURCE: (
+        "Component activations computed in your browser from the serving copy, with no "
+        "preprocessing; they approximate the decomposition's input, the dataset's own recording "
+        "filtered and repaired with artifact subspace reconstruction."
+    ),
+}
+MIDSEGMENT_CAPTION = (
+    "Two seconds of the recording inside the floor's good samples nearest its middle, as the serving "
+    "copy holds it, with the floor's bad channels and segments marked."
+)
+
 # The floor's three values nemar-ica sets in place of the floor's own (the owner's legacy NEMAR
 # settings, 2026-11-23): a 0.5 Hz FIR high-pass (pop_eegfiltnew, legacy's call) in place of
 # clean_drifts, RANSAC's correlation threshold of 0.85 in place of 0.8, and a channel removed when it is

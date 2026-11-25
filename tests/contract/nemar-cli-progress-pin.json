@@ -1,5 +1,5 @@
 {
-  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and its vectors, the vendored neuroschema bundle and its view registry the recipes validate plugin outputs against (ADR 0137), the naming vectors of nemar-cli's port of common/naming.py, three of neuroschema's view vectors (the record checks, the preset checks and the view digest) that the views writer's tests replay, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
+  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and its vectors, the vendored neuroschema bundle and its view registry the recipes validate plugin outputs against (ADR 0137), the naming vectors of nemar-cli's port of common/naming.py, four of neuroschema's view vectors (the record checks, the preset checks, the view digest and the component activations) that the views writer's tests replay, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's pipeline progress epic branch; it stays reachable once that branch is merged with a merge commit, and the pin moves to the dev commit that holds the same bytes after the merge. Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
   "repository": "nemarOrg/nemar-cli",
   "ref": "1788c5d2bf5075a853573527fc9536b1689a671c",
   "schema": {
@@ -79,6 +79,12 @@
     "copy": "tests/contract/neuroschema-views/view-digest.v1.json",
     "sha256": "ddc048c896b098302300eabaedfd289f596df2df3a03a3e40450cbc87ac07b70",
     "bytes": 22145
+  },
+  "ic_activity_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/ic-activity.v1.json",
+    "copy": "tests/contract/neuroschema-views/ic-activity.v1.json",
+    "sha256": "05a8a4cea72def73ab7c2891a451f6669877d47aad7d3cd95f763c9b1e564e3e",
+    "bytes": 1247782
   },
   "words": {
     "progress_contract": "shared/contract/compute-progress.ts",

@@ -17,6 +17,11 @@ ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-dev
 out of the GPU's memory: it is fitted again on the CPU with every setting the same (``decompose``;
 the run's state decides, ``tally``).
 
+Beside the fit, what its views need of the recording (ADR 0137 P5, ``outputs.recipe_views``): where
+the channels' positions came from (``position_facts``), the recording's cap model and reference from
+its sidecar, and the signal window, two seconds inside the good-sample mask (``good_sample_mask``:
+outside every row of ``_badsegments.tsv``) nearest the recording's middle (``midsegment``).
+
 eegprep is imported where it is used, so that this module (and the command, which registers the
 recipe) import on any eegprep that has the floor's steps.
 """
@@ -26,6 +31,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import math
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from nemar_process.common import determinism, device, io, qc
+from nemar_process.common import determinism, device, io, qc, views
 from nemar_process.common.determinism import rounded
 from nemar_process.common.errors import (
     ICA_DEGENERATE,
@@ -100,6 +106,12 @@ class Decomposition:
     # the store row of each kept channel, in order (None on a dataset directory)
     store_rows: list[int] | None
     iclabel: dict[str, Any] = field(default_factory=dict)
+    # where the channels' positions came from, as the loader read them (``position_facts``), the
+    # recording's cap model and reference from its sidecar (``views.sidecar_fields``), and the signal
+    # window inside the good-sample mask nearest the middle (``midsegment``; None when there is none)
+    positions: dict[str, Any] = field(default_factory=dict)
+    sidecar: dict[str, str] = field(default_factory=dict)
+    window: dict[str, Any] | None = None
 
 
 def state_text(document: dict[str, Any]) -> str:
@@ -291,6 +303,128 @@ def decomposition_input(
     return block
 
 
+def _stated(value: Any) -> str | None:
+    """A text the dataset stated, or None for nothing (an empty text, ``n/a``, a value of no text)."""
+    if not isinstance(value, str) or value.strip() in ("", "n/a"):
+        return None
+    return value
+
+
+def position_facts(loaded: Loaded) -> dict[str, Any]:
+    """Where the recording's channel positions came from, as the loader read them (read before the
+    floor takes the recording): ``source`` is the loader's location source (``electrodes.tsv``,
+    ``embedded`` or ``none``), and ``coordinate_system`` and ``coordinate_units`` what the dataset
+    stated for those positions: on a dataset directory the ``_coordsystem.json`` eegprep read beside
+    ``electrodes.tsv`` (its ``EEGCoordinateSystem`` and ``EEGCoordinateUnits``, which eegprep keeps in
+    ``etc["BIDSCoordsystem"]``), on the serving copy the store's own (``coordinate_system`` and
+    ``coordinate_units``, as eegprep-lean recorded them in ``etc["nemar"]["locations"]`` when it
+    located a channel). Each is None when nothing stated it: positions embedded in the data file, or
+    an electrodes file eegprep read with no coordsystem (it then assumed a frame and guessed a unit).
+
+    eegprep converts the positions on loading to millimeters in EEGLAB's frame, correctly for a frame
+    it reads as stated. Its BIDS import reads every frame but EEGLAB's as RAS (unless the
+    coordsystem's description is ``EEGLAB``), so on a dataset directory positions in the frames BIDS
+    defines as ALS (``steps.ROTATED_FRAMES``: CTF, 4DBti, KitYokogawa) come out turned by 90 degrees
+    (sccn/eegprep#692). ``withheld`` is then ``frame_rotated`` (``steps.FRAME_ROTATED``), and the
+    recipe writes no place of them and draws no map on them; otherwise it is None. eegprep-lean, the
+    serving copy's reader, reads those frames as stated, so nothing is withheld there.
+    """
+    etc = loaded.eeg.get("etc")
+    etc = etc if isinstance(etc, dict) else {}
+    found: Any = None
+    names = ("EEGCoordinateSystem", "EEGCoordinateUnits")
+    if loaded.serving is not None:
+        nemar = etc.get("nemar")
+        found = nemar.get("locations") if isinstance(nemar, dict) else None
+        if not (isinstance(found, dict) and found.get("located")):
+            found = None
+        names = ("coordinate_system", "coordinate_units")
+    elif loaded.location_source == "electrodes.tsv":
+        found = etc.get("BIDSCoordsystem")
+    found = found if isinstance(found, dict) else {}
+    system = _stated(found.get(names[0]))
+    # the coordsystem is read on a dataset directory only beside an electrodes file (above)
+    rotated = (
+        loaded.serving is None
+        and system in steps.ROTATED_FRAMES
+        and found.get("EEGCoordinateSystemDescription") != "EEGLAB"
+    )
+    return {
+        "source": loaded.location_source,
+        "coordinate_system": system,
+        "coordinate_units": _stated(found.get(names[1])),
+        "withheld": steps.FRAME_ROTATED if rotated else None,
+    }
+
+
+def good_sample_mask(result: floor.FloorResult, bursts: dict[str, Any]) -> np.ndarray:
+    """The samples the floor read that no row of ``_badsegments.tsv`` covers (True is good): outside
+    the floor's bad windows (its sample mask; every sample when the window step was skipped) and
+    outside the spans ASR repaired (``bursts["spans"]``, ``[start, stop)``, the table's ``burst``
+    rows)."""
+    count = int(result.work["pnts"])
+    if result.sample_mask is None:
+        good = np.ones(count, dtype=bool)
+    else:
+        good = np.array(result.sample_mask, dtype=bool)
+    if good.shape != (count,):
+        raise RecordingError(INTERNAL_ERROR, "iclabel", "sample_mask_inconsistent")
+    for start, stop in bursts["spans"]:
+        good[int(start) : int(stop)] = False
+    return good
+
+
+def window_stop(first: int, rate: float, duration_s: float) -> int:
+    """The sample after the window that starts at sample ``first`` and lasts ``duration_s``: the least
+    ``k`` above ``first`` with ``k / rate >= first / rate + duration_s``, each a binary64 division and
+    one sum, which is how a renderer finds a signal window's samples from its times
+    (docs/views/presets.md, nemar.signal-window), never from a rounded product."""
+    end = first / rate + duration_s
+    stop = first + max(1, math.ceil(duration_s * rate))
+    while stop - 1 > first and (stop - 1) / rate >= end:
+        stop -= 1
+    while stop / rate < end:
+        stop += 1
+    return stop
+
+
+def midsegment(good: np.ndarray, rate: float, duration_s: float) -> dict[str, Any] | None:
+    """The signal window: ``duration_s`` seconds of the recording inside the good-sample mask whose
+    middle is nearest the recording's, or None when no such window fits.
+
+    A window starting at sample ``first`` holds the samples a renderer finds from its times
+    (``window_stop``); it fits when every one of them is good. Of the windows that fit, the chosen one
+    has the least ``|2 * first + duration_s * rate - n|`` for ``n`` samples (its middle, in time, nearest
+    the recording's), the earlier on a tie. Its start is ``first / rate`` seconds.
+    """
+    count = int(good.size)
+    target = (count - duration_s * rate) / 2
+    best: tuple[float, int] | None = None
+    for start, length in qc.runs(~good):  # the runs of good samples
+        end = start + length
+        last = min(end - 1, end - math.ceil(duration_s * rate) + 2)
+        while last >= start and window_stop(last, rate, duration_s) > end:
+            last -= 1
+        if last < start:
+            continue
+        for first in {
+            min(max(math.floor(target), start), last),
+            min(max(math.ceil(target), start), last),
+        }:
+            key = (abs(2 * first + duration_s * rate - count), first)
+            if best is None or key < best:
+                best = key
+    if best is None:
+        return None
+    first = best[1]
+    return {
+        "start_s": first / rate,
+        "duration_s": duration_s,
+        "first": first,
+        "count": window_stop(first, rate, duration_s) - first,
+    }
+
+
 def amica15_account(eeg: dict[str, Any]) -> dict[str, Any]:
     """What eegprep read of the binary's output: its log-likelihood per iteration, summarized.
 
@@ -413,6 +547,10 @@ def process(
     ran it (``Decomposition.resolution``).
     """
     serving = loaded.serving
+    # what the loader read of the positions and the sidecar, before the floor takes the recording
+    positions = position_facts(loaded)
+    etc = loaded.eeg.get("etc")
+    sidecar = views.sidecar_fields(etc.get("BIDS") if isinstance(etc, dict) else None)
     result = floor.process(
         loaded,
         recipe_id=steps.RECIPE_ID,
@@ -543,4 +681,9 @@ def process(
         bursts=bursts,
         store_rows=None if serving is None else kept_rows(result),
         iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
+        positions=positions,
+        sidecar=sidecar,
+        window=midsegment(
+            good_sample_mask(result, bursts), result.srate_hz, steps.MIDSEGMENT_DURATION_S
+        ),
     )
