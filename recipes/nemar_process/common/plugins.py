@@ -18,7 +18,9 @@ coordinates come from the array headers and its units from the manifest role (a 
 overriding the role's), never from the plugin (``docs/contracts.md``). Then the views writer
 (``views.plugin_view``) checks the arrays against the recording the host describes (``views.Host``) and
 makes the files and declarations, which ``CheckpointRun.views`` hands to the recipe's product writer; a
-skipped plugin's views are listed in ``CheckpointRun.views_skipped`` with the reason ``plugin_failed``.
+skipped plugin's views are listed in ``CheckpointRun.views_skipped`` with the reason ``plugin_failed``,
+and a view of a plugin that ran, on a recipe role the host withholds for this recording
+(``views.Host.withheld``: nemar-ica's layout of turned positions), with the host's reason.
 
 What runs is fixed in the image: a recipe declares ``PLUGINS = ((name, version), ...)`` beside its
 step order, and ``load`` refuses a plugin whose entry, name, version, checkpoint or reads differ from
@@ -168,7 +170,9 @@ class PluginView:
 class CheckpointRun:
     """What one checkpoint's plugins gave: outcomes in order, the headline numbers, the views of each
     plugin that ran, by plugin name, checked and ready to write (``views.PreparedView``), and the views
-    of each plugin that was skipped, ``{key, kind, reason: plugin_failed}``, in pinned order."""
+    skipped, ``{key, kind, reason}``, in pinned order: every view of a plugin that was skipped, with
+    ``plugin_failed``, and a view of a plugin that ran on a recipe role the host withholds for this
+    recording, with the host's reason (``views.Host.withheld``)."""
 
     outcomes: list[PluginOutcome] = field(default_factory=list)
     summary_metrics: dict[str, Any] = field(default_factory=dict)
@@ -573,20 +577,30 @@ def _log_skip(plugin: Plugin, detail: str) -> None:
 
 def _checked_views(
     plugin: Plugin, returned: PluginResult, host: writer.Host | None
-) -> list[writer.PreparedView]:
-    """The views of a result: their shape and parameters, then the writer's checks of their data."""
+) -> tuple[list[writer.PreparedView], list[dict[str, str]]]:
+    """The views of a result: their shape and parameters, then the writer's checks of their data. A
+    view on a recipe role the host withholds for this recording (``views.ViewWithheld``) is not
+    prepared and is listed with the host's reason instead, ``{key, kind, reason}``; its plugin ran."""
     checked = _plugin_views(plugin, returned.views)
     if not checked:
-        return []
+        return [], []
     assert host is not None  # run_checkpoint refused a checkpoint of views with no host
     declared = plugin.manifest["outputs"]["views"]
     identity = {"name": plugin.name, "version": plugin.version}
-    return [
-        writer.plugin_view(
-            identity, view.key, declared[view.key], view.roles, view.parameters, host
-        )
-        for view in checked
-    ]
+    prepared: list[writer.PreparedView] = []
+    withheld: list[dict[str, str]] = []
+    for view in checked:
+        try:
+            prepared.append(
+                writer.plugin_view(
+                    identity, view.key, declared[view.key], view.roles, view.parameters, host
+                )
+            )
+        except writer.ViewWithheld as held:
+            withheld.append(
+                {"key": view.key, "kind": declared[view.key]["kind"], "reason": held.reason}
+            )
+    return prepared, withheld
 
 
 def _skip_detail(error: Exception) -> str:
@@ -646,7 +660,7 @@ def run_checkpoint(
                 if not isinstance(returned, PluginResult):
                     raise _OutputRefused("result_not_a_plugin_result")
                 quality = _quality_metrics(plugin, returned.metrics)
-                prepared = _checked_views(plugin, returned, host)
+                prepared, withheld = _checked_views(plugin, returned, host)
             except Exception as error:  # noqa: BLE001  (an output that fails a check skips the plugin)
                 detail = _skip_detail(error)
         if detail is not None:
@@ -677,6 +691,7 @@ def run_checkpoint(
                 result.summary_metrics[name] = metric["value"]
         if prepared:
             result.views[plugin.name] = prepared
+        result.views_skipped += withheld
         plan.add_plugin_outcome(outcome.entry())
         result.outcomes.append(outcome)
     return result

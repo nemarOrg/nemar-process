@@ -1033,8 +1033,10 @@ def test_a_zarr_runs_views_name_the_store_its_decomposition_read(commanded, stan
         (out / "{}_desc-nemarica_signalJourney.json".format(stem)).read_text(encoding="utf-8")
     )
     found = views_of(record)
-    assert list(found) == ["icmaps", "icactivity", "midsegment"]
+    # the recipe's three, then its plugins' (nemar-quality's, nemar-spectrum's)
+    assert list(found) == ["icmaps", "icactivity", "midsegment", "icclasses", "spectrum"]
     assert "views_skipped" not in record["extensions"]["nemar"]
+    assert record["extensions"]["nemar"]["ica"]["serving_index"] is None  # the store read is named
     expected = {
         "recording": STORE,
         "group": row["group"],

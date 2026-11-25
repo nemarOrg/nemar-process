@@ -20,7 +20,10 @@ the run's state decides, ``tally``).
 Beside the fit, what its views need of the recording (ADR 0137 P5, ``outputs.recipe_views``): where
 the channels' positions came from (``position_facts``), the recording's cap model and reference from
 its sidecar, and the signal window, two seconds inside the good-sample mask (``good_sample_mask``:
-outside every row of ``_badsegments.tsv``) nearest the recording's middle (``midsegment``).
+outside every row of ``_badsegments.tsv``) nearest the recording's middle (``midsegment``), on the grid
+the floor read. The serving copy a renderer draws the window from is that grid on the Zarr input; on a
+dataset directory it is the serving index's (the converter may have resampled), and the window is
+chosen on it from the same spans in seconds (``bad_intervals``, ``grid_mask``, ``outputs.serving_window``).
 
 eegprep is imported where it is used, so that this module (and the command, which registers the
 recipe) import on any eegprep that has the floor's steps.
@@ -33,6 +36,7 @@ import hashlib
 import json
 import math
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -371,6 +375,26 @@ def good_sample_mask(result: floor.FloorResult, bursts: dict[str, Any]) -> np.nd
         raise RecordingError(INTERNAL_ERROR, "iclabel", "sample_mask_inconsistent")
     for start, stop in bursts["spans"]:
         good[int(start) : int(stop)] = False
+    return good
+
+
+def bad_intervals(result: floor.FloorResult, bursts: dict[str, Any]) -> list[tuple[float, float]]:
+    """The runs of samples the good-sample mask leaves out (``good_sample_mask``), as the spans of time
+    ``[start / rate, stop / rate)`` they cover on the floor's grid, in seconds."""
+    rate = float(result.srate_hz)
+    good = good_sample_mask(result, bursts)
+    return [(start / rate, (start + length) / rate) for start, length in qc.runs(good)]
+
+
+def grid_mask(intervals: Iterable[tuple[float, float]], rate: float, count: int) -> np.ndarray:
+    """The good-sample mask of another grid of the recording (the serving copy's, ``count`` samples at
+    ``rate``; True is good): a sample ``k`` is good when its time ``k / rate``, a binary64 division as a
+    renderer computes it, lies in no interval ``[low, high)`` of ``intervals`` (seconds)."""
+    times = np.arange(count, dtype=np.float64) / rate
+    good = np.ones(count, dtype=bool)
+    for low, high in intervals:
+        first, stop = np.searchsorted(times, (low, high), "left")
+        good[first:stop] = False
     return good
 
 

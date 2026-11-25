@@ -19,7 +19,15 @@ from ``_mixing.tsv`` on the layout ``_chanlocs.tsv`` with ``_components.tsv`` as
 ``icactivity``, the activations a browser computes from the serving copy with
 ``_servingunmixing.tsv``, shaded by the floor's bad segments; and ``midsegment``, two seconds of the
 serving copy inside the good-sample mask nearest the middle, with the floor's tables marked. A view a
-recording cannot have is listed as skipped, with why (``extensions.nemar.views_skipped``).
+recording cannot have is listed as skipped, with why (``extensions.nemar.views_skipped``). On a dataset
+directory the two views of the serving copy name the channel group the serving index lists for the
+recording (``serving_index``, ``--serving-index``), and are skipped with a word without one.
+
+Then the recipe's quality plugins run at ``quality`` (``steps.PLUGINS``: nemar-quality and
+nemar-spectrum, ADR 0137; docs/plugins.md), on the inputs ``plugin_inputs`` builds from the decomposition
+and the floor, with ``view_host``'s host and its layout, as steps of the plan: their views follow the
+recipe's own in ``extensions.nemar.views``, their headline metrics join the summary metrics, and a plugin
+that fails is skipped and keeps the recording (``plugins.run_checkpoint``).
 
 What the record says is one block, ``extensions.nemar.ica``, and ``_ica.json`` is the same block
 under the recipe's name and version (``facts``): the engine, pAMICA's own account of the run copied
@@ -34,23 +42,35 @@ decomposition agrees with EEGLAB's AMICA: it is pAMICA's.
 from __future__ import annotations
 
 import copy
+import functools
 import math
 import numbers
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from nemar_process.common import device, files, io, naming, records, versions, views
+from nemar_process.common import (
+    device,
+    files,
+    io,
+    naming,
+    plugins,
+    records,
+    serving_index,
+    versions,
+    views,
+)
 from nemar_process.common.determinism import installed_versions
 from nemar_process.common.errors import INTERNAL_ERROR, RecordingError
 from nemar_process.common.io import Loaded, Recording
 from nemar_process.common.params import jsonable
 from nemar_process.common.recipe import RecipeInfo, RecipeMetric, RecordingProduct, RunContext
 from nemar_process.nemar_floor import outputs as floor_outputs
+from nemar_process.nemar_floor.pipeline import FloorResult
 from nemar_process.nemar_ica import pipeline, steps, tally
 from nemar_process.nemar_ica.options import Settings
 
@@ -175,8 +195,14 @@ def facts(
     profile: str,
     browser: Mapping[str, Any] | None = None,
     browser_reason: str | None = None,
+    served: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The block ``extensions.nemar.ica`` and ``_ica.json`` hold.
+
+    ``served`` is what the run says of the serving index it was given on a dataset directory
+    (``serving_index.ServingIndex.facts``: its digest, the dataset and commit it names, and the
+    recording's row, or null with the word for why there is none); null on the serving copy, and on a
+    dataset directory given no index.
 
     For pAMICA the settings and the account of the fit are ``EEG['etc']['pamica']`` as eegprep wrote
     it, copied whole under ``pamica``, and the top-level ``seed``, ``n_models``, ``n_mix``,
@@ -242,6 +268,7 @@ def facts(
         "browser_transform": None if browser is None else copy.deepcopy(dict(browser)),
         "browser_transform_reason": browser_reason,
         "positions": copy.deepcopy(fit.positions),
+        "serving_index": None if served is None else copy.deepcopy(dict(served)),
         **device.facts(
             resolution,
             threads=settings.threads,
@@ -527,12 +554,20 @@ def layout_role(chanlocs: views.ViewFile, fit: pipeline.Decomposition) -> views.
 
 
 def view_host(
-    recording: Recording, fit: pipeline.Decomposition, layout: views.RoleData | None
+    recording: Recording,
+    fit: pipeline.Decomposition,
+    layout: views.RoleData | None,
+    layout_reason: str | None = None,
 ) -> views.Host:
     """What nemar-ica knows of one recording, for its own views and for a plugin's (``views.Host``):
     the decomposition's channels in layout order, its components, ICLabel's classes, the floor's
     sampling rate, the layout (none when the component maps have none: positions withheld, or a
-    layout over the caps), the sidecar's cap model and reference, and the suffixes of its own files."""
+    layout over the caps, and then the layout is withheld with ``layout_reason``, ``frame_rotated`` or
+    ``cap_exceeded``, so a plugin's view on it is skipped with the same word), the sidecar's cap model
+    and reference, and the suffixes of its own files."""
+    withheld = (
+        {} if layout is not None or layout_reason is None else {steps.LAYOUT_ROLE: layout_reason}
+    )
     return views.Host(
         recipe_id=INFO.id,
         recipe_version=INFO.version,
@@ -542,21 +577,28 @@ def view_host(
         sensors=tuple(channel_labels(fit.good_channels)),
         components=tuple(component_labels(fit.rank)),
         classes=tuple(fit.classes),
-        roles={} if layout is None else {"layout": layout},
+        roles={} if layout is None else {steps.LAYOUT_ROLE: layout},
         sidecar=dict(fit.sidecar),
         reserved=frozenset(views.RECIPE_SUFFIXES),
+        withheld=withheld,
     )
 
 
 def signal_store(
-    recording: Recording, fit: pipeline.Decomposition, archive_group: str | None = None
+    recording: Recording,
+    fit: pipeline.Decomposition,
+    row: serving_index.ServingRow | None = None,
+    index: serving_index.ServingIndex | None = None,
 ) -> dict[str, Any] | None:
     """The recording's store in the serving copy, as a view's ``signal`` input, or None.
 
     On the serving copy it is the store the decomposition read, with its group and its digest (the
     dataset record's ``stores_content`` row). On a dataset directory no store was read: its channel
-    group is named only when the caller gives it (``archive_group``), with no digest and the profile
-    ``archive``, and otherwise the recipe names no store, so declares no view of the serving copy.
+    group is the one the serving index the run read lists for the recording (``row``, resolved from
+    ``index`` by ``ServingIndex.resolve``, never a name made up): a row of this recording that the index
+    gives as it is (``ServingIndex.lists``: its digest, and its group, rate and samples), else
+    ``ValueError``. The store has no digest and the profile ``archive``; without a row the recipe names
+    no store, so declares no view of the serving copy.
     """
     serving = fit.serving
     if serving is not None:
@@ -568,15 +610,50 @@ def signal_store(
             content_sha256=serving.content_sha256,
             profile=steps.INPUT_PROFILES["zarr"],
         )
-    if archive_group is None:
+    if row is None:
         return None
+    if (
+        type(index) is not serving_index.ServingIndex
+        or type(row) is not serving_index.ServingRow
+        or row.path != recording.path
+        or not index.lists(row)
+    ):
+        raise ValueError(
+            "the store of a dataset directory's recording is its row of the serving index"
+        )
     return views.store_input(
         "signal",
         recording=recording.path,
-        group=archive_group,
+        group=row.group,
         content_sha256=None,
         profile=steps.INPUT_PROFILES["bids"],
     )
+
+
+def serving_window(
+    fit: pipeline.Decomposition,
+    row: serving_index.ServingRow,
+    segments: views.ViewFile | None,
+) -> dict[str, Any] | None:
+    """The signal window of a dataset directory's recording, chosen on the serving copy's grid (the
+    row's rate and samples; the converter may have resampled, so the floor's grid is not it): two
+    seconds nearest the middle (``pipeline.midsegment``) whose samples' times lie outside every span the
+    good-sample mask leaves out (``pipeline.bad_intervals``) and outside every row of
+    ``_badsegments.tsv`` as written (``segments``, ``[onset, onset + duration)`` in its rounded
+    seconds), so the window is good whichever a reader takes. None when no such window fits.
+
+    The table is read by its grammar alone, never by a renderer's caps: a table over them still has
+    its spans kept out of the window, and the views that read it are skipped as ``cap_exceeded`` by
+    their own builders, never the recording failed here."""
+    intervals = pipeline.bad_intervals(fit.floor_result, fit.bursts)
+    if segments is not None:
+        header, rows = views.read_tsv(segments.text.encode("utf-8"))
+        onset, duration = header.index("onset"), header.index("duration")
+        for cells in rows:
+            start = views.cell_number(cells[onset])
+            intervals.append((start, start + views.cell_number(cells[duration])))
+    good = pipeline.grid_mask(intervals, row.rate_hz, row.n_samples)
+    return pipeline.midsegment(good, row.rate_hz, steps.MIDSEGMENT_DURATION_S)
 
 
 def icmaps_view(
@@ -716,47 +793,83 @@ def floor_tables(recording: Recording, fit: pipeline.Decomposition) -> dict[str,
     return found
 
 
+@dataclass(frozen=True)
+class RecipeViews:
+    """One recording's own views (``views``, the ``ViewSet`` its plugins' views are added to) and the
+    host they were built on (``view_host``: the layout, or the word for why there is none), which the
+    plugins get."""
+
+    views: views.ViewSet
+    host: views.Host
+
+
 def recipe_views(
     recording: Recording,
     fit: pipeline.Decomposition,
     block: Mapping[str, Any],
     named: Mapping[str, views.ViewFile],
     *,
-    archive_group: str | None = None,
-) -> views.ViewSet:
+    serving: serving_index.ServingIndex | None = None,
+    resolved: serving_index.Resolution | None = None,
+) -> RecipeViews:
     """nemar-ica's own views of one recording, in ``steps.RECIPE_VIEWS`` order, and the ones it
-    skipped, with why.
+    skipped, with why; and the host its plugins get.
 
-    ``icmaps`` always, but for positions the loader is known to have turned (skipped with the word
-    ``fit.positions["withheld"]``, ``frame_rotated``); its layout is read inside its builder, so a
-    layout over the caps skips it with ``cap_exceeded`` like any part of it. ``icactivity`` and
-    ``midsegment`` read the serving copy, so they are declared
-    when the recipe names its store (``signal_store``): ``icactivity`` is skipped with
+    ``icmaps`` on the layout ``_chanlocs.tsv`` (``layout_role``), or skipped with the word for why there
+    is no layout: positions the loader is known to have turned (``fit.positions["withheld"]``,
+    ``frame_rotated``), or a layout over the caps (``cap_exceeded``); the host then withholds the layout
+    with that word, so a plugin's view on it is skipped with it too. A map over the caps is skipped
+    with ``cap_exceeded``. ``icactivity`` and ``midsegment`` read the serving copy, so they are declared
+    when the recipe names its store (``signal_store``): on the serving copy the store the decomposition
+    read, with the window chosen on the grid the floor read (``fit.window``, the same grid), and on a
+    dataset directory the row the serving index the run read (``serving``) gives the recording
+    (``resolved``), with the window chosen on that row's grid (``serving_window``); without an index
+    both are skipped with ``no_serving_index``, and without a row with the resolution's word
+    (``not_in_serving_index``, ``serving_index_stale``). ``icactivity`` is skipped with
     ``labels_unusable`` when the channel labels cannot head the matrix's columns (they fell back to
     ``Ch001`` and so on, so no column could be matched to the serving copy's), and ``midsegment`` with
     ``no_good_window`` when no two seconds lie inside the good-sample mask. A view over the caps is
     skipped with ``cap_exceeded`` (``ViewSet.add_recipe_view``); any other refusal is the recipe's
     fault and raises ``views.ViewRefused``.
     """
+    if fit.serving is not None and serving is not None:
+        raise ValueError("a recording of the serving copy names the store it read, not an index")
+    if (serving is None) != (resolved is None):
+        raise ValueError("a serving index comes with the recording's resolution in it")
     classes = [class_column(name) for name in fit.classes]
     found = views.ViewSet(INFO.id, INFO.version)
-    placed: dict[str, views.RoleData] = {}
-
-    def maps() -> views.PreparedView:
-        layout = layout_role(named[steps.CHANLOCS], fit)
-        placed["layout"] = layout
-        host = view_host(recording, fit, layout)
-        return icmaps_view(host, named["mixing"], layout, named["components"], classes)
-
-    withheld = fit.positions.get("withheld")
-    if withheld is not None:
-        found.skip(steps.ICMAPS_VIEW, views.IC_MAPS, withheld)
+    layout: views.RoleData | None = None
+    reason = fit.positions.get("withheld")
+    if reason is None:
+        try:
+            layout = layout_role(named[steps.CHANLOCS], fit)
+        except views.ViewRefused as refused:
+            reason = views.SKIP_REASON_OF.get(refused.word)
+            if reason is None:
+                raise
+    host = view_host(recording, fit, layout, reason)
+    if layout is None:
+        assert reason is not None  # positions withheld, or a layout over the caps
+        found.skip(steps.ICMAPS_VIEW, views.IC_MAPS, reason)
     else:
-        found.add_recipe_view(steps.ICMAPS_VIEW, views.IC_MAPS, maps)
-    host = view_host(recording, fit, placed.get("layout"))
-    store = signal_store(recording, fit, archive_group)
-    if store is None:
-        return found
+        placed = layout
+        found.add_recipe_view(
+            steps.ICMAPS_VIEW,
+            views.IC_MAPS,
+            lambda: icmaps_view(host, named["mixing"], placed, named["components"], classes),
+        )
+    if fit.serving is not None:
+        store, window = signal_store(recording, fit), fit.window
+    elif resolved is not None and resolved.row is not None:
+        store = signal_store(recording, fit, resolved.row, serving)
+        window = serving_window(fit, resolved.row, named.get("badsegments"))
+    else:
+        reason = steps.NO_SERVING_INDEX if resolved is None else resolved.reason
+        assert reason is not None  # a resolution without a row says why
+        found.skip(steps.ICACTIVITY_VIEW, views.IC_ACTIVITY, reason)
+        found.skip(steps.MIDSEGMENT_VIEW, views.SIGNAL_WINDOW, reason)
+        return RecipeViews(found, host)
+    assert store is not None
     if block["browser_transform"] is None or channel_labels(fit.good_channels) != list(
         fit.good_channels
     ):
@@ -767,7 +880,6 @@ def recipe_views(
             views.IC_ACTIVITY,
             lambda: icactivity_view(host, block, store, named),
         )
-    window = fit.window
     if window is None:
         found.skip(steps.MIDSEGMENT_VIEW, views.SIGNAL_WINDOW, steps.NO_GOOD_WINDOW)
     else:
@@ -776,7 +888,61 @@ def recipe_views(
             views.SIGNAL_WINDOW,
             lambda: midsegment_view(host, window, store, named),
         )
-    return found
+    return RecipeViews(found, host)
+
+
+# ---- the quality plugins (ADR 0137; docs/plugins.md) ------------------------------------------------
+
+
+@functools.cache
+def _loaded(pins: tuple[tuple[str, str], ...]) -> tuple[plugins.Plugin, ...]:
+    names = {name for name, _ in pins}
+    return tuple(
+        plugins.load(
+            pins,
+            checkpoints={
+                step: checkpoint
+                for checkpoint, ids in steps.CHECKPOINTS
+                for step in ids
+                if step in names
+            },
+            provides=steps.PLUGIN_PROVIDES,
+            steps=[step for _, ids in steps.CHECKPOINTS for step in ids if step not in names],
+            recipe_roles=steps.RECIPE_ROLES,
+            recipe_views=[key for key, _ in steps.RECIPE_VIEWS],
+        )
+    )
+
+
+def quality_plugins() -> tuple[plugins.Plugin, ...]:
+    """nemar-ica's pinned plugins (``steps.PLUGINS``), loaded and checked once per process
+    (``plugins.load``): each at the checkpoint the recipe's map puts it in, reading what the recipe
+    provides (``steps.PLUGIN_PROVIDES``), its ``{"from": "recipe"}`` roles the layout
+    (``steps.RECIPE_ROLES``), and no view key or step id of the recipe's own. The recipe's preflight
+    loads them, so a pin that cannot be loaded refuses the run before anything is written."""
+    return _loaded(tuple(steps.PLUGINS))
+
+
+def plugin_inputs(fit: pipeline.Decomposition, host: views.Host) -> dict[str, dict[str, Any]]:
+    """What nemar-ica hands its plugins, by recipe (docs/plugins.md, The first two plugins): from
+    ``nemar-ica`` the decomposition's input (``data``: the good channels by samples the fit was given,
+    in ``unit`` ``uV``), the host's sampling rate (``srate``) and channel names in layout order
+    (``channels``: the unmixing's header, the layout's names), ICLabel's ``classes`` in its order with
+    its ``classifications`` (components by classes) and each component's own ``variance_pct``; from
+    ``nemar-floor`` the line frequency it measured (``line_hz``, its table's, or None).
+    ``plugins.run_checkpoint`` hands each plugin read-only views of the ones its manifest reads."""
+    return {
+        "nemar-ica": {
+            "data": fit.eeg["data"],
+            "unit": steps.INPUT_UNIT,
+            "srate": host.srate_hz,
+            "channels": list(host.sensors or ()),
+            "classes": list(fit.classes),
+            "classifications": fit.probabilities,
+            "variance_pct": list(fit.variance_pct),
+        },
+        "nemar-floor": {"line_hz": floor_outputs.line_frequency(fit.floor_result)},
+    }
 
 
 RANK_EDGES = (0, 8, 16, 24, 32, 40, 48, 56, 64)
@@ -814,9 +980,8 @@ RECIPE_METRICS = (
 )
 
 # The share of brain components is nemar-quality's metric, never a recipe value (ADR 0137 C6): the
-# table's ``pct_brain_components`` is its value in the recording's record when the plugin ran.
-# TODO(P7): nemar-ica's PLUGINS and CHECKPOINTS do not run nemar-quality yet, so the column is null
-# until P7 wires the plugin into the recipe; nothing here computes the share itself.
+# table's ``pct_brain_components`` is its value in the recording's record, and null when the plugin was
+# skipped; nothing here computes the share itself.
 BRAIN_PLUGIN = "nemar-quality"
 BRAIN_METRIC = "nemar-quality:percentBrainComponents"
 
@@ -833,15 +998,20 @@ def plugin_metric(record: Mapping[str, Any], step_id: str, name: str) -> Any:
 
 def table_row(
     recording: Recording,
-    fit: pipeline.Decomposition,
+    result: FloorResult,
     block: Mapping[str, Any],
     content: str,
     record: Mapping[str, Any],
 ) -> dict[str, Any]:
     """The recording's row of the table; the floor's columns are not this recipe's, except the
-    floor's metrics the dataset summarizes (``floor_outputs.metric_values``)."""
-    metrics = fit.floor_result.metrics
-    floor_values = floor_outputs.metric_values(fit.floor_result)
+    floor's metrics the dataset summarizes (``floor_outputs.metric_values``). ``result`` is the floor's
+    result with the plan the record was written from (the plugins' steps and skips in it): the row's
+    ``plan_hash`` and ``skipped_steps`` are that plan's, the skips as the floor's table writes them
+    (``<step>:<reason>``, comma-joined), so a plugin skipped as ``plugin_failed`` counts as skipped at
+    ``quality`` (nemar-cli's rules, ``launcher/nemar_launch/checkpoints.py``)."""
+    metrics = result.metrics
+    floor_values = floor_outputs.metric_values(result)
+    skipped = ",".join("{}:{}".format(s["step_id"], s["reason"]) for s in result.plan.skipped)
     return {
         "path": recording.path,
         "datatype": "eeg",
@@ -853,7 +1023,7 @@ def table_row(
         "n_good_channels": block["n_good_channels"],
         "duration_s": metrics["durationS"],
         "srate_hz": metrics["samplingRateHz"],
-        "plan_hash": fit.floor_result.plan.hash(),
+        "plan_hash": result.plan.hash(),
         "engine": block["engine"],
         "rank": block["rank"],
         "iterations": block["iterations"],
@@ -870,6 +1040,7 @@ def table_row(
         "pct_good_samples": floor_values["percentGoodSamples"],
         "line_db_before": floor_values["lineNoiseBeforeDb"],
         "pct_brain_components": plugin_metric(record, BRAIN_PLUGIN, BRAIN_METRIC),
+        "skipped_steps": skipped or None,
         "record_content_sha256": content,
     }
 
@@ -894,7 +1065,7 @@ def write_product(
     *,
     profile: str,
     nemar_extra: Mapping[str, Any] | None = None,
-    archive_group: str | None = None,
+    serving: serving_index.ServingIndex | None = None,
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
@@ -902,21 +1073,45 @@ def write_product(
     ``serving`` with a store of the serving copy): a record that says it read one and names the other
     is never written (``ValueError``).
 
-    The record declares the recipe's views (``recipe_views``) over the files written, by their bytes;
-    ``archive_group`` names the serving copy's channel group for a recording of a dataset directory,
-    which then declares the views of the serving copy too (``signal_store``). A view the writer refuses
-    for any reason but its size is a fault of the recipe: the recording fails (``internal_error``,
-    the step ``record``, the writer's word) and nothing is written.
+    The record declares the recipe's views (``recipe_views``) over the files written, by their bytes.
+    ``serving`` is the serving index a run of a dataset directory was given (``--serving-index``): the
+    row it lists for the recording (``ServingIndex.resolve``, in an index of the run's dataset built
+    from the run's ``--source-commit``) names the serving copy's channel group, rate and length, and
+    the views of the serving copy are declared on it (``signal_store``, ``serving_window``); with no
+    index they are skipped with ``no_serving_index``, and with no row with ``not_in_serving_index`` or
+    ``serving_index_stale`` (another commit, or none named), and the record says what the index was and
+    why it gave no row (``extensions.nemar.ica.serving_index``). A run of the serving copy takes none
+    (``ValueError``).
+
+    Then the recipe's quality plugins run at ``quality`` on a copy of the plan (``quality_plugins``,
+    ``plugin_inputs``, ``plugins.run_checkpoint``) with the host the recipe's views were built on: their
+    steps or skips join the plan the record and the row state, their views follow the recipe's, and
+    their headline metrics join the summary metrics; a plugin that fails is skipped and the recording
+    is kept. A view the writer refuses for any reason but its size is a fault of the recipe: the
+    recording fails (``internal_error``, the step ``record``, the writer's word) and nothing is
+    written.
     """
     source = fit.decomposition_input.get("source")
     if steps.SOURCES.get(str(source)) != profile:
         raise ValueError(
             "the decomposition input {!r} is not the input profile {!r}'s".format(source, profile)
         )
+    if serving is not None and fit.serving is not None:
+        raise ValueError("a recording of the serving copy names the store it read, not an index")
+    identity = context.identity
+    resolved = (
+        None
+        if serving is None
+        else serving.resolve(recording.path, identity.dataset_id, identity.source_commit)
+    )
     spans = fit.bursts["spans"]
     written = floor_outputs.segment_tables_written(fit.floor_result, spans)
     block = facts(
-        fit, profile, browser_transform(recording, fit, written), browser_unavailable(fit)
+        fit,
+        profile,
+        browser_transform(recording, fit, written),
+        browser_unavailable(fit),
+        None if serving is None or resolved is None else serving.facts(resolved),
     )
     values = (
         block["rank"],
@@ -928,29 +1123,36 @@ def write_product(
     summary = dict(zip(SUMMARY_METRICS, values, strict=True))
     made = products(recording, fit, block)
     try:
-        view_set = recipe_views(
+        built = recipe_views(
             recording,
             fit,
             block,
             {**made.named, **floor_tables(recording, fit)},
-            archive_group=archive_group,
+            serving=serving,
+            resolved=resolved,
         )
     except views.ViewRefused as refused:
         raise RecordingError(INTERNAL_ERROR, "record", refused.word) from refused
+    # the plugins' steps join a copy of the plan, so the decomposition's own plan is left as it was
+    result = replace(fit.floor_result, plan=copy.deepcopy(fit.floor_result.plan))
+    run = plugins.run_checkpoint(
+        quality_plugins(), "quality", plugin_inputs(fit, built.host), result.plan, host=built.host
+    )
+    built.views.add_run(run.views, run.views_skipped)
     product = floor_outputs.write_product(
         recording,
         context,
         directory,
-        fit.floor_result,
+        result,
         inputs,
         info=INFO,
         extra_products=made.products,
-        view_set=view_set,
+        view_set=built.views,
         extra_segments=[
             (start, stop, steps.BURST_LABEL, steps.BURST_REASON) for start, stop in spans
         ],
         extra_segments_step="asr",
-        summary_extra=summary,
+        summary_extra={**summary, **run.summary_metrics},
         extra_metrics=[
             (metric, value)
             for metric, value in zip(
@@ -966,7 +1168,7 @@ def write_product(
         },
     )
     product.row = table_row(
-        recording, fit, block, records.content_sha256(product.record), product.record
+        recording, result, block, records.content_sha256(product.record), product.record
     )
     return product
 
@@ -979,9 +1181,11 @@ def produce(
     *,
     profile: str,
     nemar_extra: Mapping[str, Any] | None = None,
+    serving: serving_index.ServingIndex | None = None,
 ) -> RecordingProduct:
     """Process a loaded recording and write its product: the recipe's ``run_recording`` after the
-    input's own load (``recipe.py``).
+    input's own load (``recipe.py``); ``serving`` is the serving index a run of a dataset directory
+    was given (``write_product``).
 
     The device is resolved here from the run's options (a function of the option, the runner's two
     variables and torch's view of the GPU, none of which a run changes); the run's state applies a
@@ -994,7 +1198,14 @@ def produce(
     inputs = loaded.inputs
     fit = pipeline.process(loaded, settings, resolution, recording.path)
     product = write_product(
-        recording, context, directory, fit, inputs, profile=profile, nemar_extra=nemar_extra
+        recording,
+        context,
+        directory,
+        fit,
+        inputs,
+        profile=profile,
+        nemar_extra=nemar_extra,
+        serving=serving,
     )
     tally.note(fit.resolution.device)
     return product

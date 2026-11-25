@@ -1,8 +1,8 @@
 # Quality plugins
 
-**Partly built.**
+**Built.**
 The loader, the runner for metric plugins, the checks of declared views, the views writer and the contracts a plugin is checked against are built (Phase 5, P1 to P3).
-NEMAR's first two plugins, `nemar-quality` and `nemar-spectrum`, ship (P6, [below](#the-first-two-plugins)); no recipe runs plugins yet, and P7 pins them in nemar-ica.
+NEMAR's first two plugins, `nemar-quality` and `nemar-spectrum`, ship (P6, [below](#the-first-two-plugins)), and nemar-ica pins and runs both (P7, [In nemar-ica](#in-nemar-ica)); the floor runs none.
 Figures are gone (nemar-cli ADR 0137): a plugin writes views, data a browser draws (a spectrum, component classes, a table), never an image, and there is no `figures` checkpoint.
 The views writer (`recipes/nemar_process/common/views.py`, P3) is the only path by which a plugin's arrays become published files: it checks each array against the recording, writes it with the recipes' deterministic writers and declares it as neuroschema validates it.
 The legacy figures are kept below as a mapping to the views that replace them.
@@ -10,7 +10,7 @@ This page describes the plugin interface that nemar-cli ADR 0134 decides on.
 The interface is one part of a general job platform that anyone can follow, not something private to NEMAR's pipeline:
 a job that runs in a nemar-process image (or one built from it) under the launcher, declares its checkpoints and writes signalJourney records and a recordings table gets the same progress and results reports wherever it runs ([progress.md](progress.md)).
 The plugin manifest is one of the platform's public, versioned interfaces, beside the launch specification ([launcher.md](launcher.md)), the progress object and the neuroschema extensions ([Where each schema lives](#where-each-schema-lives)).
-Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md)) is the only quality measurement a run makes.
+The floor runs no plugin: its own `qc` step ([recipes.md](recipes.md)) is the only quality measurement it makes.
 
 ## As built: loading, running, rendering
 
@@ -30,24 +30,25 @@ Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md
   The record's `extensions.nemar.plugins` lists each plugin with its version, checkpoint, the SHA-256 of its manifest and of its source tree, and whether it ran.
 - **Writing views** (`common/views.py`, nemar-cli ADR 0137 decision 4): a checkpoint whose plugins declare views is run with a `views.Host`, what the recipe knows of the recording (its good channels in layout order, its components, the classifier's classes, its sampling rate, the layout it gives a `{"from": "recipe"}` role, the sidecar's `cap_model` and `reference`, and the suffixes of its own files); without one the run is refused before any plugin starts.
   A host that lacks what a check needs refuses the view (`host_missing`), never skips the check: a `sensor`, `component` or `class` dimension without the host's names, a frequency axis without its sampling rate, an ic-classes view without its classes and components.
+  A host that gives a `{"from": "recipe"}` role for other recordings and not for this one says why (`Host.withheld`, a skip reason: nemar-ica's layout of positions known to be turned, `frame_rotated`, or over the caps, `cap_exceeded`); a view on that role is then checked as any other, its produced roles first, and listed in `views_skipped` with the host's word instead of being declared (`views.ViewWithheld`): the plugin ran, its other views and its metrics are kept, and a fault of its own is still `plugin_failed`. A role the host neither gives nor withholds is `role_unprovided`, a fault of the recipe.
   What `run` returned is copied, inside the plugin's own `try`, by `plugins.plain`: mappings into dictionaries, lists and tuples into lists and tuples, NumPy arrays into base-class copies, and a `PluginResult` and a `TableArray` into new ones; built-in scalars and NumPy's own scalars are kept by their exact type, and any other value, a subclass of `float` or of `numpy.float64` included, becomes a value no check accepts. The copy classes each value by `type()`, never by its `__class__`. So whatever the plugin's code raises while it is copied is named by its class, and the checks see only built-in and NumPy values and the runner's own classes.
   After the shape and the parameters, each produced role is checked, in this order, and the first failure skips the plugin with its word: the roles (`role_missing`, `role_extra`, `role_unprovided`); a `TableArray` that is a 2-D float64 array as wide as its header (`dim_mismatch`), within the registry's caps of 1,024 entries per dimension and 262,144 cells (`view_too_large`), with unique column names (`header_mismatch`) and finite cells (`not_finite`); its dimensions, the first column holding the coordinates of a dimension along the rows unless that is `sensor` and the view has a layout, and the header naming the columns: `sensor` the host's good channels in layout order, `component` its components, `class` its classes (`dim_mismatch` for the count, `header_mismatch` for the names), a frequency or a line chart's x rising strictly (`freq_not_increasing`, `x_not_increasing`), a frequency within 0 and the lower of `upper_hz` and the Nyquist frequency (`freq_out_of_range`) and, for a spectrum, on Welch's grid with no 0 Hz row (`freq_off_grid`); its columns' types and units, a column's own unit overriding the role's (`header_mismatch`, `units_differ`); a JSON role that is strict Internet JSON and valid against its kind's content schema (`json_invalid`), with a histogram's counts and edges and the ic-classes rules (`counts_length`, `edges_not_increasing`, `variance_length`, `components_total`), and a histogram's total within 2^53 - 1 and its widths and densities finite (`view_too_large`, neuroschema's histogram model); each file within the role's `max_bytes` and 4 MiB (`view_too_large`) and named apart from the reserved names and the host's (`suffix_reserved`, `view_repeated`); and the declaration, `base` and `base_version` taken from the registry, valid against the bundle's `view.schema.json#/$defs/view` (`declaration_invalid`).
   The files are written as `.17g` TSV (`files.matrix_text`) and sorted-key JSON (`files.json_text`), named `<stem>_<suffix>.<format>` beside the recording, the suffix being the view key with `_` dropped (BIDS keeps `_` between entities), and the role, `_` dropped too, appended when the view produces more than one role, and each is an output target of the plugin's step; the declarations go to the record's `extensions.nemar.views` and a skipped plugin's views to `views_skipped` with the reason `plugin_failed` ([recipes.md](recipes.md)).
-  A recipe declares its own views through the same builder (`views.recipe_view`, with `data_role`, `file_input` and `store_input`), and the floor's tables a computed view reads are checked as the renderer will read them (`table_location_mismatch`, `column_missing`, `cell_not_number`, `channel_status_unknown`, `duration_not_positive`); nemar-ica's own views come with P5.
+  A recipe declares its own views through the same builder (`views.recipe_view`, with `data_role`, `file_input` and `store_input`), and the floor's tables a computed view reads are checked as the renderer will read them (`table_location_mismatch`, `column_missing`, `cell_not_number`, `channel_status_unknown`, `duration_not_positive`); nemar-ica's own views are P5's ([recipes.md](recipes.md#the-views)).
 - **A plugin never fails the recording** (owner decision, 2026-11-23).
   An exception, or an output that breaks the manifest (a missing or extra key, NaN, infinity, a bool, a value outside the declared bounds, a metric neuroschema refuses; views that are not exactly the declared ones, `views_differ`; a view that is not `{"roles": {...}, "parameters": {...}}` with each role a `TableArray` or a mapping, `view_malformed`; parameters that are not strict JSON or that the kind's schema refuses, `parameters_invalid`), skips that plugin: the plan records the skip with the word `plugin_failed`, the record keeps only the exception's class name (or the word `exception` when that name is not a plain identifier) or the rule's word, its metrics and views are absent, a fixed line `plugin_skipped: <name> code=plugin_failed detail=<word>` goes to standard error, and the rest of the recording is kept.
   The detail is one of the runner's own words (`plugins.RUNNER_WORDS`, a closed list) for a check made after `run` returned and the copy was made, and otherwise the exception's class name (or `exception`): a plugin's failure is named by its class, and no other text reaches the record or the log line.
 - **A plugin is part of the executed plan** (owner decision, 2026-11-23): its step or its skip is hashed like any other, with its identity (name, version, source-tree digest) as a `plugin` field of the step's resolved entry, so two versions with the same parameters, or a run where the plugin was skipped, hash differently.
   The record writer takes `extensions.nemar.plugins` (with `tree_sha256`) from the plan itself, never from a caller, and the plan refuses an outcome whose identity is not the one its step or skip was hashed with; that list is where the plan is read back from, and `verify` reports a malformed entry as a problem; the step's `software` is display only.
   The dataset's `plan_hashes` histogram therefore counts the recordings where a plugin was skipped as their own variant.
-- **The recordings table**: a skipped plugin leaves the recording `succeeded`; the plan's skip lands in the row's existing `skipped_steps` cell like any skipped step (`<plugin>:plugin_failed`, comma-joined with the others), and nemar-cli counts a pair whose step is a plugin step as `skipped` at that plugin's checkpoint.
+- **The recordings table**: a skipped plugin leaves the recording `succeeded`; the plan's skip lands in the row's `skipped_steps` cell like any skipped step (`<plugin>:plugin_failed`, comma-joined with the others; nemar-ica's table has the column as the floor's does), and nemar-cli counts a pair whose step is a plugin step as `skipped` at that plugin's checkpoint.
 
 Abbreviations used here: tab-separated values (TSV), JavaScript Object Notation (JSON), ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), quality control (QC), Portable Network Graphics (PNG), Scalable Vector Graphics (SVG), mutual information reduction (MIR), decibel (dB), hertz (Hz).
 
 ## The first two plugins
 
 Both are version 0.1.0, run at `quality` and take no manifest parameters; they read nemar-ica's decomposition, and `nemar-spectrum` also reads the floor's `line_hz`, which the host hands them as plain arrays and values (`run_checkpoint` makes them read-only).
-What each reads is its contract with the host recipe; P7 builds those inputs in nemar-ica.
+What each reads is its contract with the host recipe; nemar-ica builds those inputs ([below](#in-nemar-ica)).
 
 - **`nemar-quality`** (`recipes/nemar_process/plugins/nemar_quality/`) reads, from `nemar-ica`, `classes` (ICLabel's seven, in ICLabel's order), `classifications` (the probabilities, components by classes) and `variance_pct` (each component's own percent of the data's variance, one per component).
   The dominant class of each component and the counts by class are eegprep's `eeg_icalabelstat`, never recounted.
@@ -61,6 +62,30 @@ What each reads is its contract with the host recipe; P7 builds those inputs in 
   The rows are the periodogram's bins `k = 1, 2, ..., kmax` (no 0 Hz row), each at `k * srate / length` Hz with `length` the window's samples, and `kmax = floor(upper_hz * length / srate + 1e-9)`, so a bin at `upper_hz` is kept; `upper_hz` is 125 Hz unless the recording's Nyquist frequency is lower, and then that frequency.
   The view's parameters are recorded per recording, from what was computed (`window_s` is the window's samples over the rate, `overlap` its overlapping samples over its samples), with `initial_maps_hz` 6, 10 and 22 Hz and the line frequency, each at most `upper_hz`.
   A recording shorter than one window, a rate that is not a finite number above 0, or data that are not one row per named channel skip the plugin with the class of the refusal; a cell that is not finite skips it with the writer's `not_finite`.
+
+### In nemar-ica
+
+nemar-ica pins both as a literal beside its step order, `PLUGINS = (("nemar-quality", "0.1.0"), ("nemar-spectrum", "0.1.0"))` in `recipes/nemar_process/nemar_ica/steps.py`, in the order of its map's `quality` checkpoint, which nemar-cli's process-drift test compares with the registry's plugin steps; each version's source tree is pinned in `tests/recipes/plugin_digests.json`.
+The recipe's preflight loads them (`outputs.quality_plugins`, once per process): at the checkpoint its map gives them, reading what it provides (`nemar-floor` and `nemar-ica`), with the layout as the one `{"from": "recipe"}` role it gives, and no view key of its own (`icmaps`, `icactivity`, `midsegment`) or step id taken; a pin that cannot be loaded ends the run before anything is written (exit 1, `plugin_unloadable: <plugin> <word>`).
+
+The host is `outputs.view_host`, the one nemar-ica's own views are built on: the decomposition's channels in layout order (the unmixing's header, so `Ch001` and so on when the labels cannot head columns), its components (`IC001` and so on), ICLabel's classes, the floor's sampling rate, the layout `_chanlocs.tsv` (or, when the maps have none, the layout withheld with `frame_rotated` or `cap_exceeded`), the sidecar's cap model and reference, and the suffixes of its own files.
+The inputs (`outputs.plugin_inputs`) are, from `nemar-ica`:
+
+| Input | What it is |
+|---|---|
+| `data` | the decomposition's input: the good channels by samples the fit was given (ASR-repaired, average-referenced), in microvolts |
+| `unit` | `uV` |
+| `srate` | the host's sampling rate, in Hz |
+| `channels` | the host's channel names in layout order, the layout's `name` column |
+| `classes` | ICLabel's seven classes, in ICLabel's order |
+| `classifications` | ICLabel's probabilities, components by classes |
+| `variance_pct` | each component's own percent of the data's variance (eegprep's `eeg_pvaf`), one per component |
+
+From `nemar-floor` the input is `line_hz`, the line frequency the floor measured (its table's `line_hz`: whichever of 50 and 60 Hz had the larger excess before the filters), or null.
+
+They run when the recording's product is written, after the recipe's own views and before any file is written, on a copy of the plan, so the record, its `plan_hash` and the row hold their steps or skips: each plugin's identity (name, version, source tree) is hashed with its step.
+Their views follow the recipe's in `extensions.nemar.views` (`icmaps`, `icactivity`, `midsegment`, then `icclasses` and `spectrum`), their files are the outputs of their steps, nemar-quality's headline metric joins the record's `summaryMetrics`, and the table's `pct_brain_components` is its value (null when nemar-quality was skipped).
+A plugin that fails is skipped (`plugin_failed`, its views in `views_skipped`, the pair in the row's `skipped_steps`) and the recording succeeds; when the layout is withheld, the spectrum's view is listed with the layout's word and nemar-spectrum still ran.
 
 ## What a plugin is
 

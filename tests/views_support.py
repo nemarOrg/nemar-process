@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 RECORDING = "sub-01/eeg/sub-01_task-rest_eeg.set"
@@ -116,3 +117,66 @@ def check_view_files(root: Path, record: dict) -> dict[str, bytes]:
 
 def read_record(root: Path, record_path: str) -> dict:
     return json.loads((root / record_path).read_text(encoding="utf-8"))
+
+
+def serving_index_text(rows, *, dataset_id: str, source_commit: str) -> str:
+    """A serving index in the contract's shape (``zarr_input.validate_document``), as its file holds it:
+    one store per row ``(path, groups)``, each group ``(name, modality, rate, n_channels, n_samples)``,
+    under reserved example hosts, built from ``source_commit`` (a run uses its rows only when that is its
+    own ``--source-commit``)."""
+    stores = [
+        {
+            "path": path,
+            "zarr": path.rsplit(".", 1)[0] + ".zarr",
+            "groups": [
+                {
+                    "name": name,
+                    "modality": modality,
+                    "rate": rate,
+                    "n_channels": channels,
+                    "n_samples": samples,
+                }
+                for name, modality, rate, channels, samples in groups
+            ],
+        }
+        for path, groups in rows
+    ]
+    document = {
+        "format": "nemar-zarr-index",
+        "format_version": 3,
+        "dataset_id": dataset_id,
+        "contract_base": "https://zarr.example.org/{}/zarr/".format(dataset_id),
+        "data_base": "https://data.example.org/{}/zarr/".format(dataset_id),
+        "source_commit": source_commit,
+        "engine_version": "3",
+        "store_count": len(stores),
+        "stores": stores,
+    }
+    return json.dumps(document, indent=1) + "\n"
+
+
+def serving_index_of(rows, *, dataset_id: str, source_commit: str):
+    """``serving_index_text`` read as a run reads its ``--serving-index`` file."""
+    from nemar_process.common import serving_index
+
+    text = serving_index_text(rows, dataset_id=dataset_id, source_commit=source_commit)
+    return serving_index.parse(text.encode("utf-8"))
+
+
+# nemar-cli's registry (shared/compute-recipes.ts): nemar-ica's resultLimits.maxFiles, which
+# tests/e2e/test_nemar_ica_views_e2e.py holds the product's file count to, and which
+# tests/contract/test_progress_drift.py holds to the registry at the progress pin.
+NEMAR_ICA_MAX_FILES = 25_000
+
+
+def max_files_of(source: str, recipe: str) -> int | None:
+    """The ``maxFiles`` a recipe's entry of nemar-cli's ``shared/compute-recipes.ts`` declares (its
+    ``resultLimits``), or None: read from the text between its ``name: "<recipe>",`` and the next
+    recipe's name."""
+    start = source.find('name: "{}",'.format(recipe))
+    if start < 0:
+        return None
+    following = source.find('name: "', start + 1)
+    block = source[start : following if following > 0 else len(source)]
+    found = re.search(r"\bmaxFiles: ([0-9][0-9_]*)\b", block)
+    return None if found is None else int(found.group(1).replace("_", ""))
