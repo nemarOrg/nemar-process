@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from nemar_process.common import files, io, naming, qc, records
+from nemar_process.common import files, io, naming, qc, records, views
 from nemar_process.common.errors import INTERNAL_ERROR, RecordingError
 from nemar_process.common.io import Loaded, Recording
 from nemar_process.common.recipe import RecipeInfo, RecordingProduct, RunContext
@@ -264,6 +264,8 @@ class Product:
 
     ``write`` returns the optional fields the file's entry in the record carries (``shape``,
     ``dtype``, ``rowLabels``, ``columnLabels``, ``encoding``: see ``records.output_entry``), or None.
+    ``location`` is set for a file a view names (``of_view_file``): the place it was named for, which
+    must be the place ``write_product`` gives it.
     """
 
     suffix: str
@@ -271,6 +273,21 @@ class Product:
     step_id: str
     description: str
     write: Callable[[Path], Mapping[str, Any] | None]
+    location: str | None = None
+
+    @classmethod
+    def of_view_file(cls, file: views.ViewFile) -> Product:
+        """A view's file (``views.ViewFile``) as a product: its exact text, under the step that made it.
+        A recipe writes the files its own views name (a layout) this way, and ``write_product`` writes
+        the files of the views it is given."""
+        return cls(
+            file.suffix,
+            file.format,
+            file.step_id,
+            file.description,
+            lambda path: files.write_text(path, file.text),
+            file.location,
+        )
 
 
 def write_product(
@@ -287,6 +304,7 @@ def write_product(
     profile: str | None = None,
     extra_segments: Sequence[tuple[int, int, str, str]] = (),
     extra_segments_step: str | None = None,
+    view_set: views.ViewSet | None = None,
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
 
@@ -308,9 +326,15 @@ def write_product(
     one, else ``profile`` (``archive`` when neither is given); a ``profile`` that disagrees with the
     stated one is refused (``grid_profile``). The identity is looked up when called, not when
     defined, so a caller that replaces ``INFO`` is honored.
+
+    ``view_set`` are the recording's quality views (ADR 0137): the files they write are listed after
+    every other file, each under its step, and the record gains ``extensions.nemar.views`` (and
+    ``views_skipped`` when a view was skipped), which ``records.views_problems`` holds to the files
+    written. Without it the product is what it always was, byte for byte.
     """
-    if "mask_grid" in (nemar_extra or {}):
-        raise ValueError("mask_grid is a key the floor writes")
+    for reserved in ("mask_grid", "views", "views_skipped"):
+        if reserved in (nemar_extra or {}):
+            raise ValueError("{} is a key the floor writes".format(reserved))
     if extra_segments and result.sample_mask is None and extra_segments_step is None:
         # the segment tables would belong to no step of the plan
         raise ValueError("spans a recipe flagged need its step when the window step did not run")
@@ -322,9 +346,18 @@ def write_product(
         return naming.product_path(recording.path, label, suffix, extension)
 
     stamp = {"recipe": info.id, "recipeVersion": info.version}
-    for product in extra_products:
+    if view_set is not None and view_set.recipe_id != info.id:
+        raise ValueError("the views are another recipe's")
+    view_products = [Product.of_view_file(file) for file in view_set.files()] if view_set else []
+    for product in [*extra_products, *view_products]:
         if not result.plan.has_step(product.step_id):
             raise RecordingError(INTERNAL_ERROR, "record", "unknown_step")
+        if product.location is not None and product.location != place(
+            product.suffix, product.extension
+        ):
+            # a view named the file for another recording or another recipe's label: refused before
+            # anything is written
+            raise RecordingError(INTERNAL_ERROR, "record", "view_file_location")
     # the files in the order they are listed: what each is, the step that produced it, how it is written
     jobs = [
         Product(
@@ -388,6 +421,7 @@ def write_product(
         ),
     ]
     jobs += extra_products
+    jobs += view_products
     names = [(job.suffix, job.extension) for job in jobs]
     if len(set(names)) != len(names):  # a file written over another would be recorded once
         raise RecordingError(INTERNAL_ERROR, "record", "duplicate_file")
@@ -416,7 +450,11 @@ def write_product(
         ],
         summary_metrics=metrics,
         context=context,
-        nemar_extra={**(nemar_extra or {}), "mask_grid": grid},
+        nemar_extra={
+            **(nemar_extra or {}),
+            "mask_grid": grid,
+            **(view_set.extension() if view_set is not None else {}),
+        },
     )
     problems = records.problems_of(record, context.validator)
     if problems:

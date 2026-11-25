@@ -8,8 +8,10 @@ record and the distributions to summarize (``recipe.py``).
 
 What the schema cannot say goes in ``extensions.nemar`` (docs/upstream.md; signalJourney/signalJourney#7 to #9): the
 checksum of every output file (``outputTargets`` has no checksum field), the identity of the run,
-the engine, the plan hash. The PyPI validator checks neither timestamps nor non-finite numbers
-nor references, so ``check`` does (``TIMESTAMP``; the writer refuses NaN; ``references_problems``).
+the engine, the plan hash, and the recording's quality views (``views`` and ``views_skipped``,
+neuroschema 0.6.0 declarations, ADR 0137). The PyPI validator checks neither timestamps nor non-finite
+numbers nor references, and knows nothing of views, so ``check`` does (``TIMESTAMP``; the writer
+refuses NaN; ``references_problems``; ``views_problems``).
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nemar_process.common import build, files, naming
+from nemar_process.common import build, files, naming, views
 from nemar_process.common import plan as plans
 from nemar_process.common.determinism import canonical_json, rounded, utc_now
 from nemar_process.common.errors import TIME_BUDGET
@@ -285,15 +287,73 @@ def references_problems(record: Mapping[str, Any]) -> list[str]:
     return problems
 
 
+def _view_targets(declaration: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The files a declaration names: its data entries and its file inputs."""
+    named: list[Mapping[str, Any]] = list(declaration.get("data", []))
+    named += [item["file"] for item in declaration.get("inputs", []) if "file" in item]
+    return named
+
+
+def views_problems(record: Mapping[str, Any]) -> list[str]:
+    """What is wrong with a record's views (ADR 0137), or nothing when it declares none.
+
+    ``views`` and ``views_skipped`` are lists of at most 32; each declaration is valid against the
+    bundle's ``view.schema.json#/$defs/view`` and is a recording view (no ``scope``), each skipped view
+    against ``dataQuality``'s ``viewSkipped``; the record checks pass (``views.record_findings``: unique
+    keys, a recipe source that is the record's recipe); and every file a view names is a file output of
+    a step of the record (``outputTargets``) whose ``extensions.nemar.outputs`` entry has the declared
+    size and SHA-256, so a declaration never names bytes the product does not hold.
+    """
+    nemar = record.get("extensions", {}).get("nemar", {})
+    if "views" not in nemar and "views_skipped" not in nemar:
+        return []
+    declared, skipped = nemar.get("views"), nemar.get("views_skipped", [])
+    if not isinstance(declared, list) or len(declared) > views.MAX_VIEWS:
+        return ["views is not a list of at most {}".format(views.MAX_VIEWS)]
+    if not isinstance(skipped, list) or len(skipped) > views.MAX_VIEWS:
+        return ["views_skipped is not a list of at most {}".format(views.MAX_VIEWS)]
+    problems: list[str] = []
+    validator = views.contract.bundle_validator(views.VIEW_SKIPPED_ID)
+    for index, item in enumerate(skipped):
+        if not validator.is_valid(item):
+            problems.append("views_skipped[{}] is not a skipped view".format(index))
+    for index, declaration in enumerate(declared):
+        if views.declaration_errors(declaration) or "scope" in declaration:
+            problems.append("views[{}] is not a valid recording view".format(index))
+    if problems:
+        return problems
+    recipe = nemar.get("recipe", {}).get("id")
+    for finding in views.record_findings(recipe, {"views": declared, "views_skipped": skipped}):
+        problems.append("{} at {}".format(finding["word"], finding["at"]))
+    targets = {
+        target.get("location")
+        for step in record.get("processingSteps", [])
+        for target in step.get("outputTargets", [])
+        if target.get("targetType") == "file"
+    }
+    written = {
+        entry["location"]: (entry["size"], entry["sha256"]) for entry in nemar.get("outputs", [])
+    }
+    for index, declaration in enumerate(declared):
+        for target in _view_targets(declaration):
+            location = target["location"]
+            if location not in targets:
+                problems.append("views[{}] names {}, no step's output".format(index, location))
+            elif written.get(location) != (target["size"], target["sha256"]):
+                problems.append("views[{}] names {} with other bytes".format(index, location))
+    return problems
+
+
 def problems_of(record: Mapping[str, Any], validator: Any) -> list[tuple[str, str]]:
     """Everything wrong with a record, each as (category, text): the schema, the timestamps, the
-    references, the plan hash. The category is a fixed word; the text can quote the record."""
+    references, the views, the plan hash. The category is a fixed word; the text can quote the record."""
     found = [
         ("schema", str(problem))
         for problem in validator.validate(dict(record), raise_exceptions=False)
     ]
     found += [("timestamp", problem) for problem in timestamp_problems(record)]
     found += [("reference", problem) for problem in references_problems(record)]
+    found += [("views", problem) for problem in views_problems(record)]
     if record.get("extensions", {}).get("nemar", {}).get("profile") == "recording":
         found += [("plan_hash", problem) for problem in plans.verify(dict(record))]
     return found
