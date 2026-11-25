@@ -175,13 +175,21 @@ def needs_value_unit(entry: Mapping[str, Any], role: str) -> bool:
     return entry["base"] is None and entry["roles"][role]["dims"] is None
 
 
-def role_states_unit(declared: Mapping[str, Any]) -> bool:
-    """A produced role states its value unit: a role ``unit``, or ``columns`` each with a ``unit``
-    (a column's own unit overrides the role's, nemar-cli #2358)."""
+def role_states_unit(declared: Mapping[str, Any], places_sensors: bool = False) -> bool:
+    """A produced role states its value unit: a role ``unit`` (a column's own unit overrides it,
+    nemar-cli #2358), or, without one, ``columns`` that each carry a unit and that name a value column
+    beside the one that holds the rows' coordinates. The writer takes those coordinates from the first
+    header column unless the rows are ``sensor`` and the view has a layout or positions role
+    (``places_sensors``), so a role whose only declared column is that coordinate column (a time in
+    seconds) declares no value unit at all, and is refused here rather than when it runs."""
     if "unit" in declared:
         return True
     columns = declared.get("columns")
-    return bool(columns) and all("unit" in column for column in columns)
+    if not columns or not all("unit" in column for column in columns):
+        return False
+    dims = list(declared["dims"])
+    coordinate = 1 if dims and not (dims[0] == "sensor" and places_sensors) else 0
+    return len(columns) > coordinate
 
 
 def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | None:
@@ -193,7 +201,8 @@ def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | 
     ones the registry fixes for that role (``dims_unregistered``; a role whose registry dimensions are
     null takes any); a produced role's format is not one the kind allows for that role, or one the
     runner cannot write (``format_unwritable``); a produced role that ``needs_value_unit`` states none
-    (``unit_undeclared``: neither a role ``unit`` nor ``columns`` with units); a role taken
+    (``unit_undeclared``: neither a role ``unit`` nor ``columns`` with units that name a value column,
+    ``role_states_unit``); a role taken
     ``{"from": "recipe"}`` is not one the host recipe provides (``role_unprovided``).
     """
     entry = kind_entry(view["kind"], view["kind_version"])
@@ -212,7 +221,8 @@ def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | 
         allowed = registered[role]["formats"]
         if declared["format"] not in allowed or declared["format"] not in WRITABLE_FORMATS:
             return FORMAT_UNWRITABLE
-        if needs_value_unit(entry, role) and not role_states_unit(declared):
+        places_sensors = any(name in ("layout", "positions") for name in view["roles"])
+        if needs_value_unit(entry, role) and not role_states_unit(declared, places_sensors):
             return UNIT_UNDECLARED
     for role, declared in view["roles"].items():
         if "from" in declared and role not in provided:

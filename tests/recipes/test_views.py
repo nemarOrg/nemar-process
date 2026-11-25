@@ -1956,3 +1956,31 @@ def test_a_long_floor_table_skips_its_view(loaded):
         {"key": "midsegment", "kind": "nemar.signal-window", "reason": "cap_exceeded"}
     ]
     assert view_set.views == []
+
+
+def test_a_role_unit_only_on_the_coordinate_does_not_pass_the_loader(loaded):
+    view = copy.deepcopy(loaded["fx-generic"].manifest["outputs"]["views"]["erp"])
+    del view["roles"]["values"]["unit"]  # only time_s, the coordinate column, carries a unit
+    assert contract.view_problem(view, ["layout"]) == "unit_undeclared"
+    view["roles"]["values"]["columns"].append({"name": "Fz", "type": "number", "unit": "uV"})
+    assert contract.view_problem(view, ["layout"]) is None  # a value column states the unit
+
+
+def test_a_map_of_named_columns_with_their_units_needs_no_role_unit():
+    """Sensors along the rows of a layout take no coordinate column, so one declared value column
+    with its unit states the value unit."""
+    role = {
+        "format": "tsv",
+        "max_bytes": 65536,
+        "dims": ["sensor", "map"],
+        "columns": [{"name": "alpha", "type": "number", "unit": "uV"}],
+    }
+    view = {
+        "kind": "nemar.sensor-field",
+        "kind_version": 1,
+        "caption": "x",
+        "roles": {"values": role},
+    }
+    assert contract.view_problem(view, ()) == "unit_undeclared"  # rows of a column: alpha is it
+    view["roles"]["layout"] = {"from": "recipe"}
+    assert contract.view_problem(view, ["layout"]) is None
