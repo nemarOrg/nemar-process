@@ -280,7 +280,8 @@ def named_product(
     file: views.ViewFile, fields: Mapping[str, Any] | None = None
 ) -> floor_outputs.Product:
     """A file a view names, as a product: its exact text at its place, with the entry fields the
-    record carries for it (``fields``, a matrix's), under the step that made it."""
+    record carries for it (a matrix's), under the step that made it; ``Product.of_view_file`` with
+    the fields."""
 
     def write(path: Path) -> Mapping[str, Any] | None:
         files.write_text(path, file.text)
@@ -389,7 +390,7 @@ def products(recording: Recording, fit: pipeline.Decomposition, block: Mapping[s
             lambda path: write_matrix(path, sphere, principal, channels),
         ),
         mixing_product,
-        named_product(components_file),
+        floor_outputs.Product.of_view_file(components_file),
         floor_outputs.Product(
             "ica",
             "json",
@@ -408,7 +409,7 @@ def products(recording: Recording, fit: pipeline.Decomposition, block: Mapping[s
     # the layout of the component maps, after the recipe's other files
     chanlocs = chanlocs_file(recording, fit)
     named[steps.CHANLOCS] = chanlocs
-    made.append(named_product(chanlocs))
+    made.append(floor_outputs.Product.of_view_file(chanlocs))
     return Made(made, named)
 
 
