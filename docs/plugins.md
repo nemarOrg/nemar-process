@@ -102,7 +102,7 @@ Metrics, from `eeg_nemar_dataqual.m` (the last two are new to this pipeline):
 
 The floor already measures the first three: its `qc` step's `qualityMetrics` hold `percentGoodSamples` and `percentGoodChannels`, and its `line_noise_measure` step measures the line-noise excess (the recordings table carries them as `pct_good_samples`, `pct_good_channels`, `line_db_before` and `line_db_after`).
 A plugin reports a value the floor measures from the floor's output rather than computing it again.
-The dataset summary adds the legacy per-dataset bounds (lowest and highest good channels, good data and brain components), which today's QC summary does not hold.
+The dataset dataQuality document (`desc-<label>_dataquality.json`, [recipes.md](recipes.md)) carries the legacy per-dataset bounds as `observed_range`: the lowest and highest good channels and good data from the recipe's metrics, and brain components from nemar-quality's, which nemar-ica's table carries as `pct_brain_components`.
 
 Figures, from `nemar_plugins/`, and the view each becomes (ADR 0137; the browser draws it from data):
 
@@ -125,7 +125,7 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 | What | Home |
 |---|---|
 | Quality results per recording (typed metrics; views with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
-| The dataset QC summary (counts, distributions, bounds, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level; in a later version it replaces `schemas/qc-summary.v1.json` and drops that schema's fixed `recipe: nemar-floor` |
+| The dataset QC summary (counts, distributions, observed ranges, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level, written by every recipe as `desc-<label>_dataquality.json`; it replaced `qc-summary.v1`, whose schema is retired |
 | Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | a new neuroschema namespace, `processing` |
 | Links to the signalJourney records | neuroschema `signalJourney` |
 | The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |

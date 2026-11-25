@@ -99,7 +99,7 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 | What | Home |
 |---|---|
 | Quality results per recording (typed metrics; views with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
-| The dataset QC summary (counts, distributions, bounds, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level; in a later version it replaces `schemas/qc-summary.v1.json` and drops that schema's fixed `recipe: nemar-floor` |
+| The dataset QC summary (counts, distributions, observed ranges, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level, written by every recipe as `desc-<label>_dataquality.json`; it replaced `qc-summary.v1`, whose schema is retired |
 | Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | a new neuroschema namespace, `processing` |
 | Links to the signalJourney records | neuroschema `signalJourney` |
 | The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |
