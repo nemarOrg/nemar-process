@@ -1106,7 +1106,8 @@ def test_the_view_digest_vectors_replay_through_the_writers_json_guard():
 
 
 # Each preset-check word the writer checks before it writes, as the writer names it. The rest are
-# checks only a renderer can make (the store's digest, rate and rows, the window) or are P5's (ic-maps).
+# checks only a renderer can make (the store's digest, rate and rows, the window); the ic-maps cases
+# replay against the writer's ic-maps check in test_nemar_ica_views.py, beside nemar-ica's views.
 WRITER_WORD = {
     None: None,
     "content_invalid": "json_invalid",
