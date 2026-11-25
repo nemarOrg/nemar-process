@@ -31,7 +31,7 @@ IDENTITY = [
 ]
 TABLE = "desc-nemarfloor_recordings.tsv"
 RECORD = "desc-nemarfloor_signalJourney.json"
-SUMMARY = "desc-nemarfloor_qcsummary.json"
+SUMMARY = "desc-nemarfloor_dataquality.json"
 FIXED_CLOCK = "2026-11-15T12:00:00Z"
 
 
@@ -133,7 +133,7 @@ def comparable(root, *, resumed=None):
     writer's own order, and every other file as its bytes.
 
     ``resumed`` is where a merged record is allowed to differ from one run's: its ``report.resumed``
-    must be that number, and is then left out. The QC summary names its record by digest, and the
+    must be that number, and is then left out. The dataQuality document names its record by digest, and the
     record holds the clock, so that digest is left out too.
     """
     found = {}
@@ -147,9 +147,10 @@ def comparable(root, *, resumed=None):
                 assert record["extensions"]["nemar"]["report"].pop("resumed") == resumed
             found[name] = json.dumps(record, indent=2, ensure_ascii=False)
         elif name == SUMMARY:
-            summary = json.loads(path.read_text(encoding="utf-8"))
-            summary.pop("record_sha256")
-            found[name] = json.dumps(summary, indent=2, ensure_ascii=False)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            for entry in document["recipes"].values():
+                entry.pop("record_sha256")
+            found[name] = json.dumps(document, indent=2, ensure_ascii=False)
         else:
             found[name] = path.read_bytes()
     return found

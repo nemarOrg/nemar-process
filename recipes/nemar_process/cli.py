@@ -89,6 +89,7 @@ from nemar_process import sj
 from nemar_process.common import (
     COMMON_VERSION,
     build,
+    dataquality,
     determinism,
     files,
     io,
@@ -119,7 +120,6 @@ from nemar_process.common.errors import (
     is_cuda_out_of_memory,
 )
 from nemar_process.common.recipe import INPUTS, Identity, Option, Recipe, RunContext
-from nemar_process.nemar_floor import qc_summary
 from nemar_process.recipes import REGISTRY, RETIRED
 
 EXIT_OK = 0
@@ -441,7 +441,7 @@ def finalize(
     built_by: tuple[dict[str, Any] | None, str | None] | None = None,
     resumed: int | None = None,
 ) -> tuple[dict[str, Any], int, int]:
-    """Build and write the dataset record from the table in ``out``, and the recipe's QC summary.
+    """Build and write the dataset record from the table in ``out``, and its dataQuality document.
 
     Returns the record, how many of the recordings in the table were skipped for their format, and
     how many were left out by the time budget, which with the counts in the record tell the exit
@@ -471,8 +471,7 @@ def finalize(
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
-    if qc_summary.applies(recipe):  # after the record: it names the record file by its digest
-        qc_summary.write(recipe, out, record, rows)
+    dataquality.write(recipe, out, record, rows)  # after the record: it names the record by digest
     return (
         record,
         sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT),
@@ -481,10 +480,11 @@ def finalize(
 
 
 def dataset_files(recipe: Recipe) -> list[str]:
-    """The files at the root of a product besides its table and its record: the QC summary of the
-    floor. ``run`` writes them from the table and the record, and ``aggregate`` writes them from the
-    merged table and record and never copies an input's."""
-    return [qc_summary.path(recipe)] if qc_summary.applies(recipe) else []
+    """The files at the root of a product besides its table and its record: the dataset dataQuality
+    document (``common/dataquality.py``), which every recipe writes. ``run`` writes them from the table
+    and the record, and ``aggregate`` writes them from the merged table and record and never copies an
+    input's."""
+    return [dataquality.path(recipe)]
 
 
 def result_line(

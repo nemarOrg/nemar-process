@@ -6,26 +6,24 @@ from 1, with no leading zero). The first release drops the suffix; at that relea
 below changes its pattern to `1\\.0\\.0`, nothing else here moves. A recipe that joins the registry
 (PX-05's `nemar-ica`) is held by the first test as soon as it merges.
 
-Versions are compared for equality only, so the one pattern `SCHEME` is what the QC summary's
-schema holds for `recipe_version` (the one validator that checks the text), and the cases below pin
-exactly what it accepts and refuses.
+Versions are compared for equality only. `SCHEME` is the scheme itself, and the cases below pin
+exactly what it accepts and refuses; every version it accepts is one neuroschema's `version` pattern
+accepts, so the dataset dataQuality document (`recipe_version`, which replaced the retired
+qc-summary schema's stricter pattern) carries any version of the scheme.
 """
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Iterator
 
 import pytest
-from nemar_process.common import COMMON_VERSION
+from nemar_process.common import COMMON_VERSION, contract
 from nemar_process.recipes import REGISTRY
-from recipe_support import ROOT
 
 SCHEME = r"[0-9]+\.[0-9]+\.[0-9]+(-b[1-9][0-9]*)?"
 END = r"(?![\s\S])"  # the schema's end of string, which is not `$` (a trailing newline passes `$`)
 BEFORE_THE_FIRST_RELEASE = r"1\.0\.0-b[1-9][0-9]*"
-SCHEMA = ROOT / "docs" / "schemas" / "qc-summary.v1.json"
+TYPES = "nsc:/definitions/processingTypes.schema.json"
 
 
 def test_every_registered_recipe_and_the_common_layer_are_pre_release_versions():
@@ -39,14 +37,12 @@ def test_every_registered_recipe_and_the_common_layer_are_pre_release_versions()
         )
 
 
-def test_the_qc_summary_schema_accepts_exactly_the_scheme():
-    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
-    assert schema["properties"]["recipe_version"]["pattern"] == "^" + SCHEME + END
-
-
 @pytest.mark.parametrize("version", ["1.0.0", "1.0.0-b1", "1.0.0-b12", "2.3.4"])
 def test_the_scheme_accepts(version):
     assert re.search("^" + SCHEME + END, version)
+    # and so does neuroschema's version pattern, which the dataQuality document holds it to
+    pattern = contract.bundle_registry().contents(TYPES)["$defs"]["version"]["pattern"]
+    assert re.search(pattern, version)
 
 
 @pytest.mark.parametrize(
@@ -68,25 +64,3 @@ def test_the_scheme_refuses(version):
     # as jsonschema applies a pattern (re.search, so the anchors are the pattern's own); the end
     # is END and not `$`, which in Python also matches before a final newline
     assert not re.search("^" + SCHEME + END, version)
-
-
-def schema_patterns(node: object) -> Iterator[str]:
-    """Every `pattern` keyword of a schema, at any depth."""
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key == "pattern" and isinstance(value, str):
-                yield value
-            else:
-                yield from schema_patterns(value)
-    elif isinstance(node, list):
-        for value in node:
-            yield from schema_patterns(value)
-
-
-def test_every_pattern_of_the_qc_summary_schema_ends_at_the_end_of_the_string():
-    # `$` lets a final newline through in Python's re (jsonschema's), not in ECMAScript
-    found = list(schema_patterns(json.loads(SCHEMA.read_text(encoding="utf-8"))))
-    assert found, "the schema has no pattern: the check below would hold nothing"
-    for pattern in found:
-        assert pattern.startswith("^"), pattern
-        assert pattern.endswith(END), pattern
