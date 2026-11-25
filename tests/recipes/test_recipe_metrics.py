@@ -75,9 +75,17 @@ def test_the_floor_and_nemar_ica_name_no_metric_twice_and_none_is_a_plugins():
 def test_every_distribution_is_a_metric_of_its_recipe_or_a_plugins_with_its_unit():
     floor_metrics = {m.name: m for m in floor_outputs.RECIPE_METRICS}
     ica_metrics = {m.name: m for m in (*floor_outputs.RECIPE_METRICS, *ica_outputs.RECIPE_METRICS)}
+    # a plugin's metric that a recipe's table carries states the plugin's unit and description, which
+    # neuroschema's example entry gives for nemar-quality's share of brain components
+    example = json.loads(VECTORS.read_text(encoding="utf-8"))["cases"][0]["entry"]["metrics"]
+    checked = 0
     for recipe, metrics in ((FLOOR, floor_metrics), (ICA, ica_metrics)):
         for spec in recipe.distributions:
-            if ":" in spec.name:  # a plugin's metric that the recipe's table carries
+            if ":" in spec.name:
+                stated = example[spec.name]
+                assert (spec.unit, spec.description) == (stated["unit"], stated["description"])
+                assert stated["plugin"]["name"] == spec.name.partition(":")[0]
+                checked += 1
                 continue
             metric = metrics[spec.name]
             assert (spec.column, spec.edges, spec.unit, spec.description) == (
@@ -95,6 +103,7 @@ def test_every_distribution_is_a_metric_of_its_recipe_or_a_plugins_with_its_unit
         "lineNoiseBeforeDb",
         "nemar-quality:percentBrainComponents",
     ]
+    assert checked == 1  # the plugin distribution was compared, not skipped
 
 
 def test_the_neuroschema_example_states_icarank_as_nemar_ica_does():

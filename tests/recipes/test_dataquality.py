@@ -420,6 +420,20 @@ def test_every_writer_rule_refuses_its_break(runs, rule):
     assert not found[0].startswith("schema at"), found  # the writer's rule, not the schema
 
 
+def test_n_counts_the_underflow_and_the_overflow_too(runs):
+    """``n`` is the bins plus ``underflow`` plus ``overflow``: a value outside the edges is in ``n``."""
+    document = load(runs["whole"] / DOCUMENT)
+    spec = document["recipes"]["nemar-floor"]["distributions"]["percentGoodChannels"]
+    binned = sum(spec["histogram"]["counts"])
+    spec["histogram"].update(underflow=1, overflow=1)
+    spec["n"] = binned + 2
+    assert dataquality.problems(document) == []
+    spec["n"] = binned  # the bins only
+    assert dataquality.problems(document) == [
+        "percentGoodChannels: n is not the sum of the bins, underflow and overflow"
+    ]
+
+
 def test_a_document_over_the_byte_limit_is_refused(runs):
     document = load(runs["whole"] / DOCUMENT)
     found = document["recipes"]["nemar-floor"]
