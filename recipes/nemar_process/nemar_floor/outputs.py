@@ -422,8 +422,11 @@ def write_product(
     ]
     jobs += extra_products
     jobs += view_products
-    names = [(job.suffix, job.extension) for job in jobs]
-    if len(set(names)) != len(names):  # a file written over another would be recorded once
+    # a file written over another would be recorded once: names compared case-folded (a
+    # case-insensitive file system holds one file for both), the record's among them
+    names = [(job.suffix.casefold(), job.extension.casefold()) for job in jobs]
+    names.append((views.RECORD_SUFFIX.casefold(), "json"))
+    if len(set(names)) != len(names):
         raise RecordingError(INTERNAL_ERROR, "record", "duplicate_file")
     written: list[tuple[str, str, records.FileTarget, dict[str, Any]]] = []
     for job in jobs:
@@ -460,7 +463,7 @@ def write_product(
     if problems:
         # the category (schema, timestamp, reference, plan_hash) says what kind; the text is not kept
         raise RecordingError(INTERNAL_ERROR, "record", problems[0][0])
-    record_path = place("signalJourney", "json")
+    record_path = place(views.RECORD_SUFFIX, "json")
     files.write_json(directory / record_path, record)
     return RecordingProduct(
         files=[location for location, _, _, _ in written] + [record_path],

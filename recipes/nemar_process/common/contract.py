@@ -55,6 +55,12 @@ FORMAT_UNWRITABLE = "format_unwritable"
 UNIT_UNDECLARED = "unit_undeclared"
 ROLE_UNPROVIDED = "role_unprovided"
 VIEW_REPEATED = "view_repeated"
+# What the loader refuses across a recipe's plugins (``plugins.load``): a view file name, case-folded,
+# that the record, BIDS or a NEMAR recipe's own product takes (``views.RESERVED_SUFFIXES``), and more
+# views than one recording's entry holds (32, plugins' and the host recipe's together).
+SUFFIX_RESERVED = "suffix_reserved"
+VIEWS_TOO_MANY = "views_too_many"
+MAX_VIEWS = 32
 VIEW_PROBLEMS = (
     KIND_UNREGISTERED,
     ROLE_UNREGISTERED,

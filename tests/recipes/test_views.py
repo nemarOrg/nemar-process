@@ -1734,6 +1734,101 @@ def test_a_plugins_view_cannot_declare_the_floors_tables():
 # ---- round 1 of the review of #90: the reviewer's repros, adopted ---------------------------------------
 
 
+def rekeyed(plugin, old, new):
+    """The plugin with one view key changed in its manifest and in what it returns (the loader is not
+    asked: these are what a manifest the loader refuses would do)."""
+    manifest = copy.deepcopy(plugin.manifest)
+    declared = manifest["outputs"]["views"]
+    manifest["outputs"]["views"] = {(new if k == old else k): v for k, v in declared.items()}
+    run = plugin.run
+
+    def changed(given, parameters):
+        result = run(given, parameters)
+        return plugins.PluginResult(
+            result.metrics, {(new if k == old else k): v for k, v in result.views.items()}
+        )
+
+    return replace(plugin, manifest=manifest, run=changed)
+
+
+@pytest.mark.parametrize("key", ["signaljourney", "SignalJourney", "events", "Channels", "mixing"])
+def test_a_view_file_never_takes_a_reserved_name_whatever_its_case(loaded, capsys, key):
+    """The record, BIDS's suffixes and the recipes' products are reserved by the writer itself, with a
+    host that reserves nothing, compared case-folded (``_signaljourney.json`` is the record's file on
+    a case-insensitive file system)."""
+    plugin = rekeyed(loaded["fx-generic"], "amplitude", key)
+    host = replace(HOST, reserved=frozenset())
+    plugin, plan, result = run_returning(
+        plugin, plugin.run(plugins.read_only(generic_inputs()), {}), host=host
+    )
+    assert_refused(plugin, plan, result, "suffix_reserved", capsys)
+
+
+def test_a_host_reserved_name_is_refused_whatever_its_case(loaded, capsys):
+    host = replace(HOST, reserved=frozenset({"Spectrum"}))
+    plugin, plan, result = run_returning(
+        loaded["fx-views"], plugins.PluginResult(metrics={}, views=views_of()), host=host
+    )
+    assert_refused(plugin, plan, result, "view_repeated", capsys)
+
+
+def test_every_file_the_recipes_write_is_reserved(floor_product):
+    """The floor's own product files: their suffixes are the writer's reserved names (nemar-ica's are
+    held to them in test_nemar_ica.py)."""
+    _, product = floor_product
+    for name in product.files:
+        suffix = name.rsplit("/", 1)[-1].rsplit("_", 1)[1].split(".")[0]
+        assert suffix.casefold() in views.RESERVED_SUFFIXES, name
+    assert views.RECORD_SUFFIX.casefold() in views.RESERVED_SUFFIXES
+    assert {"events", "electrodes", "coordsystem", "eeg", "participants"} <= views.RESERVED_SUFFIXES
+
+
+def json_view(recording, suffix):
+    text = files.json_text({"categories": ["a"], "counts": [1]})
+    file = views.view_file(recording.path, LABEL, suffix, "json", text, "fx-views", "x")
+    declared = views.recipe_view(
+        replace(HOST, recording=recording.path),
+        key="hist",
+        kind="nemar.histogram",
+        kind_version=1,
+        caption="A histogram.",
+        data=[views.RoleData("histogram", file)],
+        owned=[file],
+    )
+    view_set = views.ViewSet(ICA_INFO.id, ICA_INFO.version)
+    view_set.add(declared)
+    return view_set
+
+
+def test_a_view_file_and_the_record_of_one_folded_name_are_refused(
+    fixture_result, recording, tmp_path
+):
+    from nemar_process.common.errors import RecordingError
+
+    with pytest.raises(RecordingError) as refused:
+        write_views(json_view(recording, "signaljourney"), fixture_result, recording, tmp_path)
+    assert refused.value.detail == "duplicate_file"
+    assert product_files(tmp_path) == []
+
+
+def test_two_files_of_one_folded_name_are_refused(fixture_result, recording, tmp_path):
+    """A product named ``QC`` beside the floor's ``qc``: one file on a case-insensitive file system."""
+    from nemar_process.common import io as recipe_io
+    from nemar_process.common.errors import RecordingError
+
+    shadow = outputs.Product("QC", "json", "qc", "x", lambda path: files.write_json(path, {}))
+    with pytest.raises(RecordingError) as refused:
+        outputs.write_product(
+            recording,
+            make_context(),
+            tmp_path,
+            fixture_result,
+            recipe_io.load(recording).inputs,
+            extra_products=[shadow],
+        )
+    assert refused.value.detail == "duplicate_file"
+
+
 def test_a_returned_object_cannot_claim_a_runner_word(loaded, capsys):
     """The result is copied, inside the plugin's own ``try``, before any check: a mapping whose
     ``items`` raises the writer's exception with one of its words is the plugin's failure, by class."""

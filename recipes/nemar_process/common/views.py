@@ -128,6 +128,45 @@ ONE_VALUE_UNIT = frozenset({LINES, "nemar.heatmap", "nemar.sensor-field"})
 # A spectrum's rows are Welch's frequencies k / window_s for k = 1, 2, ...: equal to these within this
 # share of the frequency (the binary64 rounding of the plugin's arithmetic, never a coarser grid).
 GRID_TOLERANCE = 1e-9
+
+# The file names a plugin's view may never take, compared case-folded (a case-insensitive file system
+# holds one file for ``_signalJourney.json`` and ``_signaljourney.json``): the record, the suffixes
+# BIDS gives a recording's own files, and every per-recording product of NEMAR's recipes (the floor's,
+# nemar-ica's, and nemar-ica's layout). The writer reserves them itself, whatever ``Host.reserved``
+# says; the loader refuses a view that would take one (``suffix_reserved``), and ``write_product``
+# refuses two files of one case-folded name.
+RECORD_SUFFIX = "signalJourney"
+BIDS_SUFFIXES = (
+    "events",
+    "electrodes",
+    "channels",
+    "coordsystem",
+    "eeg",
+    "physio",
+    "stim",
+    "scans",
+    "sessions",
+    "participants",
+)
+RECIPE_SUFFIXES = (
+    "channels",
+    "badsegments",
+    "samplemask",
+    "filters",
+    "qc",
+    "asr",
+    "unmixing",
+    "weights",
+    "sphere",
+    "mixing",
+    "components",
+    "ica",
+    "servingunmixing",
+    "chanlocs",
+)
+RESERVED_SUFFIXES = frozenset(
+    name.casefold() for name in (RECORD_SUFFIX, *BIDS_SUFFIXES, *RECIPE_SUFFIXES)
+)
 # The floor's tables (docs/views/presets.md, The floor's tables): their columns, and the statuses BIDS
 # allows a channel, compared as exact strings.
 SEGMENT_COLUMNS = ("onset", "duration", "label")
@@ -616,12 +655,27 @@ class _Context:
     produced: int
 
 
+def suffix_of(key: str, role: str, produced: int) -> str:
+    """A plugin's view file suffix: the view key with ``_`` dropped (BIDS keeps ``_`` between
+    entities), and the role, ``_`` dropped too, appended when the view produces more than one role.
+    The loader (``plugins.load``) and the writer name a file by this one rule."""
+    suffix = key.replace("_", "")
+    return suffix if produced == 1 else suffix + role.replace("_", "")
+
+
+def view_suffixes(key: str, view: Mapping[str, Any]) -> list[str]:
+    """The suffixes of the files a manifest's view produces, one per produced role, in order."""
+    produced = [role for role, spec in view["roles"].items() if "from" not in spec]
+    return [suffix_of(key, role, len(produced)) for role in produced]
+
+
 def _suffix(context: _Context, role: str) -> str:
-    """A produced file's suffix: the view key (with ``_`` dropped, which BIDS keeps between entities),
-    and the role too when the view produces more than one."""
-    suffix = context.key.replace("_", "")
-    suffix = suffix if context.produced == 1 else suffix + role.replace("_", "")
-    if suffix in context.host.reserved:
+    """A produced file's suffix (``suffix_of``), never a reserved name (``suffix_reserved``) nor one of
+    the host recipe's own (``view_repeated``), compared case-folded."""
+    suffix = suffix_of(context.key, role, context.produced)
+    if suffix.casefold() in RESERVED_SUFFIXES:
+        raise ViewRefused(contract.SUFFIX_RESERVED, suffix)
+    if suffix.casefold() in {name.casefold() for name in context.host.reserved}:
         raise ViewRefused(contract.VIEW_REPEATED, suffix)
     return suffix
 

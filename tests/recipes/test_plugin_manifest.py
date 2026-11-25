@@ -664,6 +664,59 @@ def test_a_view_key_the_host_recipe_writes_is_refused(plugin_dir):
     )
 
 
+# ---- what would fail a recording once its plugins ran is refused at load (review of #90) -------------
+
+
+def load_pins(names, recipe_views=()):
+    return plugins.load(
+        [(name, "1.0.0") for name in names],
+        checkpoints=dict.fromkeys(names, "quality"),
+        provides=["nemar-floor"],
+        recipe_views=recipe_views,
+        recipe_roles=(),
+        steps=(),
+        package="tmp_plugins",
+    )
+
+
+def test_two_keys_of_one_file_name_are_refused(plugin_dir):
+    """``erp`` and ``e_rp`` both write ``_erp.tsv``: the writer drops ``_`` from a key."""
+    write_plugin(plugin_dir, "twins", with_views("twins", {"erp": view(), "e_rp": view()}))
+    refused("view_repeated", lambda: load_one("twins"))
+
+
+def test_a_key_and_a_key_with_a_role_of_one_file_name_are_refused(plugin_dir):
+    """A view of two produced roles names each file key plus role: ``a`` with ``values`` is the file
+    of a view keyed ``avalues``."""
+    two = view(
+        "nemar.sensor-field",
+        roles={
+            "values": produced(dims=["sensor", "map"], unit="uV"),
+            "layout": produced(dims=["sensor"]),
+        },
+    )
+    write_plugin(plugin_dir, "first", with_views("first", {"a": two}))
+    write_plugin(plugin_dir, "second", with_views("second", {"avalues": view()}))
+    load_pins(["first"])
+    refused("view_repeated", lambda: load_pins(["first", "second"]))
+
+
+@pytest.mark.parametrize("key", ["signaljourney", "events", "chan_nels", "mixing", "chanlocs"])
+def test_a_view_that_would_take_a_reserved_file_name_is_refused(plugin_dir, key):
+    write_plugin(plugin_dir, "taker", with_views("taker", {key: view()}))
+    refused("suffix_reserved", lambda: load_one("taker"))
+
+
+def test_more_views_than_a_recording_holds_are_refused(plugin_dir):
+    sixteen = {"v{:02d}".format(n): view() for n in range(16)}
+    write_plugin(plugin_dir, "many", with_views("many", sixteen))
+    load_pins(["many"], recipe_views=["r{:02d}".format(n) for n in range(16)])  # 32: the most
+    refused(
+        "views_too_many",
+        lambda: load_pins(["many"], recipe_views=["r{:02d}".format(n) for n in range(17)]),
+    )
+
+
 def test_every_registered_kind_has_its_schema_in_the_bundle():
     registry = contract.views_registry()
     for entry in registry["kinds"]:

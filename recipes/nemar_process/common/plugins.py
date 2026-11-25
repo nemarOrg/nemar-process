@@ -311,8 +311,15 @@ def load(
     recipe's own step ids, which a plugin's name (its step id) may not repeat. ``recipe_roles`` are the
     view roles the host recipe can attach to a role declared ``{"from": "recipe"}``, and
     ``recipe_views`` the view keys the host recipe writes itself, which no plugin view may take
-    (``view_repeated``, as a view key two plugins declare). Once every pin has loaded, each plugin's
-    function gets its parameter row in ``plan.PARAMETER_TYPES``.
+    (``view_repeated``, as a view key two plugins declare).
+
+    What would otherwise fail a recording once its plugins ran is refused here, from the manifests:
+    two produced files of one name, case-folded, by the writer's naming rule (``views.suffix_of``: two
+    keys such as ``erp`` and ``e_rp``, or a key and a key plus a role; ``view_repeated``), a file name
+    the writer reserves (the record, BIDS's suffixes, a NEMAR recipe's products, case-folded:
+    ``suffix_reserved``), and more views than a recording's entry holds, the plugins' and the host
+    recipe's together (``views_too_many``). Once every pin has loaded, each plugin's function gets its
+    parameter row in ``plan.PARAMETER_TYPES``.
     """
     provided = frozenset(provides)
     roles = frozenset(recipe_roles)
@@ -320,6 +327,7 @@ def load(
     loaded: list[Plugin] = []
     names: set[str] = set()
     views: set[str] = set(recipe_views)
+    files: set[str] = set()
     for name, version in pins:
         if name in names:
             raise PluginLoadError(name, "pinned_twice")
@@ -327,10 +335,21 @@ def load(
             raise PluginLoadError(name, "name_is_a_step")
         names.add(name)
         plugin = _load_one(name, version, checkpoints, provided, roles, package)
-        keys = set(plugin.manifest["outputs"]["views"])
+        declared = plugin.manifest["outputs"]["views"]
+        keys = set(declared)
         if views & keys:
             raise PluginLoadError(name, contract.VIEW_REPEATED)
         views |= keys
+        if len(views) > contract.MAX_VIEWS:
+            raise PluginLoadError(name, contract.VIEWS_TOO_MANY)
+        for key, view in declared.items():
+            # keys and roles are lowercase by the manifest's grammar; the reserved names are folded
+            for suffix in writer.view_suffixes(key, view):
+                if suffix in writer.RESERVED_SUFFIXES:
+                    raise PluginLoadError(name, contract.SUFFIX_RESERVED)
+                if suffix in files:
+                    raise PluginLoadError(name, contract.VIEW_REPEATED)
+                files.add(suffix)
         loaded.append(plugin)
     for plugin in loaded:
         plans.PARAMETER_TYPES[plugin.function] = dict.fromkeys(plugin.manifest["parameters"], "any")
