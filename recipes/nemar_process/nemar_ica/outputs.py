@@ -519,12 +519,12 @@ def layout_role(chanlocs: views.ViewFile, fit: pipeline.Decomposition) -> views.
 
 
 def view_host(
-    recording: Recording, fit: pipeline.Decomposition, layout: views.RoleData
+    recording: Recording, fit: pipeline.Decomposition, layout: views.RoleData | None
 ) -> views.Host:
     """What nemar-ica knows of one recording, for its own views and for a plugin's (``views.Host``):
     the decomposition's channels in layout order, its components, ICLabel's classes, the floor's
-    sampling rate, the layout, the sidecar's cap model and reference, and the suffixes of its own
-    files."""
+    sampling rate, the layout (none when the component maps have none: a layout over the caps), the
+    sidecar's cap model and reference, and the suffixes of its own files."""
     return views.Host(
         recipe_id=INFO.id,
         recipe_version=INFO.version,
@@ -534,7 +534,7 @@ def view_host(
         sensors=tuple(channel_labels(fit.good_channels)),
         components=tuple(component_labels(fit.rank)),
         classes=tuple(fit.classes),
-        roles={"layout": layout},
+        roles={} if layout is None else {"layout": layout},
         sidecar=dict(fit.sidecar),
         reserved=frozenset(views.RECIPE_SUFFIXES),
     )
@@ -719,7 +719,9 @@ def recipe_views(
     """nemar-ica's own views of one recording, in ``steps.RECIPE_VIEWS`` order, and the ones it
     skipped, with why.
 
-    ``icmaps`` always. ``icactivity`` and ``midsegment`` read the serving copy, so they are declared
+    ``icmaps`` always; its layout is read inside its builder, so a layout over the caps skips it with
+    ``cap_exceeded`` like any part of it. ``icactivity`` and ``midsegment`` read the serving copy, so
+    they are declared
     when the recipe names its store (``signal_store``): ``icactivity`` is skipped with
     ``labels_unusable`` when the channel labels cannot head the matrix's columns (they fell back to
     ``Ch001`` and so on, so no column could be matched to the serving copy's), and ``midsegment`` with
@@ -727,15 +729,18 @@ def recipe_views(
     skipped with ``cap_exceeded`` (``ViewSet.add_recipe_view``); any other refusal is the recipe's
     fault and raises ``views.ViewRefused``.
     """
-    layout = layout_role(named[steps.CHANLOCS], fit)
-    host = view_host(recording, fit, layout)
     classes = [class_column(name) for name in fit.classes]
     found = views.ViewSet(INFO.id, INFO.version)
-    found.add_recipe_view(
-        steps.ICMAPS_VIEW,
-        views.IC_MAPS,
-        lambda: icmaps_view(host, named["mixing"], layout, named["components"], classes),
-    )
+    placed: dict[str, views.RoleData] = {}
+
+    def maps() -> views.PreparedView:
+        layout = layout_role(named[steps.CHANLOCS], fit)
+        placed["layout"] = layout
+        host = view_host(recording, fit, layout)
+        return icmaps_view(host, named["mixing"], layout, named["components"], classes)
+
+    found.add_recipe_view(steps.ICMAPS_VIEW, views.IC_MAPS, maps)
+    host = view_host(recording, fit, placed.get("layout"))
     store = signal_store(recording, fit, archive_group)
     if store is None:
         return found

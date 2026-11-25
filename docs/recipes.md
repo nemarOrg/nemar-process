@@ -799,7 +799,7 @@ The command names no group on a dataset directory, because a run of the archive 
 The signal window is the two seconds inside the good-sample mask nearest the recording's middle (`pipeline.midsegment`): the mask is the samples the floor read that no row of `_badsegments.tsv` covers (the floor's bad windows and the spans ASR repaired), a window starting at sample `first` holds the samples `k` with `first / rate <= k / rate < first / rate + 2` (the times rule a renderer uses, never `ceil(2 * rate)`), and of the windows whose samples are all good the one with the least `|2 * first + 2 * rate - n|` is chosen, the earlier on a tie; `start_s` is `first / rate`.
 
 What the writer makes sure of before it declares each one, and the words it refuses with, are `common/views.py`'s (`check_ic_maps`, `check_ic_activity`, `check_floor_tables`), held to neuroschema's preset-check and activation vectors (`tests/recipes/test_nemar_ica_views.py`).
-A view over the registry's caps (more than 1,024 channels, say) is skipped with `cap_exceeded`; any other refusal is a fault of the recipe, and the recording fails (`internal_error`, the step `record`, the writer's word) with nothing written.
+A view over the registry's caps (more than 1,024 channels, say, whose layout is read inside the maps' builder) is skipped with `cap_exceeded`; any other refusal is a fault of the recipe, and the recording fails (`internal_error`, the step `record`, the writer's word) with nothing written.
 
 ### Failures and skips
 

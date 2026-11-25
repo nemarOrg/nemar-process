@@ -1194,3 +1194,32 @@ def test_labels_that_fall_back_skip_the_activations_on_the_serving_copy_too(
             "profile": "serving",
         }
     ]
+
+
+def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
+    archive, recording, fixture_fit
+):
+    """A layout of more than 1,024 rows is no view a renderer draws: the maps are skipped with
+    cap_exceeded, the other views are declared, and the recording is kept."""
+    _, product = archive
+    block = product.record["extensions"]["nemar"]["ica"]
+    made = outputs.products(recording, fixture_fit, block)
+    rows = [["E{}".format(n), "EEG", 0.0, 0.5, 1.0, 2.0, 3.0] for n in range(1, 1026)]
+    big = views.view_file(
+        recording.path,
+        outputs.LABEL,
+        steps.CHANLOCS,
+        "tsv",
+        views.table_text(steps.CHANLOCS_COLUMNS, rows),
+        steps.CHANLOCS_STEP,
+        "1,025 channels",
+    )
+    found = outputs.recipe_views(
+        recording,
+        fixture_fit,
+        block,
+        {**made.named, **outputs.floor_tables(recording, fixture_fit), steps.CHANLOCS: big},
+        archive_group=ARCHIVE_GROUP,
+    )
+    assert found.skipped == [{"key": "icmaps", "kind": "nemar.ic-maps", "reason": "cap_exceeded"}]
+    assert [view.key for view in found.views] == ["icactivity", "midsegment"]
