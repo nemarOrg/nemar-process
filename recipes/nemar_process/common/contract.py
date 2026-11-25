@@ -175,21 +175,30 @@ def needs_value_unit(entry: Mapping[str, Any], role: str) -> bool:
     return entry["base"] is None and entry["roles"][role]["dims"] is None
 
 
-def role_states_unit(declared: Mapping[str, Any], places_sensors: bool = False) -> bool:
+def role_states_unit(declared: Mapping[str, Any]) -> bool:
     """A produced role states its value unit: a role ``unit`` (a column's own unit overrides it,
-    nemar-cli #2358), or, without one, ``columns`` that each carry a unit and that name a value column
-    beside the one that holds the rows' coordinates. The writer takes those coordinates from the first
-    header column unless the rows are ``sensor`` and the view has a layout or positions role
-    (``places_sensors``), so a role whose only declared column is that coordinate column (a time in
-    seconds) declares no value unit at all, and is refused here rather than when it runs."""
+    nemar-cli #2358), or, without one, ``columns`` that each carry a unit, at least one of them a value
+    column rather than the rows' coordinate column (the lead's ruling on #90, round 2).
+
+    The coordinate column need not be declared: the writer takes the rows' coordinates from the first
+    header column (none when the rows are ``sensor`` named by a layout), and gives it the unit the
+    registry reserves for the rows' dimension (``time`` in ``s``) when the manifest declares none. Its
+    name is the header's, which a manifest does not know, so a declared column is taken for the
+    coordinate column here exactly when it carries that reserved unit: a role along ``time`` whose only
+    declared column is in ``s`` declares no value unit and is refused, while one that declares a single
+    series in uV loads. Along a dimension the registry reserves no unit for (``sensor``, ``epoch``) or
+    does not reserve at all, every declared column counts as a value column, and the writer refuses a
+    header value column that has no unit when the role runs."""
     if "unit" in declared:
         return True
     columns = declared.get("columns")
     if not columns or not all("unit" in column for column in columns):
         return False
     dims = list(declared["dims"])
-    coordinate = 1 if dims and not (dims[0] == "sensor" and places_sensors) else 0
-    return len(columns) > coordinate
+    reserved = views_registry()["reserved_dims"].get(dims[0]) if dims else None
+    coordinate_unit = None if reserved is None else reserved["unit"]
+    # with no reserved unit (None), every declared column, which carries a unit, is a value column
+    return any(column["unit"] != coordinate_unit for column in columns)
 
 
 def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | None:
@@ -221,8 +230,7 @@ def view_problem(view: Mapping[str, Any], recipe_roles: Iterable[str]) -> str | 
         allowed = registered[role]["formats"]
         if declared["format"] not in allowed or declared["format"] not in WRITABLE_FORMATS:
             return FORMAT_UNWRITABLE
-        places_sensors = any(name in ("layout", "positions") for name in view["roles"])
-        if needs_value_unit(entry, role) and not role_states_unit(declared, places_sensors):
+        if needs_value_unit(entry, role) and not role_states_unit(declared):
             return UNIT_UNDECLARED
     for role, declared in view["roles"].items():
         if "from" in declared and role not in provided:

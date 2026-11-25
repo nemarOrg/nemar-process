@@ -1967,8 +1967,8 @@ def test_a_role_unit_only_on_the_coordinate_does_not_pass_the_loader(loaded):
 
 
 def test_a_map_of_named_columns_with_their_units_needs_no_role_unit():
-    """Sensors along the rows of a layout take no coordinate column, so one declared value column
-    with its unit states the value unit."""
+    """Sensors along the rows have no unit of their own to mark a coordinate column (and with a layout
+    no coordinate column at all), so one declared value column with its unit states the value unit."""
     role = {
         "format": "tsv",
         "max_bytes": 65536,
@@ -1981,7 +1981,7 @@ def test_a_map_of_named_columns_with_their_units_needs_no_role_unit():
         "caption": "x",
         "roles": {"values": role},
     }
-    assert contract.view_problem(view, ()) == "unit_undeclared"  # rows of a column: alpha is it
+    assert contract.view_problem(view, ()) is None
     view["roles"]["layout"] = {"from": "recipe"}
     assert contract.view_problem(view, ["layout"]) is None
 
@@ -2125,3 +2125,31 @@ def test_every_refusal_word_is_on_the_runners_closed_list():
     found |= {views.FREQ_NOT_INCREASING, views.X_NOT_INCREASING}
     assert len(found) > 40
     assert found <= plugins.RUNNER_WORDS, sorted(found - plugins.RUNNER_WORDS)
+
+
+def test_a_single_series_with_its_unit_loads_and_is_written():
+    """The lead's ruling: the coordinate column need not be declared; one declared value column with
+    its unit states the value unit, and the writer gives the time column the unit of time."""
+    role = {
+        "format": "tsv",
+        "max_bytes": 65536,
+        "dims": ["time", "series"],
+        "columns": [{"name": "gfp", "type": "number", "unit": "uV"}],
+    }
+    view = {"kind": "nemar.lines", "kind_version": 1, "caption": "GFP.", "roles": {"values": role}}
+    assert contract.view_problem(view, ()) is None
+    table = plugins.TableArray(("time_s", "gfp"), np.array([[0.0, 1.0], [0.004, 2.0]]))
+    prepared = views.plugin_view(
+        {"name": "p", "version": "1.0.0"}, "gfp", view, {"values": table}, {}, HOST
+    )
+    (values,) = prepared.declaration["data"]
+    assert values["columns"] == [
+        {"name": "time_s", "type": "number", "unit": "s"},
+        {"name": "gfp", "type": "number", "unit": "uV"},
+    ]
+    # only the coordinate's unit declared: still refused at load
+    role["columns"] = [{"name": "time_s", "type": "number", "unit": "s"}]
+    assert contract.view_problem(view, ()) == "unit_undeclared"
+    # along a dimension the registry reserves no unit for, the declared column is a value column
+    role["dims"] = ["lag", "series"]
+    assert contract.view_problem(view, ()) is None
