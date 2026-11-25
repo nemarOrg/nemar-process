@@ -81,7 +81,7 @@ The inputs (`outputs.plugin_inputs`) are, from `nemar-ica`:
 | `classifications` | ICLabel's probabilities, components by classes |
 | `variance_pct` | each component's own percent of the data's variance (eegprep's `eeg_pvaf`), one per component |
 
-and from `nemar-floor` `line_hz`, the line frequency the floor measured (its table's `line_hz`: whichever of 50 and 60 Hz had the larger excess before the filters), or null.
+From `nemar-floor` the input is `line_hz`, the line frequency the floor measured (its table's `line_hz`: whichever of 50 and 60 Hz had the larger excess before the filters), or null.
 
 They run when the recording's product is written, after the recipe's own views and before any file is written, on a copy of the plan, so the record, its `plan_hash` and the row hold their steps or skips: each plugin's identity (name, version, source tree) is hashed with its step.
 Their views follow the recipe's in `extensions.nemar.views` (`icmaps`, `icactivity`, `midsegment`, then `icclasses` and `spectrum`), their files are the outputs of their steps, nemar-quality's headline metric joins the record's `summaryMetrics`, and the table's `pct_brain_components` is its value (null when nemar-quality was skipped).
