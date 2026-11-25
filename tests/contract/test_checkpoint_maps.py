@@ -81,3 +81,33 @@ def test_every_pre_check_counts_at_preprocess_and_is_not_a_record_step(recipe):
     for step in literal(path, "PRE_CHECKS"):
         assert step in preprocess
         assert step not in literal(path, "STEP_ORDER")
+
+
+def test_nemar_ica_pins_the_registrys_plugin_steps_in_the_maps_order():
+    """nemar-cli's process-drift test reads ``PLUGINS`` strictly once a ``steps.py`` declares it: its
+    names, in order, are the registry's plugin steps (``RECIPE_PLUGIN_STEPS``) and its map's `quality`
+    steps, and each pin is a version whose source tree is recorded (tests/recipes/plugin_digests.json)."""
+    from nemar_launch.checkpoints import RECIPE_PLUGIN_STEPS
+
+    path = RECIPES["nemar-ica"]
+    pins = literal(path, "PLUGINS")
+    names = [name for name, _version in pins]
+    assert names == list(RECIPE_PLUGIN_STEPS)
+    assert names == list(dict(literal(path, "CHECKPOINTS"))["quality"]), BUMP
+    assert (
+        names
+        == {c["checkpoint"]: c["steps"] for c in VECTORS["maps"]["nemar-ica"]["checkpoints"]}[
+            "quality"
+        ]
+    )
+    digests = json.loads((ROOT / "tests" / "recipes" / "plugin_digests.json").read_text())
+    assert {"{}@{}".format(name, version) for name, version in pins} <= set(digests)
+
+
+def test_the_floor_runs_no_plugin():
+    from nemar_launch.checkpoints import RECIPE_PLUGIN_STEPS
+
+    path = RECIPES["nemar-floor"]
+    assert "\nPLUGINS" not in path.read_text(encoding="utf-8")
+    mapped_steps = {step for _name, group in literal(path, "CHECKPOINTS") for step in group}
+    assert not mapped_steps & set(RECIPE_PLUGIN_STEPS)

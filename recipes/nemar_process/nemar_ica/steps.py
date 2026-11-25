@@ -54,6 +54,21 @@ CHECKPOINTS = (
     ("quality", ("nemar-quality", "nemar-spectrum")),
 )
 
+# The quality plugins nemar-ica runs at `quality`, in this order, each pinned by its version (ADR 0134
+# decision 6, ADR 0137; docs/plugins.md): `plugins.load` refuses any other version, and
+# tests/recipes/plugin_digests.json pins each version's source tree. A literal, like CHECKPOINTS:
+# nemar-cli's process-drift test reads the names, which must be the map's `quality` steps in order.
+PLUGINS = (
+    ("nemar-quality", "0.1.0"),
+    ("nemar-spectrum", "0.1.0"),
+)
+# The recipes whose outputs nemar-ica hands a plugin (``outputs.plugin_inputs``): its own decomposition
+# and the floor it embeds. The views writer's host is nemar-ica's (``outputs.view_host``).
+PLUGIN_PROVIDES = ("nemar-floor", "nemar-ica")
+# The role nemar-ica gives a plugin view's ``{"from": "recipe"}`` role: its layout, ``_chanlocs.tsv``.
+LAYOUT_ROLE = "layout"
+RECIPE_ROLES = (LAYOUT_ROLE,)
+
 # Step ids that are not steps of the record but name where a recording can end (the floor's, and the two
 # checks nemar-ica makes before ASR): counted at `preprocess`, in CHECKPOINTS and not in STEP_ORDER.
 PRE_CHECKS = ("qc_amplitude", "ica_eligibility", "iclabel_locations")
@@ -237,6 +252,13 @@ MIDSEGMENT_DURATION_S = 2
 # Why a recording has no signal window: no two seconds of it lie inside the good-sample mask. A word of
 # nemar-process's own, which dataQuality admits beside neuroschema's and a renderer shows as it is.
 NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
+# Why a recording of a dataset directory has no view of the serving copy (``icactivity`` and
+# ``midsegment``): the run was given no serving index (``--serving-index``), or the index it was given
+# has no row for the recording (``serving_index.ServingIndex.row``: another dataset's index, no store at
+# the recording's path, or not exactly one EEG group). The serving copy's channel group is read from its
+# index, never guessed from a naming rule (the lead's ruling, 2026-11-24). Words of nemar-process's own.
+NO_SERVING_INDEX = "no_serving_index"  # views.OWN_SKIP_REASONS
+NOT_IN_SERVING_INDEX = "not_in_serving_index"  # views.OWN_SKIP_REASONS
 # The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
 # import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
 # description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees
