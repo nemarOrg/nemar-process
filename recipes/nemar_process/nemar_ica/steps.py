@@ -216,8 +216,9 @@ VIEW_KIND_VERSION = 1
 # The positions of the decomposition's channels, the layout of its component maps (and of a plugin's
 # sensor views): ``_chanlocs.tsv``, one row per column of ``_unmixing.tsv`` in its order, named by that
 # header, each row's type as the floor's ``_channels.tsv`` gives it, EEGLAB's theta and radius, and x,
-# y and z as eegprep holds them after loading (millimeters in EEGLAB's frame: +x toward the nose, +y
-# left, +z up). Written at ``iclabel``, the step that classified the components on these positions.
+# y and z as eegprep holds them after loading (millimeters in what eegprep takes for EEGLAB's frame: +x
+# toward the nose, +y left, +z up), every place n/a when they are known to be misread
+# (``FRAME_ROTATED``). Written at ``iclabel``, the step that classified the components on them.
 CHANLOCS = "chanlocs"
 CHANLOCS_STEP = "iclabel"
 CHANLOCS_COLUMNS = ("name", "sensor_type", "theta_deg", "radius", "x", "y", "z")
@@ -236,6 +237,15 @@ MIDSEGMENT_DURATION_S = 2
 # Why a recording has no signal window: no two seconds of it lie inside the good-sample mask. A word of
 # nemar-process's own, which dataQuality admits beside neuroschema's and a renderer shows as it is.
 NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
+# The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
+# import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
+# description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees
+# (sccn/eegprep#TBD; eegprep-lean, the serving copy's reader, reads them as stated). nemar-ica withholds
+# such positions (``pipeline.position_facts``): ``_chanlocs.tsv`` holds no place and ``icmaps`` is
+# skipped with this word, never drawn on positions known to be turned. ICLabel still classified on them
+# (nemarOrg/nemar-process#94).
+ROTATED_FRAMES = ("CTF", "4DBti", "KitYokogawa")
+FRAME_ROTATED = "frame_rotated"  # views.OWN_SKIP_REASONS
 ICMAPS_CAPTION = (
     "Scalp maps of the independent components, each with its share of the variance and its ICLabel "
     "probabilities."

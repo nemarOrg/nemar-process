@@ -170,8 +170,9 @@ WORDS = frozenset(
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
 # nemar-process's own reasons beside neuroschema's, which dataQuality admits ("another word, which a
 # renderer shows as it is"): a signal window with no two seconds of the recording inside the
-# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``).
-OWN_SKIP_REASONS = ("no_good_window",)
+# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``), and component maps whose
+# positions the loader is known to have turned (nemar-ica's ``icmaps``, ``steps.FRAME_ROTATED``).
+OWN_SKIP_REASONS = ("no_good_window", "frame_rotated")
 # A recipe view the builder refuses for its size is skipped with ``cap_exceeded``; any other refusal of
 # a recipe's own view is a fault of the recipe, never of the data.
 SKIP_REASON_OF = {VIEW_TOO_LARGE: "cap_exceeded", CAP_EXCEEDED: "cap_exceeded"}

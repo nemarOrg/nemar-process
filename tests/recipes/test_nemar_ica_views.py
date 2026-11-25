@@ -839,6 +839,7 @@ def test_the_frame_unit_and_source_are_the_loaders(archive, fixture_fit):
         "source": "electrodes.tsv",
         "coordinate_system": "MNI305",
         "coordinate_units": "mm",
+        "withheld": None,
     }
     assert product.record["extensions"]["nemar"]["ica"]["positions"] == fixture_fit.positions
     placed = views_of(product)["icmaps"]["data"][1]
@@ -851,17 +852,32 @@ def test_the_frame_unit_and_source_are_the_loaders(archive, fixture_fit):
         (
             {"EEGCoordinateSystem": "CapTrak", "EEGCoordinateUnits": "cm"},
             1.0,
-            {"source": "electrodes.tsv", "coordinate_system": "CapTrak", "coordinate_units": "cm"},
+            {
+                "source": "electrodes.tsv",
+                "coordinate_system": "CapTrak",
+                "coordinate_units": "cm",
+                "withheld": None,
+            },
         ),
         (
             {"EEGCoordinateSystem": "Other", "EEGCoordinateUnits": "n/a"},
             1e-3,
-            {"source": "electrodes.tsv", "coordinate_system": "Other", "coordinate_units": None},
+            {
+                "source": "electrodes.tsv",
+                "coordinate_system": "Other",
+                "coordinate_units": None,
+                "withheld": None,
+            },
         ),
         (
             None,
             1e-3,
-            {"source": "electrodes.tsv", "coordinate_system": None, "coordinate_units": None},
+            {
+                "source": "electrodes.tsv",
+                "coordinate_system": None,
+                "coordinate_units": None,
+                "withheld": None,
+            },
         ),
     ],
     ids=["captrak_cm", "unit_n_a", "no_coordsystem"],
@@ -905,7 +921,12 @@ def test_positions_embedded_in_a_set_state_no_frame(tmp_path):
     (found,) = io.discover(tmp_path)
     assert found.abs_path == path
     facts = pipeline.position_facts(io.load(found))
-    assert facts == {"source": "embedded", "coordinate_system": None, "coordinate_units": None}
+    assert facts == {
+        "source": "embedded",
+        "coordinate_system": None,
+        "coordinate_units": None,
+        "withheld": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1196,6 +1217,113 @@ def test_labels_that_fall_back_skip_the_activations_on_the_serving_copy_too(
     ]
 
 
+# ---- positions eegprep turns: the frames BIDS defines as ALS (nemarOrg/nemar-process#94) ------------
+
+
+def als_copy(destination, system, description=None):
+    """The fixture dataset with its electrodes written in ALS millimeters (x toward the nose, y left)
+    and the coordsystem naming ``system``: the reviewer's repro."""
+    tree = copy_fixture(destination)
+    eeg_dir = tree / "sub-CUCOV076" / "eeg"
+    electrodes = eeg_dir / "sub-CUCOV076_electrodes.tsv"
+    lines = electrodes.read_text().splitlines()
+    rows = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split("\t")
+        if "n/a" not in cells[1:4]:
+            right, front, up = (float(cell) for cell in cells[1:4])
+            cells[1:4] = [repr(front), repr(-right), repr(up)]
+        rows.append("\t".join(cells))
+    electrodes.write_text("\n".join(rows) + "\n")
+    stated = {"EEGCoordinateSystem": system, "EEGCoordinateUnits": "mm"}
+    if description is not None:
+        stated["EEGCoordinateSystemDescription"] = description
+    (eeg_dir / "sub-CUCOV076_coordsystem.json").write_text(json.dumps(stated))
+    return tree
+
+
+@pytest.mark.parametrize("system", ["CTF", "4DBti", "KitYokogawa"])
+def test_positions_in_a_frame_eegprep_turns_are_withheld(tmp_path, system):
+    """eegprep's BIDS import reads these ALS frames as RAS and turns them by 90 degrees: Fp1, stated
+    at (77, 32, 19), is held at (32, -77, 19), right of the nose (sccn/eegprep#TBD). The positions
+    are withheld; this test fails once eegprep reads them as stated, and the withholding goes."""
+    (found,) = io.discover(als_copy(tmp_path / "dataset", system))
+    loaded = io.load(found)
+    fp1 = next(entry for entry in loaded.eeg["chanlocs"] if entry["labels"] == "Fp1")
+    assert (fp1["X"], fp1["Y"], fp1["Z"]) == (32.0, -77.0, 19.0)
+    assert fp1["theta"] > 0  # the left frontal pole, right of the nose
+    assert pipeline.position_facts(loaded) == {
+        "source": "electrodes.tsv",
+        "coordinate_system": system,
+        "coordinate_units": "mm",
+        "withheld": "frame_rotated",
+    }
+
+
+def test_an_eeglab_description_keeps_the_frame_as_stated(tmp_path):
+    """With the description EEGLAB beside it, eegprep reads CTF as ALS: nothing is withheld."""
+    (found,) = io.discover(als_copy(tmp_path / "dataset", "CTF", "EEGLAB"))
+    loaded = io.load(found)
+    fp1 = next(entry for entry in loaded.eeg["chanlocs"] if entry["labels"] == "Fp1")
+    assert (fp1["X"], fp1["Y"], fp1["Z"]) == (77.0, 32.0, 19.0)
+    assert pipeline.position_facts(loaded)["withheld"] is None
+
+
+@pytest.fixture(scope="module")
+def rotated(recording, tmp_path_factory):
+    """The reviewer's repro end to end: the cut fixture with its electrodes in CTF, decomposed and
+    written with the serving copy's group named."""
+    tree = als_copy(tmp_path_factory.mktemp("ctf") / "dataset", "CTF")
+    (found,) = io.discover(tree)
+    loaded = io.load(found)
+    eeg = loaded.eeg
+    samples = round(CUT_SECONDS * eeg["srate"])
+    eeg["data"] = np.ascontiguousarray(eeg["data"][CUT_CHANNELS, :samples])
+    eeg["nbchan"], eeg["pnts"] = len(CUT_CHANNELS), samples
+    eeg["xmax"] = (samples - 1) / eeg["srate"]
+    eeg["chanlocs"] = [eeg["chanlocs"][index] for index in CUT_CHANNELS]
+    settings = Settings.from_options(RECIPE.option_values({"ica_max_iter": 5}))
+    with determinism.pinned_threads(1), command.quiet():
+        fit = pipeline.process(loaded, settings, device.resolve("cpu"))
+    directory = tmp_path_factory.mktemp("ctf-product")
+    return directory, fit, write(found, fit, directory, archive_group=ARCHIVE_GROUP)
+
+
+def test_turned_positions_draw_no_map_and_write_no_place(rotated):
+    """No position known to be turned is written or drawn: every place of _chanlocs.tsv is n/a, the
+    maps are skipped with frame_rotated and the record says why; the views that need no position
+    are declared as on any recording."""
+    directory, fit, product = rotated
+    nemar = product.record["extensions"]["nemar"]
+    assert nemar["ica"]["positions"]["withheld"] == "frame_rotated"
+    assert [view["key"] for view in nemar["views"]] == ["icactivity", "midsegment"]
+    assert nemar["views_skipped"] == [
+        {"key": "icmaps", "kind": "nemar.ic-maps", "reason": "frame_rotated"}
+    ]
+    header, rows = read_table(named(directory, "chanlocs.tsv"))
+    assert tuple(header) == steps.CHANLOCS_COLUMNS
+    assert [row[0] for row in rows] == list(fit.good_channels)
+    assert all(row[2:] == ["n/a"] * 5 for row in rows)
+    assert all(row[1] == "EEG" for row in rows)  # the names and types are still the channels'
+    assert records.views_problems(product.record) == []
+
+
+def test_a_host_with_turned_positions_offers_no_layout(rotated, recording):
+    _, fit, _ = rotated
+    found = outputs.recipe_views(
+        recording,
+        fit,
+        {"browser_transform": None, "decomposition_input": fit.decomposition_input},
+        {
+            steps.CHANLOCS: outputs.chanlocs_file(recording, fit),
+            "mixing": product_file("mixing", ""),
+            "components": product_file("components", ""),
+        },
+    )
+    assert found.skipped == [{"key": "icmaps", "kind": "nemar.ic-maps", "reason": "frame_rotated"}]
+    assert outputs.view_host(recording, fit, None).roles == {}
+
+
 def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
     archive, recording, fixture_fit
 ):
@@ -1223,3 +1351,29 @@ def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
     )
     assert found.skipped == [{"key": "icmaps", "kind": "nemar.ic-maps", "reason": "cap_exceeded"}]
     assert [view.key for view in found.views] == ["icactivity", "midsegment"]
+
+
+def test_the_serving_copys_positions_in_those_frames_are_read_as_stated():
+    """eegprep-lean, the serving copy's reader, keeps CTF as ALS (its frame table): positions it
+    located in CTF are the dataset's, and nothing is withheld."""
+    from nemar_process.common.zarr_input import ServingStore
+
+    stated = {"coordinate_system": "CTF", "coordinate_units": "mm", "located": 8}
+    loaded = io.Loaded(
+        eeg={"etc": {"nemar": {"locations": stated}}},
+        function="eegprep_lean.load_recording",
+        parameters={},
+        etc_normalized=False,
+        etc_keys_dropped=[],
+        location_source="electrodes.tsv",
+        n_channels_with_locations=8,
+        power_line_hz_declared=None,
+        inputs=[],
+        serving=ServingStore(RECORDING, "eeg_250hz", "a" * 64, "uV", tuple(SENSORS)),
+    )
+    assert pipeline.position_facts(loaded) == {
+        "source": "electrodes.tsv",
+        "coordinate_system": "CTF",
+        "coordinate_units": "mm",
+        "withheld": None,
+    }

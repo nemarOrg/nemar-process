@@ -469,15 +469,22 @@ def chanlocs_rows(fit: pipeline.Decomposition) -> list[list[Any]]:
     """The rows of ``_chanlocs.tsv``: one per column of ``_unmixing.tsv``, in its order and named by
     its header (``channel_labels``), each with its type as the floor's ``_channels.tsv`` writes it
     (``files.tsv_cell``) and its places as eegprep holds them after the chain (``theta``, ``radius``,
-    ``X``, ``Y``, ``Z``; ``n/a`` for a channel without a position). The decomposition's ``chanlocs``
-    must be its channels in that order: anything else is a fault of the recipe (``ValueError``)."""
+    ``X``, ``Y``, ``Z``; ``n/a`` for a channel without a position). When the positions are known to be
+    misread (``fit.positions["withheld"]``, ``pipeline.position_facts``), every place is ``n/a``: no
+    position known to be turned is written. The decomposition's ``chanlocs`` must be its channels in
+    that order: anything else is a fault of the recipe (``ValueError``)."""
     chanlocs = list(fit.eeg["chanlocs"])
     if io.channel_labels(fit.eeg) != list(fit.good_channels):
         raise ValueError("the decomposition's chanlocs are not its channels in order")
     names = channel_labels(fit.good_channels)
     kinds = io.channel_types(fit.eeg)
+    withheld = fit.positions.get("withheld") is not None
     return [
-        [name, files.tsv_cell(kind), *(_place(chanloc.get(key)) for key in PLACE_FIELDS)]
+        [
+            name,
+            files.tsv_cell(kind),
+            *(None if withheld else _place(chanloc.get(key)) for key in PLACE_FIELDS),
+        ]
         for name, kind, chanloc in zip(names, kinds, chanlocs, strict=True)
     ]
 
@@ -493,8 +500,9 @@ def chanlocs_file(recording: Recording, fit: pipeline.Decomposition) -> views.Vi
         views.table_text(steps.CHANLOCS_COLUMNS, chanlocs_rows(fit)),
         steps.CHANLOCS_STEP,
         "Positions of the decomposition's channels, in the unmixing's column order: name, type, "
-        "EEGLAB's theta (degrees) and radius, and x, y, z in millimeters in EEGLAB's frame "
-        "(+x nose, +y left, +z up), as eegprep holds them",
+        "EEGLAB's theta (degrees) and radius, and x, y, z in millimeters in the frame eegprep "
+        "takes for EEGLAB's (+x nose, +y left, +z up), as it holds them after loading; every "
+        "place n/a when they are known to be misread (extensions.nemar.ica.positions.withheld)",
     )
 
 
@@ -523,8 +531,8 @@ def view_host(
 ) -> views.Host:
     """What nemar-ica knows of one recording, for its own views and for a plugin's (``views.Host``):
     the decomposition's channels in layout order, its components, ICLabel's classes, the floor's
-    sampling rate, the layout (none when the component maps have none: a layout over the caps), the
-    sidecar's cap model and reference, and the suffixes of its own files."""
+    sampling rate, the layout (none when the component maps have none: positions withheld, or a
+    layout over the caps), the sidecar's cap model and reference, and the suffixes of its own files."""
     return views.Host(
         recipe_id=INFO.id,
         recipe_version=INFO.version,
@@ -719,9 +727,10 @@ def recipe_views(
     """nemar-ica's own views of one recording, in ``steps.RECIPE_VIEWS`` order, and the ones it
     skipped, with why.
 
-    ``icmaps`` always; its layout is read inside its builder, so a layout over the caps skips it with
-    ``cap_exceeded`` like any part of it. ``icactivity`` and ``midsegment`` read the serving copy, so
-    they are declared
+    ``icmaps`` always, but for positions the loader is known to have turned (skipped with the word
+    ``fit.positions["withheld"]``, ``frame_rotated``); its layout is read inside its builder, so a
+    layout over the caps skips it with ``cap_exceeded`` like any part of it. ``icactivity`` and
+    ``midsegment`` read the serving copy, so they are declared
     when the recipe names its store (``signal_store``): ``icactivity`` is skipped with
     ``labels_unusable`` when the channel labels cannot head the matrix's columns (they fell back to
     ``Ch001`` and so on, so no column could be matched to the serving copy's), and ``midsegment`` with
@@ -739,7 +748,11 @@ def recipe_views(
         host = view_host(recording, fit, layout)
         return icmaps_view(host, named["mixing"], layout, named["components"], classes)
 
-    found.add_recipe_view(steps.ICMAPS_VIEW, views.IC_MAPS, maps)
+    withheld = fit.positions.get("withheld")
+    if withheld is not None:
+        found.skip(steps.ICMAPS_VIEW, views.IC_MAPS, withheld)
+    else:
+        found.add_recipe_view(steps.ICMAPS_VIEW, views.IC_MAPS, maps)
     host = view_host(recording, fit, placed.get("layout"))
     store = signal_store(recording, fit, archive_group)
     if store is None:

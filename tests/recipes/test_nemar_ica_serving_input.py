@@ -1079,6 +1079,7 @@ def test_the_layout_on_the_serving_copy_is_the_stores_positions(runs, path):
         "source": "electrodes.tsv",
         "coordinate_system": "CapTrak",
         "coordinate_units": "mm",
+        "withheld": None,  # eegprep-lean reads every frame as stated
     }
     placed = views_of(run.product.record)["icmaps"]["data"][1]
     assert (placed["coordinate_system"], placed["position_source"]) == ("CapTrak", "measured")
