@@ -1,7 +1,8 @@
 # Quality plugins
 
 **Partly built.**
-The loader, the runner for metric plugins, the checks of declared views, the views writer and the contracts a plugin is checked against are built (Phase 5, P1 to P3); no plugin of NEMAR's ships yet, and no recipe runs plugins yet.
+The loader, the runner for metric plugins, the checks of declared views, the views writer and the contracts a plugin is checked against are built (Phase 5, P1 to P3).
+NEMAR's first two plugins, `nemar-quality` and `nemar-spectrum`, ship (P6, [below](#the-first-two-plugins)); no recipe runs plugins yet, and P7 pins them in nemar-ica.
 Figures are gone (nemar-cli ADR 0137): a plugin writes views, data a browser draws (a spectrum, component classes, a table), never an image, and there is no `figures` checkpoint.
 The views writer (`recipes/nemar_process/common/views.py`, P3) is the only path by which a plugin's arrays become published files: it checks each array against the recording, writes it with the recipes' deterministic writers and declares it as neuroschema validates it.
 The legacy figures are kept below as a mapping to the views that replace them.
@@ -42,6 +43,24 @@ Until a recipe runs plugins, the recipes' own `qc` step ([recipes.md](recipes.md
 - **The recordings table**: a skipped plugin leaves the recording `succeeded`; the plan's skip lands in the row's existing `skipped_steps` cell like any skipped step (`<plugin>:plugin_failed`, comma-joined with the others), and nemar-cli counts a pair whose step is a plugin step as `skipped` at that plugin's checkpoint.
 
 Abbreviations used here: tab-separated values (TSV), JavaScript Object Notation (JSON), ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), EEGLAB (the electroencephalography toolbox for MATLAB), quality control (QC), Portable Network Graphics (PNG), Scalable Vector Graphics (SVG), mutual information reduction (MIR), decibel (dB), hertz (Hz).
+
+## The first two plugins
+
+Both are version 0.1.0, run at `quality`, take no manifest parameters, and read only nemar-ica's decomposition, which the host hands them as plain arrays and values (`run_checkpoint` makes them read-only).
+What each reads is its contract with the host recipe; P7 builds those inputs in nemar-ica.
+
+- **`nemar-quality`** (`recipes/nemar_process/plugins/nemar_quality/`) reads, from `nemar-ica`, `classes` (ICLabel's seven, in ICLabel's order), `classifications` (the probabilities, components by classes) and `variance_pct` (each component's own percent of the data's variance, one per component).
+  The dominant class of each component and the counts by class are eegprep's `eeg_icalabelstat`, never recounted.
+  It reports `nemar-quality:percentBrainComponents` (a headline metric, in `%`, bounded 0 to 100: the share of components whose dominant class is Brain) and writes the view `icclasses` (`nemar.ic-classes` version 1, `_icclasses.json`): the counts, and each class's summed variance of the components classed as it, to four decimals.
+  Its caption says "summed variance of components classed X", never "variance explained", because the components are not orthogonal.
+  Classes that are not ICLabel's skip the plugin (`NotIclabelClasses`), and so does a variance list that is not one per component (`VarianceLengthMismatch`).
+- **`nemar-spectrum`** (`recipes/nemar_process/plugins/nemar_spectrum/`) reads, from `nemar-ica`, `data` (the decomposition's input, good channels by samples), `unit` (`uV`, else `NotMicrovolts`), `srate` and `channels` (the good channels' labels in layout order), and, from `nemar-floor`, `line_hz` (the line frequency, or none).
+  It writes the view `spectrum` (`nemar.spectrum` version 1, `_spectrum.tsv`, a header of `freq_hz` and then the channels), with the host's `layout` as its `{"from": "recipe"}` role, so the host must provide one (`role_unprovided` at load otherwise).
+  The estimate is the one neuroschema's `docs/views/presets.md` states and nemar-cli ADR 0137 decision 5 fixes: Welch's method over windows of `round(2 * srate)` samples, half of each overlapping the next, each detrended by its own mean and tapered by a symmetric Hamming window, the periodograms averaged by their mean, one-sided, a density in dB re 1 µV²/Hz, with no zero padding.
+  The periodograms are eegprep's `compute_spectra`, which does not detrend (EEGLAB's `spectopo` does not), so each window, its mean taken out, is handed to it as one epoch; the tests hold every cell to scipy's `welch` with `detrend="constant"`.
+  The rows are `k / window_s` for `k = 1, 2, ...` (no 0 Hz row) up to `upper_hz`, which is 125 Hz unless the recording's Nyquist frequency is lower, and then that frequency.
+  The view's parameters are recorded per recording, from what was computed (`window_s` is the window's samples over the rate, `overlap` its overlapping samples over its samples), with `initial_maps_hz` 6, 10 and 22 Hz and the line frequency, each at most `upper_hz`.
+  A recording shorter than one window, a rate that is not a finite number above 0, or data that are not one row per named channel skip the plugin with the class of the refusal; a cell that is not finite skips it with the writer's `not_finite`.
 
 ## What a plugin is
 
