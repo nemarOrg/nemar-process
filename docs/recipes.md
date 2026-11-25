@@ -101,7 +101,7 @@ nemar-recipe version
 | Exit | Word | When |
 |---|---|---|
 | 0 | none | the run completed and the dataset record was written, whatever the mix of succeeded, failed and skipped |
-| 1 | `internal_error` | an uncaught error in the program itself, a signalJourney validator that cannot be built (it is built once, before anything is written) included; the class name goes to standard error, never a traceback |
+| 1 | `internal_error` | an uncaught error in the program itself, a signalJourney validator that cannot be built (it is built once, before anything is written) included; the class name goes to standard error, never a traceback; and a recipe's pinned quality plugin that cannot be loaded as declared (`plugin_unloadable: <plugin> <word>`, found by the preflight, so nothing is written; [plugins.md](plugins.md)) |
 | 2 | usage | argument errors, no output directory |
 | 3 | `no_recordings` | no EEG recording was found (the dataset record is still written, with zero counts) |
 | 4 | `no_recording_succeeded` | recordings were found, at least one was not skipped for its format (it failed, or was skipped for another reason), and none succeeded (the record is written) |
@@ -576,6 +576,8 @@ Then, each an eegprep call:
 | 12 | `ica` | `eegprep.pop_runica` | pAMICA: `icatype='pamica'`, `reorder='on'`, `n_models=1`, `n_mix=3`, `max_iter`, `block_size=131072`, `seed=5489`, `device`, `threads`, `pcakeep`, `do_reject=False`, `rejsig=3.0`, `rejstart=2`, `rejint=3`, `maxrej=3`, `use_min_dll=True`, `min_dll=1e-9`, `maxincs=5`, `use_grad_norm=True`, `min_nd=1e-7`; the binary: `icatype='runamica15'`, `reorder='on'`, `num_models=1`, `num_mix_comps=3`, `max_iter`, `pcakeep`, `max_threads`, `amica_binary`, `do_reject=0`, `rejsig=3.0`, `rejstart=2`, `rejint=3`, `numrej=3`, `use_min_dll=1`, `min_dll=1e-9`, `use_grad_norm=1`, `min_grad_norm=1e-7` | ICA fits on the ASR-repaired, re-referenced copy (nothing cut); at most `--ica-max-iter` (4000) iterations, fewer when AMICA's own stops end it; rank `pcakeep = min(N_good - 1, 64)`, where `N_good` is the channel count after the floor's removal (the average reference takes one dimension) |
 | 13 | `iclabel` | `eegprep.pop_iclabel` | `icversion='default'` | eegprep's one network, `netICL.mat` |
 
+Then, at the checkpoint `quality`, the recipe's two quality plugins, each a step of the record named by the plugin and pinned by its version and source tree (`steps.PLUGINS`): `nemar-quality` 0.1.0 and `nemar-spectrum` 0.1.0, on the inputs [plugins.md](plugins.md#in-nemar-ica) states; a plugin that fails is a skip, `plugin_failed`, and the recording is kept.
+
 ASR's memory budget is fixed and recorded because a smaller or missing one makes `asr_process` replace it with half of the machine's free memory, and the cleaned data then depend on the machine: 1024 MB covers 64 channels up to a lookahead of about 10,000 samples (channels times channels times lookahead samples times 24 bytes).
 eegprep warns when the budget is below that, and the recipe listens to the warning for the length of the call (the command silences warnings for the whole run) and fails the recording with the detail `asr_maxmem`, writing nothing for it: a state that cannot reproduce its data is never written.
 pAMICA's own settings that eegprep does not pass are eegprep's `runamica15` table (`_AMICA_DEFAULTS`, as sccn/eegprep#617 merged it), and the record states every value:
@@ -683,6 +685,7 @@ RANSAC's `max_broken_time` of 0.5 matches legacy and eegprep's default; the high
 | `--ica-threads N` | 1 | threads for the whole run, recorded; one is the reproducible setting |
 | `--ica-max-iter N` | 4000 | the most iterations, recorded (AMICA's own stops may end the fit earlier), so that a short test product says so |
 | `--time-budget-s N` | none | as for every recipe |
+| `--serving-index FILE` | none | on a dataset directory only: the serving copy's `index.json`, from which the views of the serving copy take each recording's channel group ("The views" below); read once while the arguments are parsed, so a file that is not a serving index is exit 2, and `--input zarr` refuses the option (exit 2) |
 
 The registry's invocation is `pamica`, up to 4000 iterations, one thread, device `auto`; the options that change values (engine, iterations, threads) are for manual and test runs.
 A dispatch that passes one must first make it change the derivative key.
@@ -728,6 +731,7 @@ On the GPU and the CPU each recording is pAMICA's fit with the same seed and set
 - pamica or torch not importable: `no_pamica`;
 - `--ica-engine amica15` with the binary missing, not executable, or with a SHA-256 other than the one the image wrote beside it (`/opt/amica/amica15.sha256`): `no_amica15`.
 
+The same preflight then loads the recipe's pinned quality plugins ([plugins.md](plugins.md#in-nemar-ica)); a pin that cannot be loaded as declared is exit 1 with `plugin_unloadable: <plugin> <word>` (the loader's word, such as `pin_mismatch`), with nothing written either.
 No other engine is ever substituted.
 The device changes only under `auto`, by the rules above, and is always recorded.
 
@@ -745,6 +749,8 @@ sub-<id>/[ses-<id>/]eeg/<entities>_desc-nemarica_
   components.tsv   component, variance_pct, the seven ICLabel probabilities
   ica.json         what the run says (the record's `extensions.nemar.ica` block)
   chanlocs.tsv     the positions of the decomposition's channels: the layout of its views (below)
+  icclasses.json   nemar-quality's view: components by ICLabel class (plugins.md)
+  spectrum.tsv     nemar-spectrum's view: each good channel's spectrum (plugins.md)
   signalJourney.json
 ```
 
@@ -754,8 +760,10 @@ The record's `outputs` entry of each matrix carries its `shape`, `dtype`, `rowLa
 `_asr.json` is `json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=True)` plus one newline, so its digest is stable.
 `variance_pct` is the percent of the data's variance each component accounts for on its own (eegprep's `eeg_pvaf`), and the probabilities are ICLabel's, to six decimals.
 `LLt`, the per-frame log-likelihood the binary writes, is never stored.
-The recordings table has the columns `path`, `datatype`, `status`, `code`, `step`, `detail`, `n_channels`, `n_good_channels`, `duration_s`, `srate_hz`, `plan_hash`, `engine`, `rank`, `iterations`, `stop_reason`, `did_converge`, `final_ll`, `device`, `device_reason`, `fallback`, `asr_burst_fraction`, `pct_good_channels`, `pct_good_samples`, `line_db_before`, `pct_brain_components` and `record_content_sha256`.
-The floor's three are its values for the recording (the floor's table has the same columns), and `pct_brain_components` is nemar-quality's `nemar-quality:percentBrainComponents` in the recording's record, `n/a` when the plugin did not run (it is not yet wired into the recipe): a recipe never reports a plugin's value as its own (ADR 0137 C6).
+The recordings table has the columns `path`, `datatype`, `status`, `code`, `step`, `detail`, `n_channels`, `n_good_channels`, `duration_s`, `srate_hz`, `plan_hash`, `engine`, `rank`, `iterations`, `stop_reason`, `did_converge`, `final_ll`, `device`, `device_reason`, `fallback`, `asr_burst_fraction`, `pct_good_channels`, `pct_good_samples`, `line_db_before`, `pct_brain_components`, `skipped_steps` and `record_content_sha256`.
+The floor's three are its values for the recording (the floor's table has the same columns), and `pct_brain_components` is nemar-quality's `nemar-quality:percentBrainComponents` in the recording's record, `n/a` when the plugin was skipped: a recipe never reports a plugin's value as its own (ADR 0137 C6).
+`skipped_steps` is the floor's column: the plan's skips as `<step>:<reason>` pairs, comma-joined (`n/a` for none), so a quality plugin skipped as `plugin_failed` is counted as skipped at `quality` by nemar-cli's rules while the recording succeeds.
+`_icclasses.json` and `_spectrum.tsv` are the plugins' views, absent when the plugin was skipped (or, for the spectrum, when its layout is withheld); `_icclasses.json` belongs to the step `nemar-quality` and `_spectrum.tsv` to `nemar-spectrum`, the plugins' steps, which follow `iclabel` in the record.
 The record's recipe metrics are the floor's and `icaRank`, `icaIterations` and `asrBurstFraction` ("Recipe metrics" above), each produced by `nemar-ica`; `icaFinalLogLikelihood` and `icaDidConverge` stay summary metrics only.
 
 ### What the record says
@@ -770,6 +778,7 @@ The record's recipe metrics are the floor's and `icaRank`, `icaIterations` and `
 - ASR's `maxmem_mb`, the digest of its state (of the `_asr.json` bytes), the cutoff, the window and step it applied and the channels it names;
 - `decomposition_input`, `asr_burst_fraction`, `asr_bursts` and `browser_transform` ("The decomposition input and the browser weights" above);
 - `positions`: where the channels' positions came from, as the loader read them ("The views" below): `source` (`electrodes.tsv`, `embedded` or `none`), the `coordinate_system` and `coordinate_units` the dataset stated for them, each null when it stated none, and `withheld` (`frame_rotated` for positions eegprep's BIDS import turned, else null);
+- `serving_index`: on a dataset directory given `--serving-index`, the index it read: its `sha256` (of the file's bytes), the `dataset_id` and `source_commit` it names, and the recording's `row` (`path`, `group`, `rate`, `n_samples`), or null when it lists none; null on a dataset directory given no index and on the serving copy (whose store is `decomposition_input.store`);
 - the good-channel set and its count, ICLabel's version and the SHA-256 of its network file, and the input profile (`archive` for a dataset directory, `serving` for the Zarr serving copy);
 - the device facts: `device_requested`, `device` (the one that ran), `device_reason` (the resolution's reason, or `cuda_oom` or `gpu_contended` after a move), `fallback` (true exactly when `device_requested` is `auto` and the CPU ran), `gpu_memory_cap_mb` (the cap passed in `NEMAR_GPU_MEMORY_MB`, as the job read it when it first initialized CUDA; null when none was passed or the job never initialized CUDA), `gpu_allocator_limit_mb` (the most torch's allocator could reserve in the job's process, `min(cap, the GPU's memory)` in whole mebibytes, the GPU's memory when no cap was passed; null when the job never initialized CUDA; the CUDA context and the libraries' own memory come on top of it), `gpu_name` (CUDA only), `torch_version`, `torch_cuda`, `threads` and `image_flavor` (from `/opt/nemar/flavor`, null outside an image); `bit_reproducible` follows the device that ran the recording, so a refit on the CPU with one thread states true.
 
@@ -779,7 +788,7 @@ A merge of product directories (`aggregate`) ran no recording and states none of
 
 ### The views
 
-The record declares three quality views of its own (ADR 0137; neuroschema 0.6.0's `docs/views/presets.md`), each built by the views writer (`common/views.py`, `recipe_view`) over files of the product and named by their sizes and SHA-256 digests, in `extensions.nemar.views`, in this order:
+The record declares three quality views of its own (ADR 0137; neuroschema 0.6.0's `docs/views/presets.md`), each built by the views writer (`common/views.py`, `recipe_view`) over files of the product and named by their sizes and SHA-256 digests, in `extensions.nemar.views`, in this order, followed by the views of its quality plugins, nemar-quality's `icclasses` and nemar-spectrum's `spectrum` ([plugins.md](plugins.md#in-nemar-ica)):
 
 | Key | Kind | What it names |
 |---|---|---|
@@ -791,15 +800,19 @@ The record declares three quality views of its own (ADR 0137; neuroschema 0.6.0'
 Its type is the channel's as the floor's `_channels.tsv` writes it, and its places are as eegprep holds them after the chain: EEGLAB's theta (degrees) and radius, and x, y and z in millimeters in the frame eegprep takes for EEGLAB's (+x toward the nose, +y left, +z up), converted on loading from the unit and frame the dataset stated.
 That conversion is right for a frame eegprep reads as stated, and not for every frame: on a dataset directory its BIDS import reads every frame but EEGLAB's as right-anterior-superior (unless the coordsystem's description is `EEGLAB`), so positions in the frames BIDS defines as anterior-left-superior (`CTF`, `4DBti`, `KitYokogawa`) come out turned by 90 degrees (sccn/eegprep#692); eegprep-lean, the serving copy's reader, reads them as stated.
 For such a recording the record says so (`positions.withheld` is `frame_rotated`), every place of `_chanlocs.tsv` is `n/a`, no position known to be turned is written, and `icmaps` is listed in `views_skipped` with `frame_rotated` (a word of nemar-process's own) instead of maps drawn on turned positions; ICLabel itself classified on them, which nemarOrg/nemar-process#94 tracks.
+The layout is then withheld from the plugins with the same word (a layout over the caps with `cap_exceeded`), so nemar-spectrum's `spectrum`, drawn on it, is listed in `views_skipped` with that word too, never as `plugin_failed`: the plugin ran, and its spectrum, which passed every check, is not written.
 A channel the recording does not type stays untyped (`n/a`), and a scalp map draws only rows typed EEG from measured positions, so a recording whose channels are all untyped shows `no_eeg_sensors` in place of its maps: the view says why, and nothing guesses a type.
 The `layout` role reads `name`, `sensor_type`, `theta_deg` and `radius`, states `position_source` `measured` (the dataset's own positions, which NEMAR does not verify; no template is ever applied) and as its `coordinate_system` the BIDS name the dataset stated (its `_coordsystem.json`'s `EEGCoordinateSystem` on a dataset directory, the store's own on the serving copy), or `n/a` when it stated none; a layout carries no `cap_model` or `reference`, which neuroschema refuses on a layout.
 The record's `extensions.nemar.ica.positions` says the same: the loader's location source, what the dataset stated, and `withheld` (null, or the word for positions known to be misread).
 
-The two views of the serving copy name its store: on the Zarr input the store the decomposition read, with its group and its `nemar.store-content.v1` digest (the dataset record's `stores_content` row); on a dataset directory only when the caller names the serving copy's channel group (`outputs.write_product`'s `archive_group`), with no digest and the profile `archive`, matched by label and captioned "not checked against the decomposition input".
-The command names no group on a dataset directory, because a run of the archive reads no index of the serving copy, so such a run declares `icmaps` alone.
+The two views of the serving copy name its store: on the Zarr input the store the decomposition read, with its group and its `nemar.store-content.v1` digest (the dataset record's `stores_content` row); on a dataset directory the store and channel group the serving copy's own index lists for the recording, with no digest and the profile `archive`, matched by label and captioned "not checked against the decomposition input" (the lead's ruling of 2026-11-24 on open question 1).
+A run of a dataset directory reads no store of the serving copy, so it takes that index as a file (`--serving-index`, `common/serving_index.py`): read once, at most 64 MiB, as strict JSON, checked by the Zarr input's own `validate_document`, and named by the SHA-256 of its bytes in the record (`serving_index`).
+The recording's row is the store whose source path is the recording's path, in an index whose `dataset_id` is the run's `--dataset-id`, with exactly one EEG group: its name, rate and sample count.
+The group is never made up from a naming rule (the converter names a group after its resampling, `eeg_250hz`, which nothing here pins): with no index both views are listed in `views_skipped` with `no_serving_index`, and with an index that has no row for the recording (another dataset's, a run with no `--dataset-id`, no store at that path or two, no EEG group or two) with `not_in_serving_index`, words of nemar-process's own.
 `icactivity` is listed in `views_skipped` with `labels_unusable` when the channel labels cannot head the matrix's columns, and `midsegment` with `no_good_window` (a word of nemar-process's own, which dataQuality admits and a renderer shows as it is) when no two seconds of the recording lie inside the good-sample mask.
 
-The signal window is the two seconds inside the good-sample mask nearest the recording's middle (`pipeline.midsegment`): the mask is the samples the floor read that no row of `_badsegments.tsv` covers (the floor's bad windows and the spans ASR repaired), a window starting at sample `first` holds the samples `k` with `first / rate <= k / rate < first / rate + 2` (the times rule a renderer uses, never `ceil(2 * rate)`), and of the windows whose samples are all good the one with the least `|2 * first + 2 * rate - n|` is chosen, the earlier on a tie; `start_s` is `first / rate`.
+The signal window is the two seconds inside the good-sample mask nearest the recording's middle (`pipeline.midsegment`): the mask is the samples that no row of `_badsegments.tsv` covers (the floor's bad windows and the spans ASR repaired), a window starting at sample `first` holds the samples `k` with `first / rate <= k / rate < first / rate + 2` (the times rule a renderer uses, never `ceil(2 * rate)`), and of the windows whose samples are all good the one with the least `|2 * first + 2 * rate - n|` is chosen, the earlier on a tie; `start_s` is `first / rate`.
+The samples are the serving copy's, which a renderer draws: on the Zarr input those the floor read; on a dataset directory those of the row's grid (its rate and sample count; the converter may have resampled), where a sample is good when its time `k / rate` lies outside every span the floor's mask leaves out (`[start / rate, stop / rate)` on the floor's grid) and outside every row of `_badsegments.tsv` as written (`[onset, onset + duration)`, in its rounded seconds), so the window is good whichever a reader takes (`pipeline.grid_mask`, `outputs.serving_window`).
 
 What the writer makes sure of before it declares each one, and the words it refuses with, are `common/views.py`'s (`check_ic_maps`, `check_ic_activity`, `check_floor_tables`), held to neuroschema's preset-check and activation vectors (`tests/recipes/test_nemar_ica_views.py`).
 A view over the registry's caps (more than 1,024 channels, say, whose layout is read inside the maps' builder) is skipped with `cap_exceeded`; any other refusal is a fault of the recipe, and the recording fails (`internal_error`, the step `record`, the writer's word) with nothing written.
