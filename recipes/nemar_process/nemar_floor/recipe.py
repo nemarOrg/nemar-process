@@ -9,11 +9,14 @@ from __future__ import annotations
 from typing import Any
 
 from nemar_process.common import qc
-from nemar_process.common.recipe import INPUT_OPTION, Column, DatasetStep, Distribution, Recipe
+from nemar_process.common.recipe import (
+    INPUT_OPTION,
+    Column,
+    DatasetStep,
+    Recipe,
+    distributions_of,
+)
 from nemar_process.nemar_floor import outputs, steps
-
-PERCENT_EDGES = tuple(range(0, 101, 10))
-DB_EDGES = (-10, -5, 0, 5, 10, 15, 20, 30, 40)
 
 COLUMNS = (
     Column("path", "text"),
@@ -39,11 +42,10 @@ COLUMNS = (
     Column("record_content_sha256", "str"),
 )
 
-DISTRIBUTIONS = (
-    Distribution("percentGoodChannels", "pct_good_channels", PERCENT_EDGES),
-    Distribution("percentGoodSamples", "pct_good_samples", PERCENT_EDGES),
-    Distribution("lineNoiseBeforeDb", "line_db_before", DB_EDGES),
-    Distribution("lineNoiseAfterDb", "line_db_after", DB_EDGES),
+# The recipe metrics the dataset record and the dataset dataQuality document summarize.
+DISTRIBUTIONS = distributions_of(
+    outputs.RECIPE_METRICS,
+    ("percentGoodChannels", "percentGoodSamples", "lineNoiseBeforeDb", "lineNoiseAfterDb"),
 )
 
 

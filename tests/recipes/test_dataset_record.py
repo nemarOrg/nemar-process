@@ -200,20 +200,54 @@ def test_the_distributions_have_fixed_edges_and_count_each_value_once(mixed):
 
 def test_a_value_belongs_to_the_bin_that_starts_at_its_edge_and_the_last_bin_is_closed():
     edges = (0, 10, 20)
-    result = records.distribution([0, 9.9, 10, 20, 20.1, -0.1], edges)
+    result = records.distribution([0, 9.9, 10, 20, 20.1, -0.1], edges, "%")
     assert result["histogram"]["counts"] == [2, 2]  # 0, 9.9 | 10, 20 (the last bin is closed)
     assert (result["histogram"]["underflow"], result["histogram"]["overflow"]) == (1, 1)
     assert result["n"] == 6
+    assert (result["unit"], result["histogram"]["missing"]) == ("%", 0)
+    assert "description" not in result
+
+
+def test_a_missing_or_non_finite_value_is_counted_apart_never_binned():
+    """``n`` is the sum of the bins, underflow and overflow; a value that is None (the step that
+    measures it did not run) or not finite is in none of them, counted under ``missing``."""
+    values = [5, None, 15, float("nan"), None, float("inf")]
+    result = records.distribution(values, (0, 10, 20), "dB", "Line noise.")
+    histogram = result["histogram"]
+    assert (
+        result["n"]
+        == 2
+        == sum(histogram["counts"]) + histogram["underflow"] + histogram["overflow"]
+    )
+    assert histogram["missing"] == 4
+    assert (result["min"], result["median"], result["max"]) == (5, 10, 15)
+    assert result["description"] == "Line noise."
+    only_missing = records.distribution([None, None], (0, 10), "dB")
+    assert (only_missing["n"], only_missing["min"], only_missing["histogram"]["missing"]) == (
+        0,
+        None,
+        2,
+    )
 
 
 def test_a_distribution_of_nothing_has_no_statistics_not_zeros():
-    result = records.distribution([], (0, 10, 20))
+    result = records.distribution([], (0, 10, 20), "count")
     assert (result["n"], result["min"], result["median"], result["max"]) == (0, None, None, None)
     assert result["histogram"]["counts"] == [0, 0]
 
 
+def test_the_rounded_median_never_passes_the_extremes():
+    """A share's median rounded to four decimals could fall below its minimum or above its maximum;
+    it is held between them, so min <= median <= max always holds."""
+    result = records.distribution([0.00004, 0.00006], (0, 1), "fraction")
+    assert (result["min"], result["median"], result["max"]) == (0.00004, 0.00006, 0.00006)
+    result = records.distribution([0.00002, 0.00004], (0, 1), "fraction")
+    assert result["median"] == 0.00002  # 0.00003 rounds to 0.0, below the minimum
+    assert records.distribution([0.123456], (0, 1), "fraction")["median"] == 0.123456
+
+
 def test_the_median_of_two_values_is_their_mean():
-    assert records.distribution([87.5, 90.4762], (0, 100))["median"] == 88.9881
+    assert records.distribution([87.5, 90.4762], (0, 100), "%")["median"] == 88.9881
 
 
 def test_skipped_steps_are_counted_per_step_and_reason_for_succeeded_recordings(mixed):

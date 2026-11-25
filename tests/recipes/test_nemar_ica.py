@@ -24,6 +24,7 @@ from nemar_process import sj
 from nemar_process.common import build, determinism, device, files, io, records, versions
 from nemar_process.common.errors import EngineUnavailable, RecordingError
 from nemar_process.common.recipe import RunContext
+from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import RECIPE, engines, outputs, pipeline, steps, tally
 from nemar_process.nemar_ica.options import Settings
 from recipe_support import (
@@ -304,6 +305,45 @@ def test_the_recording_record_passes_every_check(tiny):
     _, _, product, _ = tiny
     assert records.check(product.record, sj.validator()) == []
     assert records.content_sha256(product.record) == product.row["record_content_sha256"]
+
+
+def test_the_record_holds_the_floors_and_nemar_icas_metrics_each_produced_by_nemar_ica(tiny):
+    """ADR 0137 C6: the floor's recipe metrics and nemar-ica's, under bare names, as neuroschema
+    ``qualityMetric`` objects whose producer is nemar-ica, never the floor it embeds."""
+    _, fit, product, _ = tiny
+    metrics = product.record["extensions"]["nemar"]["metrics"]
+    names = [m.name for m in (*floor_outputs.RECIPE_METRICS, *outputs.RECIPE_METRICS)]
+    assert sorted(metrics) == sorted(names)
+    assert records.metrics_problems(product.record) == []
+    for name in names:
+        assert metrics[name]["recipe"] == {
+            "name": "nemar-ica",
+            "version": PINNED_ICA_RECIPE_VERSION,
+        }
+    assert metrics["icaRank"]["value"] == fit.rank == product.row["rank"]
+    assert metrics["icaIterations"]["value"] == product.row["iterations"]
+    assert metrics["asrBurstFraction"]["value"] == product.row["asr_burst_fraction"]
+    assert metrics["percentGoodChannels"]["value"] == product.row["pct_good_channels"]
+
+
+def test_the_row_carries_the_floors_three_metrics_and_no_brain_share_without_its_plugin(tiny):
+    _, fit, product, _ = tiny
+    values = floor_outputs.metric_values(fit.floor_result)
+    row = product.row
+    assert row["pct_good_channels"] == values["percentGoodChannels"] is not None
+    assert row["pct_good_samples"] == values["percentGoodSamples"] is not None
+    assert row["line_db_before"] == values["lineNoiseBeforeDb"]
+    # nemar-quality is not wired into the recipe yet: its share is missing, never a recipe value
+    assert row["pct_brain_components"] is None
+    columns = [column.name for column in RECIPE.columns]
+    assert columns[-5:] == [
+        "pct_good_channels",
+        "pct_good_samples",
+        "line_db_before",
+        "pct_brain_components",
+        "record_content_sha256",
+    ]
+    assert set(row) == set(columns)
 
 
 # ---- test 8: the pamica block, and what the record says about reproducibility --------------------
@@ -699,6 +739,44 @@ def dataset_record_of(out: Path) -> dict:
     return json.loads((out / "desc-nemarica_signalJourney.json").read_text(encoding="utf-8"))[
         "extensions"
     ]["nemar"]
+
+
+def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(cli, tmp_path):
+    """nemar-ica writes the neuroschema dataset document too: its own three metrics, the floor's three
+    that the legacy summary bounded, and nemar-quality's brain share, missing for every recording
+    until the plugin runs in the recipe."""
+    from nemar_process.common import dataquality
+
+    dataset = located_dataset(tmp_path / "ds", subjects=2)
+    out = tmp_path / "o"
+    assert cli("run", "nemar-ica", "--dataset-dir", dataset, "--out", out, *run_args())[0] == 0
+    document = json.loads((out / "desc-nemarica_dataquality.json").read_text(encoding="utf-8"))
+    assert dataquality.problems(document) == []
+    (entry,) = document["recipes"].values()
+    assert list(document["recipes"]) == ["nemar-ica"]
+    assert entry["counts"] == {"passed": 2, "failed": 0, "skipped": 0, "total": 2}
+    units = {name: spec["unit"] for name, spec in entry["distributions"].items()}
+    assert units == {
+        "icaRank": "count",
+        "icaIterations": "count",
+        "asrBurstFraction": "fraction",
+        "percentGoodChannels": "%",
+        "percentGoodSamples": "%",
+        "lineNoiseBeforeDb": "dB",
+        "nemar-quality:percentBrainComponents": "%",
+    }
+    brain = entry["distributions"]["nemar-quality:percentBrainComponents"]
+    assert (brain["n"], brain["histogram"]["missing"]) == (0, 2)
+    assert entry["observed_range"]["nemar-quality:percentBrainComponents"] == {
+        "min": None,
+        "max": None,
+    }
+    rank = entry["distributions"]["icaRank"]
+    assert rank["n"] == 2
+    assert entry["observed_range"]["icaRank"] == {"min": rank["min"], "max": rank["max"]}
+    rows = table_of(out)
+    assert {row["rank"] for row in rows} == {str(rank["min"]), str(rank["max"])}
+    assert all(row["pct_brain_components"] == "n/a" for row in rows)
 
 
 @pytest.fixture

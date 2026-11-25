@@ -11,6 +11,7 @@ list of steps the dataset record states, and the function that processes one rec
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from collections.abc import Callable, Mapping
@@ -93,13 +94,99 @@ class Column:
             )
 
 
+# A metric's name (neuroschema's ``metricName``): a recipe's own by a bare name, a plugin's by
+# ``<plugin>:<name>``; at most 128 characters.
+METRIC_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*(:[A-Za-z][A-Za-z0-9_-]*)?")
+BARE_METRIC_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+METRIC_NAME_MAX = 128
+UNIT_MAX = 32  # neuroschema's qualityMetric and distribution `unit`
+DESCRIPTION_MAX = 500  # and their `description`
+
+
+def _check_text(name: str, unit: str, description: str) -> None:
+    if not isinstance(unit, str) or not 1 <= len(unit) <= UNIT_MAX:
+        raise ValueError("metric {!r}: a unit is 1 to {} characters".format(name, UNIT_MAX))
+    if not isinstance(description, str) or not 1 <= len(description) <= DESCRIPTION_MAX:
+        raise ValueError(
+            "metric {!r}: a description is 1 to {} characters".format(name, DESCRIPTION_MAX)
+        )
+
+
 @dataclass(frozen=True)
 class Distribution:
-    """A summary of one numeric column of the table: counts in fixed bins, with min, median, max."""
+    """A summary of one numeric column of the table: counts in fixed bins, with min, median, max.
 
-    name: str  # the key under summaryMetrics
+    ``name`` is the key under the dataset record's ``summaryMetrics`` and the dataset ``dataQuality``
+    document's ``distributions``: a recipe metric's bare name (``RecipeMetric.distribution``), or a
+    plugin's ``<plugin>:<name>`` for a column the recipe fills from that plugin's metric. ``unit`` and
+    ``description`` are the metric's, as its producer states them; the edges are strictly ascending
+    finite numbers, at least two.
+    """
+
+    name: str
     column: str  # the table column it summarizes
     edges: tuple[float, ...]  # whole numbers for counts, fractions for a share
+    unit: str
+    description: str
+
+    def __post_init__(self) -> None:
+        if len(self.name) > METRIC_NAME_MAX or not METRIC_NAME_RE.fullmatch(self.name):
+            raise ValueError("{!r} is not a metric name".format(self.name))
+        _check_text(self.name, self.unit, self.description)
+        edges = self.edges
+        if len(edges) < 2 or not all(
+            isinstance(edge, (int, float)) and not isinstance(edge, bool) and math.isfinite(edge)
+            for edge in edges
+        ):
+            raise ValueError("{}: at least two finite edges".format(self.name))
+        if any(low >= high for low, high in itertools.pairwise(edges)):
+            raise ValueError("{}: the edges are strictly ascending".format(self.name))
+
+
+@dataclass(frozen=True)
+class RecipeMetric:
+    """One metric a recipe writes into each recording's record (``RECIPE_METRICS``, ADR 0137 C6).
+
+    The record holds it as a neuroschema ``qualityMetric`` with the recipe as its producer, under
+    ``extensions.nemar.metrics`` (``records.recipe_metrics``): a bare name, the unit and the
+    one-sentence description, and the valid range when the metric has one (``bounds``, either end
+    None when open; never a quality threshold). A metric the dataset document summarizes names its
+    table ``column`` and its histogram ``edges`` (both, or neither).
+    """
+
+    name: str
+    unit: str
+    description: str
+    bounds: tuple[float | None, float | None] | None = None
+    column: str | None = None
+    edges: tuple[float, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.name) > METRIC_NAME_MAX or not BARE_METRIC_RE.fullmatch(self.name):
+            raise ValueError("a recipe metric has a bare name: {!r}".format(self.name))
+        _check_text(self.name, self.unit, self.description)
+        if self.bounds is not None:
+            low, high = self.bounds
+            if low is not None and high is not None and low > high:
+                raise ValueError("{}: bounds with min above max".format(self.name))
+        if (self.column is None) != (self.edges is None):
+            raise ValueError("{}: a column and its edges, or neither".format(self.name))
+        if self.edges is not None:
+            self.distribution()  # the edges are checked as a distribution's
+
+    def distribution(self) -> Distribution:
+        """The dataset summary of the metric's column; ``ValueError`` for a metric with none."""
+        if self.column is None or self.edges is None:
+            raise ValueError("{} is not summarized over the dataset".format(self.name))
+        return Distribution(self.name, self.column, self.edges, self.unit, self.description)
+
+
+def distributions_of(
+    metrics: tuple[RecipeMetric, ...], names: tuple[str, ...]
+) -> tuple[Distribution, ...]:
+    """The distributions of the named recipe metrics, in the order named."""
+    by_name = {metric.name: metric for metric in metrics}
+    return tuple(by_name[name].distribution() for name in names)
 
 
 @dataclass(frozen=True)
@@ -298,6 +385,17 @@ class Recipe:
     def __post_init__(self) -> None:
         if self.checkpoints:
             check_checkpoints(self.checkpoints)
+        numeric = {column.name for column in self.columns if column.kind in ("int", "float")}
+        names = [spec.name for spec in self.distributions]
+        if len(set(names)) != len(names):
+            raise ValueError("a recipe summarizes each metric once")
+        for spec in self.distributions:
+            if spec.column not in numeric:
+                raise ValueError(
+                    "{} summarizes {!r}, not a numeric column of the table".format(
+                        spec.name, spec.column
+                    )
+                )
         identity = (self.info.id, self.info.version, self.info.label)
         kinds = [self.input]
         for variant in self.variants:
