@@ -9,7 +9,6 @@ replaced, and the command is run in this process.
 
 from __future__ import annotations
 
-import argparse
 import dataclasses
 import hashlib
 import json
@@ -225,29 +224,60 @@ def test_a_file_that_cannot_be_read_is_refused_by_a_phrase_that_names_no_path(tm
     with pytest.raises(serving_index.IndexUnusable) as refused:
         serving_index.read(missing)
     assert "secret-name" not in str(refused.value)
-    # as the option's value, the same phrase is the usage error argparse prints
-    with pytest.raises(argparse.ArgumentTypeError) as usage:
-        serving_index.serving_index(str(missing))
-    assert str(usage.value) == "the serving index cannot be read"
+    # as the option's value it never ends the run: an index with no digest that lists nothing
+    given = serving_index.serving_index(str(missing))
+    assert (given.unusable, given.sha256) == (True, None)
+    resolved = given.resolve(PATH, DATASET, COMMIT)
+    assert resolved == serving_index.Resolution(None, serving_index.UNUSABLE)
+    assert given.facts(resolved)["reason"] == "serving_index_unusable"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"{}", b"\xef\xbb\xbf{}", b'{"stores": [], "stores": []}', b"[]", b"not json", b"\xff\xfe"],
+    ids=["no_stores", "byte_order_mark", "repeated_name", "array", "not_json", "not_utf8"],
+)
+def test_an_index_the_run_cannot_use_lists_nothing_and_says_why(tmp_path, data):
+    """Handed a file it cannot use, the run goes on (nemar-cli ADR 0141 as amended): every recording
+    resolves to serving_index_unusable, the record names the bytes' digest, and no row is ever listed."""
+    path = tmp_path / "index.json"
+    path.write_bytes(data)
+    given = serving_index.serving_index(str(path))
+    assert given.unusable
+    assert given.sha256 == hashlib.sha256(data).hexdigest()
+    resolved = given.resolve(PATH, DATASET, COMMIT)
+    assert resolved == serving_index.Resolution(None, "serving_index_unusable")
+    assert given.facts(resolved) == {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "dataset_id": None,
+        "source_commit": None,
+        "row": None,
+        "reason": "serving_index_unusable",
+    }
+    assert not given.lists(
+        serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 1, given.sha256 or "")
+    )
+
+
+def test_a_usable_index_through_the_option_is_the_parsed_one(tmp_path):
+    path = tmp_path / "index.json"
+    path.write_text(text(), encoding="utf-8")
+    given = serving_index.serving_index(str(path))
+    assert not given.unusable
+    assert given.resolve(PATH, DATASET, COMMIT).row is not None
 
 
 # ---- the command ------------------------------------------------------------------------------------
 
 
-def test_a_serving_index_that_is_refused_is_a_usage_error_before_anything_is_made(
-    cli, capsys, tmp_path
-):
+def test_a_serving_index_the_run_cannot_use_is_no_usage_error(cli, capsys, tmp_path):
+    """Before the amendment such a file ended the run with exit 2; now the run goes on without it."""
     bad = tmp_path / "index.json"
     bad.write_text("{}", encoding="utf-8")
     out = tmp_path / "o"
-    with pytest.raises(SystemExit) as stopped:
-        cli("run", "nemar-ica", "--dataset-dir", tmp_path, "--out", out, "--serving-index", bad)
-    assert stopped.value.code == 2
-    assert not out.exists()
-    # the operator reads why: the refusal's fixed phrase, and no path
-    err = capsys.readouterr().err
-    assert "argument --serving-index: the serving index is not usable (stores is not a list)" in err
-    assert str(tmp_path) not in err
+    code = cli("run", "nemar-ica", "--dataset-dir", tmp_path, "--out", out, "--serving-index", bad)
+    assert code != 2
+    assert "--serving-index" not in capsys.readouterr().err
 
 
 def test_the_serving_copy_takes_no_serving_index(cli, tmp_path):

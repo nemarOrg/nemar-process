@@ -90,10 +90,10 @@ def check_layout(data: bytes, root: Path) -> list[str]:
             problems.append("the nemar_launch package is missing from lib/")
         if any(n not in SCRIPTS and not n.startswith("lib/") for n in names):
             problems.append("something other than lib/ and the scripts is at the root")
-        schema = root / "launcher" / "schema" / "launch-spec.v1.json"
+        schema = root / "launcher" / "schema" / "launch-spec.v2.json"
         if (
-            "lib/schema/launch-spec.v1.json" not in names
-            or archive.read("lib/schema/launch-spec.v1.json") != schema.read_bytes()
+            "lib/schema/launch-spec.v2.json" not in names
+            or archive.read("lib/schema/launch-spec.v2.json") != schema.read_bytes()
         ):
             problems.append("the schema in the zip is not the repository's copy")
     return problems

@@ -1,4 +1,7 @@
-"""The launch specification `nemar.launch-spec.v1`: read, decode, size-check, hash, parse, validate.
+"""The launch specification `nemar.launch-spec.v2`: read, decode, size-check, hash, parse, validate.
+
+Version 2 adds one optional member to version 1, ``serving_index`` (the SHA-256 and size of the serving
+index the Worker staged, fetched by ``serving_index.py``); every version 1 document is a version 2 one.
 
 The document is the JSON text written by NEMAR's Worker: compact, printable ASCII only (every byte
 0x20 to 0x7e), at most 64 KiB. It travels as ONE scheduler environment value, ``NEMAR_LAUNCH_SPEC``,
@@ -11,7 +14,7 @@ is the base64url encoding (RFC 4648 section 5, no padding, no line break) of the
 
 ``decode_wire`` is the strict decoder (stdlib only, bounded, silent about the value) and mirrors
 nemar-cli's ``decodeLaunchSpecEnv`` rule for rule; ``parse`` decodes and then validates the text
-against the JSON Schema this launcher ships (``launcher/schema/launch-spec.v1.json``, copied byte
+against the JSON Schema this launcher ships (``launcher/schema/launch-spec.v2.json``, copied byte
 for byte from nemar-cli), by a small validator below, because the launcher may use only the standard
 library. There is no legacy form: a raw JSON value is refused like any other value that is not
 base64url.
@@ -55,7 +58,7 @@ _ALPHABET_BYTES = WIRE_ALPHABET.encode("ascii")
 _PRINTABLE_BYTES = bytes(range(0x20, 0x7F))  # space to tilde: the only bytes a text may hold
 _TO_STANDARD = bytes.maketrans(b"-_", b"+/")
 _TO_URLSAFE = bytes.maketrans(b"+/", b"-_")
-SCHEMA_FILE = "launch-spec.v1.json"
+SCHEMA_FILE = "launch-spec.v2.json"
 LOCAL_SCHEMA_FILE = "compute-local-launch.v1.json"
 LOCAL_FORMAT = "nemar.local-launch.v1"
 PLACEHOLDER_JOB_ID = "job_" + "0" * 24
@@ -482,6 +485,8 @@ class Spec(Job):
         super().__init__(document, digest, document["job_id"])
         self.datasets: list[dict[str, Any]] = list(document["datasets"])
         self.data_names = [dataset["id"] for dataset in self.datasets]
+        # The serving index the Worker staged (version 2): its SHA-256 and size, or None.
+        self.serving_index: dict[str, Any] | None = document.get("serving_index")
         self.api_base: str = document["api_base"]
         self.max_files: int = document["limits"]["max_files"]
         self.max_total_bytes: int = document["limits"]["max_total_bytes"]

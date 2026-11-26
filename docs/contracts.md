@@ -6,7 +6,7 @@ Abbreviations: continuous integration (CI), JavaScript Object Notation (JSON), S
 
 | What | Where it is written | Copy here |
 |---|---|---|
-| The launch specification schema `nemar.launch-spec.v1`, with the `$defs` of the bundle response, the outputs request and response, and the launcher's `result`, `manifest` and `provenance` | `shared/contract/compute-launch.schema.json` | `launcher/schema/launch-spec.v1.json`, byte for byte |
+| The launch specification schema `nemar.launch-spec.v2` (version 1 and the optional `serving_index`, nemar-cli ADR 0141), with the `$defs` of the bundle response, the serving index response, the outputs request and response, and the launcher's `result`, `manifest` and `provenance` | `shared/contract/compute-launch.schema.json` | `launcher/schema/launch-spec.v2.json`, byte for byte |
 | The seven failure codes and exit numbers 10 to 16 | `shared/compute-state.ts` (`LAUNCHER_FAILURE_CODES`) | `launcher/nemar_launch/codes.py` |
 | The launcher file names, the environment names (including `NEMAR_SIF_ROOT`), the environment allowlist, the output limits | `shared/contract/compute.ts` (`LAUNCHER_FILE_NAMES`, `LAUNCHER_ENV`, `JOB_ENV_ALLOWLIST`, `COMPUTE_MAX_OUTPUT_FILES`, `RESULT_MAX_FILE_BYTES`) | `launcher/nemar_launch/codes.py` and the schema's `env` |
 | The declared details per failure code, and which are the platform's | `shared/compute-state.ts` (`LAUNCHER_DETAILS`, `PLATFORM_LAUNCHER_DETAILS`, `RESULT_REFUSAL_DETAILS`) | `codes.LAUNCHER_DETAILS`, `codes.PLATFORM_LAUNCHER_DETAILS`, `codes.RESULT_REFUSAL_DETAILS` |
@@ -55,8 +55,8 @@ When the schema lands on nemar-cli `dev`, bump the pin to the commit of `dev` th
 ```bash
 NEMAR_CLI=/path/to/nemar-cli          # a checkout that contains the new commit
 REF=<the new nemar-cli commit, 40 hex digits>
-git -C "$NEMAR_CLI" show "$REF:shared/contract/compute-launch.schema.json" > launcher/schema/launch-spec.v1.json
-shasum -a 256 launcher/schema/launch-spec.v1.json && wc -c < launcher/schema/launch-spec.v1.json
+git -C "$NEMAR_CLI" show "$REF:shared/contract/compute-launch.schema.json" > launcher/schema/launch-spec.v2.json
+shasum -a 256 launcher/schema/launch-spec.v2.json && wc -c < launcher/schema/launch-spec.v2.json
 # edit tests/contract/nemar-cli-pin.json: ref, schema.sha256, schema.bytes
 git -C "$NEMAR_CLI" checkout --detach "$REF"    # the table is written from the working tree
 (cd "$NEMAR_CLI" && bun install --frozen-lockfile --ignore-scripts --production)   # no lifecycle script: husky would set core.hooksPath

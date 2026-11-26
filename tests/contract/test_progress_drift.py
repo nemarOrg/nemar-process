@@ -219,7 +219,7 @@ SHARED_MEMBERS = ("runtime", "entry", "command", "args", "bundle", "image", "env
 
 def test_the_local_launch_shares_the_launch_specifications_members_and_rules():
     local = copied("local_launch")
-    launch = json.loads((ROOT / "launcher" / "schema" / "launch-spec.v1.json").read_text())
+    launch = json.loads((ROOT / "launcher" / "schema" / "launch-spec.v2.json").read_text())
     for name in SHARED_MEMBERS:
         assert local["properties"][name] == launch["properties"][name], name
     for rule in ("oneOf", "if", "then"):

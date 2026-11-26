@@ -27,6 +27,7 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
         --mount type=bind,src=<host>,dst=/work  --mount type=bind,src=<host>,dst=/tmp
         [--mount type=bind,src=<host>,dst=/code,readonly]
         [--mount type=bind,src=<host>,dst=/data/<id>,readonly ...]
+        [--mount type=bind,src=<host>,dst=/data/serving-index,readonly]
         [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
         --env NEMAR_OUT=/work/outputs  [--env NEMAR_DEVICE=... --env NEMAR_DEVICE_REASON=...
         [--env NEMAR_GPU_MEMORY_MB=...]]  <image.uri>  <entry or command> <args>

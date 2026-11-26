@@ -205,6 +205,7 @@ run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --
     --mount type=bind,src=<out>/work,dst=/work  --mount type=bind,src=<scratch>/tmp,dst=/tmp
     [--mount type=bind,src=<scratch>/code,dst=/code,readonly]
     [--mount type=bind,src=<dataset dir>,dst=/data/<id>,readonly ...]
+    [--mount type=bind,src=<scratch>/serving-index,dst=/data/serving-index,readonly]
     [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
     --env NEMAR_OUT=/work/outputs
     [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
@@ -252,7 +253,7 @@ It skips where there is no usable daemon and fails in the CI job that sets `NEMA
 
 The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`.
 The document is JSON text, printable ASCII only (every byte is 0x20 to 0x7E: a control character is a JSON escape, and every character at or above U+007F, DEL included, is a `\uXXXX` escape), at most 64 KiB.
-`launcher/schema/launch-spec.v1.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
+`launcher/schema/launch-spec.v2.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
 The launcher validates against it with a small validator of its own, because it may use only the standard library; a schema keyword the validator does not implement is an error, never ignored.
 
 ### The environment value: base64url
@@ -313,6 +314,7 @@ No job with a real token is to be submitted before then either ([unverified.md](
 | `entry` or `command` | exactly one: a path inside the bundle, or an argument vector for an image job |
 | `args` | arguments, after the entry or the command |
 | `bundle` | `{sha256, size}` of the code archive; required with `entry`, optional with `command`; no URL |
+| `serving_index` | `{sha256, size}` of the serving index the Worker staged for the job (version 2; [serving index](#serving-index)); optional; no URL |
 | `datasets` | `[{id, version, include?}]`, each id at most once; `version` is the data-plane tag; `include` is a list of globs |
 | `api_base` | NEMAR's API; the launcher calls it with `job_token`; HTTPS, or HTTP on loopback only |
 | `image` | `{uri, digest, sif}`; `sif` is `<64 hex digits of the digest>.sif`, relative to `NEMAR_SIF_ROOT` |
@@ -378,6 +380,7 @@ The arguments are built in one function (`run.build_argv`) and pinned by tests:
 exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
      --bind <out>/work:/work  --bind <scratch>/tmp:/tmp
      [--bind <scratch>/code:/code:ro]  [--bind <dataset>:/data/<id>:ro ...]
+     [--bind <scratch>/serving-index:/data/serving-index:ro]
      [--nv]  --env <name>=<value> ... [--env CUDA_VISIBLE_DEVICES=<ids>]  --env NEMAR_OUT=/work/outputs
      [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
      <image> <entry or command> <args>
@@ -391,7 +394,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
   The runtime reads each `--env` argument as a CSV record, so a value with a comma or a double quote is passed quoted as CSV (`"NAME=a,b"`, the quote doubled); the tests run that against a real runtime.
 - The runtime process itself gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR` and `XDG_RUNTIME_DIR`, because `APPTAINERENV_*` and `SINGULARITY_BIND` style variables in the launcher's environment would otherwise be honoured.
 - `launcher/` is a sibling of `work/` and is not mounted, so the container can neither read nor forge the result, the provenance or the manifest.
-- `/code` and `/data/<id>` are read-only.
+- `/code`, `/data/<id>` and `/data/serving-index` are read-only.
 - The container is started in a session of its own, with `oom_score_adj` raised to 1000, so the kernel's OOM killer ends the entry rather than the launcher that has to record it.
   After a SIGTERM the container gets 10 seconds to stop, and the whole process group is then killed (a process that is PID 1 of its namespace ignores a SIGTERM it has no handler for); whatever the entry left running in the group is killed when the container exits.
 - **The launcher enforces the end time itself.**
@@ -430,6 +433,13 @@ An archive is refused whole when a member is absolute, contains `..` or an empty
 `tar -czf bundle.tar.gz -C dir .` writes `.` and `./name`: a leading `./` is stripped and the root entry is allowed.
 Reading is bounded: more than 100,000 members (counted while the headers are read), more than 4 GiB of file data, a decompressed stream past that plus 128 MiB, or a long-name or pax header over 1 MiB is `archive_too_large`.
 Extraction is hand-written, creates regular files and directories only, and removes the setuid, setgid, sticky and group and world write bits.
+
+## Serving index
+
+A specification of version 2 (`nemar.launch-spec.v2`) may carry `serving_index`, the SHA-256 and size of the serving copy's `index.json` that NEMAR's Worker staged for a recipe run of the archive copy (nemar-cli ADR 0141); every version 1 document is a version 2 document.
+After the datasets are staged, `POST <api_base>/compute/jobs/<job_id>/serving-index` with the token returns a ten-minute presigned address of that copy, which the launcher downloads to scratch with the same retry, size and SHA-256 checks as a dataset file, before the container runs and so before the job's network is fenced.
+The file is placed at `<scratch>/serving-index/index.json`, read-only, in a read-only directory that is bound read-only at `/data/serving-index`: the Worker names `/data/serving-index/index.json` after `--serving-index` in the job's arguments.
+Any failure ends the job `dataset_fetch_failed` before the container runs: `serving_index_mismatch`, the platform's, for a size or SHA-256 that differs, and `fetch_failed`, `bad_response` or `disk_error` as for the bundle.
 
 ## Datasets
 
@@ -539,7 +549,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 |---|---|---|
 | 0 | none | nothing failed |
 | 10 | `code_fetch_failed` | the bundle route refused, the download failed, the digest or size differs, the archive is unsafe |
-| 11 | `dataset_fetch_failed` | a manifest, file, checksum, size, path or cap failure while staging |
+| 11 | `dataset_fetch_failed` | a manifest, file, checksum, size, path or cap failure while staging, or a staged serving index that cannot be fetched or is not the one named |
 | 12 | `entry_not_found` | the entry is not a file in the bundle |
 | 13 | `runtime_error` | the entry exited non-zero; an unsupported runtime or invalid specification; the output directory, bind sources, PID namespace, runtime or image refused; an output that cannot be read; a SIGTERM before the time limit |
 | 14 | `out_of_memory` | exit status 137 (SIGKILL) |
@@ -551,7 +561,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 | Code | Details |
 |---|---|
 | `code_fetch_failed` | `unsafe_archive`, `archive_too_large`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `digest_mismatch`, `size_mismatch`, `content_missing`, `disk_error` |
-| `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error` |
+| `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error`, `serving_index_mismatch` |
 | `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `image_unverified`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
 | `result_upload_failed` | `results_too_large`, `results_quota_exceeded`, `too_many_outputs`, `outputs_unreadable`, `bad_response`, `fetch_failed`, `incomplete_plan`, `upload_failed`, `outputs_refused`, `complete_refused`, `internal_error` |
 | `entry_not_found`, `out_of_memory`, `time_limit` | none |
