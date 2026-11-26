@@ -76,8 +76,12 @@ class LocationGuard:
 
 
 def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
-    """At least half of the signal channels and at least four have finite X, Y, Z, and the
+    """More than half of the signal channels and at least four have finite X, Y, Z, and the
     unit-length position vectors have numerical rank 3.
+
+    More than half, as ``clean_channels`` requires since sccn/eegprep#650 (``clean_channels.m``'s
+    ``length([chanlocs.X]) > n/2``): exactly half located would be refused there with a
+    ``ValueError``, so it takes the no-locations branch here.
 
     ``clean_channels`` raises nothing for positions that are one point, a line or a plane through
     the origin and silently removes a large part of the channels (sccn/eegprep#539), so the rank is tested
@@ -90,13 +94,33 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
         if flag
     ]
     n_located = len(points)
-    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located < len(chanlocs):
+    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located <= len(chanlocs):
         return LocationGuard(False, flags)
     matrix = np.asarray(points, dtype=np.float64)
     lengths = np.sqrt((matrix**2).sum(axis=1))
     unit = matrix[lengths > 0] / lengths[lengths > 0][:, None]
     rank = int(np.linalg.matrix_rank(unit)) if len(unit) else 0
     return LocationGuard(rank >= 3, flags)
+
+
+def unlocated_cleared(eeg: dict[str, Any], located: tuple[bool, ...]) -> dict[str, Any]:
+    """A shallow copy of ``eeg`` in which each channel the guard counts as unlocated (``located``)
+    has no X, Y or Z, for ``clean_channels``.
+
+    eegprep's ``chanloc_has_coords``, which the guard follows, counts a channel with a NaN coordinate
+    as unlocated; ``clean_channels`` counts it as located (sccn/eegprep#650) and then refuses the
+    non-finite position with a ``ValueError`` (sccn/eegprep#609). Handed None, which both count as
+    missing, RANSAC uses the channels the guard counted, as it did before those changes. Only the
+    copy's channel list is new: the recording's own entries are not changed.
+    """
+    chanlocs = list(eeg["chanlocs"])
+    if len(located) != len(chanlocs):
+        raise ValueError("one located flag per channel")
+    cleared = [
+        chanloc if flag else {**chanloc, "X": None, "Y": None, "Z": None}
+        for chanloc, flag in zip(chanlocs, located, strict=True)
+    ]
+    return {**eeg, "chanlocs": cleared}
 
 
 # ---- spectra ----------------------------------------------------------------------------------

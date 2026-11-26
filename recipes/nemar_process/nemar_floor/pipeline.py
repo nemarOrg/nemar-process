@@ -316,7 +316,10 @@ def process(
             if guard.usable:
                 branch = "ransac"
                 recipe.add_rule("locations-usable")
-                work = clean_channels(work, **steps.ransac_call(embedding))
+                # the channels the guard counted as unlocated carry no position for RANSAC
+                work = clean_channels(
+                    qc.unlocated_cleared(work, located), **steps.ransac_call(embedding)
+                )
                 function, parameters = steps.RANSAC_FUNCTION, steps.ransac_parameters(embedding)
             elif srate > steps.MIN_NOLOCS_SRATE_HZ:
                 branch = "nolocs"

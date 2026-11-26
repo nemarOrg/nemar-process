@@ -323,6 +323,32 @@ def test_fewer_than_half_of_the_channels_located_is_not_usable():
     assert qc.location_guard(chanlocs_of(list(head(11)) + [None] * 10)).usable is True
 
 
+def test_exactly_half_of_the_channels_located_is_not_usable():
+    """``clean_channels`` needs more than half of the channels located (sccn/eegprep#650) and raises
+    on exactly half, so exactly half takes the no-locations branch."""
+    guard = qc.location_guard(chanlocs_of(list(head(10)) + [None] * 10))
+    assert (guard.usable, guard.n_located, len(guard.located)) == (False, 10, 20)
+    assert qc.location_guard(chanlocs_of(list(head(11)) + [None] * 10)).usable is True
+
+
+def test_unlocated_channels_reach_ransac_with_no_position_and_the_recording_keeps_its_own():
+    chanlocs = chanlocs_of([*head(3), (float("nan"), 1.0, 2.0)])
+    chanlocs[1]["theta"] = 12.5
+    eeg = {"chanlocs": chanlocs, "data": np.zeros((4, 3))}
+    guard = qc.location_guard(chanlocs)
+    assert guard.located == (True, True, True, False)
+    cleared = qc.unlocated_cleared(eeg, guard.located)
+    assert [c["X"] is None for c in cleared["chanlocs"]] == [False, False, False, True]
+    assert (cleared["chanlocs"][3]["Y"], cleared["chanlocs"][3]["Z"]) == (None, None)
+    assert cleared["chanlocs"][:3] == chanlocs[:3]
+    assert cleared["chanlocs"][1]["theta"] == 12.5
+    assert cleared["data"] is eeg["data"]
+    assert np.isnan(chanlocs[3]["X"])  # the recording's own entry is unchanged
+    assert chanlocs[3]["Y"] == 1.0
+    with pytest.raises(ValueError, match="one located flag per channel"):
+        qc.unlocated_cleared(eeg, guard.located[:3])
+
+
 def test_fewer_than_four_located_channels_is_not_usable_even_when_they_are_most_of_the_set():
     guard = qc.location_guard(chanlocs_of(list(head(3))))
     assert (guard.usable, guard.n_located) == (False, 3)
