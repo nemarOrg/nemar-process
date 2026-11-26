@@ -4,14 +4,15 @@ A recipe is a short, fixed sequence of eegprep calls that annotates every electr
 The first recipe is `nemar-floor`, which reads a dataset directory (`--input bids`, the default) or NEMAR's Zarr serving copy (`--input zarr`): one recipe, one name, one version and one set of steps, with the input an argument.
 The second is `nemar-ica`, the decomposition of the floor's cleaned data into independent components (below); it takes its input the same way.
 The command that runs recipes is `nemar-recipe` (`python -m nemar_process` outside the image).
-How each recipe's steps map to checkpoints, and how progress will be reported live, is planned in [progress.md](progress.md); quality metrics and views as plugins are described in [plugins.md](plugins.md).
+How each recipe's steps map to checkpoints, and how progress is reported live, is in [progress.md](progress.md); quality metrics and views as plugins are described in [plugins.md](plugins.md).
 
 Abbreviations used here: ICLabel (EEGLAB's classifier of independent components; a name, not an abbreviation), pAMICA (the Python implementation of AMICA, whose package is `pamica`), independent component analysis (ICA), adaptive mixture ICA (AMICA), artifact subspace reconstruction (ASR), central processing unit (CPU), graphics processing unit (GPU), Compute Unified Device Architecture (CUDA), Brain Imaging Data Structure (BIDS), European Data Format (EDF), BioSemi Data Format (BDF), EEGLAB (the electroencephalography toolbox for MATLAB) dataset file (SET), tab-separated values (TSV), JavaScript Object Notation (JSON), Secure Hash Algorithm 256 (SHA-256), quality control (QC), random sample consensus (RANSAC), median absolute deviation (MAD), Singularity Image Format (SIF), Hypertext Transfer Protocol Secure (HTTPS), hertz (Hz), decibel (dB), microvolt (uV), continuous integration (CI), termination signal (SIGTERM), kill signal (SIGKILL), kilobyte (KB, 1,024 bytes), mebibyte (MiB, 1,048,576 bytes), megabyte (MB, 10^6 bytes), gigabyte (GB, 10^9 bytes), Unicode Transformation Format with 8-bit units (UTF-8), American Standard Code for Information Interchange (ASCII).
 
 Two rules bind every recipe (see [`AGENTS.md`](../AGENTS.md)).
 A recipe holds no numerics: every signal-processing call is an eegprep function, and a step eegprep lacks is added to eegprep upstream, never written here.
 `tests/recipes/test_upstream_first.py` scans the package and fails on a filter, a window, a decomposition or an import of a signal-processing library.
-A recipe annotates: nothing that carries samples is ever written, so raw samples are never altered in outputs, and a test lists the product tree and fails on any file that is not TSV or JSON.
+A recipe annotates: nothing that carries samples is ever written, so raw samples are never altered in outputs, and `tests/recipes/test_product_formats.py` lists the floor's product, written by the command on the fixture, and nemar-ica's committed product (`tests/fixtures/ica-views/product`), and fails on any file that is not TSV or JSON or is a symbolic link; `tests/e2e/test_nemar_ica_views_e2e.py` checks the same of a fresh nemar-ica run's product (`views_support.product_files`).
+The two are separate checks of different products, and neither replaces the other.
 
 ## The command
 
