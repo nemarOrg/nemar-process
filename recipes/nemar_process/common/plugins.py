@@ -20,7 +20,7 @@ overriding the role's), never from the plugin (``docs/contracts.md``). Then the 
 makes the files and declarations, which ``CheckpointRun.views`` hands to the recipe's product writer; a
 skipped plugin's views are listed in ``CheckpointRun.views_skipped`` with the reason ``plugin_failed``,
 and a view of a plugin that ran, on a recipe role the host withholds for this recording
-(``views.Host.withheld``: nemar-ica's layout of turned positions), with the host's reason.
+(``views.Host.withheld``: nemar-ica's layout over the caps), with the host's reason.
 
 What runs is fixed in the image: a recipe declares ``PLUGINS = ((name, version), ...)`` beside its
 step order, and ``load`` refuses a plugin whose entry, name, version, checkpoint or reads differ from

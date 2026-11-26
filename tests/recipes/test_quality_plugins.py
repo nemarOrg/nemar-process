@@ -315,6 +315,7 @@ def test_a_withheld_layout_skips_the_spectrum_view_with_the_hosts_word_and_the_p
     layout is the recipe's, is skipped with that word, never refused as role_unprovided; the plugin
     ran, its step is in the plan, and nemar-quality's view and metric are kept."""
     fit, line_hz = decomposition
+    reason = "cap_exceeded"
     host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": reason})
     plan, run = run_both(loaded, fit, host, host_inputs(fit, line_hz))
     assert [(o.name, o.status) for o in run.outcomes] == [
@@ -337,7 +338,7 @@ def test_a_plugins_fault_is_still_its_own_when_its_layout_is_withheld(
     fit, line_hz = decomposition
     data = np.array(fit.eeg["data"], dtype=np.float64)
     data[0, 100:300] = np.nan
-    host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": "frame_rotated"})
+    host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": "cap_exceeded"})
     _, run = run_both(loaded, fit, host, host_inputs(fit, line_hz, data=data))
     spectrum = run.outcomes[1]
     assert (spectrum.status, spectrum.code, spectrum.detail) == (
@@ -369,7 +370,7 @@ def test_a_withheld_role_is_a_skip_reason_and_never_also_given(decomposition, re
     with pytest.raises(ValueError, match="skip reason"):
         replace(host, roles={}, withheld={"layout": "no_layout_today"})
     with pytest.raises(ValueError, match="both given and withheld"):
-        replace(host, withheld={"layout": "frame_rotated"})
+        replace(host, withheld={"layout": "cap_exceeded"})
 
 
 # ---- nemar-spectrum on the decomposition ----------------------------------------------------------

@@ -232,8 +232,8 @@ VIEW_KIND_VERSION = 1
 # sensor views): ``_chanlocs.tsv``, one row per column of ``_unmixing.tsv`` in its order, named by that
 # header, each row's type as the floor's ``_channels.tsv`` gives it, EEGLAB's theta and radius, and x,
 # y and z as eegprep holds them after loading (millimeters in what eegprep takes for EEGLAB's frame: +x
-# toward the nose, +y left, +z up), every place n/a when they are known to be misread
-# (``FRAME_ROTATED``). Written at ``iclabel``, the step that classified the components on them.
+# toward the nose, +y left, +z up). Written at ``iclabel``, the step that classified the components on
+# them.
 CHANLOCS = "chanlocs"
 CHANLOCS_STEP = "iclabel"
 CHANLOCS_COLUMNS = ("name", "sensor_type", "theta_deg", "radius", "x", "y", "z")
@@ -263,15 +263,6 @@ NO_SERVING_INDEX = "no_serving_index"  # views.OWN_SKIP_REASONS
 NOT_IN_SERVING_INDEX = "not_in_serving_index"  # views.OWN_SKIP_REASONS, serving_index.NOT_LISTED
 SERVING_INDEX_STALE = "serving_index_stale"  # views.OWN_SKIP_REASONS, serving_index.STALE
 SERVING_INDEX_UNUSABLE = "serving_index_unusable"  # views.OWN_SKIP_REASONS, serving_index.UNUSABLE
-# The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
-# import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
-# description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees
-# (sccn/eegprep#692; eegprep-lean, the serving copy's reader, reads them as stated). nemar-ica withholds
-# such positions (``pipeline.position_facts``): ``_chanlocs.tsv`` holds no place and ``icmaps`` is
-# skipped with this word, never drawn on positions known to be turned. ICLabel still classified on them
-# (nemarOrg/nemar-process#94).
-ROTATED_FRAMES = ("CTF", "4DBti", "KitYokogawa")
-FRAME_ROTATED = "frame_rotated"  # views.OWN_SKIP_REASONS
 ICMAPS_CAPTION = (
     "Scalp maps of the independent components, each with its share of the variance and its ICLabel "
     "probabilities."

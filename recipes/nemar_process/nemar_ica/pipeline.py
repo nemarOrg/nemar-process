@@ -329,13 +329,11 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
     located a channel). Each is None when nothing stated it: positions embedded in the data file, or
     an electrodes file eegprep read with no coordsystem (it then assumed a frame and guessed a unit).
 
-    eegprep converts the positions on loading to millimeters in EEGLAB's frame, correctly for a frame
-    it reads as stated. Its BIDS import reads every frame but EEGLAB's as RAS (unless the
-    coordsystem's description is ``EEGLAB``), so on a dataset directory positions in the frames BIDS
-    defines as ALS (``steps.ROTATED_FRAMES``: CTF, 4DBti, KitYokogawa) come out turned by 90 degrees
-    (sccn/eegprep#692). ``withheld`` is then ``frame_rotated`` (``steps.FRAME_ROTATED``), and the
-    recipe writes no place of them and draws no map on them; otherwise it is None. eegprep-lean, the
-    serving copy's reader, reads those frames as stated, so nothing is withheld there.
+    eegprep converts the positions on loading to millimeters in EEGLAB's frame. Its BIDS import reads
+    a frame by the orientation the BIDS coordinate-systems appendix gives it (sccn/eegprep#693, which
+    fixed sccn/eegprep#692: CTF, 4DBti and KitYokogawa are ALS, as eegprep-lean, the serving copy's
+    reader, reads them), and applies no position of a frame the appendix gives no orientation
+    (``Other``, an unlisted name or none): the electrodes file is then not the source.
     """
     etc = loaded.eeg.get("etc")
     etc = etc if isinstance(etc, dict) else {}
@@ -351,17 +349,10 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
         found = etc.get("BIDSCoordsystem")
     found = found if isinstance(found, dict) else {}
     system = _stated(found.get(names[0]))
-    # the coordsystem is read on a dataset directory only beside an electrodes file (above)
-    rotated = (
-        loaded.serving is None
-        and system in steps.ROTATED_FRAMES
-        and found.get("EEGCoordinateSystemDescription") != "EEGLAB"
-    )
     return {
         "source": loaded.location_source,
         "coordinate_system": system,
         "coordinate_units": _stated(found.get(names[1])),
-        "withheld": steps.FRAME_ROTATED if rotated else None,
     }
 
 

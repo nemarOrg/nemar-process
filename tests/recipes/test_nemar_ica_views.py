@@ -887,7 +887,6 @@ def test_the_frame_unit_and_source_are_the_loaders(archive, fixture_fit):
         "source": "electrodes.tsv",
         "coordinate_system": "MNI305",
         "coordinate_units": "mm",
-        "withheld": None,
     }
     assert product.record["extensions"]["nemar"]["ica"]["positions"] == fixture_fit.positions
     placed = views_of(product)["icmaps"]["data"][1]
@@ -904,17 +903,15 @@ def test_the_frame_unit_and_source_are_the_loaders(archive, fixture_fit):
                 "source": "electrodes.tsv",
                 "coordinate_system": "CapTrak",
                 "coordinate_units": "cm",
-                "withheld": None,
             },
         ),
         (
-            {"EEGCoordinateSystem": "Other", "EEGCoordinateUnits": "n/a"},
+            {"EEGCoordinateSystem": "CapTrak", "EEGCoordinateUnits": "n/a"},
             1e-3,
             {
                 "source": "electrodes.tsv",
-                "coordinate_system": "Other",
+                "coordinate_system": "CapTrak",
                 "coordinate_units": None,
-                "withheld": None,
             },
         ),
         (
@@ -924,7 +921,6 @@ def test_the_frame_unit_and_source_are_the_loaders(archive, fixture_fit):
                 "source": "electrodes.tsv",
                 "coordinate_system": None,
                 "coordinate_units": None,
-                "withheld": None,
             },
         ),
     ],
@@ -973,7 +969,6 @@ def test_positions_embedded_in_a_set_state_no_frame(tmp_path):
         "source": "embedded",
         "coordinate_system": None,
         "coordinate_units": None,
-        "withheld": None,
     }
 
 
@@ -1606,7 +1601,7 @@ def test_labels_that_fall_back_skip_the_activations_on_the_serving_copy_too(
     ]
 
 
-# ---- positions eegprep turns: the frames BIDS defines as ALS (nemarOrg/nemar-process#94) ------------
+# ---- the frames BIDS defines as ALS (sccn/eegprep#692, #693; nemarOrg/nemar-process#94) --------------
 
 
 def als_copy(destination, system, description=None):
@@ -1631,35 +1626,44 @@ def als_copy(destination, system, description=None):
     return tree
 
 
+@pytest.mark.parametrize("description", [None, "EEGLAB"])
 @pytest.mark.parametrize("system", ["CTF", "4DBti", "KitYokogawa"])
-def test_positions_in_a_frame_eegprep_turns_are_withheld(tmp_path, system):
-    """eegprep's BIDS import reads these ALS frames as RAS and turns them by 90 degrees: Fp1, stated
-    at (77, 32, 19), is held at (32, -77, 19), right of the nose (sccn/eegprep#692). The positions
-    are withheld; this test fails once eegprep reads them as stated, and the withholding goes."""
-    (found,) = io.discover(als_copy(tmp_path / "dataset", system))
+def test_positions_in_the_frames_bids_defines_as_als_are_read_as_stated(
+    tmp_path, system, description
+):
+    """eegprep's BIDS import reads CTF, 4DBti and KitYokogawa as ALS (sccn/eegprep#693): Fp1, stated
+    at (77, 32, 19), is held there, left of the nose, with or without the description EEGLAB. Before
+    that fix it was held at (32, -77, 19), turned by 90 degrees (sccn/eegprep#692), and nemar-ica
+    withheld such positions (nemarOrg/nemar-process#94); the record now states the frame as any other."""
+    (found,) = io.discover(als_copy(tmp_path / "dataset", system, description))
     loaded = io.load(found)
     fp1 = next(entry for entry in loaded.eeg["chanlocs"] if entry["labels"] == "Fp1")
-    assert (fp1["X"], fp1["Y"], fp1["Z"]) == (32.0, -77.0, 19.0)
-    assert fp1["theta"] > 0  # the left frontal pole, right of the nose
+    assert (fp1["X"], fp1["Y"], fp1["Z"]) == (77.0, 32.0, 19.0)
+    assert fp1["theta"] < 0  # the left frontal pole, left of the nose
     assert pipeline.position_facts(loaded) == {
         "source": "electrodes.tsv",
         "coordinate_system": system,
         "coordinate_units": "mm",
-        "withheld": "frame_rotated",
     }
 
 
-def test_an_eeglab_description_keeps_the_frame_as_stated(tmp_path):
-    """With the description EEGLAB beside it, eegprep reads CTF as ALS: nothing is withheld."""
-    (found,) = io.discover(als_copy(tmp_path / "dataset", "CTF", "EEGLAB"))
+@pytest.mark.parametrize("system", ["Other", "ACPC", "NoSuchFrame"])
+def test_positions_in_a_frame_with_no_orientation_are_not_applied(tmp_path, system):
+    """A frame the BIDS coordinate-systems appendix gives no orientation is not read at all
+    (sccn/eegprep#693): eegprep applies none of the electrodes file's positions, so the recording has
+    none, and the block says the electrodes file was not their source."""
+    (found,) = io.discover(als_copy(tmp_path / "dataset", system))
     loaded = io.load(found)
-    fp1 = next(entry for entry in loaded.eeg["chanlocs"] if entry["labels"] == "Fp1")
-    assert (fp1["X"], fp1["Y"], fp1["Z"]) == (77.0, 32.0, 19.0)
-    assert pipeline.position_facts(loaded)["withheld"] is None
+    assert loaded.n_channels_with_locations == 0
+    assert pipeline.position_facts(loaded) == {
+        "source": "none",
+        "coordinate_system": None,
+        "coordinate_units": None,
+    }
 
 
 @pytest.fixture(scope="module")
-def rotated(recording, tmp_path_factory):
+def ctf(recording, tmp_path_factory):
     """The reviewer's repro end to end: the cut fixture with its electrodes in CTF, decomposed and
     written with the serving copy's group named."""
     tree = als_copy(tmp_path_factory.mktemp("ctf") / "dataset", "CTF")
@@ -1678,50 +1682,46 @@ def rotated(recording, tmp_path_factory):
     return directory, fit, write(found, fit, directory, serving=index_for(found.path))
 
 
-def test_turned_positions_draw_no_map_and_write_no_place(rotated):
-    """No position known to be turned is written or drawn: every place of _chanlocs.tsv is n/a, the
-    maps are skipped with frame_rotated and the record says why; the views that need no position
-    are declared as on any recording."""
-    directory, fit, product = rotated
+def test_positions_in_ctf_are_written_and_drawn_as_stated(ctf):
+    """A recording located in CTF writes its places and draws its maps like any other: every view is
+    declared, nothing is skipped, and _chanlocs.tsv holds each channel's position as the dataset
+    stated it (ALS millimeters, x toward the nose)."""
+    directory, fit, product = ctf
     nemar = product.record["extensions"]["nemar"]
-    assert nemar["ica"]["positions"]["withheld"] == "frame_rotated"
-    assert [view["key"] for view in nemar["views"]] == ["icactivity", "midsegment", "icclasses"]
-    assert nemar["views_skipped"] == [
-        {"key": "icmaps", "kind": "nemar.ic-maps", "reason": "frame_rotated"},
-        {"key": "spectrum", "kind": "nemar.spectrum", "reason": "frame_rotated"},
+    assert nemar["ica"]["positions"] == {
+        "source": "electrodes.tsv",
+        "coordinate_system": "CTF",
+        "coordinate_units": "mm",
+    }
+    assert [view["key"] for view in nemar["views"]] == [
+        "icmaps",
+        "icactivity",
+        "midsegment",
+        *PLUGIN_VIEWS,
     ]
-    # the spectrum's plugin ran: only its view, on the withheld layout, is skipped
+    assert "views_skipped" not in nemar
     statuses = {entry["name"]: entry["status"] for entry in nemar["plugins"]}
     assert statuses == {"nemar-quality": "ran", "nemar-spectrum": "ran"}
-    assert not list(directory.rglob("*_spectrum.tsv"))
     header, rows = read_table(named(directory, "chanlocs.tsv"))
     assert tuple(header) == steps.CHANLOCS_COLUMNS
     assert [row[0] for row in rows] == list(fit.good_channels)
-    assert all(row[2:] == ["n/a"] * 5 for row in rows)
-    assert all(row[1] == "EEG" for row in rows)  # the names and types are still the channels'
-    assert records.views_problems(product.record) == []
-
-
-def test_a_host_with_turned_positions_offers_no_layout(rotated, recording):
-    _, fit, _ = rotated
-    found = outputs.recipe_views(
-        recording,
-        fit,
-        {"browser_transform": None, "decomposition_input": fit.decomposition_input},
-        {
-            steps.CHANLOCS: outputs.chanlocs_file(recording, fit),
-            "mixing": product_file("mixing", ""),
-            "components": product_file("components", ""),
-        },
-    )
-    assert found.views.skipped[0] == {
-        "key": "icmaps",
-        "kind": "nemar.ic-maps",
-        "reason": "frame_rotated",
+    stated = {
+        line.split("\t")[0]: line.split("\t")[1:4]
+        for line in (DATASET / "sub-CUCOV076" / "eeg" / "sub-CUCOV076_electrodes.tsv")
+        .read_text()
+        .splitlines()[1:]
     }
-    assert found.host.roles == {}
-    assert found.host.withheld == {"layout": "frame_rotated"}  # a plugin's view on it says why
-    assert outputs.view_host(recording, fit, None).withheld == {}
+    placed_rows = [row for row in rows if "n/a" not in stated[row[0]]]
+    assert placed_rows
+    for row in rows:
+        if row not in placed_rows:
+            assert row[2:] == ["n/a"] * 5, row[0]  # the dataset gave this channel no position
+            continue
+        right, front, up = (float(cell) for cell in stated[row[0]])
+        assert [float(cell) for cell in row[4:]] == [front, -right, up], row[0]
+    placed = views_of(product)["icmaps"]["data"][1]
+    assert (placed["coordinate_system"], placed["position_source"]) == ("CTF", "measured")
+    assert records.views_problems(product.record) == []
 
 
 def test_a_layout_over_the_caps_skips_the_maps_and_keeps_the_recording(
@@ -1794,5 +1794,4 @@ def test_the_serving_copys_positions_in_those_frames_are_read_as_stated():
         "source": "electrodes.tsv",
         "coordinate_system": "CTF",
         "coordinate_units": "mm",
-        "withheld": None,
     }
