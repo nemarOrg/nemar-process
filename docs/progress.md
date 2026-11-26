@@ -93,20 +93,20 @@ the backend reconciles its counts from the uploaded table and records any disagr
 
 ## Where each schema lives
 
-**Planned.**
+Built, except where a row says planned.
 Nothing here enters neuroschema's core: the metadata goes into neuroschema extension namespaces, which neuroschema versions on its own.
 
-| What | Home |
-|---|---|
-| Quality results per recording (typed metrics; views with location, format, size, digest and caption) | neuroschema `dataQuality`, record level |
-| The dataset QC summary (counts, distributions, observed ranges, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level, written by every recipe as `desc-<label>_dataquality.json`; it replaced `qc-summary.v1`, whose schema is retired |
-| Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | a new neuroschema namespace, `processing` |
-| Links to the signalJourney records | neuroschema `signalJourney` |
-| The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) |
-| The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` |
-| NEMAR's rules for signalJourney records (view formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8) |
+| What | Home | Status |
+|---|---|---|
+| Quality results per recording (typed metrics; views with location, format, size, digest and caption) | in the recording's signalJourney record, as neuroschema `qualityMetric` objects in each step's `qualityMetrics` and view declarations in `extensions.nemar.views` and `views_skipped` ([recipes.md](recipes.md)); NEMAR's backend turns them into neuroschema `dataQuality` at the record level | Built |
+| The dataset QC summary (counts, distributions, observed ranges, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level, written by every recipe as `desc-<label>_dataquality.json` (`recipes/nemar_process/common/dataquality.py`); it replaced `qc-summary.v1`, whose schema is retired | Built |
+| Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | neuroschema's `processing` namespace, written by NEMAR's backend | Built at the dataset level; the record level is defined in the schema and planned |
+| Links to the signalJourney records | neuroschema `signalJourney`, written by NEMAR's backend | Built |
+| The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) | Built |
+| The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` | Built |
+| NEMAR's rules for signalJourney records (view formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8); until then this repository checks them on the records it writes, under `extensions.nemar` ([upstream.md](upstream.md)) | Planned upstream |
 
-nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted today at the dataset document; its vendor script gains a record root (or validates extension objects by their `$id`), and this repository will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
+nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, with two roots, the dataset and the record document; this repository validates the objects it writes against that bundle by their `$id`, through its existing nemar-cli pin, so no third pin is added.
 
 ## Run your own job on the platform
 
