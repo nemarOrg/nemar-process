@@ -144,7 +144,7 @@ Metrics, from `eeg_nemar_dataqual.m` (the last two are new to this pipeline):
 | Share of brain components | components ICLabel labels brain, out of all components |
 | MIR | the mutual information reduction of the decomposition |
 
-The floor already measures the first three: its `qc` step's `qualityMetrics` hold `percentGoodSamples` and `percentGoodChannels`, and its `line_noise_measure` step measures the line-noise excess (the recordings table carries them as `pct_good_samples`, `pct_good_channels`, `line_db_before` and `line_db_after`).
+The floor already measures the first three: its record's `extensions.nemar.metrics` hold `percentGoodSamples` and `percentGoodChannels` as typed metrics (its `qc` step's `qualityMetrics` carry the same values, plain), and its `line_noise_measure` step measures the line-noise excess (the recordings table carries them as `pct_good_samples`, `pct_good_channels`, `line_db_before` and `line_db_after`).
 A plugin reports a value the floor measures from the floor's output rather than computing it again.
 The dataset dataQuality document (`desc-<label>_dataquality.json`, [recipes.md](recipes.md)) carries the legacy per-dataset bounds as `observed_range`: the lowest and highest good channels and good data from the recipe's metrics, and brain components from nemar-quality's, which nemar-ica's table carries as `pct_brain_components`.
 
@@ -168,13 +168,13 @@ Nothing here enters neuroschema's core: the metadata goes into neuroschema exten
 
 | What | Home | Status |
 |---|---|---|
-| Quality results per recording (typed metrics; views with location, format, size, digest and caption) | in the recording's signalJourney record, as neuroschema `qualityMetric` objects in each step's `qualityMetrics` and view declarations in `extensions.nemar.views` and `views_skipped` ([recipes.md](recipes.md)); NEMAR's backend turns them into neuroschema `dataQuality` at the record level | Built |
+| Quality results per recording (typed metrics; views with location, format, size, digest and caption) | in the recording's signalJourney record: neuroschema `qualityMetric` objects, the recipe's in `extensions.nemar.metrics` and each plugin's (`<plugin>:<name>`) in its step's `qualityMetrics`, and view declarations in `extensions.nemar.views` and `views_skipped` ([recipes.md](recipes.md)); NEMAR's backend turns them into neuroschema `dataQuality` at the record level | Built |
 | The dataset QC summary (counts, distributions, observed ranges, the not-processed list, the record digest) | neuroschema `dataQuality`, dataset level, written by every recipe as `desc-<label>_dataquality.json` (`recipes/nemar_process/common/dataquality.py`); it replaced `qc-summary.v1`, whose schema is retired | Built |
-| Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | neuroschema's `processing` namespace, written by NEMAR's backend | Built at the dataset level; the record level is defined in the schema and planned |
-| Links to the signalJourney records | neuroschema `signalJourney`, written by NEMAR's backend | Built |
+| Checkpoint outcomes (per recording and recipe: the recipe version and each checkpoint's status, failure code and step; per dataset: the declared checkpoints and the reconciled counts) | neuroschema's `processing` namespace, written by NEMAR's backend | Built at the dataset level; the record level is being built in epic nemarOrg/nemar-cli#2324 |
+| Links to the signalJourney records | neuroschema `signalJourney`, written by NEMAR's backend | Built at the dataset level; the record level is being built in epic nemarOrg/nemar-cli#2324 |
 | The plugin manifest and the live progress object | nemar-cli `shared/contract/`, pinned here ([contracts.md](contracts.md)) | Built |
 | The step-to-checkpoint map | recipe code here, printed by `nemar-recipe version` | Built |
-| NEMAR's rules for signalJourney records (view formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8); until then this repository checks them on the records it writes, under `extensions.nemar` ([upstream.md](upstream.md)) | Planned upstream |
+| NEMAR's rules for signalJourney records (view formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` namespace (signalJourney#8); until then this repository checks the view formats and size caps (the views writer, `common/views.py`) and the metric naming (the plugin loader and `records.check`) on the records it writes, under `extensions.nemar` ([upstream.md](upstream.md)); the no-samples rule is held by the recipes' design ([recipes.md](recipes.md)), not by a check of its own | Planned upstream |
 
 nemar-cli vendors neuroschema as one bundle in `shared/contract/neuroschema/`, with two roots, the dataset and the record document; this repository validates the objects it writes against that bundle by their `$id`, through its existing nemar-cli pin, so no third pin is added.
 
