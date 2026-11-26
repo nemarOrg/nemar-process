@@ -42,8 +42,8 @@ jobs:
           theirs=.nemar-cli-dev/shared/contract/compute-launch.schema.json
           if [ ! -f "$theirs" ]; then
             echo "::warning title=nemar-cli dev has no launch schema yet::The pin in tests/contract/nemar-cli-pin.json still points at a commit of the epic branch."
-          elif cmp -s "$theirs" launcher/schema/launch-spec.v1.json; then
-            echo "launcher/schema/launch-spec.v1.json equals nemar-cli dev"
+          elif cmp -s "$theirs" launcher/schema/launch-spec.v2.json; then
+            echo "launcher/schema/launch-spec.v2.json equals nemar-cli dev"
           else
             echo "::warning title=launch schema differs from nemar-cli dev::Bump the pin (docs/contracts.md) once the change is reviewed."
           fi

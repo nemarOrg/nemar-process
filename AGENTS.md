@@ -56,7 +56,7 @@ What the operator supplies and does is in [`docs/operator.md`](docs/operator.md)
 
 ### One shared contract with nemar-cli
 
-The launch specification schema `launcher/schema/launch-spec.v1.json` is copied byte for byte from nemar-cli's `shared/contract/compute-launch.schema.json`.
+The launch specification schema `launcher/schema/launch-spec.v2.json` is copied byte for byte from nemar-cli's `shared/contract/compute-launch.schema.json`.
 Never edit it here: change it in nemar-cli, then bump the pin described in `docs/contracts.md`.
 The seven failure codes and exit numbers 10 to 16 in `launcher/nemar_launch/codes.py` are nemar-cli's list in nemar-cli's order.
 The live progress schema `launcher/schema/compute-progress.v1.json` and the counting vectors `tests/contract/compute-progress-vectors.json` are copied byte for byte from nemar-cli too (ADR 0134), pinned by `tests/contract/nemar-cli-progress-pin.json`, and so are the standalone entry's three schemas (`launcher/schema/compute-{local-launch,recipe-progress,results-report}.v1.json`); the runner schema is pinned at the same commit, and the launcher's counting rules (`launcher/nemar_launch/checkpoints.py`) are a port of nemar-cli's that replays its vectors.
