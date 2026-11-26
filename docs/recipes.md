@@ -11,7 +11,7 @@ Abbreviations used here: ICLabel (EEGLAB's classifier of independent components;
 Two rules bind every recipe (see [`AGENTS.md`](../AGENTS.md)).
 A recipe holds no numerics: every signal-processing call is an eegprep function, and a step eegprep lacks is added to eegprep upstream, never written here.
 `tests/recipes/test_upstream_first.py` scans the package and fails on a filter, a window, a decomposition or an import of a signal-processing library.
-A recipe annotates: nothing that carries samples is ever written, so raw samples are never altered in outputs, and `tests/recipes/test_product_formats.py` lists the floor's product, written by the command on the fixture, and nemar-ica's committed product (`tests/fixtures/ica-views/product`), and fails on any file that is not TSV or JSON or is a symbolic link.
+A recipe annotates: nothing that carries samples is ever written, so raw samples are never altered in outputs, and `tests/recipes/test_product_formats.py` lists the floor's product, written by the command on the fixture, and nemar-ica's committed product (`tests/fixtures/ica-views/product`), and fails on any file that is not TSV or JSON or is a symbolic link; `tests/e2e/test_nemar_ica_views_e2e.py` checks the same of a fresh nemar-ica run's product (`views_support.product_files`). The two are separate checks of different products, and neither replaces the other.
 
 ## The command
 
