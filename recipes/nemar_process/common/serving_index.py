@@ -24,7 +24,6 @@ pass but a row of the index the run read.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 from collections.abc import Mapping
@@ -38,6 +37,11 @@ from nemar_process.common import zarr_input
 # dataset at its path, or it was built from another commit than the run's (or one of them names none).
 NOT_LISTED = "not_in_serving_index"
 STALE = "serving_index_stale"
+# Why no recording has a row: the file the run was handed is not a serving index it can use (not strict
+# JSON, not the shape the Zarr input reads, over the cap, or unreadable). The run goes on and skips the
+# views of the serving copy with this word (nemar-cli ADR 0141 as amended: the defense holds on both sides,
+# the Worker never stages such an index and the recipe never ends a run over one).
+UNUSABLE = "serving_index_unusable"
 
 
 class IndexUnusable(ValueError):
@@ -76,8 +80,10 @@ class Resolution:
     def __post_init__(self) -> None:
         if (self.row is None) == (self.reason is None):
             raise ValueError("a resolution is a row or the word for why there is none, never both")
-        if self.reason is not None and self.reason not in (NOT_LISTED, STALE):
-            raise ValueError("a resolution's word is {} or {}".format(NOT_LISTED, STALE))
+        if self.reason is not None and self.reason not in (NOT_LISTED, STALE, UNUSABLE):
+            raise ValueError(
+                "a resolution's word is {}, {} or {}".format(NOT_LISTED, STALE, UNUSABLE)
+            )
 
 
 @dataclass(frozen=True)
@@ -85,10 +91,13 @@ class ServingIndex:
     """A serving index read from a file: its digest, the dataset and commit it names (None when it names
     none), and each store's EEG groups by the store's source path, ``(name, rate, n_samples)``."""
 
-    sha256: str
+    sha256: str | None
     dataset_id: str | None
     source_commit: str | None
     stores: Mapping[str, tuple[tuple[tuple[str, float, int], ...], ...]] = field(repr=False)
+    # The file could not serve as an index (``unusable``): no recording has a row, each with ``UNUSABLE``;
+    # ``sha256`` is then the digest of the bytes read, or None when none could be read.
+    unusable: bool = False
 
     def resolve(self, path: str, dataset_id: str | None, source_commit: str | None) -> Resolution:
         """The row of the recording at ``path`` of the run's dataset ``dataset_id`` and commit
@@ -96,6 +105,8 @@ class ServingIndex:
         ``not_in_serving_index``; then an index built from another commit, or a run or an index that
         names none, is ``serving_index_stale``; then no store at the path or more than one, or a store
         with no EEG group or more than one, is ``not_in_serving_index``."""
+        if self.unusable:
+            return Resolution(None, UNUSABLE)
         if self.dataset_id is None or dataset_id is None or self.dataset_id != dataset_id:
             return Resolution(None, NOT_LISTED)
         # another commit, or a run that names none; an index that names none never matches, even a
@@ -106,6 +117,7 @@ class ServingIndex:
         if len(found) != 1 or len(found[0]) != 1:
             return Resolution(None, NOT_LISTED)
         ((name, rate, count),) = found[0]
+        assert self.sha256 is not None  # only an unusable index has no digest, and it lists nothing
         return Resolution(ServingRow(path, name, rate, count, self.sha256), None)
 
     def lists(self, row: ServingRow) -> bool:
@@ -176,18 +188,35 @@ def parse(data: bytes) -> ServingIndex:
 def read(path: Path) -> ServingIndex:
     """The serving index in the file at ``path``, read at most one byte past the cap, or
     ``IndexUnusable`` (a file that cannot be read included)."""
+    return parse(_read_bytes(path))
+
+
+def _read_bytes(path: Path) -> bytes:
     try:
         with path.open("rb") as handle:
-            data = handle.read(zarr_input.MAX_INDEX_BYTES + 1)
+            return handle.read(zarr_input.MAX_INDEX_BYTES + 1)
     except OSError as error:
         raise IndexUnusable("the serving index cannot be read") from error
-    return parse(data)
+
+
+def unusable(sha256: str | None) -> ServingIndex:
+    """An index the run was handed and cannot use: it lists nothing, and every recording resolves to
+    ``UNUSABLE``. ``sha256`` is the digest of the bytes read, or None when none could be read."""
+    return ServingIndex(
+        sha256=sha256, dataset_id=None, source_commit=None, stores={}, unusable=True
+    )
 
 
 def serving_index(text: str) -> ServingIndex:
-    """``--serving-index``'s value: the index in the file it names. A refusal is a usage error whose
-    message is the refusal's fixed phrase (``argparse.ArgumentTypeError``), so the operator reads why."""
+    """``--serving-index``'s value: the index in the file it names, or, when the file cannot serve as one,
+    an ``unusable`` index (the run goes on, and the views of the serving copy are skipped with
+    ``serving_index_unusable``), never a usage error: an index is the platform's input to a run that is
+    useful without it, so it never ends the run."""
     try:
-        return read(Path(text))
-    except IndexUnusable as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
+        data = _read_bytes(Path(text))
+    except IndexUnusable:
+        return unusable(None)
+    try:
+        return parse(data)
+    except IndexUnusable:
+        return unusable(hashlib.sha256(data).hexdigest())

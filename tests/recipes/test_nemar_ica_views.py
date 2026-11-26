@@ -24,7 +24,16 @@ from typing import Any
 import numpy as np
 import pytest
 from nemar_process import cli as command
-from nemar_process.common import determinism, device, files, io, plugins, records, views
+from nemar_process.common import (
+    determinism,
+    device,
+    files,
+    io,
+    plugins,
+    records,
+    serving_index,
+    views,
+)
 from nemar_process.common.errors import RecordingError
 from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import RECIPE, outputs, pipeline, steps
@@ -994,6 +1003,30 @@ def test_without_a_serving_index_the_views_of_the_serving_copy_are_skipped_with_
     assert records.views_problems(product.record) == []
     check_view_files(directory, product.record)
     product_files(directory)  # TSV and JSON only
+
+
+def test_an_unusable_index_skips_the_views_of_the_serving_copy_with_its_own_word(
+    recording, fixture_fit, tmp_path
+):
+    """Handed a file it cannot use as a serving index (nemar-cli ADR 0141 as amended), the run goes on:
+    the maps and the plugins' views are declared, the two views of the serving copy are skipped with
+    serving_index_unusable, and the record names the file's digest and the word."""
+    product = write(recording, fixture_fit, tmp_path, serving=serving_index.unusable("b" * 64))
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", *PLUGIN_VIEWS]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "serving_index_unusable"},
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "serving_index_unusable"},
+    ]
+    assert nemar["ica"]["serving_index"] == {
+        "sha256": "b" * 64,
+        "dataset_id": None,
+        "source_commit": None,
+        "row": None,
+        "reason": "serving_index_unusable",
+    }
+    assert records.views_problems(product.record) == []
+    check_view_files(tmp_path, product.record)
 
 
 def test_with_its_row_in_the_serving_index_an_archive_run_declares_the_views_of_the_serving_copy(

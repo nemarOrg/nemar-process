@@ -262,6 +262,7 @@ NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
 NO_SERVING_INDEX = "no_serving_index"  # views.OWN_SKIP_REASONS
 NOT_IN_SERVING_INDEX = "not_in_serving_index"  # views.OWN_SKIP_REASONS, serving_index.NOT_LISTED
 SERVING_INDEX_STALE = "serving_index_stale"  # views.OWN_SKIP_REASONS, serving_index.STALE
+SERVING_INDEX_UNUSABLE = "serving_index_unusable"  # views.OWN_SKIP_REASONS, serving_index.UNUSABLE
 # The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
 # import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
 # description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees

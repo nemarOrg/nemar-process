@@ -64,7 +64,8 @@ OPTIONS = (ENGINE, DEVICE, THREADS, MAX_ITER, TIME_BUDGET_S)
 # On a dataset directory only: the serving copy's index, as a file, from which the views of the serving
 # copy take each recording's channel group (``common/serving_index.py``). Without it those views are
 # skipped with ``no_serving_index``. Read and checked once, while the arguments are parsed: a file that
-# is not a serving index is a usage error (exit 2), before anything is created.
+# cannot serve as a serving index never ends the run, and those views are skipped with
+# ``serving_index_unusable``.
 SERVING_INDEX = Option(
     "serving_index",
     "--serving-index",
@@ -73,7 +74,7 @@ SERVING_INDEX = Option(
     "the serving copy's index.json, as a file (dataset directories only): the views of the serving "
     "copy (activations, signal window) name each recording's EEG group as it lists it, used only when "
     "the index's source_commit is exactly --source-commit (else serving_index_stale), and are "
-    "skipped with a word when it is not given or does not list the recording",
+    "skipped with a word when it is not given, cannot be used, or does not list the recording",
 )
 
 
