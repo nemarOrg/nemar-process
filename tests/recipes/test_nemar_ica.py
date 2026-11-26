@@ -26,6 +26,7 @@ from nemar_process.common.errors import EngineUnavailable, RecordingError
 from nemar_process.common.recipe import RunContext
 from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import RECIPE, engines, outputs, pipeline, steps, tally
+from nemar_process.nemar_ica import recipe as ica_recipe
 from nemar_process.nemar_ica.options import Settings
 from recipe_support import (
     DATASET,
@@ -347,7 +348,7 @@ def test_the_record_holds_the_floors_and_nemar_icas_metrics_each_produced_by_nem
     assert metrics["percentGoodChannels"]["value"] == product.row["pct_good_channels"]
 
 
-def test_the_row_carries_the_floors_three_metrics_and_the_brain_share_of_its_plugin(tiny):
+def test_the_row_carries_the_floors_three_metrics_and_its_plugins_brain_share_and_mir(tiny):
     _, fit, product, _ = tiny
     values = floor_outputs.metric_values(fit.floor_result)
     row = product.row
@@ -364,12 +365,19 @@ def test_the_row_carries_the_floors_three_metrics_and_the_brain_share_of_its_plu
         product.record["summaryMetrics"]["nemar-quality:percentBrainComponents"]
         == (metric["value"])
     )
+    # the MIR is nemar-quality's too, at the table's six decimals; not a headline metric
+    mir = quality["qualityMetrics"]["nemar-quality:mutualInformationReduction"]
+    assert mir["unit"] == "nat"
+    assert mir["value"] is not None
+    assert row["mir_nats"] == mir["value"]
+    assert "nemar-quality:mutualInformationReduction" not in product.record["summaryMetrics"]
     columns = [column.name for column in RECIPE.columns]
-    assert columns[-6:] == [
+    assert columns[-7:] == [
         "pct_good_channels",
         "pct_good_samples",
         "line_db_before",
         "pct_brain_components",
+        "mir_nats",
         "skipped_steps",
         "record_content_sha256",
     ]
@@ -778,8 +786,8 @@ def dataset_record_of(out: Path) -> dict:
 
 def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(cli, tmp_path):
     """nemar-ica writes the neuroschema dataset document too: its own three metrics, the floor's three
-    that the legacy summary bounded, and nemar-quality's brain share, which fills from the plugin's
-    metric in each recording's record (the table's pct_brain_components)."""
+    that the legacy summary bounded, and nemar-quality's brain share and MIR, which fill from the
+    plugin's metrics in each recording's record (the table's pct_brain_components and mir_nats)."""
     from nemar_process.common import dataquality
 
     dataset = located_dataset(tmp_path / "ds", subjects=2)
@@ -799,6 +807,7 @@ def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(c
         "percentGoodSamples": "%",
         "lineNoiseBeforeDb": "dB",
         "nemar-quality:percentBrainComponents": "%",
+        "nemar-quality:mutualInformationReduction": "nat",
     }
     rows = table_of(out)
     shares = sorted(float(row["pct_brain_components"]) for row in rows)
@@ -807,6 +816,14 @@ def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(c
     assert entry["observed_range"]["nemar-quality:percentBrainComponents"] == {
         "min": shares[0],
         "max": shares[-1],
+    }
+    mirs = sorted(float(row["mir_nats"]) for row in rows)
+    mir = entry["distributions"]["nemar-quality:mutualInformationReduction"]
+    assert (mir["n"], mir["histogram"]["missing"], mir["unit"]) == (2, 0, "nat")
+    assert mir["histogram"]["edges"] == list(ica_recipe.MIR_EDGES)
+    assert entry["observed_range"]["nemar-quality:mutualInformationReduction"] == {
+        "min": mirs[0],
+        "max": mirs[-1],
     }
     rank = entry["distributions"]["icaRank"]
     assert rank["n"] == 2

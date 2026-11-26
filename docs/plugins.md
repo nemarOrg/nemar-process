@@ -50,13 +50,15 @@ Abbreviations used here: tab-separated values (TSV), JavaScript Object Notation 
 
 ## The first two plugins
 
-Both are version 0.1.0, run at `quality` and take no manifest parameters; they read nemar-ica's decomposition, and `nemar-spectrum` also reads the floor's `line_hz`, which the host hands them as plain arrays and values (`run_checkpoint` makes them read-only).
+`nemar-quality` is version 0.2.0 and takes one fixed manifest parameter, `nbins` (256); `nemar-spectrum` is version 0.1.0 and takes none. Both run at `quality` and read nemar-ica's decomposition, and `nemar-spectrum` also reads the floor's `line_hz`, which the host hands them as plain arrays and values (`run_checkpoint` makes them read-only).
 What each reads is its contract with the host recipe; nemar-ica builds those inputs ([below](#in-nemar-ica)).
 
-- **`nemar-quality`** (`recipes/nemar_process/plugins/nemar_quality/`) reads, from `nemar-ica`, `classes` (ICLabel's seven, in ICLabel's order), `classifications` (the probabilities, components by classes) and `variance_pct` (each component's own percent of the data's variance, one per component).
+- **`nemar-quality`** (`recipes/nemar_process/plugins/nemar_quality/`) reads, from `nemar-ica`, `classes` (ICLabel's seven, in ICLabel's order), `classifications` (the probabilities, components by classes) and `variance_pct` (each component's own percent of the data's variance, one per component), and, for the MIR, `data`, `weights`, `sphere` and `icachansind`.
   The dominant class of each component and the counts by class are eegprep's `eeg_icalabelstat`, never recounted.
   It reports `nemar-quality:percentBrainComponents` (a headline metric, in `%`, bounded 0 to 100: the share of components whose dominant class is Brain) and writes the view `icclasses` (`nemar.ic-classes` version 1, `_icclasses.json`): the counts, and each class's summed variance of the components classed as it, to four decimals.
   Its caption says "summed variance of components classed X", never "variance explained", because the components are not orthogonal.
+  Since 0.2.0 it also reports `nemar-quality:mutualInformationReduction` (in `nat`, no bounds, not a headline metric): eegprep's `eeg_mir` of the decomposition, the mutual information `icaweights` removes from the sphered data `x = icasphere @ data[icachansind]`, `log|det W| + sum h(x_i) - sum h(y_i)` with `W = icaweights` and `y = W x` ([The starting set](#the-starting-set) gives the definition and what it is not comparable with).
+  The bins are fixed: the manifest's `nbins` (256) must equal eegprep's `MIR_NBINS`, and when it does not the metric is null with the word `mir_bins_changed`, so a change of eegprep's rule is refused rather than shifting every stored value; a decomposition `eeg_mir` refuses (its `ValueError`: singular or non-finite matrices, matrices that do not match `icachansind`, a constant component) leaves it null with `mir_refused`; both are its `METRIC_SKIP_WORDS`, and the plugin, its brain share and its view are kept.
   Classes that are not ICLabel's skip the plugin (`NotIclabelClasses`), and so does a variance list that is not one per component (`VarianceLengthMismatch`).
 - **`nemar-spectrum`** (`recipes/nemar_process/plugins/nemar_spectrum/`) reads, from `nemar-ica`, `data` (the decomposition's input, good channels by samples), `unit` (`uV`, else `NotMicrovolts`), `srate` and `channels` (the good channels' labels in layout order), and, from `nemar-floor`, `line_hz` (the line frequency, or none).
   It writes the view `spectrum` (`nemar.spectrum` version 1, `_spectrum.tsv`, a header of `freq_hz` and then the channels), with the host's `layout` as its `{"from": "recipe"}` role, so the host must provide one (`role_unprovided` at load otherwise).
@@ -68,10 +70,10 @@ What each reads is its contract with the host recipe; nemar-ica builds those inp
 
 ### In nemar-ica
 
-nemar-ica pins both as a literal beside its step order, `PLUGINS = (("nemar-quality", "0.1.0"), ("nemar-spectrum", "0.1.0"))` in `recipes/nemar_process/nemar_ica/steps.py`, in the order of its map's `quality` checkpoint, which nemar-cli's process-drift test compares with the registry's plugin steps; each version's source tree is pinned in `tests/recipes/plugin_digests.json`.
+nemar-ica pins both as a literal beside its step order, `PLUGINS = (("nemar-quality", "0.2.0"), ("nemar-spectrum", "0.1.0"))` in `recipes/nemar_process/nemar_ica/steps.py`, in the order of its map's `quality` checkpoint, which nemar-cli's process-drift test compares with the registry's plugin steps; each version's source tree is pinned in `tests/recipes/plugin_digests.json`.
 The recipe's preflight loads them (`outputs.quality_plugins`, once per process): at the checkpoint its map gives them, reading what it provides (`nemar-floor` and `nemar-ica`), with the layout as the one `{"from": "recipe"}` role it gives, and no view key of its own (`icmaps`, `icactivity`, `midsegment`) or step id taken; a pin that cannot be loaded ends the run before anything is written (exit 1, `plugin_unloadable: <plugin> <word>`).
 
-The host is `outputs.view_host`, the one nemar-ica's own views are built on: the decomposition's channels in layout order (the unmixing's header, so `Ch001` and so on when the labels cannot head columns), its components (`IC001` and so on), ICLabel's classes, the floor's sampling rate, the layout `_chanlocs.tsv` (or, when the maps have none, the layout withheld with `frame_rotated` or `cap_exceeded`), the sidecar's cap model and reference, and the suffixes of its own files.
+The host is `outputs.view_host`, the one nemar-ica's own views are built on: the decomposition's channels in layout order (the unmixing's header, so `Ch001` and so on when the labels cannot head columns), its components (`IC001` and so on), ICLabel's classes, the floor's sampling rate, the layout `_chanlocs.tsv` (or, when the maps have none, the layout withheld with `cap_exceeded`), the sidecar's cap model and reference, and the suffixes of its own files.
 The inputs (`outputs.plugin_inputs`) are, from `nemar-ica`:
 
 | Input | What it is |
@@ -83,11 +85,14 @@ The inputs (`outputs.plugin_inputs`) are, from `nemar-ica`:
 | `classes` | ICLabel's seven classes, in ICLabel's order |
 | `classifications` | ICLabel's probabilities, components by classes |
 | `variance_pct` | each component's own percent of the data's variance (eegprep's `eeg_pvaf`), one per component |
+| `weights` | `icaweights`, components by principal components (square) |
+| `sphere` | `icasphere`, principal components by channels (the rank's rows, so fewer than the channels) |
+| `icachansind` | the rows of `data` the decomposition was computed on (every good channel) |
 
 From `nemar-floor` the input is `line_hz`, the line frequency the floor measured (its table's `line_hz`: whichever of 50 and 60 Hz had the larger excess before the filters), or null.
 
 They run when the recording's product is written, after the recipe's own views and before any file is written, on a copy of the plan, so the record, its `plan_hash` and the row hold their steps or skips: each plugin's identity (name, version, source tree) is hashed with its step.
-Their views follow the recipe's in `extensions.nemar.views` (`icmaps`, `icactivity`, `midsegment`, then `icclasses` and `spectrum`), their files are the outputs of their steps, nemar-quality's headline metric joins the record's `summaryMetrics`, and the table's `pct_brain_components` is its value (null when nemar-quality was skipped).
+Their views follow the recipe's in `extensions.nemar.views` (`icmaps`, `icactivity`, `midsegment`, then `icclasses` and `spectrum`), their files are the outputs of their steps, nemar-quality's headline metric joins the record's `summaryMetrics`, and the table's `pct_brain_components` and `mir_nats` are its two metrics' values (null when nemar-quality was skipped, and `mir_nats` null too when the MIR has none, `mir_refused` or `mir_bins_changed`).
 A plugin that fails is skipped (`plugin_failed`, its views in `views_skipped`, the pair in the row's `skipped_steps`) and the recording succeeds; when the layout is withheld, the spectrum's view is listed with the layout's word and nemar-spectrum still ran.
 
 ## What a plugin is
@@ -145,11 +150,11 @@ Metrics, from `eeg_nemar_dataqual.m` (the last two are new to this pipeline):
 | Share of channels kept | channels the cleaning kept, out of the signal channels |
 | Line-noise magnitude | the line-noise excess in dB |
 | Share of brain components | components ICLabel labels brain, out of all components |
-| MIR | the mutual information reduction of the decomposition |
+| MIR | the mutual information reduction of the decomposition, in nats (`nemar-quality:mutualInformationReduction`, eegprep's `eeg_mir`): `log|det W| + sum h(x_i) - sum h(y_i)`, with `W` the components' weights (`icaweights`), `x` the sphered data (`icasphere` times the decomposition's channels) and `y = W x`, each marginal entropy `h` binned over 256 fixed bins with the Miller-Madow correction; 0 for identity weights, unchanged by scaling, reordering or flipping components, larger when the unmixing removes more dependence. It rates what the unmixing adds to the decorrelation sphering does, so it is not comparable with Delorme et al. 2012 (equation 17 there is taken from the recorded channels with the full unmixing, reported in kbits/s) or with the legacy NEMAR report (`eeg_nemar_dataqual.m`, whose commented-out `mir` passes the channel data with `icaweights * icasphere`): both include sphering's reduction. |
 
 The floor already measures the first three: its record's `extensions.nemar.metrics` hold `percentGoodSamples` and `percentGoodChannels` as typed metrics (its `qc` step's `qualityMetrics` carry the same values, plain), and its `line_noise_measure` step measures the line-noise excess (the recordings table carries them as `pct_good_samples`, `pct_good_channels`, `line_db_before` and `line_db_after`).
 A plugin reports a value the floor measures from the floor's output rather than computing it again.
-The dataset dataQuality document (`desc-<label>_dataquality.json`, [recipes.md](recipes.md)) carries the legacy per-dataset bounds as `observed_range`: the lowest and highest good channels and good data from the recipe's metrics, and brain components from nemar-quality's, which nemar-ica's table carries as `pct_brain_components`.
+The dataset dataQuality document (`desc-<label>_dataquality.json`, [recipes.md](recipes.md)) carries the legacy per-dataset bounds as `observed_range`: the lowest and highest good channels and good data from the recipe's metrics, and brain components from nemar-quality's, which nemar-ica's table carries as `pct_brain_components`; nemar-quality's MIR, the table's `mir_nats`, has its distribution and observed range there too (edges in nats, 0, 0.25, 0.5, 1, 2, 4, 8, 16 and 32; a value below 0, an unmixing that adds dependence, is in the underflow, one above 32 in the overflow, and a recording with no MIR in `missing`).
 
 Figures, from `nemar_plugins/`, and the view each becomes (ADR 0137; the browser draws it from data):
 

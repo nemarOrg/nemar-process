@@ -59,7 +59,7 @@ CHECKPOINTS = (
 # tests/recipes/plugin_digests.json pins each version's source tree. A literal, like CHECKPOINTS:
 # nemar-cli's process-drift test reads the names, which must be the map's `quality` steps in order.
 PLUGINS = (
-    ("nemar-quality", "0.1.0"),
+    ("nemar-quality", "0.2.0"),
     ("nemar-spectrum", "0.1.0"),
 )
 # The recipes whose outputs nemar-ica hands a plugin (``outputs.plugin_inputs``): its own decomposition

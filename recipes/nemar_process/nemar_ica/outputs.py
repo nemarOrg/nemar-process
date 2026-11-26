@@ -917,9 +917,12 @@ def plugin_inputs(fit: pipeline.Decomposition, host: views.Host) -> dict[str, di
     ``nemar-ica`` the decomposition's input (``data``: the good channels by samples the fit was given,
     in ``unit`` ``uV``), the host's sampling rate (``srate``) and channel names in layout order
     (``channels``: the unmixing's header, the layout's names), ICLabel's ``classes`` in its order with
-    its ``classifications`` (components by classes) and each component's own ``variance_pct``; from
-    ``nemar-floor`` the line frequency it measured (``line_hz``, its table's, or None).
-    ``plugins.run_checkpoint`` hands each plugin read-only views of the ones its manifest reads."""
+    its ``classifications`` (components by classes), each component's own ``variance_pct``, and the
+    decomposition as eegprep holds it: ``weights`` (``icaweights``, components by principal
+    components), ``sphere`` (``icasphere``, principal components by channels) and ``icachansind`` (the
+    rows of ``data`` it was computed on); from ``nemar-floor`` the line frequency it measured
+    (``line_hz``, its table's, or None). ``plugins.run_checkpoint`` hands each plugin read-only views
+    of the ones its manifest reads."""
     return {
         "nemar-ica": {
             "data": fit.eeg["data"],
@@ -929,6 +932,9 @@ def plugin_inputs(fit: pipeline.Decomposition, host: views.Host) -> dict[str, di
             "classes": list(fit.classes),
             "classifications": fit.probabilities,
             "variance_pct": list(fit.variance_pct),
+            "weights": np.asarray(fit.eeg["icaweights"]),
+            "sphere": np.asarray(fit.eeg["icasphere"]),
+            "icachansind": np.asarray(fit.eeg["icachansind"]),
         },
         "nemar-floor": {"line_hz": floor_outputs.line_frequency(fit.floor_result)},
     }
@@ -968,11 +974,13 @@ RECIPE_METRICS = (
     ),
 )
 
-# The share of brain components is nemar-quality's metric, never a recipe value (ADR 0137 C6): the
-# table's ``pct_brain_components`` is its value in the recording's record, and null when the plugin was
-# skipped; nothing here computes the share itself.
+# The share of brain components and the mutual information reduction are nemar-quality's metrics, never
+# recipe values (ADR 0137 C6): the table's ``pct_brain_components`` and ``mir_nats`` are their values in
+# the recording's record, and null when the plugin was skipped or the metric has none (``mir_refused``,
+# ``mir_bins_changed``); nothing here computes either.
 BRAIN_PLUGIN = "nemar-quality"
 BRAIN_METRIC = "nemar-quality:percentBrainComponents"
+MIR_METRIC = "nemar-quality:mutualInformationReduction"
 
 
 def plugin_metric(record: Mapping[str, Any], step_id: str, name: str) -> Any:
@@ -1029,6 +1037,7 @@ def table_row(
         "pct_good_samples": floor_values["percentGoodSamples"],
         "line_db_before": floor_values["lineNoiseBeforeDb"],
         "pct_brain_components": plugin_metric(record, BRAIN_PLUGIN, BRAIN_METRIC),
+        "mir_nats": plugin_metric(record, BRAIN_PLUGIN, MIR_METRIC),
         "skipped_steps": skipped or None,
         "record_content_sha256": content,
     }
