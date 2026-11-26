@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "nemarOrg/nemar-cli",
-    "commit": "e35026f3fa93c6fb7a13ed2ed1a95a195a4e072a",
+    "commit": "39e2ee3f023cdfee4054e539389dbe2ae5905812",
     "source": "shared/contract/compute-launch.ts",
     "function": "decodeLaunchSpecEnv",
     "generator": "scripts/gen_wire_cases.ts",
