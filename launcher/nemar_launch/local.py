@@ -496,7 +496,7 @@ class LocalImage(service.Image):
 
     def _pull_image(
         self,
-        docker: runtime.Engine,
+        engine: runtime.Engine,
         bare: str,
         digest_hex: str,
         cosign: str,
@@ -507,17 +507,22 @@ class LocalImage(service.Image):
         log: Log,
     ) -> None:
         """Docker: cosign verifies the digest (every entry names it), then the image is pulled by that
-        digest only if it is absent; the window allows exactly those three command lines."""
+        digest only if it is absent; the window allows exactly those three command lines. Every engine
+        call is built by ``engine.argv``, and the pull the window allows is that exact list. The
+        standalone entry pulls only under Docker: any other engine is ``runtime_unusable`` before the
+        window opens and before any engine or cosign call."""
+        if engine.name != runtime.DOCKER:
+            log.error("{}_pull_unsupported".format(engine.name))
+            raise Failure(
+                "runtime_error", "runtime_unusable", "the standalone entry pulls only under docker"
+            )
         stop = terminator.stop
         inspect = ["image", "inspect", "--format", "{{json .Config.Volumes}}", bare]
-        allowed = [
-            verify.version_argv(cosign),
-            verify.verify_argv(cosign, bare),
-            verify.docker_pull_argv(docker.path, digest_hex),
-        ]
+        pull = engine.argv(*verify.image_pull_args(digest_hex))
+        allowed = [verify.version_argv(cosign), verify.verify_argv(cosign, bare), pull]
         with self.fenced.window(allowed):
             present, _ = runtime._run(
-                docker, inspect, env, runtime.INSPECT_SECONDS, stop, capture=True
+                engine, inspect, env, runtime.INSPECT_SECONDS, stop, capture=True
             )
             version = verify.cosign_version(cosign, path, home, stop)
             out = verify.run_cosign(cosign, bare, path, home, stop)
@@ -525,7 +530,7 @@ class LocalImage(service.Image):
             if present != 0:
                 log.info("image: pulling the verified digest")
                 pulled, _ = runtime._run_argv(
-                    allowed[2], docker.environment(env), runtime.PULL_SECONDS, stop
+                    pull, engine.environment(env), runtime.PULL_SECONDS, stop
                 )
                 if pulled != 0:
                     raise Failure("runtime_error", "image_missing", "the image could not be pulled")

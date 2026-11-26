@@ -153,6 +153,7 @@ RUNNER_LABEL = "nemar.runner"
 # path existed (the prevention of `Prevention` and the check of `check_container`); a Podman call made
 # any other way is refused by `Engine` itself, before anything runs.
 UNSUPPORTED_ENGINES: tuple[str, ...] = ()
+DOCKER = "docker"
 PODMAN = "podman"
 # Podman's configuration, shut out on every call (docs/launcher.md, "Podman"): `CONTAINERS_CONF` names
 # an empty file the caller owns, so no `containers.conf` of the site or the user is read; the global
