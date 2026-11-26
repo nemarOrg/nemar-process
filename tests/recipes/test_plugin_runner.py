@@ -98,6 +98,95 @@ def test_a_null_metric_is_kept_as_null(loaded):
     assert plan.steps[0].quality["fx-metrics:fxShare"]["value"] is None
 
 
+def test_a_null_metric_with_a_declared_word_is_kept_with_why_and_the_plugin_ran(loaded, capsys):
+    """A metric a plugin could not compute is None with one of the words its module declares
+    (``METRIC_SKIP_WORDS``): the plugin ran, its other metrics are kept, its entry in the record lists
+    the metric with the word, and a fixed line says so."""
+    plugin = loaded["fx-metrics"]
+    assert plugin.skip_words == frozenset({"fx_not_measured"})
+    plan, result = run_one(plugin, {"share": None, "level": 1.0, "why": "fx_not_measured"})
+    (step,) = plan.steps
+    assert step.quality["fx-metrics:fxShare"]["value"] is None
+    assert step.quality["fx-metrics:fxLevel"]["value"] == 2.0
+    assert plan.skipped == []
+    (outcome,) = result.outcomes
+    entry = outcome.entry()
+    assert entry["status"] == "ran"
+    assert "code" not in entry
+    assert entry["metrics_skipped"] == [
+        {"metric": "fx-metrics:fxShare", "reason": "fx_not_measured"}
+    ]
+    assert plan.plugin_outcomes == [entry]
+    assert result.summary_metrics == {"fx-metrics:fxShare": None}
+    assert capsys.readouterr().err == (
+        "plugin_metric_skipped: fx-metrics metric=fx-metrics:fxShare reason=fx_not_measured\n"
+    )
+
+
+def test_a_plugin_that_ran_with_every_value_lists_no_skipped_metric(loaded, capsys):
+    _, result = run_one(loaded["fx-metrics"], {"share": 1.0, "level": 1.0})
+    assert "metrics_skipped" not in result.outcomes[0].entry()
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("floor", "word"),
+    [
+        ({"share": None, "level": 1.0, "why": "fx_unheard_of"}, "metric_skip_undeclared"),
+        ({"share": None, "level": 1.0, "why": 7}, "metric_skip_undeclared"),
+        ({"share": 50.0, "level": 1.0, "why": "fx_not_measured"}, "metric_skip_invalid"),
+    ],
+    ids=["undeclared_word", "not_a_word", "a_value_and_a_word"],
+)
+def test_a_word_the_plugin_does_not_declare_or_a_word_beside_a_value_skips_it(
+    loaded, capsys, floor, word
+):
+    plan, result = run_one(loaded["fx-metrics"], floor)
+    assert_skipped(plan, result, loaded["fx-metrics"], word, capsys)
+
+
+@pytest.mark.parametrize(
+    "skipped",
+    [
+        {"fx-echo:fxNothing": "fx_not_measured"},
+        ["fx-echo:fxEcho"],
+        {1: "fx_not_measured"},
+    ],
+    ids=["undeclared_metric", "not_a_mapping", "key_not_a_name"],
+)
+def test_metrics_skipped_that_is_not_declared_metrics_to_words_skips_the_plugin(
+    loaded, capsys, skipped
+):
+    plugin = echo(
+        loaded["fx-echo"],
+        lambda: plugins.PluginResult(metrics={"fx-echo:fxEcho": None}, metrics_skipped=skipped),
+    )
+    plan, result = run_one(plugin, {})
+    assert_skipped(plan, result, plugin, "metric_skip_invalid", capsys)
+
+
+@pytest.mark.parametrize(
+    "words",
+    [{"fx_not_measured"}, frozenset({"Not A Word"}), frozenset({"x" * 65}), frozenset({1})],
+    ids=["a_set", "spaces", "too_long", "not_text"],
+)
+def test_skip_words_that_are_not_a_frozenset_of_words_refuse_the_load(monkeypatch, words):
+    import plugin_fixtures.fx_metrics as module
+
+    monkeypatch.setattr(module, "METRIC_SKIP_WORDS", words)
+    with pytest.raises(plugins.PluginLoadError) as refused:
+        plugins.load(
+            [("fx-metrics", "0.1.0")],
+            checkpoints=CHECKPOINTS,
+            provides=["nemar-floor"],
+            steps=(),
+            recipe_views=(),
+            recipe_roles=(),
+            package="plugin_fixtures",
+        )
+    assert (refused.value.name, refused.value.word) == ("fx-metrics", "skip_words_invalid")
+
+
 def test_plugins_of_another_checkpoint_do_not_run(loaded):
     plan, result = run_one(loaded["fx-metrics"], {"share": 1, "level": 1}, checkpoint="ica")
     assert plan.steps == []
