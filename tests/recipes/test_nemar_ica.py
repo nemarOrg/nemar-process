@@ -1241,15 +1241,9 @@ def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_fil
     assert seen["fix_init"].strip() == "0"  # eegprep's own default, not a setting of the recipe
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "eegprep's runamica._write_param_file writes a float outside _SCI_PARAMS with '%f', so "
-        "min_dll=1e-9 and min_grad_norm=1e-7 reach the binary as 0.000000 (sccn/eegprep#680); "
-        "this test passes, and so fails as strict, once eegprep writes them as they are"
-    ),
-)
 def test_the_binary_reads_amicas_convergence_thresholds_as_passed(copying_binary, tmp_path):
+    """eegprep writes min_dll and min_grad_norm into the binary's parameter file as real numbers
+    (sccn/eegprep#680, fixed at the pin), so AMICA's convergence stops reach the binary as passed."""
     options = {"ica_engine": "amica15", "ica_device": "cpu", "ica_max_iter": 7, "ica_threads": 1}
     (recording,) = io.discover(DATASET)
     with pytest.raises(RecordingError), determinism.pinned_threads(1):
@@ -1411,13 +1405,15 @@ def test_the_images_pin_the_amica15_binary_the_recipe_version_stands_for():
     assert re.fullmatch(r"[0-9a-f]{64}", steps.AMICA15_SHA256)
 
 
-def test_eegprep_is_taken_from_one_full_commit_with_the_pamica_extra():
+def test_eegprep_is_taken_from_one_full_commit_with_the_pamica_and_iclabel_extras():
+    """The ``iclabel`` extra is onnxruntime, which ICLabel's packaged network runs on since
+    sccn/eegprep#386: without it ``pop_iclabel`` raises ``ImportError`` and every recording fails."""
     declared = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     (requirement,) = [
         r for r in declared["dependency-groups"]["runtime"] if str(r).startswith("eegprep[")
     ]
     assert re.fullmatch(
-        r"eegprep\[mne,pybids,picard,torch,pamica\] @ git\+https://github\.com/sccn/eegprep@"
+        r"eegprep\[mne,pybids,picard,torch,pamica,iclabel\] @ git\+https://github\.com/sccn/eegprep@"
         + PINNED_EEGPREP_COMMIT,
         requirement,
     )

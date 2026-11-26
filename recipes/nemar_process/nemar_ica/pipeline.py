@@ -73,8 +73,9 @@ FLOOR_EMBEDDING = floor_steps.Embedding(
     max_broken_time=steps.MAX_BROKEN_TIME,
 )
 
-# eegprep's ICLabel network, the file the classification reads (hashed into the record).
-ICLABEL_WEIGHTS = "netICL.mat"
+# The ICLabel network is the packaged file eegprep's classification names as the one that ran
+# (``network``: ``iclabel.onnx``, the full-precision network its native backend runs through onnxruntime,
+# sccn/eegprep#386), hashed into the record beside its name.
 
 
 @dataclass
@@ -132,11 +133,14 @@ def state_text(document: dict[str, Any]) -> str:
 
 
 @functools.cache
-def iclabel_weights_sha256() -> str:
-    """The SHA-256 of the network file ICLabel classifies with: the weights the record names."""
+def iclabel_weights_sha256(network: str) -> str:
+    """The SHA-256 of the network file ICLabel classified with, the packaged file the classification
+    names (``classify``); a name that is not a bare file name is refused (``ValueError``)."""
     from eegprep.plugins.ICLabel import iclabel
 
-    path = Path(iclabel.__file__).resolve().parent / ICLABEL_WEIGHTS
+    if not network or Path(network).name != network:
+        raise ValueError("ICLabel's network is not a packaged file name: {!r}".format(network))
+    path = Path(iclabel.__file__).resolve().parent / network
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(1 << 20):
@@ -545,14 +549,20 @@ def component_variance(eeg: dict[str, Any], rank: int) -> list[float]:
     return [float(value) for value in found if value is not None]
 
 
-def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray]:
-    """``pop_iclabel`` (eegprep's default network): the classified EEG, the class names and the
-    probabilities of every component (components by classes)."""
+def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray, str]:
+    """``pop_iclabel`` (eegprep's default network): the classified EEG, the class names, the
+    probabilities of every component (components by classes) and the packaged network file that ran,
+    as the classification names it (``network``)."""
     from eegprep import pop_iclabel
 
     labeled = pop_iclabel(eeg, steps.ICLABEL_VERSION)
     found = labeled["etc"]["ic_classification"]["ICLabel"]
-    return labeled, [str(name) for name in found["classes"]], np.asarray(found["classifications"])
+    return (
+        labeled,
+        [str(name) for name in found["classes"]],
+        np.asarray(found["classifications"]),
+        str(found["network"]),
+    )
 
 
 def process(
@@ -675,14 +685,14 @@ def process(
 
     # ICLabel
     with guarded("iclabel"):
-        eeg, classes, probabilities = classify(eeg)
-        weights_sha256 = iclabel_weights_sha256()
+        eeg, classes, probabilities, network = classify(eeg)
+        weights_sha256 = iclabel_weights_sha256(network)
         plan.add_step(
             "iclabel",
             steps.ICLABEL_FUNCTION,
             iclabel_parameters(),
             description=steps.DESCRIPTIONS["iclabel"],
-            quality={"classes": classes, "weightsSha256": weights_sha256},
+            quality={"classes": classes, "network": network, "weightsSha256": weights_sha256},
         )
 
     return Decomposition(
@@ -704,7 +714,11 @@ def process(
         serving=serving,
         bursts=bursts,
         store_rows=None if serving is None else kept_rows(result),
-        iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
+        iclabel={
+            "version": steps.ICLABEL_VERSION,
+            "network": network,
+            "weights_sha256": weights_sha256,
+        },
         positions=positions,
         sidecar=sidecar,
         window=midsegment(

@@ -14,7 +14,7 @@ The ICLabel weights check belongs to a later phase.
 
 | Package | Pin | Where it is decided |
 |---|---|---|
-| eegprep with the `mne`, `pybids`, `picard`, `torch` and `pamica` extras | one commit of sccn/eegprep's `develop` branch, `edf694c8344b9c4c68672eac3acf9a819f1462a8` (the merge commit of sccn/eegprep#617; its version still reads `0.5.0`, so every record names the commit too: [recipes.md](recipes.md)) | `pyproject.toml`, group `runtime`; the next move is to the eegprep release that contains it |
+| eegprep with the `mne`, `pybids`, `picard`, `torch`, `pamica` and `iclabel` extras | one commit of sccn/eegprep's `develop` branch, `871bc7f8a03b6d925330c598e8dcd18b835614d3` (the merge commit of sccn/eegprep#698; its version still reads `0.5.0`, so every record names the commit too: [recipes.md](recipes.md)) | `pyproject.toml`, group `runtime`; the next move is to the eegprep release that contains it |
 | MNE-Python | `1.13.2` | the same |
 | pamica | `0.4.0` | the same |
 | NumPy, SciPy | as resolved | `uv.lock` |
@@ -260,7 +260,7 @@ It runs in the unprivileged `test` job only (the signing job holds the OpenID Co
 The same leg runs `tests/e2e/test_ica_launch.py` in the SIF: `nemar-ica` with pAMICA and with the image's `amica15` binary on the fixture.
 The length of that run is chosen from the event and the base branch of a pull request and from nothing else (the step's `NEMAR_ICA_E2E_LENGTH`; no label, no title and no head branch name is read).
 On a pull request into any branch but `main` the run is short: all four runs stop at 50 iterations and the `E1R` test is skipped with its reason.
-On a pull request into `main` (a release), on the image tag and on the dispatch, where `publish` needs this job, the run is full: pAMICA uses the registry's invocation, with no `--ica-max-iter`, so the recipe's `DEFAULT_MAX_ITER` (4000, with AMICA's convergence stops; the module reads the value from `nemar_ica/steps.py`); the first binary run is capped at 2000 iterations, because the binary's convergence stops reach it as zero (sccn/eegprep#680) and it always runs to its cap; and the test prints the informational `E1R` line, the comparison of the two engines, and asserts nothing about it.
+On a pull request into `main` (a release), on the image tag and on the dispatch, where `publish` needs this job, the run is full: pAMICA uses the registry's invocation, with no `--ica-max-iter`, so the recipe's `DEFAULT_MAX_ITER` (4000, with AMICA's convergence stops; the module reads the value from `nemar_ica/steps.py`); the first binary run is capped at 2000 iterations, a bound on the leg's time (the binary's convergence stops reach it since sccn/eegprep#680 was fixed at the pin, so it may stop sooner); and the test prints the informational `E1R` line, the comparison of the two engines, and asserts nothing about it.
 The job's limit is 90 minutes: the last full run, at 2000 pAMICA iterations, took 25.8 minutes, 15.7 of them in the fits, so doubling pAMICA's share bounds it near 42 minutes.
 Both lengths run the binary twice for 50 iterations each on the same recording, whose two weight files must differ because nothing seeds the binary, and read every record against the length that ran.
 
