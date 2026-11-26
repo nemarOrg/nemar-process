@@ -3,18 +3,16 @@
 There is one record per flavor (``cpu`` and ``cuda``). It names the image by digest (the only
 reference a consumer uses), what the image holds (the native AMICA binary's SHA-256, the CPU fit's
 SHA-256 reading and, for the CUDA flavor, torch's CUDA build and the GPU architectures it lists), and
-the Singularity Image Format (SIF) file the launcher looks for. The CPU flavor's SIF is published and
-signed, and the record names its registry artifact. The CUDA flavor publishes no SIF and no SIF exists
-for it: its record has ``"sif": null`` and ``"launch_image": null`` and names no file (a SIF built on a
-host is refused by the runner, which runs only the signed artifact's layer), so the CUDA image runs
-under Docker or Podman by its verified digest until CI publishes and signs a CUDA SIF.
-The CPU SIF is named by the image digest: ``<64 lowercase hexadecimal digits>.sif``, in the directory
-the Tapis application sets as ``NEMAR_SIF_ROOT`` (the launcher refuses a specification whose
-``image.sif`` is not that name for ``image.digest``). ``launch_image`` is the ``image`` object of a
-launch specification for this release, ready to copy.
+the Singularity Image Format (SIF) file the launcher looks for. Each flavor's SIF is built by the
+workflow from the pushed image digest, published and signed, and its record names the registry
+artifact; a record without one is refused. The SIF is named by its image digest:
+``<64 lowercase hexadecimal digits>.sif``, in the directory the Tapis application sets as
+``NEMAR_SIF_ROOT`` (the launcher refuses a specification whose ``image.sif`` is not that name for
+``image.digest``). ``launch_image`` is the ``image`` object of a launch specification for this
+release, ready to copy.
 
-Called by ``.github/workflows/image-nemar-python.yml`` after the image (and, for ``cpu``, the SIF) is
-signed. The standard library only.
+Called by ``.github/workflows/image-nemar-python.yml`` after the image and its SIF are signed. The
+standard library only.
 """
 
 from __future__ import annotations
@@ -32,10 +30,9 @@ SIF_REPOSITORY = "ghcr.io/nemarorg/nemar-python-sif"
 NAME = "nemar-python"
 FLAVORS = ("cpu", "cuda")
 AMICA15_RELEASE = "0.4.0"
-CUDA_SIF_NOTE = (
-    "No SIF is published for the cuda flavor and none may be built by hand: the runner runs only the "
-    "signed SIF artifact's layer. Run this image under Docker or Podman by its digest."
-)
+# The SIF is hashed this many bytes at a time: a CUDA SIF is several gigabytes, and the CI job that
+# writes the record never holds it whole in memory.
+CHUNK_BYTES = 1 << 20
 SIF_ROOT_ENV = "NEMAR_SIF_ROOT"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -96,9 +93,17 @@ def smoke_facts(smoke: dict, flavor: str) -> dict:
     return facts
 
 
+def file_sha256(path: Path) -> str:
+    """The SHA-256 of the whole file, read ``CHUNK_BYTES`` at a time."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def sif_block(image_digest: str, sif_digest: str, sif_file: Path) -> dict:
     """The SIF's part of the record: its registry artifact and the file the launcher looks for."""
-    sif_bytes = sif_file.read_bytes()
     return {
         "repository": SIF_REPOSITORY,
         "oras_tag": "sha256-" + hex_of(image_digest),
@@ -106,8 +111,8 @@ def sif_block(image_digest: str, sif_digest: str, sif_file: Path) -> dict:
         "oras_reference": "oras://{}:sha256-{}".format(SIF_REPOSITORY, hex_of(image_digest)),
         "file_name": sif_name(image_digest),
         "root_env": SIF_ROOT_ENV,
-        "file_sha256": hashlib.sha256(sif_bytes).hexdigest(),
-        "file_size": len(sif_bytes),
+        "file_sha256": file_sha256(sif_file),
+        "file_size": sif_file.stat().st_size,
     }
 
 
@@ -129,14 +134,12 @@ def build_record(
     require(DIGEST, image_digest, "image digest")
     require(COMMIT, commit, "source commit")
     require(RUN_URL, run_url, "run URL")
-    sif = None
-    if flavor == "cpu":
-        if sif_digest is None or sif_file is None:
-            raise ValueError("the cpu flavor publishes a SIF: its digest and its file are needed")
-        require(DIGEST, sif_digest, "SIF artifact digest")
-        sif = sif_block(image_digest, sif_digest, sif_file)
-    elif sif_digest is not None or sif_file is not None:
-        raise ValueError("the {} flavor publishes no SIF".format(flavor))
+    if sif_digest is None or sif_file is None:
+        raise ValueError(
+            "the {} flavor publishes a SIF: its digest and its file are needed".format(flavor)
+        )
+    require(DIGEST, sif_digest, "SIF artifact digest")
+    sif = sif_block(image_digest, sif_digest, sif_file)
     facts = smoke_facts(smoke, flavor)
     installed = smoke.get("distributions", {})
     image_reference = "{}@{}".format(IMAGE_REPOSITORY, image_digest)
@@ -152,18 +155,12 @@ def build_record(
             "reference": image_reference,
         },
         "sif": sif,
-        # the `image` object of a launch specification for this release. The CUDA flavor has no SIF:
-        # nothing is named, because no file of that name exists and none may be built by hand.
-        "launch_image": (
-            {
-                "uri": "docker://" + image_reference,
-                "digest": image_digest,
-                "sif": sif_name(image_digest),
-            }
-            if sif is not None
-            else None
-        ),
-        **({} if sif is not None else {"sif_note": CUDA_SIF_NOTE}),
+        # the `image` object of a launch specification for this release
+        "launch_image": {
+            "uri": "docker://" + image_reference,
+            "digest": image_digest,
+            "sif": sif_name(image_digest),
+        },
         **facts,
         "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
         "versions": {"python": smoke.get("python"), **{n: installed[n] for n in VERSIONED}},
@@ -177,14 +174,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--flavor", choices=FLAVORS, default="cpu")
     parser.add_argument("--image-digest", required=True)
-    parser.add_argument("--sif-digest", help="the SIF artifact's digest (cpu only)")
-    parser.add_argument("--sif-file", type=Path, help="the SIF file (cpu only)")
+    parser.add_argument("--sif-digest", help="the SIF artifact's digest (required)")
+    parser.add_argument("--sif-file", type=Path, help="the SIF file (required)")
     parser.add_argument("--lock", type=Path, default=ROOT / "uv.lock")
     parser.add_argument(
         "--smoke",
         type=Path,
         required=True,
-        help="the JSON smoke.py printed (in the SIF for cpu, in the image for cuda)",
+        help="the JSON smoke.py printed in the SIF",
     )
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--commit", required=True)

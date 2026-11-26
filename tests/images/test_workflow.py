@@ -7,7 +7,9 @@ checks the syntax and the shell.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -244,7 +246,7 @@ def test_the_tool_versions_equal_the_ones_ci_uses():
 def test_the_digest_file_is_built_by_the_script_and_named_by_version_and_flavor():
     commands = step_commands(workflow()["jobs"]["sign"])
     assert "scripts/make_image_digests.py" in commands
-    assert "nemar-python-${VERSION}-cpu-digests.json" in commands
+    assert "nemar-python-${VERSION}-${FLAVOR}-digests.json" in commands
 
 
 def publish_steps() -> list[dict]:
@@ -551,17 +553,241 @@ def test_the_cpu_smoke_does_not_hide_the_gpu_and_checks_flavor_cpu():
 def test_every_check_of_a_smoke_document_in_an_image_names_the_flavor_it_expects():
     text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
     checks = [line for line in text.splitlines() if "python3 scripts/check_smoke_pins.py" in line]
-    assert len(checks) == 6  # test: cpu container, cuda container, SIF; sign: the same three
+    # in each of test and sign: cpu container, cuda container, cpu SIF, cuda SIF
+    assert len(checks) == 8
     for line in checks:
         assert re.search(r"--image --flavor (cpu|cuda)\b", line), line
 
 
-def test_the_sif_and_the_launch_test_are_cpu_only():
-    for job in ("test", "sign"):
-        for step in workflow()["jobs"][job]["steps"]:
-            blob = step.get("run", "") + step.get("name", "")
-            if re.search(r"apptainer|SIF|tests/e2e|setup-uv", blob + step.get("uses", "")):
-                assert step.get("if") == "matrix.flavor == 'cpu'", (job, step.get("name"))
+# ---- the SIF of each flavor: built, sized and smoke-tested in both legs of `test` and `sign`, ----------
+# ---- and pushed and signed in both legs of `sign` ------------------------------------------------------
+
+DIRS_STEP = "Put Apptainer's directories on the largest filesystem"
+INSTALL_STEP = "Install Apptainer"
+TEST_BUILD_STEP = "Build a SIF from the local image"
+SIZE_GATE_STEP = "Refuse a SIF at or over the size gate"
+TEST_SIF_SMOKE_STEP = "Smoke test the SIF under Apptainer, isolated as the launcher runs it"
+IMAGE_SIGN_STEP = "Sign the image digest and verify the signature"
+SIGN_BUILD_STEP = "Build the SIF from the image digest"
+SIGN_SIF_SMOKE_STEP = "Smoke test the SIF under Apptainer (SIF form)"
+SIF_TAG_STEP = "Refuse to overwrite an existing SIF tag"
+SIF_PUSH_STEP = "Push the SIF to GHCR as an OCI artifact"
+SIF_LAYER_STEP = "Refuse a pushed SIF artifact that is not the file built here"
+SIF_SIGN_STEP = "Sign the SIF artifact digest and verify the signature"
+RECORD_STEP = "Write the digest record"
+# the SIF steps of `sign`, in the order both legs run them
+SIGN_SIF_STEPS = (
+    INSTALL_STEP,
+    SIGN_BUILD_STEP,
+    SIZE_GATE_STEP,
+    SIGN_SIF_SMOKE_STEP,
+    SIF_TAG_STEP,
+    SIF_PUSH_STEP,
+    SIF_LAYER_STEP,
+    SIF_SIGN_STEP,
+    RECORD_STEP,
+)
+SIF_SMOKE_STEPS = {"test": TEST_SIF_SMOKE_STEP, "sign": SIGN_SIF_SMOKE_STEP}
+SIF_MAX_BYTES = 9_000_000_000
+ISOLATED = "apptainer exec --containall --cleanenv --no-home --no-mount bind-paths nemar-python.sif"
+
+
+def the_step(job: str, name: str) -> dict:
+    found = [s for s in workflow()["jobs"][job]["steps"] if s.get("name") == name]
+    assert len(found) == 1, (job, name)
+    return found[0]
+
+
+def case_branch(run: str, flavor: str) -> list[str]:
+    """The lines of the `case "$FLAVOR"` branch for `flavor`, without its label and its `;;`."""
+    lines = [line.strip() for line in run.splitlines()]
+    start = lines.index(flavor + ")")
+    end = lines.index(";;", start)
+    return lines[start + 1 : end]
+
+
+def test_the_launch_tests_are_cpu_only_and_the_sif_build_size_gate_and_smoke_run_in_both_legs():
+    steps = workflow()["jobs"]["test"]["steps"]
+    # repository test code runs against the SIF in the `cpu` leg only
+    for step in steps:
+        blob = step.get("run", "") + step.get("name", "") + step.get("uses", "")
+        if re.search(r"tests/e2e|setup-uv|pytest", blob):
+            assert step.get("if") == "matrix.flavor == 'cpu'", step.get("name")
+    # the SIF itself is built, sized and smoke-tested in every leg: no step of it has a condition
+    for name in (DIRS_STEP, INSTALL_STEP, TEST_BUILD_STEP, SIZE_GATE_STEP, TEST_SIF_SMOKE_STEP):
+        assert "if" not in the_step("test", name), name
+    names = [s.get("name", "") for s in steps]
+    assert (
+        names.index(DIRS_STEP)
+        < names.index(INSTALL_STEP)
+        < names.index(TEST_BUILD_STEP)
+        < names.index(SIZE_GATE_STEP)
+        < names.index(TEST_SIF_SMOKE_STEP)
+    )
+    # the `sign` job turns each flavor's image into a SIF: no step of it is split by flavor, and the
+    # steps run in one order, all of them after the image digest is signed and verified
+    sign = workflow()["jobs"]["sign"]["steps"]
+    for step in sign:
+        blob = step.get("run", "") + step.get("name", "") + step.get("uses", "")
+        if re.search(r"apptainer|SIF|oras |make_image_digests", blob):
+            assert "if" not in step, step.get("name")
+    sign_names = [s.get("name", "") for s in sign]
+    positions = [sign_names.index(name) for name in SIGN_SIF_STEPS]
+    assert positions == sorted(positions)
+    assert sign_names.index(IMAGE_SIGN_STEP) < positions[0]
+    for name in SIGN_SIF_STEPS:
+        assert "if" not in the_step("sign", name), name
+
+
+def test_apptainer_is_installed_by_one_pinned_text_in_every_leg_that_builds_a_sif():
+    test_install = the_step("test", INSTALL_STEP)
+    sign_install = the_step("sign", INSTALL_STEP)
+    assert test_install["run"] == sign_install["run"]
+    assert 'echo "${APPTAINER_DEB_SHA256}  apptainer.deb" | sha256sum -c -' in test_install["run"]
+
+
+def test_apptainers_directories_go_on_the_largest_filesystem_and_the_archive_is_removed():
+    dirs = the_step("test", DIRS_STEP)
+    assert dirs["id"] == "apptainer-dirs"
+    run = dirs["run"]
+    assert run.splitlines()[1] == "df -h"  # the first reading, before Apptainer is installed
+    assert "df --output=avail /mnt" in run
+    assert 'df --output=avail "$RUNNER_TEMP"' in run
+    assert 'echo "tmpdir=' in run
+    assert 'echo "cachedir=' in run
+    build = the_step("test", TEST_BUILD_STEP)
+    assert build["env"] == {
+        "APPTAINER_TMPDIR": "${{ steps.apptainer-dirs.outputs.tmpdir }}",
+        "APPTAINER_CACHEDIR": "${{ steps.apptainer-dirs.outputs.cachedir }}",
+    }
+    lines = build["run"].splitlines()
+    order = [
+        "docker save nemar-python:ci --output nemar-python.tar",
+        "apptainer build nemar-python.sif docker-archive:nemar-python.tar",
+        "df -h",  # the second reading, after the build
+        "rm -f nemar-python.tar",
+    ]
+    assert [line for line in lines if line in order] == order
+
+
+@pytest.mark.parametrize("job", ["test", "sign"])
+def test_the_cuda_sif_smoke_runs_the_command_line_of_a_job_kept_off_the_gpu(job):
+    step = the_step(job, SIF_SMOKE_STEPS[job])
+    assert "if" not in step
+    if job == "test":
+        assert step["env"] == {"FLAVOR": "${{ matrix.flavor }}"}
+    else:
+        # `sign` holds FLAVOR for the whole job, from the same matrix
+        assert "env" not in step
+        assert workflow()["jobs"]["sign"]["env"]["FLAVOR"] == "${{ matrix.flavor }}"
+    # one text in both jobs: the SIF is smoke-tested the same way before a pull request merges and
+    # before it is pushed
+    assert step["run"] == the_step("test", TEST_SIF_SMOKE_STEP)["run"]
+    run = step["run"]
+    assert case_branch(run, "cuda") == [
+        ISOLATED + " python /opt/smoke.py --no-gpu > smoke-sif.json",
+        "python3 scripts/check_smoke_pins.py --image --flavor cuda --no-gpu smoke-sif.json",
+    ]
+    assert case_branch(run, "cpu") == [
+        ISOLATED + " python /opt/smoke.py > smoke-sif.json",
+        "python3 scripts/check_smoke_pins.py --image --flavor cpu smoke-sif.json",
+    ]
+    # a flavor with no branch fails the step rather than smoke-testing nothing
+    assert 'case "$FLAVOR" in' in run
+    assert "exit 1" in case_branch(run, "*")
+    # no SIF run anywhere in the workflow asks for the host's GPU
+    text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "apptainer exec" in line:
+            assert "--nv" not in line, line
+
+
+def test_the_size_gate_is_the_constant_the_docs_name():
+    assert workflow()["env"]["SIF_MAX_BYTES"] == str(SIF_MAX_BYTES)
+    docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert "{:,} bytes".format(SIF_MAX_BYTES) in docs
+    assert "10 GB per layer" in docs
+
+
+@pytest.mark.parametrize("job", ["test", "sign"])
+def test_the_size_gate_directly_follows_each_sif_build_and_precedes_every_tag_check_and_push(job):
+    steps = workflow()["jobs"][job]["steps"]
+    builds = [i for i, s in enumerate(steps) if "apptainer build" in s.get("run", "")]
+    gates = [i for i, s in enumerate(steps) if s.get("name") == SIZE_GATE_STEP]
+    assert len(builds) == 1, job
+    assert gates == [builds[0] + 1], job
+    # the gate runs in every leg that builds a SIF
+    assert steps[gates[0]].get("if") == steps[builds[0]].get("if"), job
+    for index, step in enumerate(steps):
+        run = step.get("run", "")
+        if re.search(r"check_tag_absent\.py nemarorg/nemar-python-sif|apptainer push|oras ", run):
+            assert index > gates[0], (job, step.get("name"))
+
+
+def test_the_size_gate_is_one_text_in_both_jobs():
+    assert the_step("test", SIZE_GATE_STEP)["run"] == the_step("sign", SIZE_GATE_STEP)["run"]
+
+
+@pytest.mark.parametrize("job", ["test", "sign"])
+@pytest.mark.parametrize(
+    ("size", "passes"),
+    [(0, True), (SIF_MAX_BYTES - 1, True), (SIF_MAX_BYTES, False), (SIF_MAX_BYTES + 1, False)],
+)
+def test_the_size_gate_runs_and_refuses_a_sif_of_the_gate_or_more(job, size, passes, tmp_path):
+    """The gate's own shell, run on a sparse file of the size: nothing of the disk is used."""
+    work = tmp_path / "work"
+    work.mkdir()
+    with (work / "nemar-python.sif").open("wb") as handle:
+        handle.truncate(size)
+    script = tmp_path / "gate.sh"
+    script.write_text(the_step(job, SIZE_GATE_STEP)["run"], encoding="utf-8")
+    done = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "FLAVOR": "cuda",
+            "SIF_MAX_BYTES": workflow()["env"]["SIF_MAX_BYTES"],
+        },
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert "SIF size (cuda): {} bytes".format(size) in done.stdout
+    assert (done.returncode == 0) is passes, done.stdout + done.stderr
+    if not passes:
+        assert "::error::" in done.stdout
+
+
+def test_the_size_gate_fails_without_a_sif_or_without_its_constant(tmp_path):
+    script = tmp_path / "gate.sh"
+    script.write_text(the_step("test", SIZE_GATE_STEP)["run"], encoding="utf-8")
+    base = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "FLAVOR": "cuda"}
+    # no SIF: the size cannot be read
+    no_file = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={**base, "SIF_MAX_BYTES": str(SIF_MAX_BYTES)},
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert no_file.returncode != 0
+    # a SIF but no gate: the step refuses rather than compares with nothing
+    (tmp_path / "nemar-python.sif").write_bytes(b"")
+    no_gate = subprocess.run(
+        ["bash", "-e", str(script)],
+        env=base,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert no_gate.returncode != 0
 
 
 def test_the_image_digest_of_a_sign_leg_is_the_one_its_own_publish_leg_pushed():
@@ -585,20 +811,26 @@ def test_both_images_are_signed_by_digest_with_the_one_identity():
     assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in step["run"]
 
 
-def test_each_flavor_writes_its_own_digest_record_and_uploads_it_under_its_own_name():
+def test_one_step_writes_each_flavors_digest_record_with_its_sif_and_uploads_it_under_its_own_name():
     sign = workflow()["jobs"]["sign"]
-    (cpu,) = named(sign, "Write the digest record (cpu)")
-    (cuda,) = named(sign, "Write the digest record (cuda)")
-    assert cpu["if"] == "matrix.flavor == 'cpu'"
-    assert cuda["if"] == "matrix.flavor == 'cuda'"
-    assert "nemar-python-${VERSION}-cpu-digests.json" in cpu["run"]
-    assert "--flavor cpu" in cpu["run"]
-    assert "--sif-digest" in cpu["run"]
-    assert "nemar-python-${VERSION}-cuda-digests.json" in cuda["run"]
-    assert "--flavor cuda" in cuda["run"]
-    # the CUDA flavor publishes no SIF, and its record comes from the container-form smoke document
-    assert "sif" not in cuda["run"].replace("--smoke", "")
-    assert "--smoke smoke-container.json" in cuda["run"]
+    # one step for both flavors: no record is written by a step of its own flavor
+    assert not named(sign, RECORD_STEP + " (")
+    step = the_step("sign", RECORD_STEP)
+    assert "if" not in step
+    assert step["env"]["SIF_DIGEST"] == "${{ steps.push-sif.outputs.digest }}"
+    run = step["run"]
+    for needle in (
+        "python3 scripts/make_image_digests.py",
+        '--flavor "$FLAVOR"',
+        '--image-digest "$IMAGE_DIGEST"',
+        # every flavor's record names its SIF, and its facts come from the SIF's own smoke document
+        '--sif-digest "$SIF_DIGEST"',
+        "--sif-file nemar-python.sif",
+        "--smoke smoke-sif.json",
+        '--output "nemar-python-${VERSION}-${FLAVOR}-digests.json"',
+    ):
+        assert needle in run, needle
+    assert "smoke-container.json" not in run
     (upload,) = [s for s in sign["steps"] if "actions/upload-artifact" in s.get("uses", "")]
     assert upload["with"]["name"] == "nemar-python-digests-${{ matrix.flavor }}"
     assert (
@@ -621,11 +853,253 @@ def test_the_release_attaches_both_records_and_replaces_neither():
     assert "--clobber" not in commands
 
 
-def test_the_cuda_flavor_pushes_no_sif():
-    sign = workflow()["jobs"]["sign"]
-    for step in sign["steps"]:
-        if "oras" in step.get("run", "") or "apptainer push" in step.get("run", ""):
-            assert step.get("if") == "matrix.flavor == 'cpu'", step.get("name")
+def test_both_sign_legs_push_the_sif_under_the_image_digest_after_the_gate_and_the_tag_check():
+    steps = workflow()["jobs"]["sign"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    # the size gate and the refusal to move a SIF tag come before the push, the signature after it
+    gate, tag, push, signature = (
+        names.index(name) for name in (SIZE_GATE_STEP, SIF_TAG_STEP, SIF_PUSH_STEP, SIF_SIGN_STEP)
+    )
+    assert gate < tag < push < signature
+    # every step that checks, pushes, reads or signs the SIF artifact runs in both legs
+    for step in steps:
+        run = step.get("run", "")
+        if re.search(r"oras |apptainer push|nemar-python-sif", run):
+            assert "if" not in step, step.get("name")
+    assert (
+        'python3 scripts/check_tag_absent.py nemarorg/nemar-python-sif "sha256-${IMAGE_DIGEST#sha256:}"'
+        in steps[tag]["run"]
+    )
+    run = steps[push]["run"]
+    assert 'hex="${IMAGE_DIGEST#sha256:}"' in run
+    assert (
+        'apptainer push nemar-python.sif "oras://ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}"'
+        in run
+    )
+    assert (
+        'oras manifest fetch --descriptor "ghcr.io/nemarorg/nemar-python-sif:sha256-${hex}"' in run
+    )
+    run = steps[signature]["run"]
+    assert 'cosign sign --yes "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}"' in run
+    assert 'cosign verify "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}"' in run
+    assert '--certificate-identity-regexp "$SIGNING_IDENTITY"' in run
+    assert "--certificate-oidc-issuer https://token.actions.githubusercontent.com" in run
+
+
+def test_the_push_prints_its_wall_time_beside_the_sif_size():
+    """GHCR's upload limit is 10 minutes: the time is read from the log, not guessed."""
+    lines = [line.strip() for line in the_step("sign", SIF_PUSH_STEP)["run"].splitlines()]
+    started = lines.index('started="$(date +%s)"')
+    pushed = next(i for i, line in enumerate(lines) if line.startswith("apptainer push "))
+    finished = lines.index('finished="$(date +%s)"')
+    assert started < pushed < finished
+    report = 'echo "SIF push (${FLAVOR}): ${size} bytes in $((finished - started)) seconds"'
+    assert report in lines[finished:]
+    assert any(line.startswith('size="$(python3 -c') for line in lines)
+
+
+# Stand-ins for the two external programs the push step calls: each records its arguments, and the
+# push exits with the status a test asks for. Nothing of NEMAR is stood in for.
+STAND_IN_APPTAINER = """#!/bin/sh
+printf '%s\n' "apptainer $*" >> "$CALLS"
+if [ "$1" = registry ]; then cat > /dev/null; exit 0; fi
+if [ "$1" = push ]; then exit "$PUSH_EXIT"; fi
+exit 64
+"""
+STAND_IN_ORAS = """#!/bin/sh
+printf '%s\n' "oras $*" >> "$CALLS"
+printf '{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "%s", "size": 1}\n' "$ORAS_DIGEST"
+"""
+PUSHED_IMAGE = "sha256:" + "1a" * 32
+PUSHED_SIF = "sha256:" + "2b" * 32
+
+
+def run_push_step(tmp_path, push_exit: int):
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    for name, body in (("apptainer", STAND_IN_APPTAINER), ("oras", STAND_IN_ORAS)):
+        (tools / name).write_text(body, encoding="utf-8")
+        (tools / name).chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "nemar-python.sif").write_bytes(b"s" * 1234)
+    output = tmp_path / "github-output"
+    output.write_text("", encoding="utf-8")
+    script = tmp_path / "push.sh"
+    script.write_text(the_step("sign", SIF_PUSH_STEP)["run"], encoding="utf-8")
+    done = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={
+            "PATH": "{}:{}".format(tools, os.environ["PATH"]),
+            "HOME": str(tmp_path),
+            "FLAVOR": "cuda",
+            "IMAGE_DIGEST": PUSHED_IMAGE,
+            "GITHUB_TOKEN": "a-token",
+            "GITHUB_ACTOR": "an-actor",
+            "GITHUB_OUTPUT": str(output),
+            "CALLS": str(tmp_path / "calls"),
+            "PUSH_EXIT": str(push_exit),
+            "ORAS_DIGEST": PUSHED_SIF,
+        },
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    calls = (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+    return done, calls, output.read_text(encoding="utf-8")
+
+
+def test_the_push_step_pushes_under_the_image_digest_and_reports_its_time_and_the_sif_digest(
+    tmp_path,
+):
+    done, calls, output = run_push_step(tmp_path, push_exit=0)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert re.search(r"^SIF push \(cuda\): 1234 bytes in [0-9]+ seconds$", done.stdout, re.M)
+    hex_ = PUSHED_IMAGE.split(":", 1)[1]
+    assert calls == [
+        "apptainer registry login --username an-actor --password-stdin oras://ghcr.io",
+        "apptainer push nemar-python.sif oras://ghcr.io/nemarorg/nemar-python-sif:sha256-" + hex_,
+        "oras manifest fetch --descriptor ghcr.io/nemarorg/nemar-python-sif:sha256-" + hex_,
+    ]
+    assert output == "digest={}\n".format(PUSHED_SIF)
+    assert "a-token" not in done.stdout + done.stderr
+
+
+def test_a_failed_push_still_reports_its_time_and_fails_the_step_with_its_status(tmp_path):
+    done, calls, output = run_push_step(tmp_path, push_exit=7)
+    assert done.returncode == 7
+    assert re.search(r"^SIF push \(cuda\): 1234 bytes in [0-9]+ seconds$", done.stdout, re.M)
+    assert "::error::apptainer push of the cuda SIF failed with exit status 7" in done.stdout
+    # nothing after the failed push ran: no digest was read and none is handed to the signature
+    assert not any(call.startswith("oras ") for call in calls)
+    assert output == ""
+
+
+def test_the_sign_build_prints_the_sif_and_cache_sizes_and_the_disk_after_the_build():
+    """The first release reads the `sign` leg's disk, as the pull request reads the `test` leg's."""
+    step = the_step("sign", SIGN_BUILD_STEP)
+    assert step["env"] == {
+        "APPTAINER_DOCKER_USERNAME": "${{ github.actor }}",
+        "APPTAINER_DOCKER_PASSWORD": "${{ secrets.GITHUB_TOKEN }}",
+        "APPTAINER_CACHEDIR": "${{ runner.temp }}/apptainer-cache",
+    }
+    lines = [line.strip() for line in step["run"].splitlines()]
+    build = next(i for i, line in enumerate(lines) if line.startswith("apptainer build "))
+    # the cache exists before the build, so the reading after it cannot fail for want of it
+    assert lines.index('mkdir -p "$APPTAINER_CACHEDIR"') < build
+    assert lines[build + 1 :] == ['du -sh nemar-python.sif "$APPTAINER_CACHEDIR"', "df -h /"]
+
+
+def test_the_pushed_artifacts_layer_is_checked_against_the_file_built_here_before_it_is_signed():
+    steps = workflow()["jobs"]["sign"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    push, check, signature = (
+        names.index(name) for name in (SIF_PUSH_STEP, SIF_LAYER_STEP, SIF_SIGN_STEP)
+    )
+    # directly after the push and directly before the signature: nothing runs in between
+    assert check == push + 1
+    assert signature == check + 1
+    step = steps[check]
+    assert "if" not in step  # both legs
+    # it reads the digest the signature step signs, from the same output
+    assert step["env"] == {"SIF_DIGEST": "${{ steps.push-sif.outputs.digest }}"}
+    assert steps[signature]["env"] == {"SIF_DIGEST": "${{ steps.push-sif.outputs.digest }}"}
+    run = step["run"]
+    assert 'oras manifest fetch "ghcr.io/nemarorg/nemar-python-sif@${SIF_DIGEST}"' in run
+    assert "nemar-python.sif" in run
+
+
+# A stand-in for `oras`, the external program the check calls: it records its arguments and prints the
+# manifest a test wrote, or fails as a test asks.
+STAND_IN_ORAS_MANIFEST = """#!/bin/sh
+printf '%s\n' "oras $*" >> "$CALLS"
+if [ "$ORAS_EXIT" != 0 ]; then exit "$ORAS_EXIT"; fi
+cat "$MANIFEST"
+"""
+# the SIF built here: larger than one mebibyte, so a check that hashed only a first chunk would differ
+BUILT_SIF = bytes(range(256)) * 8200
+BUILT_LAYER = "sha256:" + hashlib.sha256(BUILT_SIF).hexdigest()
+
+
+def layer(digest: str) -> dict:
+    return {"mediaType": "application/vnd.sylabs.sif.layer.v1.sif", "digest": digest, "size": 1}
+
+
+def run_layer_check(tmp_path, manifest: dict, oras_exit: int = 0):
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "oras").write_text(STAND_IN_ORAS_MANIFEST, encoding="utf-8")
+    (tools / "oras").chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "nemar-python.sif").write_bytes(BUILT_SIF)
+    (work / "smoke-sif.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    script = tmp_path / "check.sh"
+    script.write_text(the_step("sign", SIF_LAYER_STEP)["run"], encoding="utf-8")
+    done = subprocess.run(
+        ["bash", "-e", str(script)],
+        env={
+            "PATH": "{}:{}".format(tools, os.environ["PATH"]),
+            "HOME": str(tmp_path),
+            "SIF_DIGEST": PUSHED_SIF,
+            "CALLS": str(tmp_path / "calls"),
+            "MANIFEST": str(tmp_path / "manifest.json"),
+            "ORAS_EXIT": str(oras_exit),
+        },
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    calls = (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+    return done, calls
+
+
+def manifest_of(*layers: dict) -> dict:
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.sylabs.sif.config.v1+json", "digest": "x"},
+        "layers": list(layers),
+    }
+
+
+def test_the_layer_check_passes_when_the_one_layer_is_the_file_built_here(tmp_path):
+    done, calls = run_layer_check(tmp_path, manifest_of(layer(BUILT_LAYER)))
+    assert done.returncode == 0, done.stdout + done.stderr
+    # the manifest is fetched by the digest that is signed next, never by the tag
+    assert calls == ["oras manifest fetch ghcr.io/nemarorg/nemar-python-sif@" + PUSHED_SIF]
+    assert BUILT_LAYER in done.stdout
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        manifest_of(layer("sha256:" + hashlib.sha256(b"another file").hexdigest())),
+        manifest_of(layer("sha256:" + hashlib.sha256(BUILT_SIF[: 1 << 20]).hexdigest())),
+        manifest_of(layer(BUILT_LAYER), layer(BUILT_LAYER)),
+        manifest_of(),
+        {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json"},
+        manifest_of({"mediaType": "application/vnd.sylabs.sif.layer.v1.sif"}),
+    ],
+    ids=["another-file", "first-mebibyte", "two-layers", "no-layer", "no-layers-key", "no-digest"],
+)
+def test_the_layer_check_refuses_an_artifact_that_is_not_one_layer_of_the_file_built_here(
+    tmp_path, manifest
+):
+    done, _ = run_layer_check(tmp_path, manifest)
+    assert done.returncode != 0
+    assert "::error::" in done.stdout
+
+
+def test_the_layer_check_fails_when_the_manifest_cannot_be_fetched(tmp_path):
+    done, calls = run_layer_check(tmp_path, manifest_of(layer(BUILT_LAYER)), oras_exit=1)
+    assert done.returncode != 0
+    assert calls == ["oras manifest fetch ghcr.io/nemarorg/nemar-python-sif@" + PUSHED_SIF]
 
 
 def test_the_dispatch_input_names_both_tags():
@@ -634,18 +1108,23 @@ def test_the_dispatch_input_names_both_tags():
     assert "<version>-cuda" in description
 
 
-def test_the_docs_say_the_cuda_flavor_has_no_sif_and_runs_under_docker_not_apptainer():
+def test_the_docs_say_both_flavors_publish_a_signed_sif_and_no_host_builds_one():
     docs = (ROOT / "docs" / "images.md").read_text(encoding="utf-8")
+    assert "Both flavors publish a signed SIF" in docs
     # no host builds a SIF: the runner runs only the signed artifact's layer and refuses anything else
     assert "a GPU host builds" not in docs
     assert "apptainer build <hex>.sif" not in docs
-    assert "The CUDA flavor publishes none, and none may be built by hand" in docs
-    assert "runs under Docker or Podman" in docs
-    assert "refuses it under Apptainer (`image_unverified`)" in docs
-    # nothing in the workflow tells a host to build one either
-    text = IMAGE_WORKFLOW.read_text(encoding="utf-8")
+    assert "none may be built by hand" in docs
+    # what was true before the CUDA SIF existed is no longer said
+    assert "The CUDA flavor publishes none" not in docs
+    assert "Only the CPU flavor publishes a SIF" not in docs
+    assert "until CI publishes and signs a CUDA SIF artifact" not in docs
+    # the workflow says the same, and tells no host to build one either
+    text = re.sub(r"\s*\n#\s*", " ", IMAGE_WORKFLOW.read_text(encoding="utf-8"))
     assert "a GPU host builds" not in text
-    assert "refuses one built by hand" in re.sub(r"\s*\n#\s*", " ", text)
+    assert "refuses one built by hand" in text
+    assert "the CUDA flavor publishes no SIF" not in text
+    assert "publishes no SIF and its record names none" not in text
 
 
 def test_the_cuda_leg_runs_nemar_ica_with_no_gpu_visible_and_checks_the_cpu_fallback_record():

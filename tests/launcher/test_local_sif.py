@@ -14,7 +14,7 @@ import threading
 import pytest
 from harness import IMAGE_HEX, SIF_NAME
 from local_support import LocalRig
-from nemar_launch import local, run, runtime, spec
+from nemar_launch import local, run, spec
 from nemar_launch.codes import Env, Failure
 from nemar_launch.provenance import Log
 
@@ -87,8 +87,8 @@ def acquire(lrig, scratch):
     env = Env({b"NEMAR_SIF_ROOT": str(lrig.sif_root).encode()})
     sif = image.locate(job, env)
     path = image.acquire(
-        runtime.APPTAINER,
         "apptainer",
+        None,
         job,
         "x",
         sif,
@@ -167,8 +167,8 @@ def test_the_fence_is_told_the_pinned_image(lrig, tmp_path):
         job = spec.LocalSpec(document, "0" * 64)
         env = Env({b"NEMAR_SIF_ROOT": str(lrig.sif_root).encode()})
         path = image.acquire(
-            runtime.APPTAINER,
             apptainer,
+            None,
             job,
             "x",
             image.locate(job, env),

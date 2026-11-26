@@ -111,6 +111,11 @@ def launch_environment(
     }
     if config.runtime in ENGINES and runner_label is not None:
         env["NEMAR_RUNNER_LABEL"] = runner_label  # labels every container the launcher starts
+    runtime_dir = containers.user_runtime_dir() if config.runtime == containers.PODMAN else None
+    if runtime_dir is not None:
+        # Podman only: the user's run state, which the launcher's Podman calls must share with the
+        # runner's (docs/runner.md); without it the launcher refuses Podman as `runtime_unusable`
+        env["XDG_RUNTIME_DIR"] = runtime_dir
     memory = effective_memory_mb(job, config)
     if memory is not None:
         env["NEMAR_MEMORY_MB"] = str(memory)
@@ -741,7 +746,10 @@ class JobRunner:
             "reason": decision.reason,
         }
         if decision.cuda:
-            fields.update(gpu=decision.gpu_index, cap_mb=decision.memory_mb)
+            # the cap the check held room for, and the limit the job is told (the cap less the reserve)
+            fields.update(
+                gpu=decision.gpu_index, cap_mb=decision.cap_mb, limit_mb=decision.memory_mb
+            )
         if decision.why is not None:
             fields["why"] = decision.why
         self.log.info("device_chosen", job=job.id, **fields)

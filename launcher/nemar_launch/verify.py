@@ -142,8 +142,10 @@ def verify_argv(cosign: str, reference: str) -> list[str]:
     ]
 
 
-def docker_pull_argv(docker: str, digest_hex: str) -> list[str]:
-    return [docker, "pull", "--quiet", "{}@sha256:{}".format(IMAGE_REPOSITORY, digest_hex)]
+def image_pull_args(digest_hex: str) -> list[str]:
+    """The engine's pull of NEMAR's image by digest, without the engine: ``Engine.argv`` builds the
+    command line from it, so the line the fence allows is the line that runs."""
+    return ["pull", "--quiet", "{}@sha256:{}".format(IMAGE_REPOSITORY, digest_hex)]
 
 
 def sif_pull_argv(apptainer: str, part: str, manifest: str) -> list[str]:

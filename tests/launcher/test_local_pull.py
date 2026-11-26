@@ -21,7 +21,9 @@ from pathlib import Path
 import fake_docker
 import pytest
 from local_support import LocalRig, calls, control, install_cosign
-from nemar_launch import fence, verify
+from nemar_launch import fence, local, run, runtime, spec, verify
+from nemar_launch.codes import Env, Failure
+from nemar_launch.provenance import Log
 from server import Response, StandinServer
 
 HEX = "e" * 64
@@ -156,6 +158,44 @@ def test_docker_inspects_verifies_pulls_then_runs_with_pull_never(docker_rig):
         "cosign_version": "3.1.4",
     }
     assert fenced.refusals == []
+
+
+def test_a_pull_under_another_engine_is_refused_before_any_engine_or_cosign_call(tmp_path):
+    """The standalone pull is Docker's only: a Podman handle, even one with its prevention, is
+    ``runtime_unusable`` before the window opens, so no pull can run without the prevention's flags
+    (and no engine or cosign call is made at all)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = str(tmp_path / "engine")
+    podman = fake_docker.install(str(bin_dir), record, name="podman")
+    install_cosign(bin_dir)
+    xdg = tmp_path / "xdg"
+    xdg.mkdir(mode=0o700)
+    xdg.chmod(0o700)
+    prevention = runtime.prepare_prevention(str(tmp_path), Env({b"XDG_RUNTIME_DIR": bytes(xdg)}))
+    handle = runtime.Engine("podman", podman, prevention)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    document = {
+        "runtime": "image",
+        "command": ["true"],
+        "args": [],
+        "image": {"uri": NEMAR_URI, "digest": DIGEST, "sif": HEX + ".sif"},
+        "env": {},
+        "resources": {"gpus": 0},
+        "datasets": [],
+    }
+    job = spec.LocalSpec(document, "0" * 64)
+    fenced = fence.Fence()
+    image = local.LocalImage(pull=True, fenced=fenced)
+    env = Env({b"PATH": str(bin_dir).encode()})
+    with fenced.run([podman]), pytest.raises(Failure) as caught:
+        image.acquire(
+            podman, handle, job, NEMAR_URI, "", env, str(scratch), run.Terminator(), Log(None)
+        )
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "runtime_unusable")
+    assert not Path(record + ".calls").exists()
+    assert calls(bin_dir) == []
 
 
 def test_docker_verifies_a_present_image_and_does_not_pull_it(docker_rig):
