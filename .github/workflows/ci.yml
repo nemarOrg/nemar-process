@@ -248,6 +248,29 @@ jobs:
       - name: Launch end to end, service and standalone (real Docker)
         run: uv run --frozen pytest tests/e2e/test_docker_launch.py tests/e2e/test_docker_local.py -m docker -v
 
+  podman:
+    # The launcher with NEMAR_CONTAINER_RUNTIME=podman against this runner's own rootless Podman (card C4):
+    # the prevention on every call, the OCI configuration checked before the container starts, each
+    # configuration path prevented through the launcher and refused when the prevention is bypassed, and
+    # the FIPS mounts refused. The test writes site files through `sudo -n` on this throwaway machine
+    # (NEMAR_PODMAN_E2E_SUDO=1, set here only) and restores them; every other job leaves
+    # NEMAR_REQUIRE_PODMAN unset, so the test is skipped there. Here a missing Podman is a failure.
+    name: podman (rootless)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NEMAR_REQUIRE_PODMAN: "1"
+      NEMAR_PODMAN_E2E_SUDO: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Podman version
+        run: podman version
+      - name: Launch end to end (real rootless Podman)
+        run: uv run --frozen pytest tests/launcher/test_podman_e2e.py -m podman -v -rs -s
+
   static:
     # The former `images` and `deploy` jobs as one required check, in this order: the images group (the
     # runtime image's declaration, lock, signalJourney schema digest, smoke fixture, Dockerfile and

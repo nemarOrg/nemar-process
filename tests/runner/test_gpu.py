@@ -42,6 +42,8 @@ from runner_support import Rig as RunnerRig
 UUID0 = "GPU-11111111-2222-3333-4444-555555555555"
 UUID1 = "GPU-66666666-7777-8888-9999-aaaaaaaaaaaa"
 TOTAL = 24576
+CAP = TOTAL // 2  # the cap with the default memory_fraction, 0.5
+LIMIT = CAP - 1024  # what the job is told: the cap less the default cuda_reserve_mb
 
 SMI = """#!{python}
 import json, os, sys, time
@@ -332,20 +334,80 @@ def test_a_gpu_too_small_for_a_cap_of_at_least_one_megabyte_is_never_granted():
     assert gpu.judge(rules, reading(total=100), 0) == "gpu_memory_short"  # the cap would be 0
 
 
+# ---- what the job is told: the cap less the reserve for what torch's allocator does not count ---------
+
+
+def test_the_job_is_told_the_cap_less_the_reserve_and_the_log_keeps_both():
+    assert (CAP, LIMIT) == (12288, 11264)
+    assert gpu.limit_mb(settings(), TOTAL) == LIMIT
+    assert gpu.limit_mb(settings(cuda_reserve_mb=0), TOTAL) == CAP  # no reserve: the cap, as before
+    assert gpu.limit_mb(settings(cuda_reserve_mb=CAP), TOTAL) == 0
+    assert gpu.limit_mb(settings(cuda_reserve_mb=CAP + 1), TOTAL) == -1
+
+
+@pytest.mark.parametrize("reserve", [CAP, CAP + 1, 16_777_216])
+def test_a_reserve_at_or_above_the_cap_is_memory_short(reserve):
+    rules = settings(max_used_mb=TOTAL, headroom_mb=0, cuda_reserve_mb=reserve)
+    assert gpu.judge(rules, reading(used=0), 0) == "gpu_memory_short"
+
+
+def test_a_reserve_one_below_the_cap_still_tells_the_job_one_megabyte():
+    rules = settings(max_used_mb=TOTAL, headroom_mb=0, cuda_reserve_mb=CAP - 1)
+    assert gpu.judge(rules, reading(used=0), 0) is None
+    assert gpu.limit_mb(rules, TOTAL) == 1
+
+
+@pytest.mark.parametrize("reserve", [0, 1024, 4096])
+def test_the_idle_rule_is_the_cap_plus_the_headroom_whatever_the_reserve(reserve):
+    rules = settings(max_used_mb=TOTAL, headroom_mb=2048, cuda_reserve_mb=reserve)
+    # the reserve is inside the cap, never taken off the room the check asks
+    free_needed = CAP + 2048
+    assert gpu.judge(rules, reading(used=TOTAL - free_needed), 0) is None  # exactly enough
+    assert gpu.judge(rules, reading(used=TOTAL - free_needed + 1), 0) == "gpu_memory_short"
+
+
+def test_with_no_reserve_the_job_is_told_the_cap(tmp_path, smi):
+    decision = decide(build_pool(tmp_path, smi, settings(cuda_reserve_mb=0)))
+    assert decision == gpu.Decision("cuda", "gpu_idle", UUID0, 0, CAP, cap_mb=CAP)
+    assert decision.environment()["NEMAR_GPU_MEMORY_MB"] == str(CAP)
+
+
+@pytest.mark.parametrize("reserve", [CAP, CAP + 1])
+def test_a_reserve_that_leaves_the_job_nothing_gives_the_cpu(tmp_path, smi, reserve):
+    pool = build_pool(tmp_path, smi, settings(cuda_reserve_mb=reserve))
+    decision = decide(pool)
+    assert (decision.device, decision.reason, decision.memory_mb) == (
+        "cpu",
+        "gpu_memory_short",
+        None,
+    )
+    assert pool.holder(0) is None  # nothing granted, nothing held
+
+
+def test_the_told_value_and_the_reserve_never_exceed_the_cap_the_check_asked_for():
+    for total in (1, 2, 100, 4000, 8192, 24576, 81920):
+        for fraction in (0.001, 0.25, 0.5, 1.0):
+            for reserve in (0, 1, 512, 1024, 4096):
+                rules = settings(memory_fraction=fraction, cuda_reserve_mb=reserve)
+                told = gpu.limit_mb(rules, total)
+                if told >= 1:
+                    assert told + reserve <= gpu.cap_mb(rules, total)
+
+
 # ---- the decision -------------------------------------------------------------------------------------
 
 
-def test_six_idle_samples_give_the_gpu_with_its_identifier_index_and_cap(tmp_path, smi):
+def test_six_idle_samples_give_the_gpu_with_its_identifier_index_and_limit(tmp_path, smi):
     pool = build_pool(tmp_path, smi)
     decision = decide(pool)
-    assert decision == gpu.Decision("cuda", "gpu_idle", UUID0, 0, TOTAL // 2)
+    assert decision == gpu.Decision("cuda", "gpu_idle", UUID0, 0, LIMIT, cap_mb=CAP)
     assert decision.cuda
     assert decision.environment() == {
         "NEMAR_DEVICE": "cuda",
         "NEMAR_DEVICE_REASON": "gpu_idle",
         "NEMAR_GPU_ID": UUID0,
         "NEMAR_GPU_INDEX": "0",
-        "NEMAR_GPU_MEMORY_MB": str(TOTAL // 2),
+        "NEMAR_GPU_MEMORY_MB": str(LIMIT),
     }
     assert smi.calls("gpu") == ["gpu"] * 6  # six readings, and the two queries of each
     assert smi.calls("apps") == ["apps"] * 6
@@ -857,7 +919,7 @@ def device_keys(env: dict) -> dict:
     return {k: v for k, v in env.items() if k.startswith(("NEMAR_DEVICE", "NEMAR_GPU"))}
 
 
-def test_a_job_that_asked_for_a_gpu_is_given_the_idle_one_and_told_the_cap(jobs):
+def test_a_job_that_asked_for_a_gpu_is_given_the_idle_one_and_told_the_limit(jobs):
     jobs.claim(claim_job(1, gpus=1))
     agent = jobs.agent()
     assert run_once(jobs, agent) == 0
@@ -866,17 +928,39 @@ def test_a_job_that_asked_for_a_gpu_is_given_the_idle_one_and_told_the_cap(jobs)
         "NEMAR_DEVICE_REASON": "gpu_idle",
         "NEMAR_GPU_ID": UUID0,
         "NEMAR_GPU_INDEX": "0",
-        "NEMAR_GPU_MEMORY_MB": str(TOTAL // 2),
+        "NEMAR_GPU_MEMORY_MB": str(LIMIT),
     }
     [chosen] = jobs.events("device_chosen")
     assert (chosen["job"], chosen["device"], chosen["reason"]) == (job_id(1), "cuda", "gpu_idle")
-    assert (chosen["gpu"], chosen["cap_mb"]) == (0, TOTAL // 2)
+    assert (chosen["gpu"], chosen["cap_mb"], chosen["limit_mb"]) == (0, CAP, LIMIT)
     assert chosen["gpus"] == 1  # what the claim allowed, the ceiling the decision stays under
     assert UUID0 not in json.dumps(
         jobs.rig.log_lines()
     )  # the log names the index, never the GPU's id
     assert agent.gpus.holder(0) is None  # the job ended: the GPU is free
     assert jobs.rig.routes.bodies("complete")[0]["launcher_failure_code"] is None
+
+
+def test_a_job_on_a_large_gpu_is_told_the_cap_less_the_reserve_with_the_defaults(jobs):
+    jobs.claim(claim_job(1, gpus=1))
+    assert run_once(jobs, jobs.agent()) == 0
+    assert jobs.launched(1)["NEMAR_GPU_MEMORY_MB"] == "11264"
+    [chosen] = jobs.events("device_chosen")
+    assert (chosen["cap_mb"], chosen["limit_mb"]) == (12288, 11264)
+
+
+def test_a_job_on_the_cpu_logs_no_cap_and_no_limit(tmp_path, smi):
+    rig = JobRig(tmp_path, smi, settings(cuda_reserve_mb=CAP))
+    try:
+        rig.claim(claim_job(1, gpus=1))
+        assert run_once(rig, rig.agent()) == 0
+        [chosen] = rig.events("device_chosen")
+        assert (chosen["device"], chosen["reason"]) == ("cpu", "gpu_memory_short")
+        assert "cap_mb" not in chosen
+        assert "limit_mb" not in chosen
+        assert "NEMAR_GPU_MEMORY_MB" not in rig.launched(1)
+    finally:
+        rig.close()
 
 
 def test_a_busy_gpu_runs_the_job_on_the_cpu_and_it_finishes_all_the_same(jobs):
@@ -1202,11 +1286,11 @@ def test_gpu_check_prints_a_line_per_gpu_with_the_counts_per_sample(cli, smi, ca
     assert status == 0  # one of the GPUs is idle
     assert err == ""
     assert first == (
-        "gpu0: idle total_mb=24576 cap_mb=12288 processes=0,0,0,0,0,0 "
+        "gpu0: idle total_mb=24576 cap_mb=12288 limit_mb=11264 processes=0,0,0,0,0,0 "
         "used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0"
     )
     assert second == (
-        "gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 processes=1,1,1,0,0,0 "
+        "gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 limit_mb=11264 processes=1,1,1,0,0,0 "
         "used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0"
     )
 
@@ -1348,6 +1432,7 @@ def test_the_defaults_are_the_cards_and_the_check_is_off(cli):
         max_utilization_pct=10,
         samples=6,
         sample_seconds=5.0,
+        cuda_reserve_mb=1024,
     )
     assert loaded(cli).gpu == config.gpu  # an empty object is the defaults too
 
@@ -1362,8 +1447,9 @@ def test_every_key_of_the_object_is_read(cli):
         max_utilization_pct=5,
         samples=9,
         sample_seconds=2.5,
+        cuda_reserve_mb=512,
     )
-    assert config.gpu == Gpu(True, 0.25, 4096, 2048, 5, 9, 2.5)
+    assert config.gpu == Gpu(True, 0.25, 4096, 2048, 5, 9, 2.5, 512)
 
 
 @pytest.mark.parametrize(
@@ -1381,6 +1467,11 @@ def test_every_key_of_the_object_is_read(cli):
         ({"samples": 121}, "gpu samples"),
         ({"sample_seconds": 0}, "gpu sample_seconds"),
         ({"sample_seconds": 61}, "gpu sample_seconds"),
+        ({"cuda_reserve_mb": -1}, "gpu cuda_reserve_mb"),
+        ({"cuda_reserve_mb": 1.5}, "gpu cuda_reserve_mb"),
+        ({"cuda_reserve_mb": "1024"}, "gpu cuda_reserve_mb"),
+        ({"cuda_reserve_mb": True}, "gpu cuda_reserve_mb"),
+        ({"cuda_reserve_mb": 16_777_217}, "gpu cuda_reserve_mb"),
     ],
 )
 def test_a_bad_gpu_value_is_refused_and_the_message_names_the_key_only(cli, changes, named):

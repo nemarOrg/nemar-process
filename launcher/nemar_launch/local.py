@@ -399,8 +399,8 @@ class LocalImage(service.Image):
 
     def acquire(
         self,
-        engine: str,
         runtime_path: str,
+        handle: runtime.Engine | None,
         job: spec.Job,
         reference: str,
         sif: str,
@@ -409,7 +409,7 @@ class LocalImage(service.Image):
         terminator: run.Terminator,
         log: Log,
     ) -> str:
-        if engine == runtime.APPTAINER:
+        if handle is None:  # Apptainer
             return self._sif(runtime_path, job, sif, env, scratch, terminator, log)
         if self.pull:
             digest_hex = job.image["digest"].split(":", 1)[1]
@@ -418,11 +418,9 @@ class LocalImage(service.Image):
                 bare = verify.check_reference(job.image["uri"], digest_hex)
                 cosign = verify.find_cosign(self.cosign, path)
                 home = verify.cosign_home(scratch)
-                self._pull_image(
-                    runtime_path, bare, digest_hex, cosign, path, home, env, terminator, log
-                )
+                self._pull_image(handle, bare, digest_hex, cosign, path, home, env, terminator, log)
             log.info("image: verified by cosign (image)")
-        runtime.ensure_image(runtime_path, reference, env, terminator.stop, log, pull=False)
+        runtime.ensure_image(handle, reference, env, terminator.stop, log, pull=False)
         return sif
 
     def _sif(
@@ -498,7 +496,7 @@ class LocalImage(service.Image):
 
     def _pull_image(
         self,
-        docker: str,
+        docker: runtime.Engine,
         bare: str,
         digest_hex: str,
         cosign: str,
@@ -511,20 +509,24 @@ class LocalImage(service.Image):
         """Docker: cosign verifies the digest (every entry names it), then the image is pulled by that
         digest only if it is absent; the window allows exactly those three command lines."""
         stop = terminator.stop
-        inspect = [docker, "image", "inspect", "--format", "{{json .Config.Volumes}}", bare]
+        inspect = ["image", "inspect", "--format", "{{json .Config.Volumes}}", bare]
         allowed = [
             verify.version_argv(cosign),
             verify.verify_argv(cosign, bare),
-            verify.docker_pull_argv(docker, digest_hex),
+            verify.docker_pull_argv(docker.path, digest_hex),
         ]
         with self.fenced.window(allowed):
-            present, _ = runtime._run(inspect, env, runtime.INSPECT_SECONDS, stop, capture=True)
+            present, _ = runtime._run(
+                docker, inspect, env, runtime.INSPECT_SECONDS, stop, capture=True
+            )
             version = verify.cosign_version(cosign, path, home, stop)
             out = verify.run_cosign(cosign, bare, path, home, stop)
             verify.verified_digests(out, "sha256:" + digest_hex)
             if present != 0:
                 log.info("image: pulling the verified digest")
-                pulled, _ = runtime._run(allowed[2], env, runtime.PULL_SECONDS, stop)
+                pulled, _ = runtime._run_argv(
+                    allowed[2], docker.environment(env), runtime.PULL_SECONDS, stop
+                )
                 if pulled != 0:
                     raise Failure("runtime_error", "image_missing", "the image could not be pulled")
         self.verification = {"by": "cosign", "kind": "image", "cosign_version": version}

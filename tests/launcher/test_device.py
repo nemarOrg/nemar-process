@@ -149,8 +149,7 @@ def test_a_cuda_decision_is_refused_for_a_specification_with_no_gpus_and_not_for
 
 def docker_argv(gpus: int, device: Device | None) -> list[str]:
     return runtime.build_argv(
-        "docker",
-        "/usr/bin/docker",
+        runtime.Engine("docker", "/usr/bin/docker"),
         parsed_spec(resources={"gpus": gpus}),
         REFERENCE,
         "nemar-launch-0123456789abcdef",

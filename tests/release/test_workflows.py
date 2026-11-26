@@ -1176,7 +1176,7 @@ def test_every_required_check_is_reported_by_exactly_one_job():
     assert set(job_names(load(LINT))) == {"lint"}
     ci_names = set(job_names(load("ci.yml")))
     assert set(REQUIRED_ON_DEV) - {"lint", "bump-validator"} <= ci_names
-    assert ci_names - set(REQUIRED_ON_DEV) == {"docker backend (end to end)"}
+    assert ci_names - set(REQUIRED_ON_DEV) == {"docker backend (end to end)", "podman (rootless)"}
     assert set(RETIRED_CHECKS) & set(REQUIRED_ON_MAIN) == set()
 
 
@@ -1274,6 +1274,7 @@ def test_no_job_or_step_of_ci_can_hide_a_failure():
             **dict.fromkeys(names_of_fold(), on_3_12),
         },
         "docker": {},
+        "podman": {},
         "static": dict.fromkeys(static_deploy_group_names(), ALWAYS),
         "recipes": {},
     }
