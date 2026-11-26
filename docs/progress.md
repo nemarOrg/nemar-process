@@ -1,7 +1,7 @@
 # Checkpoints and progress
 
 **Built** (epic nemarOrg/nemar-cli#2324, Phase 3): each recipe declares its checkpoint map beside `STEP_ORDER` and `nemar-recipe version` prints it; the recipe layer writes a local progress file ([recipes.md](recipes.md), "The local progress file"); the launcher builds the live progress object and reports it ([launcher.md](launcher.md), "Live progress"); the runner carries it on its heartbeat ([runner.md](runner.md)).
-The contract is pinned at nemar-cli's Phase 2 commit ([contracts.md](contracts.md), "The live progress contract").
+The contract is copied from the nemar-cli commit that `tests/contract/nemar-cli-progress-pin.json` names (`ref`), and moves only when that pin is bumped ([contracts.md](contracts.md), "The live progress contract").
 The standalone mode of the launcher (decision 8, a person's own machine with no NEMAR service) is built ([standalone.md](standalone.md), nemarOrg/nemar-process#67): it writes the same live progress object to `launcher/progress.json` and a results report with the reconciled counts.
 Where this page and the implementation disagree, the implementation and its tests win and this page is corrected.
 
