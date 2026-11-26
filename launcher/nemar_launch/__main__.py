@@ -39,7 +39,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple
 
-from . import bundle, net, progress, provenance, run, runtime, spec, stage, upload
+from . import bundle, net, progress, provenance, run, runtime, serving_index, spec, stage, upload
 from .codes import (
     ENV_SLURM_JOB_ID,
     ENV_SPEC,
@@ -178,6 +178,9 @@ class Steps(NamedTuple):
     first_seconds: float | None = None
     report_seconds: float | None = None
     engine_pull: str = "missing"
+    # ``scratch`` -> the directory holding the staged serving index, or None (``serving_index.py``):
+    # only a launch from NEMAR's service has one.
+    serving_index: Callable[[str], str | None] = lambda _scratch: None
 
 
 def service_steps(
@@ -197,12 +200,17 @@ def service_steps(
     def data(scratch: str) -> list[stage.Staged]:
         return stage.stage_all(job, env, scratch, sleep=sleep, log=log, stop=terminator.stop)
 
+    def index(scratch: str) -> str | None:
+        return serving_index.fetch(
+            job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
+        )
+
     post = (
         None
         if state.lease is not None
         else progress.poster(job.api_base, job.job_id, job.job_token)
     )
-    return Steps(code, data, Image(), post)
+    return Steps(code, data, Image(), post, serving_index=index)
 
 
 def _inside(child: str, parent: str) -> bool:
@@ -291,12 +299,14 @@ def _do_work(
         try:
             staged = steps.data(scratch)
             state.staging = [item.record for item in staged if item.record]
+            # The staged serving index, fetched like the bundle and before the container runs.
+            index_dir = steps.serving_index(scratch)
         finally:
             state.phase("staging", started)
         if terminator.stop.is_set():
             raise Stopped  # a cancel must not run the entry
 
-        binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
+        binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged, index_dir)
         container: str | None = None
         if engine == runtime.APPTAINER:
             run.check_bind_sources(binds)

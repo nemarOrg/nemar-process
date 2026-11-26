@@ -55,6 +55,7 @@ def test_the_script_is_at_the_root_and_executable_and_the_member_list_is_the_lau
             "lib/nemar_launch/report.py",
             "lib/nemar_launch/run.py",
             "lib/nemar_launch/runtime.py",
+            "lib/nemar_launch/serving_index.py",
             "lib/nemar_launch/settings.py",
             "lib/nemar_launch/spec.py",
             "lib/nemar_launch/stage.py",
@@ -64,13 +65,13 @@ def test_the_script_is_at_the_root_and_executable_and_the_member_list_is_the_lau
             "lib/schema/compute-progress.v1.json",
             "lib/schema/compute-recipe-progress.v1.json",
             "lib/schema/compute-results-report.v1.json",
-            "lib/schema/launch-spec.v1.json",
+            "lib/schema/launch-spec.v2.json",
             "nemar-launch-local",
             "tapisjob_app.sh",
         ]
         assert (
-            archive.read("lib/schema/launch-spec.v1.json")
-            == (ROOT / "launcher" / "schema" / "launch-spec.v1.json").read_bytes()
+            archive.read("lib/schema/launch-spec.v2.json")
+            == (ROOT / "launcher" / "schema" / "launch-spec.v2.json").read_bytes()
         )
         assert {i.date_time for i in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
         assert not any("__pycache__" in n or n.endswith(".pyc") for n in names)

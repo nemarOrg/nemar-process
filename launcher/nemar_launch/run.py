@@ -8,6 +8,7 @@ real runtime:
     exec --containall --cleanenv --no-home --pwd /work
          --bind <out>/work:/work  --bind <out>/work/tmp:/tmp
          [--bind <scratch>/code:/code:ro]  [--bind <dataset dir>:/data/<id>:ro ...]
+         [--bind <scratch>/serving-index:/data/serving-index:ro]
          [--nv]  --env <allowlisted>=<value> ...  --env NEMAR_OUT=/work/outputs
          [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
          <sif>  <entry or command> <args>
@@ -56,6 +57,7 @@ from .codes import (
     CONTAINER_CODE,
     CONTAINER_DATA,
     CONTAINER_OUTPUTS,
+    CONTAINER_SERVING_INDEX,
     CONTAINER_WORK,
     ENGINE_RUNTIMES,
     ENV_CONTAINER_RUNTIME,
@@ -215,15 +217,18 @@ def build_binds(
     tmp_dir: str,
     code_dir: str | None,
     staged: list[Staged],
+    serving_index_dir: str | None = None,
 ) -> list[Bind]:
     """The whole bind table. ``work`` is the ONLY archived directory in it: ``/tmp`` is node-local
-    scratch (user temporary files must not count against the shared account's quota), code and
-    datasets are read-only, and nothing else of the host is mounted."""
+    scratch (user temporary files must not count against the shared account's quota), code,
+    datasets and the staged serving index are read-only, and nothing else of the host is mounted."""
     binds = [Bind(work, CONTAINER_WORK, False), Bind(tmp_dir, "/tmp", False)]  # noqa: S108
     if code_dir is not None:
         binds.append(Bind(code_dir, CONTAINER_CODE, True))
     for name, held in zip(job.data_names, staged):
         binds.append(Bind(held.source, "{}/{}".format(CONTAINER_DATA, name), True))
+    if serving_index_dir is not None:
+        binds.append(Bind(serving_index_dir, CONTAINER_SERVING_INDEX, True))
     return binds
 
 

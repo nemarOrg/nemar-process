@@ -8,6 +8,11 @@ response, the outputs request and response):
     of the job's archive, with an extra key a reader must ignore.
 ``GET  /s3/bundle/<id>.tar.gz``
     the archive bytes the test supplied, with ``Range`` support.
+``POST /compute/jobs/<id>/serving-index``
+    header required; answers ``{url, expires_at}``, a presigned-style GET of the serving index the
+    test supplied (``serving_index_bytes``), with an extra key a reader must ignore.
+``GET  /s3/serving-index/<id>.json``
+    those bytes, with ``Range`` support.
 ``POST /compute/jobs/<id>/outputs``
     header required; the body is the outputs request; answers ``{uploads, expires_at}`` with one
     presigned-style PUT address per requested file, each carrying a signature in its query string.
@@ -71,6 +76,9 @@ class Callbacks:
         self.token = token
         self.server: StandinServer | None = None
         self.bundle_bytes: bytes = b""
+        self.serving_index_bytes: bytes = b""
+        self.serving_index_refusal: tuple[int, str] | None = None
+        self.serving_index_response_override: dict | None = None
         # failure modes -------------------------------------------------------------------------
         self.bundle_route_statuses: list[int] = []  # answered in order before success
         self.bundle_refusal: tuple[int, str] | None = None
@@ -125,6 +133,12 @@ class Callbacks:
         base = "/compute/jobs/{}/".format(self.job_id)
         if request.method == "POST" and request.path == base + "bundle":
             return self._bundle(request)
+        if request.method == "POST" and request.path == base + "serving-index":
+            return self._serving_index(request)
+        if request.method == "GET" and request.path == "/s3/serving-index/{}.json".format(
+            self.job_id
+        ):
+            return self._ranged(request, self.serving_index_bytes)
         if request.method == "POST" and request.path == base + "outputs":
             return self._outputs(request)
         if request.method == "POST" and request.path == base + "outputs/complete":
@@ -209,6 +223,35 @@ class Callbacks:
         return Response.json_body(
             200, {"url": url, "expires_at": _expires(), "a_key_added_later": {"x": 1}}
         )
+
+    def _serving_index(self, request: Request) -> Response:
+        self._event("serving-index")
+        if not self._token_ok(request):
+            return self._refuse(404, "job_not_found")
+        if self.serving_index_refusal is not None:
+            return self._refuse(*self.serving_index_refusal)
+        if self.serving_index_response_override is not None:
+            return Response.json_body(200, self.serving_index_response_override)
+        assert self.server is not None
+        url = "{}/s3/serving-index/{}.json?{}".format(
+            self.server.base_url, self.job_id, PRESIGN_QUERY
+        )
+        return Response.json_body(
+            200, {"url": url, "expires_at": _expires(), "a_key_added_later": {"x": 1}}
+        )
+
+    @staticmethod
+    def _ranged(request: Request, data: bytes) -> Response:
+        mode, start, end = parse_range(request.headers.get("range"), len(data))
+        if mode == "unsatisfiable":
+            return Response(status=416, headers={"Content-Range": f"bytes */{len(data)}"})
+        if mode == "partial":
+            return Response(
+                status=206,
+                body=data[start:end],
+                headers={"Content-Range": f"bytes {start}-{end - 1}/{len(data)}"},
+            )
+        return Response(status=200, body=data)
 
     def _bundle_get(self, request: Request) -> Response:
         with self._lock:
