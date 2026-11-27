@@ -361,9 +361,9 @@ def test_the_mir_is_eegpreps_of_the_decomposition_and_pamicas_reference(ran, dec
     [
         lambda i: i.update(weights=np.zeros_like(i["weights"])),
         lambda i: i.update(sphere=np.full_like(i["sphere"], np.nan)),
-        lambda i: i.update(icachansind=i["icachansind"][:-1]),
+        lambda i: i.update(data=np.zeros_like(i["data"])),
     ],
-    ids=["singular_weights", "nan_sphere", "channels_mismatch"],
+    ids=["singular_weights", "nan_sphere", "constant_data"],
 )
 def test_a_decomposition_eeg_mir_refuses_keeps_the_plugin_with_the_mir_skipped(
     loaded, decomposition, recording, capsys, change
@@ -392,6 +392,50 @@ def test_a_decomposition_eeg_mir_refuses_keeps_the_plugin_with_the_mir_skipped(
             nemar_quality.MIR_METRIC
         )
     )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda i: i.update(weights=np.asarray(i["weights"])[:, :-1]),
+        lambda i: i.update(icachansind=np.asarray(i["icachansind"])[:-1]),
+        lambda i: i.update(sphere=np.asarray(i["sphere"])[:-1]),
+        lambda i: i.update(icachansind=np.asarray(i["icachansind"]) + 1),
+        lambda i: i.update(icachansind=np.zeros_like(np.asarray(i["icachansind"]))),
+        lambda i: i.update(icachansind=np.asarray(i["icachansind"]) + 0.5),
+        lambda i: i.update(data=np.asarray(i["data"])[0]),
+    ],
+    ids=[
+        "weights_not_square",
+        "channels_fewer_than_sphere_columns",
+        "sphere_rows_not_weights",
+        "channel_past_data",
+        "channels_repeated",
+        "channels_not_whole",
+        "data_one_dimension",
+    ],
+)
+def test_a_decomposition_that_breaks_the_shape_contract_is_the_hosts_fault(
+    loaded, decomposition, recording, capsys, change
+):
+    """Shapes eeg_mir's contract does not allow are refused before it runs, as the host's fault: the
+    plugin is skipped (``plugin_failed``, ``DecompositionMismatch``), never a ``mir_refused``."""
+    fit, line_hz = decomposition
+    inputs = host_inputs(fit, line_hz)
+    change(inputs["nemar-ica"])
+    outcome, _ = quality_only(loaded, fit, host_of(fit, recording.path), inputs)
+    assert (outcome.status, outcome.code, outcome.detail) == (
+        "skipped",
+        "plugin_failed",
+        "DecompositionMismatch",
+    )
+    assert capsys.readouterr().err.endswith("detail=DecompositionMismatch\n")
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_a_mir_that_is_not_finite_is_refused(value):
+    assert nemar_quality.mir_value(value) == (None, "mir_refused")
+    assert nemar_quality.mir_value(0.25) == (0.25, None)
 
 
 def test_bins_other_than_eegpreps_are_refused_rather_than_shifting_the_mir(

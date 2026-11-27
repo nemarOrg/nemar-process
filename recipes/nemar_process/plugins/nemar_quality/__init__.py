@@ -24,13 +24,18 @@ The mutual information reduction (``nemar-quality:mutualInformationReduction``, 
 fixes the bins as the parameter ``nbins``; when eegprep's constant is not that number the metric has no
 value and the word ``mir_bins_changed``, so a change upstream is refused rather than shifting every
 stored value. A decomposition ``eeg_mir`` refuses (its ``ValueError``: singular or non-finite
-matrices, a constant component) leaves the metric with no value and the word ``mir_refused``; the
-plugin still ran, and the other metric and the view are kept. It is not comparable with Delorme et al.
+matrices, a constant component), or a value that is not finite, leaves the metric with no value and
+the word ``mir_refused``; the plugin still ran, and the other metric and the view are kept. Inputs
+that break eegprep's shape contract (weights that are not square, a sphere that is not principal
+components by the ``icachansind`` channels, ``icachansind`` that are not distinct rows of ``data``)
+are the host's fault, not the data's: they raise ``DecompositionMismatch`` before ``eeg_mir`` runs,
+and the plugin is skipped (``plugin_failed``). It is not comparable with Delorme et al.
 (2012) or the legacy NEMAR report, which measure MIR from the channels, sphering's reduction included.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -58,6 +63,42 @@ class NotIclabelClasses(ValueError):
 
 class VarianceLengthMismatch(ValueError):
     """Not one ``variance_pct`` per component."""
+
+
+class DecompositionMismatch(Exception):
+    """The decomposition handed over breaks eegprep's shape contract for ``eeg_mir``: a fault of the
+    host, never a refusal of the data, so it is not a ``ValueError`` (which would read as
+    ``mir_refused``) and skips the plugin."""
+
+
+def decomposition_of(ica: Mapping[str, Any]) -> dict[str, Any]:
+    """The EEG fields ``eeg_mir`` reads, after the shape contract: ``data`` channels by samples,
+    ``weights`` square, ``sphere`` its columns' rows by one column per ``icachansind`` entry, and
+    ``icachansind`` distinct whole-number rows of ``data``; else ``DecompositionMismatch``."""
+    data = np.asarray(ica["data"])
+    weights = np.asarray(ica["weights"])
+    sphere = np.asarray(ica["sphere"])
+    channels = np.asarray(ica["icachansind"])
+    if data.ndim != 2 or weights.ndim != 2 or weights.shape[0] != weights.shape[1]:
+        raise DecompositionMismatch("weights are not square, or data not channels by samples")
+    if channels.ndim != 1 or sphere.shape != (weights.shape[1], channels.size):
+        raise DecompositionMismatch("the sphere is not the weights' rows by the channels")
+    if (
+        channels.size == 0
+        or not np.issubdtype(channels.dtype, np.number)
+        or not np.all(np.isfinite(channels))
+        or not np.array_equal(channels, np.round(channels))
+        or channels.min() < 0
+        or channels.max() >= data.shape[0]
+        or np.unique(channels).size != channels.size
+    ):
+        raise DecompositionMismatch("icachansind are not distinct rows of data")
+    return {"data": data, "icaweights": weights, "icasphere": sphere, "icachansind": channels}
+
+
+def mir_value(mir: float) -> tuple[float | None, str | None]:
+    """The metric's value and why it has none: a finite number, or None with ``mir_refused``."""
+    return (mir, None) if math.isfinite(mir) else (None, MIR_REFUSED)
 
 
 def class_summary(
@@ -97,17 +138,12 @@ def mutual_information_reduction(
 
     if type(nbins) is not int or nbins != MIR_NBINS:
         return None, MIR_BINS_CHANGED
-    decomposition = {
-        "data": ica["data"],
-        "icaweights": ica["weights"],
-        "icasphere": ica["sphere"],
-        "icachansind": ica["icachansind"],
-    }
+    decomposition = decomposition_of(ica)
     try:
         mir, _variance = eeg_mir(decomposition)
     except ValueError:
         return None, MIR_REFUSED
-    return mir, None
+    return mir_value(float(mir))
 
 
 def run(inputs: Mapping[str, Any], parameters: Mapping[str, Any]) -> PluginResult:
