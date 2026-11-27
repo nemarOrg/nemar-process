@@ -1,13 +1,16 @@
-"""``docker_support.pull_test_image``: which repository the Docker end to end gets its image from.
+"""``docker_support.pull_test_image``: which repository the Docker end to end gets its image from, and
+that the whole pull ends inside its deadline.
 
-A stand-in for the engine (a real executable on disk, the registries outside this repository) refuses
-or serves each repository as a test says; the waits between rounds are recorded, not slept.
+A stand-in for the engine (a real executable on disk, the registries outside this repository) refuses,
+serves or never answers each repository as a test says; the waits between rounds are recorded, not
+slept, and the clock moves by them.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import docker_support
@@ -18,10 +21,11 @@ ECR, HUB = REPOSITORIES
 REFUSAL = "Error response from daemon: error from registry: Data limit exceeded"
 
 # `image inspect --format {{.Id}} <ref>` exits 0 when <ref> is in present.txt; `pull --quiet <ref>`
-# records the call, then refuses (exit 1, REFUSAL on stderr) while refusals.json gives the reference's
-# repository a count above zero (one refusal used per pull), else adds <ref> to present.txt.
+# records the call, sleeps for a minute when a file `hang` exists, then refuses (exit 1, REFUSAL on
+# stderr) while refusals.json gives the reference's repository a count above zero (one refusal used per
+# pull), else adds <ref> to present.txt.
 ENGINE = """#!{python}
-import json, os, sys
+import json, os, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
 present = os.path.join(here, "present.txt")
 argv = sys.argv[1:]
@@ -31,6 +35,8 @@ if argv[:3] == ["image", "inspect", "--format"]:
 if argv[:2] == ["pull", "--quiet"]:
     with open(os.path.join(here, "pulls.txt"), "a") as handle:
         handle.write(argv[2] + "\\n")
+    if os.path.exists(os.path.join(here, "hang")):
+        time.sleep(60)
     counts_path = os.path.join(here, "refusals.json")
     counts = json.load(open(counts_path)) if os.path.exists(counts_path) else {{}}
     repository = argv[2].split("@", 1)[0]
@@ -56,9 +62,16 @@ class Stand:
         if present:
             (tmp / "present.txt").write_text("".join(r + "\n" for r in present))
         self.waits: list = []
+        self.now = 0.0
 
-    def pull(self) -> docker_support.PulledImage:
-        return docker_support.pull_test_image(str(self.engine), sleep=self.waits.append)
+    def wait(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
+
+    def pull(self, deadline: float = docker_support.DEADLINE_SECONDS) -> docker_support.PulledImage:
+        return docker_support.pull_test_image(
+            str(self.engine), sleep=self.wait, clock=lambda: self.now, deadline_seconds=deadline
+        )
 
     def pulls(self) -> list:
         path = self.dir / "pulls.txt"
@@ -111,3 +124,35 @@ def test_a_pull_no_registry_serves_fails_with_every_refusal_and_is_bounded(tmp_p
     assert message.count("Data limit exceeded") == 2 * rounds
     assert "round {}, docker.io: exit 1: ".format(rounds) + REFUSAL in message
     assert "round 1, public.ecr.aws: exit 1: " + REFUSAL in message
+    assert "in {} rounds".format(rounds) in message
+
+
+def test_no_wait_starts_that_would_end_past_the_deadline(tmp_path):
+    stand = Stand(tmp_path, {ECR: 99, HUB: 99})
+    with pytest.raises(pytest.fail.Exception) as failed:
+        stand.pull(deadline=35)
+    assert stand.waits == [BACKOFF_SECONDS[0]]  # the 30 s wait would have ended past 35 s
+    assert stand.pulls() == [ref(ECR), ref(HUB)] * 2
+    assert "before the deadline of 35 s" in str(failed.value)
+    assert str(failed.value).count("Data limit exceeded") == 4
+
+
+def test_a_registry_that_never_answers_is_given_up_on_at_the_deadline(tmp_path):
+    stand = Stand(tmp_path, {})
+    (tmp_path / "hang").write_text("1")
+    began = time.monotonic()
+    with pytest.raises(pytest.fail.Exception) as failed:
+        docker_support.pull_test_image(str(stand.engine), sleep=stand.wait, deadline_seconds=1.5)
+    assert time.monotonic() - began < 10  # not the stand-in's minute, nor PULL_SECONDS
+    assert stand.pulls() == [ref(ECR)]
+    message = str(failed.value)
+    assert "before the deadline of 1.5 s" in message
+    assert "round 1, public.ecr.aws: no answer in " in message
+    assert stand.waits == []
+
+
+def test_the_bounds_end_well_inside_the_jobs_that_run_the_pull():
+    """The docker CI job has 30 minutes and the release gate's Docker step 20 (tests/release pins both)."""
+    assert docker_support.DEADLINE_SECONDS <= 12 * 60
+    assert docker_support.PULL_SECONDS < docker_support.DEADLINE_SECONDS
+    assert sum(BACKOFF_SECONDS) < docker_support.DEADLINE_SECONDS

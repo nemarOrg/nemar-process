@@ -12,7 +12,9 @@ import re
 import shutil
 import subprocess
 from collections import Counter
+from pathlib import Path
 
+import docker_support
 import pytest
 import release_support
 from nemar_runner import install
@@ -891,6 +893,58 @@ def test_the_tools_a_release_gate_runs_are_the_versions_ci_runs():
     ci, gate = load("ci.yml")["env"], load("release-gate.yml")["env"]
     for key in gate:
         assert gate[key] == ci[key], key
+
+
+def test_the_test_image_and_its_mirror_are_one_digest_and_each_sif_build_tries_both():
+    """public.ecr.aws can refuse an anonymous pull for a quota the runner shares (#107): the SIF build
+    then tries Docker Hub's copy of the same digest, under the same cache key, as the Docker end to end
+    does (tests/docker_support.py)."""
+    for name in ("ci.yml", "release-gate.yml"):
+        workflow = load(name)
+        env = workflow["env"]
+        key = env["TEST_IMAGE_KEY"]
+        assert key == docker_support.IMAGE_HEX
+        sources = ["docker://{}@sha256:{}".format(r, key) for r in docker_support.REPOSITORIES]
+        assert [env["TEST_IMAGE"], env["TEST_IMAGE_MIRROR"]] == sources
+        (build,) = [
+            s
+            for job in workflow["jobs"].values()
+            for s in job["steps"]
+            if s.get("name") == "Build the test image"
+        ]
+        assert 'for source in "$TEST_IMAGE" "$TEST_IMAGE_MIRROR"; do' in build["run"]
+        assert 'apptainer build --force .cache/runtime.sif "$source" && exit 0' in build["run"]
+        (cache,) = [
+            s
+            for job in workflow["jobs"].values()
+            for s in job["steps"]
+            if s.get("name") == "Cache the test image"
+        ]
+        assert cache["with"]["key"] == (
+            "sif-${{ env.TEST_IMAGE_KEY }}-apptainer-${{ env.APPTAINER_VERSION }}"
+        )
+    assert [conftest_source(n) for n in ("TEST_IMAGE", "TEST_IMAGE_MIRROR")] == sources
+
+
+def conftest_source(name: str) -> str:
+    """A string constant of tests/conftest.py, read from its text (importing it by name could find
+    another module called ``conftest``)."""
+    text = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+    found = re.search(r"^{} = \(\n((?:\s+\"[^\"]*\"\n)+)\)".format(name), text, re.MULTILINE)
+    assert found is not None, name
+    return "".join(re.findall(r'"([^"]*)"', found.group(1)))
+
+
+def test_the_docker_end_to_end_has_a_limit_the_image_pull_ends_well_inside():
+    (docker,) = [
+        s
+        for s in load("release-gate.yml")["jobs"]["release-gate"]["steps"]
+        if "test_docker_launch.py" in s.get("run", "")
+    ]
+    assert docker["timeout-minutes"] == 20
+    assert load("ci.yml")["jobs"]["docker"]["timeout-minutes"] == 30
+    # the pull's deadline leaves the launches at least five minutes of the shorter limit
+    assert docker_support.DEADLINE_SECONDS <= (20 - 5) * 60
 
 
 SUITES_WITHOUT_THE_RUNNER_STACK = ("tests/release", "tests/images", "tests/recipes")

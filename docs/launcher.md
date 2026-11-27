@@ -316,8 +316,10 @@ Residuals, stated plainly:
 `tests/launcher/test_podman_e2e.py` (marker `podman`) runs against a real rootless Podman in CI's `podman (rootless)` job (`NEMAR_REQUIRE_PODMAN=1`; site files are written through `sudo -n` only there, with `NEMAR_PODMAN_E2E_SUDO=1`): the clean case, each configuration path prevented through the launcher and refused by the check when the prevention is bypassed, and the FIPS mounts refused; elsewhere it is skipped with that reason.
 `tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`; a digest no registry serves shows the launcher's own pull refused by the real engine as `image_missing reason=pull_failed`.
 It skips where there is no usable daemon and fails in the CI job that sets `NEMAR_REQUIRE_DOCKER=1`.
-The test image is pulled before the launches by `tests/docker_support.py`, from the first registry that serves its digest (`public.ecr.aws`, then Docker Hub), in up to four rounds with a growing wait between them: anonymous pulls are capped per source address (public.ecr.aws answers "Data limit exceeded" past 500 GB a month), and a CI runner shares its address with other tenants.
+The test image is pulled once per session, before the launches, by the `docker_image` fixture of `tests/docker_support.py` (a plugin of `tests/conftest.py`), from the first registry that serves its digest (`public.ecr.aws`, then Docker Hub), in up to four rounds with a growing wait between them: anonymous pulls are capped per source address (public.ecr.aws answers "Data limit exceeded" past 500 GB a month), and a CI runner shares its address with other tenants.
+Each pull gets at most 3 minutes and the whole of it 12, well inside the docker job's 30 and the release gate step's 20.
 A pull no registry serves fails the test with each registry's words, never a skip.
+The Apptainer tests' SIF of the same digest is built the same way, `public.ecr.aws` then Docker Hub, in the workflows' "Build the test image" steps (on a cache miss: the cache key is the digest) and in `tests/conftest.py`.
 
 ## The launch specification
 
@@ -643,8 +645,6 @@ The three results refusals `results_too_large`, `results_quota_exceeded` and `to
 Who pays: a detail is the platform's, and the job is refunded, if and only if a submitter cannot cause it with a valid specification and bundle (`codes.PLATFORM_LAUNCHER_DETAILS`): everything above except `unsafe_archive`, `archive_too_large`, `bad_include`, `too_many_files`, `too_many_bytes`, `entry_failed`, `terminated`, `outputs_unreadable`, `results_too_large`, `results_quota_exceeded` and `too_many_outputs`, which are the submitter's and are charged, even under a fetch code.
 A signal death of the entry is reported as 128 plus the signal, as a shell does, in `entry_exit_code`.
 
-## Environment
-
 **Every `image_missing` names its reason in the log**, as `image_missing reason=<word>` with at most a number in brackets, from a closed list (`provenance.IMAGE_MISSING_REASONS`); the words are log words only, and the detail stays `image_missing` for every one:
 
 | Reason | When |
@@ -665,6 +665,8 @@ A signal death of the entry is reported as 128 plus the signal, as a shell does,
 | `sif_pull_timeout` | that pull did not finish in 30 minutes, and was killed |
 | `sif_pull_not_started` | Apptainer could not be started to pull |
 | `sif_pull_empty` | that pull exited 0 and wrote no file, or an empty one |
+
+## Environment
 
 | Variable | Who sets it | Meaning |
 |---|---|---|
