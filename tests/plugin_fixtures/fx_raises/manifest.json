@@ -1,0 +1,23 @@
+{
+  "format": "nemar.plugin-manifest.v1",
+  "name": "fx-raises",
+  "version": "0.1.0",
+  "entry": "plugin_fixtures.fx_raises",
+  "checkpoint": "quality",
+  "reads": {
+    "dataset": false,
+    "recipes": [
+      "nemar-floor"
+    ]
+  },
+  "parameters": {},
+  "outputs": {
+    "metrics": {
+      "fx-raises:fxNever": {
+        "unit": "count",
+        "description": "Never written."
+      }
+    },
+    "views": {}
+  }
+}

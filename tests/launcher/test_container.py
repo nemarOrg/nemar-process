@@ -1,4 +1,4 @@
-"""Test 7: the real runtime, isolated from the host.
+"""Test 7: the real runtime, isolated from the host, by the service path and by the standalone entry.
 
 These need a real Apptainer or Singularity binary and run only where there is one (CI, with a pinned
 Apptainer). Locally they skip with a stated reason; in CI a missing binary is a failure.
@@ -70,12 +70,47 @@ CANARY = "host-only-secret-canary"
 TRICKY_VALUE = 'a,b "c" d=e  f'
 
 
-@pytest.fixture(scope="module")
-def probed(tmp_path_factory, test_sif):
-    tmp = tmp_path_factory.mktemp("container")
-    rig = Rig(tmp, "apptainer")
+SMUGGLERS: dict = {
+    "NEMAR_TEST_CANARY": CANARY,
+    "SINGULARITYENV_SMUGGLED": "smuggled",
+    "APPTAINERENV_SMUGGLED2": "smuggled",
+    "SINGULARITY_BIND": "/etc:/hostetc",
+    "APPTAINER_BIND": "/usr:/hostusr",
+}
+
+
+def standalone_probe(tmp, test_sif, args):
+    """The same probe through the standalone entry (``nemar-launch-local``): the person's own data
+    directory, code archive and image directory, and the same hostile host variables."""
+    from harness import sha256_hex
+    from local_support import LocalRig
+
+    rig = LocalRig(tmp, "apptainer")
+    for path in rig.bin_dir.iterdir():
+        path.unlink()
     shutil.copy(test_sif, rig.sif_root / SIF_NAME)
-    bundle = rig.set_bundle(make_bundle({"probe.py": PROBE}))
+    data = rig.dataset(DATASET_ID, {"README": "readme", "participants.tsv": "participant_id"})
+    archive = make_bundle({"probe.py": PROBE})
+    document = rig.script_spec("unused", datasets=(DATASET_ID,))
+    rig.code_path.write_bytes(archive)
+    document.update(
+        runtime="python",
+        entry="probe.py",
+        args=args,
+        bundle={"sha256": sha256_hex(archive), "size": len(archive)},
+        env={"OMP_NUM_THREADS": "3", "MPLBACKEND": TRICKY_VALUE},
+    )
+    document.pop("command")
+    rig.write_spec(document)
+    environ = rig.environ(**SMUGGLERS)
+    environ[b"PATH"] = os.environ.get("PATH", "").encode()
+    launch = rig.run(rig.argv({DATASET_ID: str(data)}), environ)
+    return rig, launch
+
+
+@pytest.fixture(scope="module", params=["service", "standalone"])
+def probed(request, tmp_path_factory, test_sif):
+    tmp = tmp_path_factory.mktemp("container")
     # A marker in the real home directory: the container must not be able to see it.
     marker = os.path.join(
         pwd.getpwuid(os.getuid()).pw_dir, ".nemar-test-marker-" + uuid.uuid4().hex
@@ -83,11 +118,24 @@ def probed(tmp_path_factory, test_sif):
     with open(marker, "w") as handle:
         handle.write("host home")
     shm_marker = "/dev/shm/nemar-test-shm-" + uuid.uuid4().hex
+    args = ["a b", 'caf\u00e9 "q"', marker, shm_marker]
+    if request.param == "standalone":
+        rig, launch = standalone_probe(tmp, test_sif, args)
+        assert launch.exit == 0, launch.log + launch.stderr
+        facts = json.loads((launch.out / "work" / "outputs" / "facts.json").read_text())
+        yield rig, launch, facts
+        os.unlink(marker)
+        assert not os.path.exists(shm_marker)
+        rig.close()
+        return
+    rig = Rig(tmp, "apptainer")
+    shutil.copy(test_sif, rig.sif_root / SIF_NAME)
+    bundle = rig.set_bundle(make_bundle({"probe.py": PROBE}))
     spec = rig.spec(
         runtime="python",
         entry="probe.py",
         bundle=bundle,
-        args=["a b", 'caf\u00e9 "q"', marker, shm_marker],
+        args=args,
         datasets=[
             {
                 "id": DATASET_ID,
@@ -97,14 +145,7 @@ def probed(tmp_path_factory, test_sif):
         ],
         env={"OMP_NUM_THREADS": "3", "MPLBACKEND": TRICKY_VALUE},
     )
-    launch = rig.launch(
-        spec,
-        NEMAR_TEST_CANARY=CANARY,
-        SINGULARITYENV_SMUGGLED="smuggled",
-        APPTAINERENV_SMUGGLED2="smuggled",
-        SINGULARITY_BIND="/etc:/hostetc",
-        APPTAINER_BIND="/usr:/hostusr",
-    )
+    launch = rig.launch(spec, **SMUGGLERS)
     assert launch.exit == 0, launch.log + launch.stderr
     facts = json.loads((launch.out / "work" / "outputs" / "facts.json").read_text())
     yield rig, launch, facts

@@ -31,6 +31,10 @@ from recipe_support import (
 from repo_paths import LOCK, PYPROJECT, RECIPES, ROOT, SMOKE
 
 IMAGE_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "PYTHONHASHSEED": "0"}
+PROGRESS_VECTORS = json.loads(
+    (ROOT / "tests" / "contract" / "compute-progress-vectors.json").read_text(encoding="utf-8")
+)
+PINNED_FLOOR_CHECKPOINTS = PROGRESS_VECTORS["maps"]["nemar-floor"]["checkpoints"]
 
 
 CPUFIT = "ab" * 32  # a SHA-256 reading, never a gate
@@ -58,6 +62,7 @@ def expected_document(flavor: str = "cpu", no_gpu: bool = False) -> dict:
             "version": {
                 "recipes": {"nemar-floor": PINNED_RECIPE_VERSION},
                 "inputs": {"nemar-floor": ["bids", "zarr"]},
+                "checkpoints": {"nemar-floor": PINNED_FLOOR_CHECKPOINTS},
                 "common": PINNED_COMMON_VERSION,
                 "eegprep": PINNED_EEGPREP_TEXT,
                 "python": "3.12.16",
@@ -88,6 +93,7 @@ def test_the_expectation_names_every_package_the_issue_pins():
     assert expected["eegprep"] == {PINNED_EEGPREP_VERSION}
     assert expected["mne"] == {"1.13.2"}
     assert expected["pamica"] == {"0.4.0"}
+    assert expected["onnxruntime"] == {"1.32.0"}
     for name in ("numpy", "scipy", "torch", "signaljourney", "python-picard", "pybids"):
         assert expected[name], name
     assert expected["signaljourney"] == {"0.2.0"}
@@ -269,7 +275,17 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
         "nemar-ica": ["bids", "zarr"],
     }
     # every pinned package was imported, not only installed
-    for module in ("eegprep", "mne", "pamica", "numpy", "scipy", "torch", "picard", "bids"):
+    for module in (
+        "eegprep",
+        "mne",
+        "pamica",
+        "onnxruntime",
+        "numpy",
+        "scipy",
+        "torch",
+        "picard",
+        "bids",
+    ):
         assert document["imports"][module], module
     assert "nemar_process" in document["imports"]
     assert "signaljourney_validator" in document["imports"]
@@ -956,3 +972,20 @@ def test_a_failing_ldd_fails_the_smoke(runtime_python, tmp_path):
     )
     assert done.returncode != 0
     assert "ldd" in done.stderr
+
+
+def test_the_recipe_command_must_print_the_pinned_checkpoint_maps():
+    """A recipe the image registers with another version or checkpoint map than nemar-cli's (the progress
+    pin's vectors) reports progress the Worker refuses: the image check fails on it (ADR 0134)."""
+    assert pins.check(expected_document(), PYPROJECT, LOCK) == []
+    missing = copy.deepcopy(expected_document())
+    del missing["recipe_command"]["version"]["checkpoints"]
+    assert any("checkpoint maps" in p for p in pins.check(missing, PYPROJECT, LOCK))
+    moved = copy.deepcopy(expected_document())
+    moved["recipe_command"]["version"]["checkpoints"]["nemar-floor"][0]["steps"].append("drift")
+    assert any("checkpoint map of nemar-floor" in p for p in pins.check(moved, PYPROJECT, LOCK))
+    bumped = copy.deepcopy(expected_document())
+    other = "1.0.0-b999"  # a version the pin's map is not for
+    assert other != PINNED_RECIPE_VERSION
+    bumped["recipe_command"]["version"]["recipes"]["nemar-floor"] = other
+    assert any("bump the progress pin" in p for p in pins.check(bumped, PYPROJECT, LOCK))

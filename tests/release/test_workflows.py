@@ -1269,6 +1269,7 @@ def test_no_job_or_step_of_ci_can_hide_a_failure():
         "launcher": {
             "Build the test image": "steps.sif-cache.outputs.cache-hit != 'true'",
             "Launcher tests on 3.9": "matrix.python == '3.9'",
+            "Fence and standalone tests on 3.13": "matrix.python == '3.9'",
             "Gates": on_3_12,
             **dict.fromkeys(names_of_fold(), on_3_12),
         },
@@ -1408,9 +1409,11 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         ".github/workflows/nemar-cli-drift.yml",
         "tests/contract/**",
         "launcher/schema/**",
+        "runner/schema/**",
         "observer/schema/**",
         "tests/observer/fixtures/**",
         "deploy/tapis/**",
+        "recipes/nemar_process/common/contract/**",
     ]
     for pattern in paths:  # a path that matches no file would never start the workflow
         files = ROOT.glob(pattern.removesuffix("/**") + "/**/*" if "**" in pattern else pattern)
@@ -1422,6 +1425,7 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         "nemar-cli-latest",
         "nemar-cli-observation-latest",
         "nemar-cli-tapis-latest",
+        "nemar-cli-progress-latest",
     }
     for name, job in document["jobs"].items():
         assert job["continue-on-error"] is True, name

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import calendar
 import datetime
+import json
 import re
 from typing import Any
 
@@ -292,3 +293,105 @@ def read_claim_response(
     if len({job.id for job in jobs}) != len(jobs):
         raise BadAnswer("claim.jobs.id")
     return jobs, minimum
+
+
+# ---- the live progress object a heartbeat may carry (ADR 0134) ------------------------------------------
+#
+# The heartbeat's optional `progress` is the closed `nemar.progress.v1` object of nemar-cli's
+# `shared/contract/compute-progress.schema.json` (the launcher's byte copy is
+# `launcher/schema/compute-progress.v1.json`). The Worker parses a heartbeat strictly: one whose progress
+# breaks that schema is `invalid_body` and renews no lease. So the runner checks the object with
+# `check_progress`, which mirrors `$defs/Progress` field by field and is at least as strict, before it
+# attaches it, and drops it (sending a plain heartbeat) when the check fails.
+
+PROGRESS_FORMAT = "nemar.progress.v1"
+PROGRESS_MIN_INTERVAL_SECONDS = 50  # the Worker ignores a report within 50 s of the last
+PROGRESS_MAX_CHECKPOINTS = 8
+PROGRESS_MAX_FAILURES = 10
+PROGRESS_PATH_MAX = 256
+PROGRESS_MAX_RECORDINGS = 1_000_000
+PROGRESS_MAX_BYTES = 8192
+PROGRESS_CHECKPOINT_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+PROGRESS_FAILURE_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+PROGRESS_STEP_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+# neuroschema 0.6.0 `relativeLocation` narrowed to printable ASCII, as the schema's `ProgressPath`.
+PROGRESS_PATH_RE = re.compile(
+    r"(?! )(?![\s\S]* (?![\s\S]))(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)"
+    r"(?!(?:[\s\S]*/)?\.\.?(?:/|(?![\s\S])))(?![\s\S]*//)(?![\s\S]*/(?![\s\S]))"
+    r"[\x20-\x22\x24\x26-\x3E\x40-\x5B\x5D-\x7E]{1,256}"
+)
+_PROGRESS_KEYS = frozenset(("format", "checkpoint", "counts", "failures"))
+_COUNT_KEYS = frozenset(("passed", "failed", "skipped", "total"))
+_FAILURE_KEYS = frozenset(("path", "code", "step", "checkpoint"))
+
+
+def _word(value: Any, pattern: re.Pattern[str]) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def check_progress(value: Any) -> str | None:
+    """What is wrong with a progress object, as a fixed word, or None when the Worker's schema and the
+    rules no schema states (the ones that need no checkpoint map) both hold.
+
+    The words name a path, never a value. Closed objects at every level, no boolean as a number, every
+    pattern anchored at both ends (`fullmatch`: a trailing newline fails), every cap, and the compact
+    UTF-8 size; then: every column has the same total, no column counts more than it, `checkpoint` and
+    each failure's checkpoint are keys of `counts`, and no checkpoint lists more failures than it counts
+    as failed or skipped.
+    """
+    if not isinstance(value, dict) or set(value) != _PROGRESS_KEYS:
+        return "progress"
+    if value["format"] != PROGRESS_FORMAT or not isinstance(value["format"], str):
+        return "progress.format"
+    if not _word(value["checkpoint"], PROGRESS_CHECKPOINT_RE):
+        return "progress.checkpoint"
+    counts = value["counts"]
+    if not isinstance(counts, dict) or not 1 <= len(counts) <= PROGRESS_MAX_CHECKPOINTS:
+        return "progress.counts"
+    for name, column in counts.items():
+        if not _word(name, PROGRESS_CHECKPOINT_RE):
+            return "progress.counts.(name)"
+        if not isinstance(column, dict) or set(column) != _COUNT_KEYS:
+            return "progress.counts.column"
+        if not all(_is_int(column[key], 0, PROGRESS_MAX_RECORDINGS) for key in _COUNT_KEYS):
+            return "progress.counts.column.count"
+    failures = value["failures"]
+    if not isinstance(failures, list) or len(failures) > PROGRESS_MAX_FAILURES:
+        return "progress.failures"
+    for failure in failures:
+        if not isinstance(failure, dict) or set(failure) != _FAILURE_KEYS:
+            return "progress.failures.item"
+        path = failure["path"]
+        if (
+            not isinstance(path, str)
+            or len(path) > PROGRESS_PATH_MAX
+            or PROGRESS_PATH_RE.fullmatch(path) is None
+        ):
+            return "progress.failures.item.path"
+        if not _word(failure["code"], PROGRESS_FAILURE_CODE_RE):
+            return "progress.failures.item.code"
+        if failure["step"] is not None and not _word(failure["step"], PROGRESS_STEP_RE):
+            return "progress.failures.item.step"
+        if not _word(failure["checkpoint"], PROGRESS_CHECKPOINT_RE):
+            return "progress.failures.item.checkpoint"
+    try:
+        size = len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return "progress"
+    if size > PROGRESS_MAX_BYTES:
+        return "progress.size"
+    columns = list(counts.values())
+    if any(c["passed"] + c["failed"] + c["skipped"] > c["total"] for c in columns):
+        return "progress.counts_over_total"
+    if any(c["total"] != columns[0]["total"] for c in columns):
+        return "progress.totals_differ"
+    if value["checkpoint"] not in counts:
+        return "progress.checkpoint_unknown"
+    for failure in failures:
+        if failure["checkpoint"] not in counts:
+            return "progress.failure_checkpoint_differs"
+    for name, column in counts.items():
+        listed = sum(1 for failure in failures if failure["checkpoint"] == name)
+        if listed > column["failed"] + column["skipped"]:
+            return "progress.failures_over_count"
+    return None

@@ -323,6 +323,56 @@ def test_fewer_than_half_of_the_channels_located_is_not_usable():
     assert qc.location_guard(chanlocs_of(list(head(11)) + [None] * 10)).usable is True
 
 
+def test_exactly_half_of_the_channels_located_is_not_usable():
+    """``clean_channels`` needs more than half of the channels located (sccn/eegprep#650) and raises
+    on exactly half, so exactly half takes the no-locations branch."""
+    guard = qc.location_guard(chanlocs_of(list(head(10)) + [None] * 10))
+    assert (guard.usable, guard.n_located, len(guard.located)) == (False, 10, 20)
+    assert qc.location_guard(chanlocs_of(list(head(11)) + [None] * 10)).usable is True
+
+
+def test_a_channel_with_a_nan_coordinate_reaches_ransac_with_no_position_at_all():
+    """A channel the guard counts as unlocated but that gives a coordinate (NaN) gets every position
+    field as the loaders give none, an empty array, theta and radius included; a channel with no
+    coordinate given is left as it is; the recording's own entries are not changed."""
+    chanlocs = chanlocs_of([*head(3), (float("nan"), 1.0, 2.0), None])
+    chanlocs[3]["theta"], chanlocs[3]["radius"] = 12.5, 0.3
+    chanlocs[4]["theta"] = 40.0  # no coordinate given: not touched
+    eeg = {"chanlocs": chanlocs, "data": np.zeros((5, 3))}
+    guard = qc.location_guard(chanlocs)
+    assert guard.located == (True, True, True, False, False)
+    cleared = qc.unlocated_cleared(eeg, guard.located)["chanlocs"]
+    assert cleared[:3] == chanlocs[:3]
+    assert cleared[4] is chanlocs[4]
+    for key in qc.POSITION_FIELDS:
+        assert isinstance(cleared[3][key], np.ndarray), key
+        assert cleared[3][key].size == 0, key
+    assert cleared[3]["labels"] == "C3"
+    assert np.isnan(chanlocs[3]["X"])  # the recording's own entry is unchanged
+    assert chanlocs[3]["theta"] == 12.5
+    assert qc.unlocated_cleared(eeg, guard.located)["data"] is eeg["data"]
+    with pytest.raises(ValueError, match="one located flag per channel"):
+        qc.unlocated_cleared(eeg, guard.located[:3])
+
+
+@pytest.mark.parametrize(
+    ("value", "given"),
+    [
+        (None, False),
+        ("", False),
+        ([], False),
+        (np.empty(0), False),
+        (float("nan"), True),
+        (0.0, True),
+    ],
+)
+def test_a_coordinate_is_given_by_clean_channels_rule(value, given):
+    from eegprep.plugins.clean_rawdata.clean_channels import _is_missing_coord
+
+    assert qc._given(value) is given
+    assert _is_missing_coord(value) is not given  # eegprep's own rule, the one RANSAC applies
+
+
 def test_fewer_than_four_located_channels_is_not_usable_even_when_they_are_most_of_the_set():
     guard = qc.location_guard(chanlocs_of(list(head(3))))
     assert (guard.usable, guard.n_located) == (False, 3)

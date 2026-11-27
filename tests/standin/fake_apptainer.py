@@ -17,6 +17,10 @@ What it does, given ``exec [options] <image> <command...>``:
   bind destination (``/work``, ``/code``, ``/data/<id>``, ``/tmp``) rewritten to its host source in
   arguments and values, and the working directory set to the host source of ``--pwd``;
 * maps a command named ``python`` to the interpreter running this file.
+
+``pull <file> <source>`` (the standalone entry's ``--pull``) writes ``<rec>.pull.content`` to the file
+and records the call in ``<rec>.pulls``; every ``exec`` and ``pull`` is also listed, in order, in
+``<rec>.order``.
 """
 
 from __future__ import annotations
@@ -58,6 +62,20 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
             print("SYSCONFDIR={}".format(directory))
         print("LOCALSTATEDIR=/var")
         return 0
+    if argv[:1] == ["pull"] and len(argv) == 3:
+        # `pull <file> <source>` (the standalone entry's --pull): records the call and writes the bytes
+        # of `<rec>.pull.content` (empty when absent) to the file; exit 1 when `<rec>.pullfail` exists.
+        with open(record_path + ".pulls", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": argv, "environ": dict(os.environ)}) + "\n")
+        _order(record_path, argv)
+        if os.path.exists(record_path + ".pullfail"):
+            return 1
+        content = record_path + ".pull.content"
+        with open(argv[1], "wb") as out:
+            if os.path.exists(content):
+                with open(content, "rb") as handle:
+                    out.write(handle.read())
+        return 0
     if argv[:1] != ["exec"]:
         print(
             "fake apptainer: only 'exec', 'buildcfg' and '--version' are supported", file=sys.stderr
@@ -93,6 +111,7 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
     # a PID namespace, so it answers the probe from a mode file: absent or "isolated" is exit 0,
     # "shared" is exit 3 (the container shares the launcher's namespace), "unknown" is exit 4.
     target = record_path + ".preflight" if probing else record_path
+    _order(record_path, argv[:1])
     with open(target, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": argv, "environ": dict(os.environ)}) + "\n")
     if not os.path.isfile(image):
@@ -147,6 +166,12 @@ def main(argv: list[str], record_path: str, name: str = "apptainer") -> int:
         )
         return 255
     return 0  # pragma: no cover
+
+
+def _order(record_path: str, argv: list[str]) -> None:
+    """Every call, in order, in `<rec>.order` (a test reads how the launcher's calls interleave)."""
+    with open(record_path + ".order", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(["apptainer", *argv]) + "\n")
 
 
 def install(bin_dir: str, record_path: str, name: str = "apptainer") -> str:

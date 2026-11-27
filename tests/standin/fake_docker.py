@@ -70,6 +70,7 @@ import time
 
 VALUELESS = {
     "--pull=missing",
+    "--pull=never",
     "--network=bridge",
     "--read-only",
     "--no-healthcheck",
@@ -145,7 +146,7 @@ def default_info(name: str) -> dict:
     }
 
 
-def _log(path: str, suffix: str, entry: dict) -> None:
+def _log(path: str, suffix: str, entry: dict | list) -> None:
     with open(path + suffix, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
 
@@ -393,6 +394,8 @@ def main(argv: list[str], record_path: str, name: str = "docker") -> int:
             print("fake podman: its configuration is not shut out", file=sys.stderr)
             return 125
         argv = rest
+    _log(record_path, ".order", [name, *argv[:2]])
+    if name == "podman":
         answer = _podman(argv, record_path)
         if answer is not None:
             return answer

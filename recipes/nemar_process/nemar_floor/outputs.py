@@ -1,9 +1,11 @@
 """The floor's files and its record: what a recording's result is written as.
 
 Per recording, beside the recording (``naming.py``): ``_channels.tsv`` (the BIDS ``status`` and
-``status_description`` columns), ``_badsegments.tsv`` (absent when the window step was skipped: an
-empty file would claim "no bad segments"), ``_samplemask.tsv`` (the same bad windows as sample
-indices of the samples the floor read, absent in the same case), ``_filters.json``, ``_qc.json``
+``status_description`` columns, always written), ``_badsegments.tsv`` (the window step's bad windows
+and the spans a recipe that embeds the floor flagged, such as the spans nemar-ica's ASR repaired;
+absent only when the window step was skipped and no span was flagged, because an empty file would
+claim "no bad segments"), ``_samplemask.tsv`` (the same rows as sample indices of the samples the
+floor read, absent in the same case; ``segment_tables_written``), ``_filters.json``, ``_qc.json``
 and the signalJourney record, which holds the size and SHA-256 of the others. The record also names
 the grid of the samples that were read (``extensions.nemar.mask_grid``: how many, at what rate, and
 whether they are the archived recording's or NEMAR's serving copy). Everything is TSV and JSON:
@@ -22,10 +24,10 @@ from typing import Any
 
 import numpy as np
 
-from nemar_process.common import files, io, naming, qc, records
+from nemar_process.common import files, io, naming, qc, records, views
 from nemar_process.common.errors import INTERNAL_ERROR, RecordingError
 from nemar_process.common.io import Loaded, Recording
-from nemar_process.common.recipe import RecipeInfo, RecordingProduct, RunContext
+from nemar_process.common.recipe import RecipeInfo, RecipeMetric, RecordingProduct, RunContext
 from nemar_process.nemar_floor import steps
 from nemar_process.nemar_floor.pipeline import FloorResult, process
 
@@ -163,6 +165,173 @@ def _strongest_line(result: FloorResult) -> tuple[int | None, float | None, floa
     return best, measured[best], result.line_after.get(best)
 
 
+def line_frequency(result: FloorResult) -> int | None:
+    """The line frequency the floor measured, its table's ``line_hz``: whichever of 50 and 60 Hz had the
+    larger excess before the filters, or None when neither was measured (what nemar-ica hands a quality
+    plugin as the floor's ``line_hz``)."""
+    return _strongest_line(result)[0]
+
+
+# The summary metric names the floor writes (``summary_metrics``): bare names, so a plugin's headline
+# metric, always ``<plugin>:<name>`` (``metric_not_prefixed``), never takes one.
+SUMMARY_METRICS = (
+    "nChannelsInput",
+    "nSignalChannels",
+    "nGoodChannels",
+    "nNoiseOnlyChannels",
+    "nNotAssessedChannels",
+    "percentGoodChannels",
+    "percentGoodSamples",
+    "durationS",
+    "samplingRateHz",
+    "lineNoiseBeforeDb",
+    "lineNoiseAfterDb",
+)
+
+
+PERCENT_EDGES = tuple(range(0, 101, 10))
+DB_EDGES = (-10, -5, 0, 5, 10, 15, 20, 30, 40)
+PERCENT = (0, 100)
+COUNT = (0, None)
+
+# The floor's recipe metrics (ADR 0137 C6): each recording's record holds them as neuroschema
+# ``qualityMetric`` objects with the recipe as producer (``extensions.nemar.metrics``), valued by
+# ``metric_values``; the four with a column and edges are summarized over the dataset. The line-noise
+# metrics are the excess, before and after the filters, at the line frequency with the larger excess
+# before them (the table's ``line_hz``), the value the table holds; the record's
+# ``summaryMetrics`` keeps the excess at each frequency.
+RECIPE_METRICS = (
+    RecipeMetric("nChannelsInput", "count", "Channels in the recording, of every type.", COUNT),
+    RecipeMetric(
+        "nSignalChannels", "count", "Channels typed EEG, the ones the floor assesses.", COUNT
+    ),
+    RecipeMetric("nGoodChannels", "count", "EEG channels the floor judged good.", COUNT),
+    RecipeMetric(
+        "nNoiseOnlyChannels",
+        "count",
+        "EEG channels without coordinates, judged on the noise criterion only.",
+        COUNT,
+    ),
+    RecipeMetric("nNotAssessedChannels", "count", "EEG channels no criterion could judge.", COUNT),
+    RecipeMetric(
+        "percentGoodChannels",
+        "%",
+        "Share of the EEG channels the floor judged good.",
+        PERCENT,
+        "pct_good_channels",
+        PERCENT_EDGES,
+    ),
+    RecipeMetric(
+        "percentGoodSamples",
+        "%",
+        "Share of the samples outside the bad windows the floor found.",
+        PERCENT,
+        "pct_good_samples",
+        PERCENT_EDGES,
+    ),
+    RecipeMetric("durationS", "s", "Duration of the samples the floor read.", (0, None)),
+    RecipeMetric("samplingRateHz", "Hz", "Sampling rate of the samples the floor read.", (0, None)),
+    RecipeMetric(
+        "lineNoiseBeforeDb",
+        "dB",
+        "Line-noise excess before the band-stop filters, at whichever of 50 and 60 Hz had the "
+        "larger excess before them.",
+        None,
+        "line_db_before",
+        DB_EDGES,
+    ),
+    RecipeMetric(
+        "lineNoiseAfterDb",
+        "dB",
+        "Line-noise excess after the band-stop filters, at whichever of 50 and 60 Hz had the "
+        "larger excess before them.",
+        None,
+        "line_db_after",
+        DB_EDGES,
+    ),
+)
+
+
+def metric_values(result: FloorResult) -> dict[str, Any]:
+    """The value of each of ``RECIPE_METRICS`` for one recording, by name: the values its row of the
+    table carries where it has the column (``table_row``)."""
+    channels, samples = result.metrics["channels"], result.metrics["samples"]
+    _, before, after = _strongest_line(result)
+    return {
+        "nChannelsInput": channels["nInput"],
+        "nSignalChannels": channels["nSignal"],
+        "nGoodChannels": channels["nGood"],
+        "nNoiseOnlyChannels": channels["nNoiseOnly"],
+        "nNotAssessedChannels": channels["nNotAssessed"],
+        "percentGoodChannels": channels["percentGood"],
+        "percentGoodSamples": None if samples is None else samples["percentGood"],
+        "durationS": result.metrics["durationS"],
+        "samplingRateHz": result.metrics["samplingRateHz"],
+        "lineNoiseBeforeDb": None if before is None else round(before, 3),
+        "lineNoiseAfterDb": None if after is None else round(after, 3),
+    }
+
+
+def segment_tables_written(result: FloorResult, extra_segments: Sequence[Any] = ()) -> bool:
+    """Whether ``_badsegments.tsv`` and ``_samplemask.tsv`` are written: when the window step ran (its
+    mask) or a recipe that embeds the floor flagged spans of its own; never empty."""
+    return result.sample_mask is not None or bool(extra_segments)
+
+
+def channels_text(result: FloorResult) -> str:
+    """The text of ``_channels.tsv``: every channel of the file, in file order (``channel_rows``)."""
+    return files.tsv_text(CHANNEL_COLUMNS, channel_rows(result))
+
+
+def segment_texts(
+    result: FloorResult, extra_segments: Sequence[tuple[int, int, str, str]] = ()
+) -> tuple[str, str] | None:
+    """The texts of ``_badsegments.tsv`` and ``_samplemask.tsv``, or None when neither is written
+    (``segment_tables_written``): the window step's bad windows and the spans a recipe that embeds the
+    floor flagged (``extra_segments``, sample indices of the samples the floor read, stop exclusive),
+    in time order, in seconds and as sample indices. What ``write_product`` writes, and what a recipe's
+    own view names by its bytes (nemar-ica's activations and signal window)."""
+    if not segment_tables_written(result, extra_segments):
+        return None
+    mask = result.sample_mask
+    windows = mask_rows(mask) if mask is not None else []
+    spans = sorted(
+        [list(row) for row in windows]
+        + [[int(start), int(stop), label, reason] for start, stop, label, reason in extra_segments],
+        key=lambda row: (row[0], row[1], row[2]),
+    )
+    rate = result.srate_hz
+    seconds = [
+        [start / rate, (stop - start) / rate, label, why] for start, stop, label, why in spans
+    ]
+    return (
+        files.tsv_text(SEGMENT_COLUMNS, seconds, SEGMENT_DECIMALS),
+        files.tsv_text(MASK_COLUMNS, spans),
+    )
+
+
+def segment_descriptions(windows: bool, flagged: bool) -> tuple[str, str]:
+    """The descriptions of ``_badsegments.tsv`` and ``_samplemask.tsv``, naming only what ran: the
+    window step's bad windows (``clean_windows``), the spans the recipe flagged, or both."""
+    if windows and flagged:
+        return (
+            "Bad segments found by clean_windows and the spans the recipe flagged",
+            "Bad windows as sample indices of the samples read, stop exclusive, and the spans the "
+            "recipe flagged",
+        )
+    if windows:
+        return (
+            "Bad segments found by clean_windows",
+            "Bad windows as sample indices of the samples read, stop exclusive",
+        )
+    if flagged:
+        return (
+            "The spans the recipe flagged",
+            "The spans the recipe flagged, as sample indices of the samples read, stop exclusive",
+        )
+    raise ValueError("no segment table is written when nothing found or flagged a span")
+
+
 def summary_metrics(result: FloorResult) -> dict[str, Any]:
     channels, samples = result.metrics["channels"], result.metrics["samples"]
     return {
@@ -182,7 +351,8 @@ def summary_metrics(result: FloorResult) -> dict[str, Any]:
 
 def table_row(recording: Recording, result: FloorResult, content_sha256: str) -> dict[str, Any]:
     channels, samples = result.metrics["channels"], result.metrics["samples"]
-    line_hz, before, after = _strongest_line(result)
+    line_hz, _, _ = _strongest_line(result)
+    values = metric_values(result)
     skipped = ",".join("{}:{}".format(s["step_id"], s["reason"]) for s in result.plan.skipped)
     return {
         "path": recording.path,
@@ -199,8 +369,8 @@ def table_row(recording: Recording, result: FloorResult, content_sha256: str) ->
         "pct_good_channels": channels["percentGood"],
         "pct_good_samples": None if samples is None else samples["percentGood"],
         "line_hz": line_hz,
-        "line_db_before": None if before is None else round(before, 3),
-        "line_db_after": None if after is None else round(after, 3),
+        "line_db_before": values["lineNoiseBeforeDb"],
+        "line_db_after": values["lineNoiseAfterDb"],
         "n_bad_channels": None
         if channels["nBad"] is None
         else channels["nFlatline"] + channels["nBad"],
@@ -217,6 +387,8 @@ class Product:
 
     ``write`` returns the optional fields the file's entry in the record carries (``shape``,
     ``dtype``, ``rowLabels``, ``columnLabels``, ``encoding``: see ``records.output_entry``), or None.
+    ``location`` is set for a file a view names (``of_view_file``): the place it was named for, which
+    must be the place ``write_product`` gives it.
     """
 
     suffix: str
@@ -224,6 +396,21 @@ class Product:
     step_id: str
     description: str
     write: Callable[[Path], Mapping[str, Any] | None]
+    location: str | None = None
+
+    @classmethod
+    def of_view_file(cls, file: views.ViewFile) -> Product:
+        """A view's file (``views.ViewFile``) as a product: its exact text, under the step that made it.
+        A recipe writes the files its own views name (a layout) this way, and ``write_product`` writes
+        the files of the views it is given."""
+        return cls(
+            file.suffix,
+            file.format,
+            file.step_id,
+            file.description,
+            lambda path: files.write_text(path, file.text),
+            file.location,
+        )
 
 
 def write_product(
@@ -238,8 +425,18 @@ def write_product(
     summary_extra: Mapping[str, Any] | None = None,
     nemar_extra: Mapping[str, Any] | None = None,
     profile: str | None = None,
+    extra_segments: Sequence[tuple[int, int, str, str]] = (),
+    extra_segments_step: str | None = None,
+    view_set: views.ViewSet | None = None,
+    extra_metrics: Sequence[tuple[RecipeMetric, Any]] = (),
 ) -> RecordingProduct:
     """Write the recording's files and record into ``directory``; return what was written.
+
+    ``extra_segments`` are spans an embedding recipe flags itself (nemar-ica's: the spans ASR repaired), as
+    ``(start, stop, label, reason)`` sample indices of the samples the floor read, stop exclusive:
+    they are rows of ``_badsegments.tsv`` and ``_samplemask.tsv`` beside the floor's, in time order,
+    and when the window step was skipped they are the files' only rows, belonging to
+    ``extra_segments_step``. The floor passes none.
 
     The defaults are the floor's own. A recipe that embeds the floor passes its ``info``: the
     floor's files (four, five when the window step ran) are then named with its label, stamped with its name and version and described by its
@@ -253,9 +450,22 @@ def write_product(
     one, else ``profile`` (``archive`` when neither is given); a ``profile`` that disagrees with the
     stated one is refused (``grid_profile``). The identity is looked up when called, not when
     defined, so a caller that replaces ``INFO`` is honored.
+
+    ``view_set`` are the recording's quality views (ADR 0137): the files they write are listed after
+    every other file, each under its step, and the record gains ``extensions.nemar.views`` (and
+    ``views_skipped`` when a view was skipped), which ``records.views_problems`` holds to the files
+    written. Without it the product is what it always was, byte for byte.
+
+    The record's ``extensions.nemar.metrics`` are the floor's ``RECIPE_METRICS`` with their values
+    (``metric_values``) and then ``extra_metrics``, the embedding recipe's own metrics with theirs,
+    each produced by ``info``'s recipe (``records.recipe_metrics``).
     """
-    if "mask_grid" in (nemar_extra or {}):
-        raise ValueError("mask_grid is a key the floor writes")
+    for reserved in ("mask_grid", "views", "views_skipped", "metrics"):
+        if reserved in (nemar_extra or {}):
+            raise ValueError("{} is a key the floor writes".format(reserved))
+    if extra_segments and result.sample_mask is None and extra_segments_step is None:
+        # the segment tables would belong to no step of the plan
+        raise ValueError("spans a recipe flagged need its step when the window step did not run")
     grid = mask_grid(result, grid_profile(profile, nemar_extra))  # refused before any file is made
     info = INFO if info is None else info
     label = info.label
@@ -264,42 +474,52 @@ def write_product(
         return naming.product_path(recording.path, label, suffix, extension)
 
     stamp = {"recipe": info.id, "recipeVersion": info.version}
-    for product in extra_products:
+    if view_set is not None and view_set.recipe_id != info.id:
+        raise ValueError("the views are another recipe's")
+    view_products = [Product.of_view_file(file) for file in view_set.files()] if view_set else []
+    for product in [*extra_products, *view_products]:
         if not result.plan.has_step(product.step_id):
             raise RecordingError(INTERNAL_ERROR, "record", "unknown_step")
+        if product.location is not None and product.location != place(
+            product.suffix, product.extension
+        ):
+            # a view named the file for another recording or another recipe's label: refused before
+            # anything is written
+            raise RecordingError(INTERNAL_ERROR, "record", "view_file_location")
     # the files in the order they are listed: what each is, the step that produced it, how it is written
+    channels = channels_text(result)
     jobs = [
         Product(
             "channels",
             "tsv",
             "bad_channels" if result.plan.has_step("bad_channels") else "flatline",
             "BIDS channels table with status of every channel",
-            lambda path: files.write_tsv(path, CHANNEL_COLUMNS, channel_rows(result)),
+            lambda path: files.write_text(path, channels),
         )
     ]
-    if result.sample_mask is not None:
+    tables = segment_texts(result, extra_segments)
+    if tables is not None:
+        segments, samples = tables
         mask = result.sample_mask
+        owner = "bad_windows" if mask is not None else extra_segments_step
+        assert owner is not None  # refused above, before anything was written
+        segments_about, mask_about = segment_descriptions(mask is not None, bool(extra_segments))
         jobs.append(
             Product(
                 "badsegments",
                 "tsv",
-                "bad_windows",
-                "Bad segments found by clean_windows",
-                lambda path: files.write_tsv(
-                    path,
-                    SEGMENT_COLUMNS,
-                    segment_rows(mask, result.srate_hz),
-                    SEGMENT_DECIMALS,
-                ),
+                owner,
+                segments_about,
+                lambda path: files.write_text(path, segments),
             )
         )
         jobs.append(
             Product(
                 "samplemask",
                 "tsv",
-                "bad_windows",
-                "Bad windows as sample indices of the samples read, stop exclusive",
-                lambda path: files.write_tsv(path, MASK_COLUMNS, mask_rows(mask)),
+                owner,
+                mask_about,
+                lambda path: files.write_text(path, samples),
             )
         )
     jobs += [
@@ -319,8 +539,12 @@ def write_product(
         ),
     ]
     jobs += extra_products
-    names = [(job.suffix, job.extension) for job in jobs]
-    if len(set(names)) != len(names):  # a file written over another would be recorded once
+    jobs += view_products
+    # a file written over another would be recorded once: names compared case-folded (a
+    # case-insensitive file system holds one file for both), the record's among them
+    names = [(job.suffix.casefold(), job.extension.casefold()) for job in jobs]
+    names.append((views.RECORD_SUFFIX.casefold(), "json"))
+    if len(set(names)) != len(names):
         raise RecordingError(INTERNAL_ERROR, "record", "duplicate_file")
     written: list[tuple[str, str, records.FileTarget, dict[str, Any]]] = []
     for job in jobs:
@@ -335,6 +559,12 @@ def write_product(
         if name in metrics:
             raise ValueError("{} is a summary metric of the floor".format(name))
     metrics.update(summary_extra or {})
+    values = metric_values(result)
+    quality = records.recipe_metrics(
+        [*((metric, values[metric.name]) for metric in RECIPE_METRICS), *extra_metrics],
+        info.id,
+        info.version,
+    )
     record = records.build_recording_record(
         info,
         result.plan,
@@ -347,13 +577,19 @@ def write_product(
         ],
         summary_metrics=metrics,
         context=context,
-        nemar_extra={**(nemar_extra or {}), "mask_grid": grid},
+        nemar_extra={
+            **(nemar_extra or {}),
+            "mask_grid": grid,
+            "metrics": quality,
+            **(view_set.extension() if view_set is not None else {}),
+        },
     )
     problems = records.problems_of(record, context.validator)
     if problems:
-        # the category (schema, timestamp, reference, plan_hash) says what kind; the text is not kept
+        # the category (schema, timestamp, reference, views, metrics, plan_hash) says what kind; the
+        # text is not kept
         raise RecordingError(INTERNAL_ERROR, "record", problems[0][0])
-    record_path = place("signalJourney", "json")
+    record_path = place(views.RECORD_SUFFIX, "json")
     files.write_json(directory / record_path, record)
     return RecordingProduct(
         files=[location for location, _, _, _ in written] + [record_path],

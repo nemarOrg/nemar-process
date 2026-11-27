@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 from dataplane import DataPlane
 from harness import IMAGE_DIGEST, SIF_NAME, Rig
+from nemar_launch import checkpoints as rules
+from nemar_launch import progress
 from recipe_support import DATASET, DATASET_ID, DATASET_VERSION, ROOT, require_runtime
 
 PRODUCT = "product"
@@ -95,7 +97,11 @@ def floor_launch(request, tmp_path_factory):
         datasets=[{"id": DATASET_ID, "version": DATASET_VERSION, "include": INCLUDE}],
         env=env,
     )
-    launch = rig.launch(spec)
+    # live progress (ADR 0134) a few times a second instead of once a minute, so a short run reports
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(progress, "REPORT_SECONDS", 0.2)
+        patch.setattr(progress, "FIRST_RETRY_SECONDS", 0.05)
+        launch = rig.launch(spec)
     yield rig, launch
     rig.close()
 
@@ -128,7 +134,7 @@ def test_the_job_leaves_the_product_tree_under_work_outputs(floor_launch):
     base = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarfloor_"
     assert product_names(product) == sorted(
         [
-            "desc-nemarfloor_qcsummary.json",
+            "desc-nemarfloor_dataquality.json",
             "desc-nemarfloor_recordings.tsv",
             "desc-nemarfloor_signalJourney.json",
             base + "badsegments.tsv",
@@ -275,3 +281,48 @@ def test_the_files_equal_those_of_a_direct_run_of_the_same_fixture(floor_launch,
     assert [s["parameters"] for s in here["processingSteps"]] == [
         s["parameters"] for s in there["processingSteps"]
     ]
+
+
+# ---- live progress (ADR 0134) ------------------------------------------------------------------------
+
+
+def floor_map() -> list:
+    vectors = json.loads(
+        (ROOT / "tests" / "contract" / "compute-progress-vectors.json").read_text()
+    )
+    return [
+        (c["checkpoint"], tuple(c["steps"])) for c in vectors["maps"]["nemar-floor"]["checkpoints"]
+    ]
+
+
+def final_rows(launch) -> list:
+    table = launch.out / "work" / "outputs" / PRODUCT / "desc-nemarfloor_recordings.tsv"
+    return rules.parse_recordings_table(table.read_text(encoding="utf-8"))
+
+
+def test_the_job_reported_live_progress_the_worker_accepts(floor_launch):
+    rig, launch = floor_launch
+    bodies = [body for _time, body in rig.callbacks.progress_reports]
+    assert bodies, launch.log[-3000:]
+    for body in bodies:  # the stand-in checked each against the pinned schema
+        assert rules.progress_problem(body, floor_map()) is None
+
+
+def test_the_reported_total_is_every_recording_and_no_live_count_runs_ahead(floor_launch):
+    rig, launch = floor_launch
+    rows = final_rows(launch)
+    final = rules.count_recordings(rows, floor_map())
+    for column in final.values():  # every final column sums to the total
+        assert column["passed"] + column["failed"] + column["skipped"] == column["total"]
+    for _time, body in rig.callbacks.progress_reports:
+        for name, live in body["counts"].items():
+            assert live["total"] == len(rows)  # what was discovered is what got a row
+            for key in ("passed", "failed", "skipped"):
+                assert live[key] <= final[name][key]
+
+
+def test_the_progress_file_stays_with_the_launcher_and_is_never_uploaded(floor_launch):
+    rig, launch = floor_launch
+    assert (launch.out / "launcher" / "progress.json").is_file()
+    assert not (launch.out / "work" / "outputs" / ".nemar-progress").exists()
+    assert not any(key.endswith("progress.json") for key in rig.callbacks.objects)

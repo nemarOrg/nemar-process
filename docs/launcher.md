@@ -16,9 +16,12 @@ Cloudflare R2 object storage is called R2.
 
 ```text
 tapisjob_app.sh                  # the entry point Tapis runs
+nemar-launch-local               # the standalone entry: a job on a person's own machine (standalone.md)
 lib/nemar_launch/*.py            # standard library only, Python 3.9 or newer
-lib/schema/launch-spec.v1.json   # the launch specification schema (see contracts.md)
+lib/schema/*.json                # the launch specification schema and the other copied contracts (contracts.md)
 ```
+
+The standalone entry runs the same container phase from a local launch specification file, with no NEMAR service involved; [standalone.md](standalone.md) is its page.
 
 ```bash
 uv run python scripts/build_launcher_zip.py            # write dist/nemar-launch.zip and print its sha256
@@ -268,6 +271,7 @@ run|create --name <name> --label nemar.job=<job id> --label nemar.runner=<runner
     --mount type=bind,src=<out>/work,dst=/work  --mount type=bind,src=<scratch>/tmp,dst=/tmp
     [--mount type=bind,src=<scratch>/code,dst=/code,readonly]
     [--mount type=bind,src=<dataset dir>,dst=/data/<id>,readonly ...]
+    [--mount type=bind,src=<scratch>/serving-index,dst=/data/serving-index,readonly]
     [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
     --env NEMAR_OUT=/work/outputs
     [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
@@ -316,7 +320,7 @@ It skips where there is no usable daemon and fails in the CI job that sets `NEMA
 
 The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`.
 The document is JSON text, printable ASCII only (every byte is 0x20 to 0x7E: a control character is a JSON escape, and every character at or above U+007F, DEL included, is a `\uXXXX` escape), at most 64 KiB.
-`launcher/schema/launch-spec.v1.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
+`launcher/schema/launch-spec.v2.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
 The launcher validates against it with a small validator of its own, because it may use only the standard library; a schema keyword the validator does not implement is an error, never ignored.
 
 ### The environment value: base64url
@@ -377,6 +381,7 @@ No job with a real token is to be submitted before then either ([unverified.md](
 | `entry` or `command` | exactly one: a path inside the bundle, or an argument vector for an image job |
 | `args` | arguments, after the entry or the command |
 | `bundle` | `{sha256, size}` of the code archive; required with `entry`, optional with `command`; no URL |
+| `serving_index` | `{sha256, size}` of the serving index the Worker staged for the job (version 2; [serving index](#serving-index)); optional; no URL |
 | `datasets` | `[{id, version, include?}]`, each id at most once; `version` is the data-plane tag; `include` is a list of globs |
 | `api_base` | NEMAR's API; the launcher calls it with `job_token`; HTTPS, or HTTP on loopback only |
 | `image` | `{uri, digest, sif}`; `sif` is `<64 hex digits of the digest>.sif`, relative to `NEMAR_SIF_ROOT` |
@@ -442,6 +447,7 @@ The arguments are built in one function (`run.build_argv`) and pinned by tests:
 exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
      --bind <out>/work:/work  --bind <scratch>/tmp:/tmp
      [--bind <scratch>/code:/code:ro]  [--bind <dataset>:/data/<id>:ro ...]
+     [--bind <scratch>/serving-index:/data/serving-index:ro]
      [--nv]  --env <name>=<value> ... [--env CUDA_VISIBLE_DEVICES=<ids>]  --env NEMAR_OUT=/work/outputs
      [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
      <image> <entry or command> <args>
@@ -455,7 +461,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
   The runtime reads each `--env` argument as a CSV record, so a value with a comma or a double quote is passed quoted as CSV (`"NAME=a,b"`, the quote doubled); the tests run that against a real runtime.
 - The runtime process itself gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR` and `XDG_RUNTIME_DIR`, because `APPTAINERENV_*` and `SINGULARITY_BIND` style variables in the launcher's environment would otherwise be honoured.
 - `launcher/` is a sibling of `work/` and is not mounted, so the container can neither read nor forge the result, the provenance or the manifest.
-- `/code` and `/data/<id>` are read-only.
+- `/code`, `/data/<id>` and `/data/serving-index` are read-only.
 - The container is started in a session of its own, with `oom_score_adj` raised to 1000, so the kernel's OOM killer ends the entry rather than the launcher that has to record it.
   After a SIGTERM the container gets 10 seconds to stop, and the whole process group is then killed (a process that is PID 1 of its namespace ignores a SIGTERM it has no handler for); whatever the entry left running in the group is killed when the container exits.
 - **The launcher enforces the end time itself.**
@@ -495,6 +501,13 @@ An archive is refused whole when a member is absolute, contains `..` or an empty
 Reading is bounded: more than 100,000 members (counted while the headers are read), more than 4 GiB of file data, a decompressed stream past that plus 128 MiB, or a long-name or pax header over 1 MiB is `archive_too_large`.
 Extraction is hand-written, creates regular files and directories only, and removes the setuid, setgid, sticky and group and world write bits.
 
+## Serving index
+
+A specification of version 2 (`nemar.launch-spec.v2`) may carry `serving_index`, the SHA-256 and size of the serving copy's `index.json` that NEMAR's Worker staged for a recipe run of the archive copy (nemar-cli ADR 0141); every version 1 document is a version 2 document.
+After the datasets are staged, `POST <api_base>/compute/jobs/<job_id>/serving-index` with the token returns a ten-minute presigned address of that copy, which the launcher downloads to scratch with the same retry, size and SHA-256 checks as a dataset file, before the container runs and so before the job's network is fenced.
+The file is placed at `<scratch>/serving-index/index.json`, read-only, in a read-only directory that is bound read-only at `/data/serving-index`: the Worker names `/data/serving-index/index.json` after `--serving-index` in the job's arguments.
+Any failure ends the job `dataset_fetch_failed` before the container runs: `serving_index_mismatch`, the platform's, for a size or SHA-256 that differs, and `fetch_failed`, `bad_response` or `disk_error` as for the bundle.
+
 ## Datasets
 
 For each dataset the launcher reads `GET <api_base>/data/<id>/<version>/manifest.json` (entries `{path, size, checksum?, checksum_algorithm?, bytes_url, url}`, at most 38,000), where `<version>` is the tag from the specification.
@@ -531,6 +544,25 @@ A regular expression, or a glob that backs up to an earlier `*`, can take expone
 
 A manifest path that could leave the dataset directory is refused before anything is downloaded.
 A SIGTERM during staging stops it: the entry does not run and the staging record does not claim files were staged.
+
+## Live progress
+
+While the entry runs, the launcher reports the job's live progress (ADR 0134 decision 3), the closed `nemar.progress.v1` object of the pinned contract ([contracts.md](contracts.md)): which checkpoint the run is at, and, per checkpoint, how many recordings passed, failed and were skipped of all the run found, with the ten most recent failures (path, code, step, checkpoint).
+It is built from two files the recipe writes under `NEMAR_OUT` (the host's `work/outputs`): the recipe's progress file, `.nemar-progress/progress.json` ([recipes.md](recipes.md)), and its recordings table.
+The counts follow nemar-cli's counting rules, ported in `nemar_launch/checkpoints.py` and replayed against nemar-cli's vectors, over the recordings that have ended; the total is every recording the run found.
+
+Both files are written by the container, so neither is trusted: each is opened one path component at a time without following a link, starting at the launcher's own `work` directory and going through `outputs` (the container can replace `outputs`, which is inside its mount, with a link; that is refused, on every read), the last one without blocking (a FIFO is refused, never waited on), it must be a regular file, its JSON is read strictly, and only the table's complete lines are read. The progress file is at most 64 KiB; the table is streamed line by line, keeping only the `path`, `status`, `code` and `step` columns and no path longer than the contract carries (256 characters; such a row still counts, but names no failure), and is refused past 64 KiB on one line, past 1,000,000 rows (the contract's cap on recordings) or past 256 MiB read (`too_large`). A report built after the reporter was stopped (the container has exited) is written but never posted.
+Nothing read from them is logged; a recording path the contract cannot carry is left out of the failures and still counted; and before anything is written or sent the object must pass the schema copy and the rules no schema can state.
+When there is no progress file (an entry that is not a recipe that declares checkpoints), there is no report and the job's states are as before (ADR 0134 decision 8).
+
+A thread beside the container builds the object once a minute (the first as soon as it can be built) and writes it to `launcher/progress.json`, replacing the file in one step.
+On Tapis (no lease), it also posts it to `POST <api_base>/compute/jobs/<job_id>/progress` with the job token, never following a redirect, with a 15-second timeout.
+A 429 waits what its `Retry-After` asks (ASCII digits only, between 1 and 600 seconds, 60 when it says nothing); a 408, a 425, a 5xx, a timeout or a network fault tries again at the next report; a 2xx is accepted, a body that is not JSON (a proxy's page) included, and does not stop the posts; any other refusal stops the posts for the rest of the job. If the reporter's thread cannot be started, the job runs without live progress and the log says `progress_reporter_not_started`.
+Under a runner (a lease) nothing is posted: the runner reads `launcher/progress.json` and carries it on its heartbeat ([runner.md](runner.md)).
+A report never fails the job: every fault is caught and logged once, as a fixed word.
+`launcher/progress.json` is not one of the four launcher files and is never uploaded.
+
+Deploy order: the Worker that accepts the route and the heartbeat's `progress` field (nemar-cli's Phase 2 of epic nemarOrg/nemar-cli#2324) goes out before a launcher or runner that sends them; an older Worker refuses the route (the posts stop) and the heartbeat field (the runner then sends plain heartbeats).
 
 ## After the entry exits
 
@@ -584,7 +616,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 |---|---|---|
 | 0 | none | nothing failed |
 | 10 | `code_fetch_failed` | the bundle route refused, the download failed, the digest or size differs, the archive is unsafe |
-| 11 | `dataset_fetch_failed` | a manifest, file, checksum, size, path or cap failure while staging |
+| 11 | `dataset_fetch_failed` | a manifest, file, checksum, size, path or cap failure while staging, or a staged serving index that cannot be fetched or is not the one named |
 | 12 | `entry_not_found` | the entry is not a file in the bundle |
 | 13 | `runtime_error` | the entry exited non-zero; an unsupported runtime or invalid specification; the output directory, bind sources, PID namespace, runtime or image refused; an output that cannot be read; a SIGTERM before the time limit |
 | 14 | `out_of_memory` | exit status 137 (SIGKILL) |
@@ -596,7 +628,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 | Code | Details |
 |---|---|
 | `code_fetch_failed` | `unsafe_archive`, `archive_too_large`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `digest_mismatch`, `size_mismatch`, `content_missing`, `disk_error` |
-| `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error` |
+| `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error`, `serving_index_mismatch` |
 | `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `image_unverified`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
 | `result_upload_failed` | `results_too_large`, `results_quota_exceeded`, `too_many_outputs`, `outputs_unreadable`, `bad_response`, `fetch_failed`, `incomplete_plan`, `upload_failed`, `outputs_refused`, `complete_refused`, `internal_error` |
 | `entry_not_found`, `out_of_memory`, `time_limit` | none |

@@ -210,6 +210,38 @@ def expected_versions(
     return expected
 
 
+# The live progress contract's counting vectors (ADR 0134): each recipe version's checkpoint map, as
+# nemar-cli's registry holds it at the commit tests/contract/nemar-cli-progress-pin.json names.
+PROGRESS_VECTORS = ROOT / "tests" / "contract" / "compute-progress-vectors.json"
+
+
+def checkpoint_problems(version: dict) -> list[str]:
+    """The checkpoint maps the recipe command prints must be nemar-cli's for the same recipe versions:
+    a recipe the image registers with another version or map reports progress the Worker refuses."""
+    pinned = json.loads(PROGRESS_VECTORS.read_text(encoding="utf-8"))["maps"]
+    printed = version.get("checkpoints")
+    if not isinstance(printed, dict):
+        return ["nemar-recipe prints no checkpoint maps"]
+    problems = []
+    for name, recipe_version in sorted((version.get("recipes") or {}).items()):
+        if name not in pinned:
+            problems.append(
+                "nemar-recipe lists {} and the progress pin has no map for it".format(name)
+            )
+            continue
+        if recipe_version != pinned[name]["version"]:
+            problems.append(
+                "nemar-recipe says {} {} and the progress pin's map is for {}: bump the progress "
+                "pin".format(name, recipe_version, pinned[name]["version"])
+            )
+        if printed.get(name) != pinned[name]["checkpoints"]:
+            problems.append(
+                "nemar-recipe's checkpoint map of {} is not the progress pin's: bump the progress "
+                "pin".format(name)
+            )
+    return problems
+
+
 def recipe_command_problems(
     command: dict | None, expected: dict[str, set[str]], image: bool
 ) -> list[str]:
@@ -227,6 +259,7 @@ def recipe_command_problems(
         )
     if "nemar-floor" not in (version.get("recipes") or {}):
         problems.append("nemar-recipe does not list the recipe nemar-floor")
+    problems += checkpoint_problems(version)
     if image and command.get("via") != "nemar-recipe":
         problems.append(
             "the recipe command ran as {!r}: in an image it is the script nemar-recipe".format(

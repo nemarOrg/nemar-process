@@ -4,9 +4,12 @@
   variables are set first, so a library that loads later (SciPy's BLAS, an OpenMP runtime) starts
   with one thread, and ``threadpoolctl`` then limits the pools that are already loaded.
 * ``engine_info`` is the engine stamp every record carries, with the pool inventory as found.
-* ``SEEDS`` names the seeds the engine uses that a recipe cannot change (eegprep's RANSAC seed is a
-  constant inside ``clean_channels``); a test compares it with eegprep's source.
+* ``SEEDS`` names the seeds the engine draws from that no recipe passes (eegprep's RANSAC seed is
+  ``clean_channels``'s ``seed`` default); a test compares it with that default.
 * ``canonical_json`` is the text a plan is hashed from; ``rounded`` is the one rounding rule.
+* ``jcs`` is the JSON Canonicalization Scheme (RFC 8785) for the values a digest that other
+  languages recompute is taken over (``channel_types_sha256``): the canonical form of neuroschema's
+  ``nemar.view-digest.v1``, for strings, arrays, objects, literals and integers.
 """
 
 from __future__ import annotations
@@ -25,8 +28,9 @@ from threadpoolctl import threadpool_info, threadpool_limits
 
 from nemar_process.common import COMMON_VERSION, build, versions
 
-# Seeds inside the engine that no argument reaches (sccn/eegprep#540 asks for a parameter). Recorded in every record (extensions.nemar.seeds)
-# and compared with eegprep's source by tests/recipes/test_determinism.py.
+# Seeds the engine draws from that no recipe passes: RANSAC's is ``clean_channels``'s ``seed`` default
+# (sccn/eegprep#605), which the floor leaves as it is. Recorded in every record (extensions.nemar.seeds)
+# and compared with that default by tests/recipes/test_determinism.py.
 SEEDS: dict[str, int] = {"clean_channels.ransac": 5489}
 
 THREAD_ENVIRONMENT = (
@@ -37,8 +41,9 @@ THREAD_ENVIRONMENT = (
 )
 RECORDED_ENVIRONMENT = ("PYTHONHASHSEED", *THREAD_ENVIRONMENT)
 # Engine distributions an ICA recipe runs on; each is recorded when it is installed, so such a recipe
-# needs no change of its own to record them.
-OPTIONAL_ENGINES = ("torch", "pamica")
+# needs no change of its own to record them. onnxruntime runs ICLabel's network (sccn/eegprep#386), so
+# the classification's probabilities depend on its version.
+OPTIONAL_ENGINES = ("torch", "pamica", "onnxruntime")
 
 
 @contextlib.contextmanager
@@ -153,6 +158,77 @@ def canonical_json(value: Any) -> str:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
     )
+
+
+# integers that binary64, and so ECMAScript, holds exactly: within it RFC 8785 writes a number as its digits
+JCS_SAFE_INTEGER = 2**53
+JCS_SHORT_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def jcs(value: Any) -> str:
+    """``value`` in the canonical form of RFC 8785 (the JSON Canonicalization Scheme), the text a
+    digest is taken over as UTF-8 bytes, exactly as ECMAScript's ``JSON.stringify`` writes it after
+    sorting: no whitespace; ``null``, ``true`` and ``false``; arrays in order; object members sorted
+    by their names' UTF-16 code units; a string with only the escapes ``\\"``, ``\\\\``, ``\\b``,
+    ``\\t``, ``\\n``, ``\\f``, ``\\r`` and ``\\u00xx`` (lowercase) for the other characters below
+    U+0020, every other character as itself; no final newline.
+
+    Numbers are limited to integers within 2^53 in magnitude, written as their digits: a float would
+    need ECMAScript's shortest round-trip printing, which nothing hashed here holds, so it is
+    refused rather than printed another way. Also refused: a string or a name with a lone surrogate,
+    a name that is not a string, and any other type. neuroschema's vectors pin it
+    (tests/recipes/test_jcs.py)."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, int):
+        if abs(value) > JCS_SAFE_INTEGER:
+            raise ValueError("an integer beyond 2^53 has no exact binary64: {!r}".format(value))
+        return str(value)
+    if isinstance(value, str):
+        return jcs_string(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(jcs(item) for item in value) + "]"
+    if isinstance(value, Mapping):
+        names = list(value)
+        if not all(isinstance(name, str) for name in names):
+            raise TypeError("an object's member names must be strings")
+        ordered = sorted(names, key=utf16_units)
+        return "{" + ",".join(jcs_string(name) + ":" + jcs(value[name]) for name in ordered) + "}"
+    raise TypeError("no canonical form for {}".format(type(value).__name__))
+
+
+def utf16_units(name: str) -> bytes:
+    """A name as big-endian UTF-16, whose bytes compare as its code units do (RFC 8785, 3.2.3)."""
+    return name.encode("utf-16-be")
+
+
+def jcs_string(text: str) -> str:
+    """A string as RFC 8785 writes it; a lone surrogate is refused (it has no UTF-8)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("a string with a lone surrogate has no canonical form") from error
+    out = []
+    for character in text:
+        if character in JCS_SHORT_ESCAPES:
+            out.append(JCS_SHORT_ESCAPES[character])
+        elif character < " ":
+            out.append("\\u{:04x}".format(ord(character)))
+        else:
+            out.append(character)
+    return '"' + "".join(out) + '"'
 
 
 def rounded(value: Any, digits: int) -> float | None:

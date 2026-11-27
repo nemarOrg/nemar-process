@@ -1,0 +1,118 @@
+{
+  "format": "nemar.plugin-manifest.v1",
+  "name": "fx-generic",
+  "version": "0.1.0",
+  "entry": "plugin_fixtures.fx_generic",
+  "checkpoint": "quality",
+  "reads": {
+    "dataset": false,
+    "recipes": [
+      "nemar-ica"
+    ]
+  },
+  "parameters": {},
+  "outputs": {
+    "metrics": {},
+    "views": {
+      "erp": {
+        "kind": "nemar.lines",
+        "kind_version": 1,
+        "caption": "Average over epochs per sensor.",
+        "roles": {
+          "values": {
+            "format": "tsv",
+            "max_bytes": 65536,
+            "dims": [
+              "time",
+              "sensor"
+            ],
+            "unit": "uV",
+            "columns": [
+              {
+                "name": "time_s",
+                "type": "number",
+                "unit": "s"
+              }
+            ]
+          }
+        }
+      },
+      "epochs": {
+        "kind": "nemar.heatmap",
+        "kind_version": 1,
+        "caption": "Amplitude per epoch and sensor.",
+        "roles": {
+          "values": {
+            "format": "tsv",
+            "max_bytes": 65536,
+            "dims": [
+              "epoch",
+              "sensor"
+            ],
+            "unit": "uV",
+            "columns": [
+              {
+                "name": "epoch",
+                "type": "integer"
+              }
+            ]
+          }
+        }
+      },
+      "summary": {
+        "kind": "nemar.table",
+        "kind_version": 1,
+        "caption": "Bad channels and their share.",
+        "roles": {
+          "table": {
+            "format": "tsv",
+            "max_bytes": 4096,
+            "dims": [],
+            "columns": [
+              {
+                "name": "n_bad",
+                "type": "integer"
+              },
+              {
+                "name": "share",
+                "type": "number",
+                "unit": "%"
+              }
+            ]
+          }
+        }
+      },
+      "amplitude": {
+        "kind": "nemar.histogram",
+        "kind_version": 1,
+        "caption": "Peak amplitudes of the sensors.",
+        "roles": {
+          "histogram": {
+            "format": "json",
+            "max_bytes": 4096,
+            "dims": []
+          }
+        }
+      },
+      "topo": {
+        "kind": "nemar.sensor-field",
+        "kind_version": 1,
+        "caption": "Two maps over the layout.",
+        "roles": {
+          "values": {
+            "format": "tsv",
+            "max_bytes": 65536,
+            "dims": [
+              "sensor",
+              "map"
+            ],
+            "unit": "uV"
+          },
+          "layout": {
+            "from": "recipe"
+          }
+        }
+      }
+    }
+  }
+}

@@ -3,13 +3,27 @@ and ICLabel. Every numerical step is an eegprep call, and no file is read or wri
 
 The chain (docs/recipes.md): the floor's own chain with its parameters (its decisions are this
 record's first steps; the bad channels it found are already removed from its working copy);
-``clean_asr`` with its state kept; ``pop_reref`` to the average; ``pop_runica`` with the engine
-asked for, on the ASR-repaired, re-referenced copy; ``pop_iclabel``. A step that raises ends the
+``clean_asr`` with its state kept and the owner's cutoff of 30, the share of samples it repairs
+measured (``asrBurstFraction``; nothing is cut); ``pop_reref`` to the average;
+``pop_runica`` with the engine asked for and AMICA's convergence stops (its sample rejection's
+schedule recorded, the rejection off), on the ASR-repaired, re-referenced copy; ``pop_iclabel``. The
+floor runs with nemar-ica's two values in place of its own (``FLOOR_EMBEDDING``: a 0.5 Hz FIR
+high-pass, RANSAC's 0.85). The chain is the same on both inputs, and the record states what the fit
+was given (``decomposition_input``: the steps that shaped it, the channels, the unit and the
+reference, and on the Zarr serving copy the store it was read from). A step that raises ends the
 recording with that step named; a decomposition that comes out degenerate ends it ``ica_degenerate``
 and one whose ASR state could not reproduce its data ends it ``asr_maxmem``, and a recording that
 ends so writes nothing. The one exception is a fit on the GPU, under ``--ica-device auto``, that runs
 out of the GPU's memory: it is fitted again on the CPU with every setting the same (``decompose``;
 the run's state decides, ``tally``).
+
+Beside the fit, what its views need of the recording (ADR 0137 P5, ``outputs.recipe_views``): where
+the channels' positions came from (``position_facts``), the recording's cap model and reference from
+its sidecar, and the signal window, two seconds inside the good-sample mask (``good_sample_mask``:
+outside every row of ``_badsegments.tsv``) nearest the recording's middle (``midsegment``), on the grid
+the floor read. The serving copy a renderer draws the window from is that grid on the Zarr input; on a
+dataset directory it is the serving index's (the converter may have resampled), and the window is
+chosen on it from the same spans in seconds (``bad_intervals``, ``grid_mask``, ``outputs.serving_window``).
 
 eegprep is imported where it is used, so that this module (and the command, which registers the
 recipe) import on any eegprep that has the floor's steps.
@@ -20,14 +34,16 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import math
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from nemar_process.common import device, io
+from nemar_process.common import determinism, device, io, qc, views
 from nemar_process.common.determinism import rounded
 from nemar_process.common.errors import (
     ICA_DEGENERATE,
@@ -46,8 +62,20 @@ from nemar_process.nemar_floor import steps as floor_steps
 from nemar_process.nemar_ica import engines, steps, tally
 from nemar_process.nemar_ica.options import Settings
 
-# eegprep's ICLabel network, the file the classification reads (hashed into the record).
-ICLABEL_WEIGHTS = "netICL.mat"
+if TYPE_CHECKING:
+    from nemar_process.common.plan import Plan
+    from nemar_process.common.zarr_input import ServingStore
+
+# The floor's values nemar-ica sets in place of the floor's own (steps.py).
+FLOOR_EMBEDDING = floor_steps.Embedding(
+    highpass_hz=steps.HIGHPASS_HZ,
+    corr_threshold=steps.CORR_THRESHOLD,
+    max_broken_time=steps.MAX_BROKEN_TIME,
+)
+
+# The ICLabel network is the packaged file eegprep's classification names as the one that ran
+# (``network``: ``iclabel.onnx``, the full-precision network its native backend runs through onnxruntime,
+# sccn/eegprep#386), hashed into the record beside its name.
 
 
 @dataclass
@@ -75,12 +103,27 @@ class Decomposition:
     classes: list[str]
     probabilities: np.ndarray
     variance_pct: list[float]
+    # what the fit was given (``decomposition_input``), the store a serving-copy recording was read
+    # from (None on a dataset directory), and the spans ASR repaired with their share (``bursts``)
+    decomposition_input: dict[str, Any]
+    serving: ServingStore | None
+    bursts: dict[str, Any]
+    # the store row of each kept channel, in order (None on a dataset directory)
+    store_rows: list[int] | None
     iclabel: dict[str, Any] = field(default_factory=dict)
+    # where the channels' positions came from, as the loader read them (``position_facts``), the
+    # recording's cap model and reference from its sidecar (``views.sidecar_fields``), and the signal
+    # window inside the good-sample mask nearest the middle (``midsegment``; None when there is none)
+    positions: dict[str, Any] = field(default_factory=dict)
+    sidecar: dict[str, str] = field(default_factory=dict)
+    window: dict[str, Any] | None = None
 
 
-def canonical_text(document: dict[str, Any]) -> str:
-    """A document as the bytes its hash is taken over: sorted keys, no spaces, ASCII, no NaN, one
-    final newline."""
+def state_text(document: dict[str, Any]) -> str:
+    """ASR's state as the text of ``_asr.json``: sorted keys, no spaces, ASCII, no NaN, one final
+    newline. The record's digest of the state is of these file bytes, as read back; it is not a
+    canonical form recomputed from values. A digest that other languages recompute from values
+    (``channel_types_sha256``) is RFC 8785 text (``determinism.jcs``), never this."""
     return (
         json.dumps(
             document, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=True
@@ -89,12 +132,39 @@ def canonical_text(document: dict[str, Any]) -> str:
     )
 
 
+# A thread count of 0 in an onnxruntime session's options: onnxruntime's own default, recorded as this word.
+ONNXRUNTIME_DEFAULT_THREADS = "default"
+
+
+def iclabel_threads() -> dict[str, int | str]:
+    """The threads ICLabel's ONNX session runs with, read from the session eegprep built and cached
+    (``iclabel_net_onnx._get_session``, the one the classification ran on): each count as the session
+    states it, or ``default`` for 0, onnxruntime's own default. eegprep sets none, so ICLabel runs on
+    onnxruntime's default pools, which the run's thread pin (``determinism.pinned_threads``) does not
+    reach; the record says so rather than claiming one thread (sccn/eegprep#763 asks for a thread
+    count and a public way to read the session's)."""
+    from eegprep.plugins.ICLabel.iclabel_net_onnx import _get_session
+
+    options = _get_session().get_session_options()
+
+    def stated(count: int) -> int | str:
+        return int(count) if count > 0 else ONNXRUNTIME_DEFAULT_THREADS
+
+    return {
+        "intra_op": stated(options.intra_op_num_threads),
+        "inter_op": stated(options.inter_op_num_threads),
+    }
+
+
 @functools.cache
-def iclabel_weights_sha256() -> str:
-    """The SHA-256 of the network file ICLabel classifies with: the weights the record names."""
+def iclabel_weights_sha256(network: str) -> str:
+    """The SHA-256 of the network file ICLabel classified with, the packaged file the classification
+    names (``classify``); a name that is not a bare file name is refused (``ValueError``)."""
     from eegprep.plugins.ICLabel import iclabel
 
-    path = Path(iclabel.__file__).resolve().parent / ICLABEL_WEIGHTS
+    if not network or Path(network).name != network:
+        raise ValueError("ICLabel's network is not a packaged file name: {!r}".format(network))
+    path = Path(iclabel.__file__).resolve().parent / network
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(1 << 20):
@@ -108,8 +178,25 @@ def asr_parameters() -> dict[str, Any]:
 
     return {
         **signature_defaults(clean_asr, steps.ASR_APPLIED),
+        "cutoff": steps.ASR_CUTOFF,
         "maxmem": steps.ASR_MAXMEM_MB,
         "return_state": True,
+    }
+
+
+def burst_share(before: np.ndarray, after: np.ndarray) -> dict[str, Any]:
+    """What the record says of ASR's bursts: the samples its repair changed (``qc.asr_repaired``,
+    eegprep's rule), as ``[start, stop)`` spans of the samples the floor read, and their share of the
+    recording (``fraction``, 0 to 1, six decimals). Nothing is removed: the fit gets the repair."""
+    repaired = qc.asr_repaired(before, after)
+    total = int(repaired.size)
+    flagged = int(repaired.sum())
+    return {
+        "fraction": rounded(flagged / total, 6) if total else None,
+        "n_samples": total,
+        "n_repaired": flagged,
+        "threshold_uv": qc.ASR_UNCHANGED_UV,
+        "spans": [[int(start), int(start + length)] for start, length in qc.runs(~repaired)],
     }
 
 
@@ -134,7 +221,7 @@ def decomposition_call(settings: Settings, resolution: device.Resolution, rank: 
     return {**engine, "reorder": steps.REORDER, **call}
 
 
-def check_locations(eeg: dict[str, Any]) -> None:
+def check_locations(eeg: dict[str, Any], detail: str = steps.ICLABEL_NO_LOCATIONS) -> None:
     """End the recording, before ASR and the fit, when ICLabel could not map its components.
 
     ICLabel draws each component's scalp map with eegprep's ``topoplot``, which raises when no channel
@@ -142,17 +229,18 @@ def check_locations(eeg: dict[str, Any]) -> None:
     the Zarr input that declares no positions is one (eegprep-lean's ``to_eeg`` fills ``chanlocs``
     from the positions a store carries in its root attributes, and leaves labels alone otherwise), and
     so is one whose unit or coordinate system the reader refuses. The fit of such a recording (up to
-    2000 iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
+    ``steps.DEFAULT_MAX_ITER``, 4000, iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
     channels exactly as ICLabel calls it, with one value per channel: the rule is eegprep's own and
     cannot drift from it. The error is recognized by its class, never by its message. ICLabel is not
-    skipped: the recording fails, writing nothing.
+    skipped: the recording fails, writing nothing, with ``detail``: ``iclabel_no_locations``, or
+    ``iclabel_frame_unoriented`` when the positions were refused for their frame (``frame_unoriented``).
     """
     from eegprep import topoplot
 
     try:
         topoplot(np.ones(int(eeg["nbchan"])), eeg["chanlocs"], noplot="on", gridscale=32)
     except ValueError as error:
-        raise RecordingError(STEP_FAILED, "iclabel", steps.ICLABEL_NO_LOCATIONS) from error
+        raise RecordingError(STEP_FAILED, "iclabel_locations", detail) from error
 
 
 def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -168,13 +256,235 @@ def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        repaired, state = clean_asr(eeg, return_state=True, maxmem=steps.ASR_MAXMEM_MB)
+        repaired, state = clean_asr(
+            eeg, cutoff=steps.ASR_CUTOFF, return_state=True, maxmem=steps.ASR_MAXMEM_MB
+        )
     if any(
         issubclass(item.category, UserWarning) and str(item.message).startswith("maxmem=")
         for item in caught
     ):
         raise RecordingError(STEP_FAILED, "asr", steps.ASR_MAXMEM_DETAIL)
-    return repaired, canonical_text(state_to_json(state))
+    return repaired, state_text(state_to_json(state))
+
+
+def kept_rows(result: floor.FloorResult) -> list[int]:
+    """The row of the loaded recording (on the serving copy, of the store) of each channel the floor
+    kept, in order: the signal channels it kept, each at its row."""
+    return [
+        row
+        for row, kept in zip(result.signal_indices, result.kept_final, strict=True)
+        if bool(kept)
+    ]
+
+
+def channel_types(result: floor.FloorResult) -> list[list[str | None]]:
+    """Each row of the loaded recording as ``[label, type]``, in order, the type as the loader gave
+    it for that row (None for an untyped row): what decided, row by row, which rows were signal
+    channels the floor and the decomposition could take."""
+    return [[name, kind] for name, kind in zip(result.all_names, result.all_types, strict=True)]
+
+
+def types_sha256(typed: list[list[str | None]]) -> str:
+    """The SHA-256 of the UTF-8 bytes of ``{"channel_types": [[label, type], ...]}`` in RFC 8785's
+    canonical form (``determinism.jcs``, neuroschema's ``nemar.view-digest.v1`` form), so a browser or
+    another language recomputes it from the record."""
+    return hashlib.sha256(determinism.jcs({"channel_types": typed}).encode("utf-8")).hexdigest()
+
+
+def decomposition_input(
+    plan: Plan, good: list[str], result: floor.FloorResult, serving: ServingStore | None
+) -> dict[str, Any]:
+    """What the fit was given, as the record states it (``extensions.nemar.ica.decomposition_input``).
+
+    ``preprocessing`` names, in the order they ran, the steps of the plan that changed the data the fit
+    received (the functions of ``steps.PREPROCESSING_FUNCTIONS``: channel selection and removal, the
+    drift high-pass, each line-noise band-stop, ASR, the average reference); their parameters are those
+    steps'. ``channels`` are the decomposition's channels, the columns of its unmixing, in the order
+    of the recording (on the serving copy, store row order).
+
+    On the serving copy the block also names the store (its source path, the channel group read and
+    its content digest, the record's ``stores_content`` row), and the kept channels must be the
+    store's rows they name, in store order: the signal channels the floor kept, each at its row of the
+    store, else the recording fails (``internal_error``, ``serving_rows_mismatch``), because the
+    browser's matrix (``outputs``) is applied to those rows.
+    """
+    shaped = []
+    for step in plan.steps:
+        if step.function in steps.PREPROCESSING_FUNCTIONS:
+            shaped.append({"step": step.step_id, "function": step.function})
+    typed = channel_types(result)
+    block: dict[str, Any] = {
+        "source": steps.ARCHIVE_SOURCE if serving is None else steps.SERVING_SOURCE,
+        "preprocessing": shaped,
+        "channels": list(good),
+        "channel_types": typed,
+        "channel_types_sha256": types_sha256(typed),
+        "reference": steps.REREF_REFERENCE,
+        "unit": steps.INPUT_UNIT,
+    }
+    if serving is not None:
+        rows = kept_rows(result)
+        if rows != sorted(rows) or [serving.labels[row] for row in rows] != list(good):
+            raise RecordingError(INTERNAL_ERROR, "reref", steps.SERVING_ROWS_MISMATCH)
+        block["store"] = {
+            "path": serving.path,
+            "group": serving.group,
+            "content_sha256": serving.content_sha256,
+        }
+    return block
+
+
+def _stated(value: Any) -> str | None:
+    """A text the dataset stated, or None for nothing (an empty text, ``n/a``, a value of no text)."""
+    if not isinstance(value, str) or value.strip() in ("", "n/a"):
+        return None
+    return value
+
+
+def frame_unoriented(loaded: Loaded) -> bool:
+    """Whether a recording of a dataset directory has a coordsystem whose frame eegprep's BIDS import
+    gives no orientation (its ``bids_coordsystem_orientation`` is None: ``Other``, ``ACPC``, a name BIDS
+    does not define, or none named), so eegprep applied none of the electrodes file's positions
+    (sccn/eegprep#693). False on the serving copy, whose reader refuses such frames itself."""
+    if loaded.serving is not None:
+        return False
+    etc = loaded.eeg.get("etc")
+    stated = etc.get("BIDSCoordsystem") if isinstance(etc, dict) else None
+    if not isinstance(stated, dict):
+        return False
+    from eegprep.plugins.EEG_BIDS.coords import bids_coordsystem_orientation
+
+    return bids_coordsystem_orientation(stated) is None
+
+
+def position_facts(loaded: Loaded) -> dict[str, Any]:
+    """Where the recording's channel positions came from, as the loader read them (read before the
+    floor takes the recording): ``source`` is the loader's location source (``electrodes.tsv``,
+    ``embedded`` or ``none``), and ``coordinate_system`` and ``coordinate_units`` what the dataset
+    stated for those positions: on a dataset directory the ``_coordsystem.json`` eegprep read beside
+    ``electrodes.tsv`` (its ``EEGCoordinateSystem`` and ``EEGCoordinateUnits``, which eegprep keeps in
+    ``etc["BIDSCoordsystem"]``), on the serving copy the store's own (``coordinate_system`` and
+    ``coordinate_units``, as eegprep-lean recorded them in ``etc["nemar"]["locations"]`` when it
+    located a channel). Each is None when nothing stated it: positions embedded in the data file, or
+    an electrodes file eegprep read with no coordsystem (it then assumed a frame and guessed a unit).
+
+    eegprep converts the positions on loading to millimeters in EEGLAB's frame. Its BIDS import reads
+    a frame by the orientation the BIDS coordinate-systems appendix gives it (sccn/eegprep#693, which
+    fixed sccn/eegprep#692: CTF, 4DBti and KitYokogawa are ALS, as eegprep-lean, the serving copy's
+    reader, reads them), and applies no position of a frame its table does not list (``Other``,
+    ``ACPC``, a name BIDS does not define, or none named: ``frame_unoriented``): the electrodes file is
+    then not the source, and when nothing else located the channels the block still says the frame the
+    dataset stated, the reason they have no positions.
+    """
+    etc = loaded.eeg.get("etc")
+    etc = etc if isinstance(etc, dict) else {}
+    found: Any = None
+    names = ("EEGCoordinateSystem", "EEGCoordinateUnits")
+    if loaded.serving is not None:
+        nemar = etc.get("nemar")
+        found = nemar.get("locations") if isinstance(nemar, dict) else None
+        if not (isinstance(found, dict) and found.get("located")):
+            found = None
+        names = ("coordinate_system", "coordinate_units")
+    elif loaded.location_source == "electrodes.tsv" or (
+        loaded.location_source == "none" and frame_unoriented(loaded)
+    ):
+        found = etc.get("BIDSCoordsystem")
+    found = found if isinstance(found, dict) else {}
+    system = _stated(found.get(names[0]))
+    return {
+        "source": loaded.location_source,
+        "coordinate_system": system,
+        "coordinate_units": _stated(found.get(names[1])),
+    }
+
+
+def good_sample_mask(result: floor.FloorResult, bursts: dict[str, Any]) -> np.ndarray:
+    """The samples the floor read that no row of ``_badsegments.tsv`` covers (True is good): outside
+    the floor's bad windows (its sample mask; every sample when the window step was skipped) and
+    outside the spans ASR repaired (``bursts["spans"]``, ``[start, stop)``, the table's ``burst``
+    rows)."""
+    count = int(result.work["pnts"])
+    if result.sample_mask is None:
+        good = np.ones(count, dtype=bool)
+    else:
+        good = np.array(result.sample_mask, dtype=bool)
+    if good.shape != (count,):
+        raise RecordingError(INTERNAL_ERROR, "iclabel", "sample_mask_inconsistent")
+    for start, stop in bursts["spans"]:
+        good[int(start) : int(stop)] = False
+    return good
+
+
+def bad_intervals(result: floor.FloorResult, bursts: dict[str, Any]) -> list[tuple[float, float]]:
+    """The runs of samples the good-sample mask leaves out (``good_sample_mask``), as the spans of time
+    ``[start / rate, stop / rate)`` they cover on the floor's grid, in seconds."""
+    rate = float(result.srate_hz)
+    good = good_sample_mask(result, bursts)
+    return [(start / rate, (start + length) / rate) for start, length in qc.runs(good)]
+
+
+def grid_mask(intervals: Iterable[tuple[float, float]], rate: float, count: int) -> np.ndarray:
+    """The good-sample mask of another grid of the recording (the serving copy's, ``count`` samples at
+    ``rate``; True is good): a sample ``k`` is good when its time ``k / rate``, a binary64 division as a
+    renderer computes it, lies in no interval ``[low, high)`` of ``intervals`` (seconds)."""
+    times = np.arange(count, dtype=np.float64) / rate
+    good = np.ones(count, dtype=bool)
+    for low, high in intervals:
+        first, stop = np.searchsorted(times, (low, high), "left")
+        good[first:stop] = False
+    return good
+
+
+def window_stop(first: int, rate: float, duration_s: float) -> int:
+    """The sample after the window that starts at sample ``first`` and lasts ``duration_s``: the least
+    ``k`` above ``first`` with ``k / rate >= first / rate + duration_s``, each a binary64 division and
+    one sum, which is how a renderer finds a signal window's samples from its times
+    (docs/views/presets.md, nemar.signal-window), never from a rounded product."""
+    end = first / rate + duration_s
+    stop = first + max(1, math.ceil(duration_s * rate))
+    while stop - 1 > first and (stop - 1) / rate >= end:
+        stop -= 1
+    while stop / rate < end:
+        stop += 1
+    return stop
+
+
+def midsegment(good: np.ndarray, rate: float, duration_s: float) -> dict[str, Any] | None:
+    """The signal window: ``duration_s`` seconds of the recording inside the good-sample mask whose
+    middle is nearest the recording's, or None when no such window fits.
+
+    A window starting at sample ``first`` holds the samples a renderer finds from its times
+    (``window_stop``); it fits when every one of them is good. Of the windows that fit, the chosen one
+    has the least ``|2 * first + duration_s * rate - n|`` for ``n`` samples (its middle, in time, nearest
+    the recording's), the earlier on a tie. Its start is ``first / rate`` seconds.
+    """
+    count = int(good.size)
+    target = (count - duration_s * rate) / 2
+    best: tuple[float, int] | None = None
+    for start, length in qc.runs(~good):  # the runs of good samples
+        end = start + length
+        last = min(end - 1, end - math.ceil(duration_s * rate) + 2)
+        while last >= start and window_stop(last, rate, duration_s) > end:
+            last -= 1
+        if last < start:
+            continue
+        for first in {
+            min(max(math.floor(target), start), last),
+            min(max(math.ceil(target), start), last),
+        }:
+            key = (abs(2 * first + duration_s * rate - count), first)
+            if best is None or key < best:
+                best = key
+    if best is None:
+        return None
+    first = best[1]
+    return {
+        "start_s": first / rate,
+        "duration_s": duration_s,
+        "first": first,
+        "count": window_stop(first, rate, duration_s) - first,
+    }
 
 
 def amica15_account(eeg: dict[str, Any]) -> dict[str, Any]:
@@ -273,14 +583,20 @@ def component_variance(eeg: dict[str, Any], rank: int) -> list[float]:
     return [float(value) for value in found if value is not None]
 
 
-def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray]:
-    """``pop_iclabel`` (eegprep's default network): the classified EEG, the class names and the
-    probabilities of every component (components by classes)."""
+def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray, str]:
+    """``pop_iclabel`` (eegprep's default network): the classified EEG, the class names, the
+    probabilities of every component (components by classes) and the packaged network file that ran,
+    as the classification names it (``network``)."""
     from eegprep import pop_iclabel
 
     labeled = pop_iclabel(eeg, steps.ICLABEL_VERSION)
     found = labeled["etc"]["ic_classification"]["ICLabel"]
-    return labeled, [str(name) for name in found["classes"]], np.asarray(found["classifications"])
+    return (
+        labeled,
+        [str(name) for name in found["classes"]],
+        np.asarray(found["classifications"]),
+        str(found["network"]),
+    )
 
 
 def process(
@@ -289,7 +605,8 @@ def process(
     resolution: device.Resolution,
     path: str | None = None,
 ) -> Decomposition:
-    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``.
+    """Run the recipe on a loaded recording. Consumes ``loaded.eeg``; ``loaded.serving`` names the
+    store of a recording of the serving copy (``decomposition_input``).
 
     ``resolution`` is the device the recording starts on (``device.resolve``, then ``tally.begin``).
     With the recording's ``path`` in the run, the run decides right before the fit where it runs
@@ -297,9 +614,21 @@ def process(
     fitted again on the CPU (``decompose``); the call, the record and the count state the device that
     ran it (``Decomposition.resolution``).
     """
-    result = floor.process(loaded, recipe_id=steps.RECIPE_ID, recipe_version=steps.RECIPE_VERSION)
+    serving = loaded.serving
+    # what the loader read of the positions and the sidecar, before the floor takes the recording
+    positions = position_facts(loaded)
+    unoriented = frame_unoriented(loaded)
+    etc = loaded.eeg.get("etc")
+    sidecar = views.sidecar_fields(etc.get("BIDS") if isinstance(etc, dict) else None)
+    result = floor.process(
+        loaded,
+        recipe_id=steps.RECIPE_ID,
+        recipe_version=steps.RECIPE_VERSION,
+        embedding=FLOOR_EMBEDDING,
+    )
     plan = result.plan
-    # the floor's decisions have the hash they would have had as the floor's own plan
+    # the hash of the floor's part of this plan (its steps to qc), named as the floor's recipe: with
+    # nemar-ica's three embedded values (FLOOR_EMBEDDING) it is not the hash of a nemar-floor product
     floor_plan_hash = plan.hash_as(floor_steps.RECIPE_ID, floor_steps.RECIPE_VERSION, "qc")
     # The floor's samples are dropped as soon as ASR has them (a long recording is gigabytes a copy);
     # its header stays, because the floor's writer reads it (`pnts` for `mask_grid`).
@@ -308,20 +637,26 @@ def process(
         {key: value for key, value in result.work.items() if key != "data"},
     )
 
-    with guarded("ica"):
+    # Pre-checks, each under its own step id (steps.PRE_CHECKS, counted at `preprocess`): they run before
+    # ASR, so a recording they refuse never reached the decomposition, and its counts must not say so.
+    with guarded("ica_eligibility"):
         good = io.channel_labels(eeg)
         rank = steps.rank_of(len(good))
         if rank < steps.MIN_RANK:
             # one component (or none) is not a decomposition: nothing is wrong with the recording
-            raise RecordingSkipped(ICA_INELIGIBLE, "ica", RANK_TOO_LOW)
+            raise RecordingSkipped(ICA_INELIGIBLE, "ica_eligibility", RANK_TOO_LOW)
 
     # ICLabel needs a scalp map: a recording that cannot have one fails now, not after the fit
-    with guarded("iclabel"):
-        check_locations(eeg)
+    with guarded("iclabel_locations"):
+        check_locations(
+            eeg, steps.ICLABEL_FRAME_UNORIENTED if unoriented else steps.ICLABEL_NO_LOCATIONS
+        )
 
     # ASR, keeping the state that reproduces it
     with guarded("asr"):
-        eeg, asr_text = asr_repair(eeg)
+        repaired, asr_text = asr_repair(eeg)
+        bursts = burst_share(eeg["data"], repaired["data"])
+        eeg = repaired
         asr_sha256 = hashlib.sha256(asr_text.encode("utf-8")).hexdigest()
         state = json.loads(asr_text)
         asr = {
@@ -343,6 +678,8 @@ def process(
                 "windowLenS": state["window_len"],
                 "stepSize": state["step_size"],
                 "channelsNamed": state["channels"] is not None,
+                "burstFraction": bursts["fraction"],
+                "nBurstSpans": len(bursts["spans"]),
             },
         )
 
@@ -360,6 +697,7 @@ def process(
             description=steps.DESCRIPTIONS["reref"],
             quality={"reference": steps.REREF_REFERENCE, "nChannels": int(eeg["nbchan"])},
         )
+        given = decomposition_input(plan, good, result, serving)
 
     # the decomposition, on the device the run holds right before it
     with guarded("ica"):
@@ -370,7 +708,7 @@ def process(
         plan.add_step(
             "ica",
             steps.ICA_FUNCTION,
-            call,
+            {**call, "rules": {"channel_types_sha256": given["channel_types_sha256"]}},
             description=steps.DESCRIPTIONS["ica"],
             quality={
                 "engine": settings.engine,
@@ -384,14 +722,14 @@ def process(
 
     # ICLabel
     with guarded("iclabel"):
-        eeg, classes, probabilities = classify(eeg)
-        weights_sha256 = iclabel_weights_sha256()
+        eeg, classes, probabilities, network = classify(eeg)
+        weights_sha256 = iclabel_weights_sha256(network)
         plan.add_step(
             "iclabel",
             steps.ICLABEL_FUNCTION,
             iclabel_parameters(),
             description=steps.DESCRIPTIONS["iclabel"],
-            quality={"classes": classes, "weightsSha256": weights_sha256},
+            quality={"classes": classes, "network": network, "weightsSha256": weights_sha256},
         )
 
     return Decomposition(
@@ -409,5 +747,19 @@ def process(
         classes=classes,
         probabilities=probabilities,
         variance_pct=variance,
-        iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
+        decomposition_input=given,
+        serving=serving,
+        bursts=bursts,
+        store_rows=None if serving is None else kept_rows(result),
+        iclabel={
+            "version": steps.ICLABEL_VERSION,
+            "network": network,
+            "weights_sha256": weights_sha256,
+            "onnxruntime_threads": iclabel_threads(),
+        },
+        positions=positions,
+        sidecar=sidecar,
+        window=midsegment(
+            good_sample_mask(result, bursts), result.srate_hz, steps.MIDSEGMENT_DURATION_S
+        ),
     )

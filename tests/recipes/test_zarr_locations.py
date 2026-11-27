@@ -311,7 +311,8 @@ def test_no_template_is_applied_to_a_store_that_declares_no_positions(located):
     assert loaded.n_channels_with_locations == 0
     assert loaded.location_source == "none"
     assert source.reader_locations[STANDARD] is None
-    assert all(set(chanloc) == {"labels"} for chanloc in loaded.eeg["chanlocs"])
+    # the labels and the type the store states for the row (zarr_input.apply_types), no position
+    assert all(set(chanloc) <= {"labels", "type"} for chanloc in loaded.eeg["chanlocs"])
     assert "nosedir" not in loaded.eeg["chaninfo"]
 
 
@@ -559,7 +560,10 @@ def test_the_dataset_record_keeps_the_readers_reason_for_a_store_that_fails_icla
     assert line["counts"] == {"discovered": 4, "failed": 4, "skipped": 0, "succeeded": 0}
     rows = ica_rows(out)
     for path in (BAD_UNITS, BAD_SYSTEM, NO_MATCH, STANDARD):
-        assert (rows[path]["step"], rows[path]["detail"]) == ("iclabel", "iclabel_no_locations")
+        assert (rows[path]["step"], rows[path]["detail"]) == (
+            "iclabel_locations",
+            "iclabel_no_locations",
+        )
     assert not [p for p in out.rglob("sub-*") if p.is_file()]
     record = dataset_record(out, "ica")
     nemar = record["extensions"]["nemar"]
@@ -595,7 +599,7 @@ def test_nemar_ica_still_fails_a_store_without_positions_at_iclabel_before_the_f
     assert (row["status"], row["code"], row["step"], row["detail"]) == (
         "failed",
         "step_failed",
-        "iclabel",
+        "iclabel_locations",
         "iclabel_no_locations",
     )
     # nothing was written for it: the check came before ASR and the fit

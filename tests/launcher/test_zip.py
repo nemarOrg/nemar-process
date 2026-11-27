@@ -37,28 +37,41 @@ def test_the_script_is_at_the_root_and_executable_and_the_member_list_is_the_lau
         names = archive.namelist()
         assert names == sorted(names)
         assert "tapisjob_app.sh" in names
-        mode = archive.getinfo("tapisjob_app.sh").external_attr >> 16
-        assert stat.S_IMODE(mode) == 0o755
+        for script in ("tapisjob_app.sh", "nemar-launch-local"):
+            mode = archive.getinfo(script).external_attr >> 16
+            assert stat.S_IMODE(mode) == 0o755
         assert names == [
             "lib/nemar_launch/__init__.py",
             "lib/nemar_launch/__main__.py",
             "lib/nemar_launch/bundle.py",
+            "lib/nemar_launch/checkpoints.py",
             "lib/nemar_launch/codes.py",
+            "lib/nemar_launch/fence.py",
             "lib/nemar_launch/include.py",
+            "lib/nemar_launch/local.py",
             "lib/nemar_launch/net.py",
+            "lib/nemar_launch/progress.py",
             "lib/nemar_launch/provenance.py",
+            "lib/nemar_launch/report.py",
             "lib/nemar_launch/run.py",
             "lib/nemar_launch/runtime.py",
+            "lib/nemar_launch/serving_index.py",
             "lib/nemar_launch/settings.py",
             "lib/nemar_launch/spec.py",
             "lib/nemar_launch/stage.py",
             "lib/nemar_launch/upload.py",
-            "lib/schema/launch-spec.v1.json",
+            "lib/nemar_launch/verify.py",
+            "lib/schema/compute-local-launch.v1.json",
+            "lib/schema/compute-progress.v1.json",
+            "lib/schema/compute-recipe-progress.v1.json",
+            "lib/schema/compute-results-report.v1.json",
+            "lib/schema/launch-spec.v2.json",
+            "nemar-launch-local",
             "tapisjob_app.sh",
         ]
         assert (
-            archive.read("lib/schema/launch-spec.v1.json")
-            == (ROOT / "launcher" / "schema" / "launch-spec.v1.json").read_bytes()
+            archive.read("lib/schema/launch-spec.v2.json")
+            == (ROOT / "launcher" / "schema" / "launch-spec.v2.json").read_bytes()
         )
         assert {i.date_time for i in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
         assert not any("__pycache__" in n or n.endswith(".pyc") for n in names)
@@ -100,7 +113,11 @@ def test_the_zip_runs_as_a_tapis_zip_runtime_application(rig, tmp_path):
     exec_dir = tmp_path / "exec"
     exec_dir.mkdir()
     unzip(archive, exec_dir)
-    assert sorted(p.name for p in exec_dir.iterdir()) == ["lib", "tapisjob_app.sh"]
+    assert sorted(p.name for p in exec_dir.iterdir()) == [
+        "lib",
+        "nemar-launch-local",
+        "tapisjob_app.sh",
+    ]
     spec = rig.script_spec('echo from-the-zip > "$NEMAR_OUT/zip.txt"\n')
     env = rig.process_env(spec)
     proc = subprocess.run(
@@ -186,3 +203,44 @@ def test_main_sets_umask_077_for_the_container_it_starts(rig):
     assert launch.exit == 0, launch.log
     assert (launch.out / "work" / "outputs" / "umask").read_text().strip() == "0077"
     assert stat.S_IMODE((launch.out / "launcher").stat().st_mode) & 0o077 == 0
+
+
+def test_the_standalone_wrapper_runs_a_job_from_the_zip(tmp_path):
+    """``nemar-launch-local`` from the unpacked zip, as a person runs it: the arguments reach the
+    launcher as given, the job runs, and the exit status is the launcher's (no tapisjob.exitcode)."""
+    from local_support import LocalRig
+
+    lrig = LocalRig(tmp_path / "rig")
+    try:
+        archive = tmp_path / "nemar-launch.zip"
+        archive.write_bytes(builder.build(ROOT))
+        exec_dir = tmp_path / "exec"
+        exec_dir.mkdir()
+        unzip(archive, exec_dir)
+        lrig.write_spec(lrig.script_spec('echo from-the-zip > "$NEMAR_OUT/zip.txt"'))
+        env = {k.decode(): v.decode() for k, v in lrig.environ().items()}
+        env["NEMAR_HOST_PYTHON"] = sys.executable
+        proc = subprocess.run(
+            ["./nemar-launch-local", *lrig.argv()],
+            env=env,
+            cwd=str(exec_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert (lrig.out / "work" / "outputs" / "zip.txt").read_text() == "from-the-zip\n"
+        assert (lrig.out / "launcher" / "results-report.json").exists()
+        assert not (lrig.out / "tapisjob.exitcode").exists()
+        bad = subprocess.run(
+            ["./nemar-launch-local", "--spec"],
+            env=env,
+            cwd=str(exec_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert bad.returncode == 2
+        assert "usage: nemar-launch-local" in bad.stderr
+    finally:
+        lrig.close()

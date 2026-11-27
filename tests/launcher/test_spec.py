@@ -1,6 +1,6 @@
 """Test 1: the launch specification is refused when it is not the one the schema describes.
 
-The launcher reads the schema file it ships (``launcher/schema/launch-spec.v1.json``) with its own
+The launcher reads the schema file it ships (``launcher/schema/launch-spec.v2.json``) with its own
 small validator, because it may use only the standard library. The validator is held to the
 reference implementation (``jsonschema``, a test-only dependency) on a corpus of mutations.
 """

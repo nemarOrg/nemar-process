@@ -45,6 +45,7 @@ THE CONTAINER BOUNDARY, ENGINE SIDE. Every Apptainer isolation flag has a counte
         --mount type=bind,src=<host>,dst=/work  --mount type=bind,src=<host>,dst=/tmp
         [--mount type=bind,src=<host>,dst=/code,readonly]
         [--mount type=bind,src=<host>,dst=/data/<id>,readonly ...]
+        [--mount type=bind,src=<host>,dst=/data/serving-index,readonly]
         [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
         --env NEMAR_OUT=/work/outputs  [--env NEMAR_DEVICE=... --env NEMAR_DEVICE_REASON=...
         [--env NEMAR_GPU_MEMORY_MB=...]]  <image.uri>  <entry or command> <args>
@@ -152,6 +153,7 @@ RUNNER_LABEL = "nemar.runner"
 # path existed (the prevention of `Prevention` and the check of `check_container`); a Podman call made
 # any other way is refused by `Engine` itself, before anything runs.
 UNSUPPORTED_ENGINES: tuple[str, ...] = ()
+DOCKER = "docker"
 PODMAN = "podman"
 # Podman's configuration, shut out on every call (docs/launcher.md, "Podman"): `CONTAINERS_CONF` names
 # an empty file the caller owns, so no `containers.conf` of the site or the user is read; the global
@@ -175,6 +177,8 @@ _CONTROLLERS = ("cpu", "memory", "pids")
 # The lowest CPU weight an engine takes (the kernel's own minimum): the smallest share among the
 # container's sibling control groups, and nothing more (see the module docstring).
 CPU_SHARES = 2
+# The engine pull policies ``build_argv`` writes: the service's, and the standalone entry's.
+PULL_POLICIES = ("missing", "never")
 
 
 def selected(env: Env) -> str:
@@ -197,14 +201,14 @@ def refuse_unsupported(engine: str, log: Log | None = None) -> None:
         raise _refused("runtime_unusable", "this engine is not supported yet")
 
 
-def hands_over_gpu(job: spec.Spec, device: Device | None) -> bool:
+def hands_over_gpu(job: spec.Job, device: Device | None) -> bool:
     """Whether the engine command line would hand the container a GPU: ``--gpus <n>`` for a GPU job
     without a runner's decision, ``--gpus device=<id>`` for a ``cuda`` decision; never for ``cpu``."""
     return job.gpus > 0 if device is None else device.cuda
 
 
 def refuse_podman_gpu(
-    engine: str, job: spec.Spec, device: Device | None, log: Log | None = None
+    engine: str, job: spec.Job, device: Device | None, log: Log | None = None
 ) -> None:
     """Under Podman no GPU is handed over (``--gpus``, and with it any CDI hook a newer Podman would
     add): a launch that would hand one over (``hands_over_gpu``) ends as ``runtime_unusable`` before
@@ -393,7 +397,7 @@ class Engine(NamedTuple):
         return environment
 
 
-def image_reference(job: spec.Spec) -> str:
+def image_reference(job: spec.Job) -> str:
     """``image.uri`` as the engines take it: the same digest-pinned reference without ``docker://``."""
     uri = job.image["uri"]
     return uri[len(_SCHEME) :] if uri.startswith(_SCHEME) else uri
@@ -444,7 +448,7 @@ def mount_argument(bind: Bind) -> str:
 
 def build_argv(
     engine: Engine,
-    job: spec.Spec,
+    job: spec.Job,
     reference: str,
     name: str,
     binds: list[Bind],
@@ -452,10 +456,15 @@ def build_argv(
     runner_label: str,
     cpu_shares: bool = False,
     device: Device | None = None,
+    pull: str = "missing",
 ) -> list[str]:
     """The whole engine command line (see the module docstring for what each flag is for): Docker's
     ``run``, or Podman's ``create`` (with the prevention's global flags first), which ``create_verified``
     runs and ``start_argv`` starts once the container's OCI configuration has been checked.
+
+    ``pull`` is the engine's own pull policy: ``missing`` for the service (``ensure_image`` has made
+    the image present, and the engine still verifies the digest of a reference that carries one), and
+    ``never`` for the standalone entry, which pulls only inside its fence's window, never here.
 
     ``cpu_shares`` is what ``preflight`` found: True only when the engine can apply CPU shares, and
     then ``--cpu-shares 2`` follows ``--cpus``. ``device`` is the runner's decision for a GPU job, if
@@ -463,6 +472,8 @@ def build_argv(
     a launch that would hand it a GPU is refused here too (``refuse_podman_gpu``)."""
     check_device(device, job.gpus)
     refuse_podman_gpu(engine.name, job, device)
+    if pull not in PULL_POLICIES:
+        raise ValueError("an engine pull policy the launcher does not use")
     if limits.memory_mb is None:  # read_settings refuses this earlier; never run without a size
         raise Failure("runtime_error", "invalid_spec", "the memory size to enforce is not valid")
     uid, gid = current_user()
@@ -475,7 +486,7 @@ def build_argv(
         "{}={}".format(JOB_LABEL, job.job_id),
         "--label",
         "{}={}".format(RUNNER_LABEL, runner_label),
-        "--pull=missing",
+        "--pull={}".format(pull),
         "--network=bridge",
         "--user",
         "{}:{}".format(uid, gid),
@@ -766,7 +777,14 @@ def _volumes_declared(output: bytes) -> bool:
     return bool(volumes)
 
 
-def ensure_image(engine: Engine, reference: str, env: Env, stop: threading.Event, log: Log) -> None:
+def ensure_image(
+    engine: Engine,
+    reference: str,
+    env: Env,
+    stop: threading.Event,
+    log: Log,
+    pull: bool = True,
+) -> None:
     """Make the image present locally and prove it declares no volume.
 
     ``image inspect`` first, and only if that finds nothing a ``pull``. The engine verifies the
@@ -775,11 +793,17 @@ def ensure_image(engine: Engine, reference: str, env: Env, stop: threading.Event
     with the image already cached never needs the registry). An image whose configuration declares
     a ``VOLUME`` is ``image_missing`` too: the engine would mount a writable volume that is none of
     the declared binds. A set ``stop`` event (SIGTERM) ends any of these at once with ``Stopped``.
+
+    ``pull`` False (the standalone entry) never pulls: an absent image is ``image_missing`` at once.
     """
     inspect = ["image", "inspect", "--format", "{{json .Config.Volumes}}", reference]
     status, output = _run(engine, inspect, env, INSPECT_SECONDS, stop, capture=True)
     if status == 0:
         log.info("image: present locally")
+    elif not pull:
+        raise Failure(
+            "runtime_error", "image_missing", "the image is not present and is not pulled"
+        )
     else:
         log.info("image: pulling")
         pulled, _ = _run(engine, ["pull", "--quiet", reference], env, PULL_SECONDS, stop)

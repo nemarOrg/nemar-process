@@ -24,7 +24,9 @@ from nemar_process import sj
 from nemar_process.common import build, determinism, device, files, io, records, versions
 from nemar_process.common.errors import EngineUnavailable, RecordingError
 from nemar_process.common.recipe import RunContext
+from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_ica import RECIPE, engines, outputs, pipeline, steps, tally
+from nemar_process.nemar_ica import recipe as ica_recipe
 from nemar_process.nemar_ica.options import Settings
 from recipe_support import (
     DATASET,
@@ -94,6 +96,27 @@ def tiny(tmp_path_factory):
     return directory, fit, product, context
 
 
+def test_every_file_nemar_ica_writes_for_a_recording_is_a_reserved_view_name(tiny):
+    """No plugin's view file may take a name of nemar-ica's own (views.RESERVED_SUFFIXES): each file
+    the recipe writes for a recording, the record's included, is one of them; the others are its
+    plugins' view files, and none of those is reserved."""
+    from nemar_process.common import views
+
+    _, _, product, _ = tiny
+    plugin_files = {
+        entry["location"]
+        for view in product.record["extensions"]["nemar"]["views"]
+        if "plugin" in view["source"]
+        for entry in view.get("data", [])
+        if entry["role"] != steps.LAYOUT_ROLE  # the spectrum's layout is the recipe's _chanlocs.tsv
+    }
+    assert len(plugin_files) == 2  # _icclasses.json and _spectrum.tsv
+    for name in product.files:
+        suffix = name.rsplit("/", 1)[-1].rsplit("_", 1)[1].split(".")[0]
+        reserved = suffix.casefold() in views.RESERVED_SUFFIXES
+        assert reserved is (name not in plugin_files), name
+
+
 def block_of(product) -> dict:
     return product.record["extensions"]["nemar"]["ica"]
 
@@ -126,9 +149,13 @@ def test_the_recipe_is_one_recipe_with_two_inputs_and_the_options_the_card_names
         "--ica-engine": "pamica",
         "--ica-device": "auto",
         "--ica-threads": 1,
-        "--ica-max-iter": 2000,
+        "--ica-max-iter": 4000,
         "--time-budget-s": None,
+        "--serving-index": None,
     }
+    # the serving index is a dataset directory's: on the serving copy the store read is named
+    zarr_flags = {option.flag for option in RECIPE.reading("zarr").options}
+    assert "--serving-index" not in zarr_flags
     assert RECIPE.reading("zarr").id == "nemar-ica"
     assert RECIPE.seeds == ()
 
@@ -144,14 +171,18 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
         for name in (
             "asr.json",
             "badsegments.tsv",
+            "chanlocs.tsv",
             "channels.tsv",
             "components.tsv",
             "filters.json",
             "ica.json",
+            "icclasses.json",  # nemar-quality's view
             "mixing.tsv",
             "qc.json",
             "samplemask.tsv",
+            "servingunmixing.tsv",
             "signalJourney.json",
+            "spectrum.tsv",  # nemar-spectrum's view
             "sphere.tsv",
             "unmixing.tsv",
             "weights.tsv",
@@ -163,13 +194,17 @@ def test_the_product_is_the_floors_files_and_the_recipes_under_the_label_nemaric
     assert listed == {name.removeprefix(stem) for name in written} - {"signalJourney.json"}
 
 
-def test_the_plan_is_the_floors_steps_then_the_four_of_the_recipe(tiny):
+def test_the_plan_is_the_floors_steps_then_the_four_of_the_recipe_then_its_plugins(tiny):
     _, fit, product, _ = tiny
     plan = [step["stepId"] for step in product.record["processingSteps"]]
-    assert plan[-4:] == list(steps.STEP_ORDER)
+    plugins = [name for name, _ in steps.PLUGINS]
+    assert plan[-2:] == plugins == ["nemar-quality", "nemar-spectrum"]
+    assert plan[-6:-2] == list(steps.STEP_ORDER)
     assert plan[0] == "load"
     assert "flatline" in plan
-    assert "qc" in plan[:-4]
+    assert "qc" in plan[:-6]
+    # the plugins ran on a copy of the plan: the decomposition's own is the recipe's steps alone
+    assert [step.step_id for step in fit.floor_result.plan.steps][-4:] == list(steps.STEP_ORDER)
     assert product.record["pipelineInfo"]["name"] == "nemar-ica"
     # the floor's decisions carry the hash they would have had as the floor's own plan
     nemar = product.record["extensions"]["nemar"]
@@ -294,6 +329,61 @@ def test_the_recording_record_passes_every_check(tiny):
     assert records.content_sha256(product.record) == product.row["record_content_sha256"]
 
 
+def test_the_record_holds_the_floors_and_nemar_icas_metrics_each_produced_by_nemar_ica(tiny):
+    """ADR 0137 C6: the floor's recipe metrics and nemar-ica's, under bare names, as neuroschema
+    ``qualityMetric`` objects whose producer is nemar-ica, never the floor it embeds."""
+    _, fit, product, _ = tiny
+    metrics = product.record["extensions"]["nemar"]["metrics"]
+    names = [m.name for m in (*floor_outputs.RECIPE_METRICS, *outputs.RECIPE_METRICS)]
+    assert sorted(metrics) == sorted(names)
+    assert records.metrics_problems(product.record) == []
+    for name in names:
+        assert metrics[name]["recipe"] == {
+            "name": "nemar-ica",
+            "version": PINNED_ICA_RECIPE_VERSION,
+        }
+    assert metrics["icaRank"]["value"] == fit.rank == product.row["rank"]
+    assert metrics["icaIterations"]["value"] == product.row["iterations"]
+    assert metrics["asrBurstFraction"]["value"] == product.row["asr_burst_fraction"]
+    assert metrics["percentGoodChannels"]["value"] == product.row["pct_good_channels"]
+
+
+def test_the_row_carries_the_floors_three_metrics_and_its_plugins_brain_share_and_mir(tiny):
+    _, fit, product, _ = tiny
+    values = floor_outputs.metric_values(fit.floor_result)
+    row = product.row
+    assert row["pct_good_channels"] == values["percentGoodChannels"] is not None
+    assert row["pct_good_samples"] == values["percentGoodSamples"] is not None
+    assert row["line_db_before"] == values["lineNoiseBeforeDb"]
+    # the share is nemar-quality's metric in the record, never a recipe value
+    (quality,) = [
+        step for step in product.record["processingSteps"] if step["stepId"] == "nemar-quality"
+    ]
+    metric = quality["qualityMetrics"]["nemar-quality:percentBrainComponents"]
+    assert row["pct_brain_components"] == metric["value"] is not None
+    assert (
+        product.record["summaryMetrics"]["nemar-quality:percentBrainComponents"]
+        == (metric["value"])
+    )
+    # the MIR is nemar-quality's too, at the table's six decimals; not a headline metric
+    mir = quality["qualityMetrics"]["nemar-quality:mutualInformationReduction"]
+    assert mir["unit"] == "nat"
+    assert mir["value"] is not None
+    assert row["mir_nats"] == mir["value"]
+    assert "nemar-quality:mutualInformationReduction" not in product.record["summaryMetrics"]
+    columns = [column.name for column in RECIPE.columns]
+    assert columns[-7:] == [
+        "pct_good_channels",
+        "pct_good_samples",
+        "line_db_before",
+        "pct_brain_components",
+        "mir_nats",
+        "skipped_steps",
+        "record_content_sha256",
+    ]
+    assert set(row) == set(columns)
+
+
 # ---- test 8: the pamica block, and what the record says about reproducibility --------------------
 
 
@@ -362,8 +452,8 @@ def test_the_pamica_block_states_every_setting_eegprep_applies_as_the_docs_list_
         "lrate": 0.05,
         "minlrate": 1e-8,
         "maxdecs": 3,
-        "use_min_dll": False,
-        "use_grad_norm": False,
+        "use_min_dll": True,  # AMICA's own stops, on (the recipe's; eegprep's table has them off)
+        "use_grad_norm": True,
         "do_newton": True,
         "newt_start": 50,
         "newtrate": 1.0,
@@ -427,6 +517,100 @@ def test_the_asr_state_is_canonical_json_that_names_its_channels_and_its_memory_
     asr = next(s for s in product.record["processingSteps"] if s["stepId"] == "asr")
     assert asr["parameters"]["maxmem"] == 1024
     assert asr["parameters"]["return_state"] is True
+    # the owner's cutoff, passed, hashed, and the one ASR calibrated with (eegprep's default is 5)
+    assert (
+        asr["parameters"]["cutoff"] == 30.0 == state["cutoff"] == block_of(product)["asr"]["cutoff"]
+    )
+
+
+def test_the_archive_input_is_the_floor_copy_after_asr_and_its_matrix_is_matched_by_label(tiny):
+    """On a dataset directory the record states what the fit was given (the steps that shaped it, the
+    channels, the unit, the reference; no store), and the browser's matrix is in microvolts with its
+    columns matched to the serving copy by label, which the caption says was not checked against
+    the fit's input. The serving copy's block is in ``test_nemar_ica_serving_input.py``."""
+    directory, fit, product, _ = tiny
+    ran = product.record["processingSteps"]
+    shaped = []
+    for step in ran:
+        if step["name"] in steps.PREPROCESSING_FUNCTIONS:
+            shaped.append({"step": step["stepId"], "function": step["name"]})
+    assert [entry["step"] for entry in shaped][-2:] == ["asr", "reref"]
+    assert {"step": "drift", "function": "eegprep.pop_eegfiltnew"} in shaped
+    typed = [
+        [name, kind]
+        for name, kind in zip(fit.floor_result.all_names, fit.floor_result.all_types, strict=True)
+    ]
+    expected = {
+        "source": "archive",
+        "preprocessing": shaped,
+        "channels": fit.good_channels,
+        "channel_types": typed,
+        "channel_types_sha256": pipeline.types_sha256(typed),
+        "reference": "average",
+        "unit": "uV",
+    }
+    assert block_of(product)["decomposition_input"] == expected == fit.decomposition_input
+    header, weights = read_matrix(named(directory, "servingunmixing.tsv"))
+    _, unmixing = read_matrix(named(directory, "unmixing.tsv"))
+    assert header == fit.good_channels
+    assert np.array_equal(weights, unmixing - unmixing.mean(axis=1, keepdims=True))  # microvolts
+    transform = block_of(product)["browser_transform"]
+    assert (transform["match"], transform["rows"], transform["unit"]) == ("label", None, "uV")
+    assert transform["columns"] == fit.good_channels
+    assert transform["caption"] == "not checked against the decomposition input"
+    assert "refuses an unknown unit" in transform["applies_to"]
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [lambda labels: [labels[0], labels[0], *labels[2:]], lambda labels: ["F\tp1", *labels[1:]]],
+    ids=["duplicate", "tab"],
+)
+def test_labels_that_cannot_head_columns_give_no_browser_matrix_and_say_why(tiny, tmp_path, spoil):
+    """On a dataset directory the browser matrix is matched by label; labels that cannot head columns
+    (the matrices fall back to Ch001 and so on) are never published as its columns: the transform is
+    null with the reason labels_unusable and no _servingunmixing.tsv is written."""
+    _, fit, _, context = tiny
+    labels = spoil(list(fit.good_channels))
+    # the decomposition's own chanlocs carry the same labels, as a recording with them would
+    chanlocs = [
+        {**entry, "labels": label} for entry, label in zip(fit.eeg["chanlocs"], labels, strict=True)
+    ]
+    spoiled = dataclasses.replace(fit, good_channels=labels, eeg={**fit.eeg, "chanlocs": chanlocs})
+    (recording,) = io.discover(DATASET)
+    with command.quiet():
+        product = outputs.write_product(
+            recording, context, tmp_path, spoiled, [], profile=steps.INPUT_PROFILES["bids"]
+        )
+    block = block_of(product)
+    assert block["browser_transform"] is None
+    assert block["browser_transform_reason"] == "labels_unusable"
+    assert not list(tmp_path.rglob("*_servingunmixing.tsv"))
+    assert not [
+        entry
+        for entry in product.record["extensions"]["nemar"]["outputs"]
+        if entry["location"].endswith("_servingunmixing.tsv")
+    ]
+    header, _ = read_matrix(named(tmp_path, "unmixing.tsv"))
+    assert header[0] == "Ch001"  # the matrices that do not match by label keep their placeholders
+    # and the usable labels of the same fit give the transform, with no reason
+    with command.quiet():
+        kept = outputs.write_product(
+            recording, context, tmp_path / "kept", fit, [], profile=steps.INPUT_PROFILES["bids"]
+        )
+    assert block_of(kept)["browser_transform"]["columns"] == fit.good_channels
+    assert block_of(kept)["browser_transform_reason"] is None
+
+
+def test_the_rank_is_one_less_than_the_good_channels_and_the_inputs_numerical_rank(tiny):
+    """The average reference takes one dimension, ASR repairs without lowering the rank and no channel
+    is interpolated, so the decomposition keeps N_good - 1 components: the numerical rank of its
+    input. One more would fit a component the data do not hold."""
+    _, fit, product, _ = tiny
+    data = np.asarray(fit.eeg["data"], dtype=np.float64)
+    n_good = len(fit.good_channels)
+    assert fit.rank == steps.rank_of(n_good) == n_good - 1 == np.linalg.matrix_rank(data)
+    assert block_of(product)["pcakeep"] == fit.rank
 
 
 def test_a_state_that_cannot_reproduce_its_data_fails_the_recording_and_writes_nothing(
@@ -482,7 +666,7 @@ def test_a_recording_with_too_few_channels_for_a_decomposition_is_skipped_not_fa
     assert raised.value.status == "skipped"
     assert (raised.value.code, raised.value.step, raised.value.detail) == (
         "ica_ineligible",
-        "ica",
+        "ica_eligibility",
         "rank_too_low",
     )
 
@@ -508,7 +692,7 @@ def test_a_recording_without_electrode_locations_fails_at_iclabel_with_a_word_an
         )
     assert (raised.value.code, raised.value.step, raised.value.detail) == (
         "step_failed",
-        "iclabel",
+        "iclabel_locations",
         "iclabel_no_locations",
     )
     assert not list(tmp_path.rglob("*"))
@@ -598,6 +782,53 @@ def dataset_record_of(out: Path) -> dict:
     return json.loads((out / "desc-nemarica_signalJourney.json").read_text(encoding="utf-8"))[
         "extensions"
     ]["nemar"]
+
+
+def test_the_dataset_dataquality_document_summarizes_the_recipes_distributions(cli, tmp_path):
+    """nemar-ica writes the neuroschema dataset document too: its own three metrics, the floor's three
+    that the legacy summary bounded, and nemar-quality's brain share and MIR, which fill from the
+    plugin's metrics in each recording's record (the table's pct_brain_components and mir_nats)."""
+    from nemar_process.common import dataquality
+
+    dataset = located_dataset(tmp_path / "ds", subjects=2)
+    out = tmp_path / "o"
+    assert cli("run", "nemar-ica", "--dataset-dir", dataset, "--out", out, *run_args())[0] == 0
+    document = json.loads((out / "desc-nemarica_dataquality.json").read_text(encoding="utf-8"))
+    assert dataquality.problems(document) == []
+    (entry,) = document["recipes"].values()
+    assert list(document["recipes"]) == ["nemar-ica"]
+    assert entry["counts"] == {"passed": 2, "failed": 0, "skipped": 0, "total": 2}
+    units = {name: spec["unit"] for name, spec in entry["distributions"].items()}
+    assert units == {
+        "icaRank": "count",
+        "icaIterations": "count",
+        "asrBurstFraction": "fraction",
+        "percentGoodChannels": "%",
+        "percentGoodSamples": "%",
+        "lineNoiseBeforeDb": "dB",
+        "nemar-quality:percentBrainComponents": "%",
+        "nemar-quality:mutualInformationReduction": "nat",
+    }
+    rows = table_of(out)
+    shares = sorted(float(row["pct_brain_components"]) for row in rows)
+    brain = entry["distributions"]["nemar-quality:percentBrainComponents"]
+    assert (brain["n"], brain["histogram"]["missing"]) == (2, 0)
+    assert entry["observed_range"]["nemar-quality:percentBrainComponents"] == {
+        "min": shares[0],
+        "max": shares[-1],
+    }
+    mirs = sorted(float(row["mir_nats"]) for row in rows)
+    mir = entry["distributions"]["nemar-quality:mutualInformationReduction"]
+    assert (mir["n"], mir["histogram"]["missing"], mir["unit"]) == (2, 0, "nat")
+    assert mir["histogram"]["edges"] == list(ica_recipe.MIR_EDGES)
+    assert entry["observed_range"]["nemar-quality:mutualInformationReduction"] == {
+        "min": mirs[0],
+        "max": mirs[-1],
+    }
+    rank = entry["distributions"]["icaRank"]
+    assert rank["n"] == 2
+    assert entry["observed_range"]["icaRank"] == {"min": rank["min"], "max": rank["max"]}
+    assert {row["rank"] for row in rows} == {str(rank["min"]), str(rank["max"])}
 
 
 @pytest.fixture
@@ -931,6 +1162,18 @@ PAMICA_KEYS = {
     "device": "cpu",
     "threads": 3,
     "pcakeep": 6,
+    # AMICA's sample rejection at AMICA's defaults, under pAMICA's names
+    "do_reject": False,  # off (the owner's choice), its schedule still passed
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rejint": 3,
+    "maxrej": 3,
+    # AMICA's convergence stops at the Fortran program's defaults, under pAMICA's names
+    "use_min_dll": True,
+    "min_dll": 1e-9,
+    "maxincs": 5,
+    "use_grad_norm": True,
+    "min_nd": 1e-7,
 }
 AMICA15_KEYS = {
     "icatype": "runamica15",
@@ -941,6 +1184,17 @@ AMICA15_KEYS = {
     "pcakeep": 6,
     "max_threads": 3,
     "amica_binary": "/opt/amica/amica15",
+    # the same rejection under the binary's names
+    "do_reject": 0,
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rejint": 3,
+    "numrej": 3,
+    # the same stops under the binary's names
+    "use_min_dll": 1,
+    "min_dll": 1e-9,
+    "use_grad_norm": 1,
+    "min_grad_norm": 1e-7,
 }
 
 
@@ -990,8 +1244,32 @@ def test_the_binary_is_started_with_its_threads_and_no_seed_in_its_parameter_fil
     assert seen["max_iter"].strip() == "7"
     assert seen["num_models"].strip() == "1"
     assert seen["pcakeep"].strip() == "6"
+    # AMICA's sample rejection reaches the binary's parameter file off, with its schedule
+    assert {key: seen[key].strip() for key in ("do_reject", "numrej", "rejstart", "rejint")} == {
+        "do_reject": "0",
+        "numrej": "3",
+        "rejstart": "2",
+        "rejint": "3",
+    }
+    assert float(seen["rejsig"]) == 3.0
+    # and AMICA's convergence stops, switched on (their thresholds: the next test)
+    assert (seen["use_min_dll"].strip(), seen["use_grad_norm"].strip()) == ("1", "1")
     assert "seed" not in seen  # nothing seeds the binary: it starts from the clock
     assert seen["fix_init"].strip() == "0"  # eegprep's own default, not a setting of the recipe
+
+
+def test_the_binary_reads_amicas_convergence_thresholds_as_passed(copying_binary, tmp_path):
+    """eegprep writes min_dll and min_grad_norm into the binary's parameter file as real numbers
+    (sccn/eegprep#680, fixed at the pin), so AMICA's convergence stops reach the binary as passed."""
+    options = {"ica_engine": "amica15", "ica_device": "cpu", "ica_max_iter": 7, "ica_threads": 1}
+    (recording,) = io.discover(DATASET)
+    with pytest.raises(RecordingError), determinism.pinned_threads(1):
+        outputs.produce(
+            recording, run_context(**options), tmp_path / "o", cut_fixture(), profile="a"
+        )
+    seen = dict(line.split(None, 1) for line in copying_binary.read_text("ascii").splitlines())
+    assert float(seen["min_dll"]) == 1e-9
+    assert float(seen["min_grad_norm"]) == 1e-7
 
 
 def test_pamica_is_found_by_the_search_for_the_module_and_torch(tmp_path, monkeypatch):
@@ -1124,10 +1402,13 @@ def lock_packages() -> list[dict]:
     return tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]
 
 
-def test_the_lock_holds_the_pamica_and_the_cuda_torch_the_recipe_version_stands_for():
+def test_the_lock_holds_the_pamica_onnxruntime_and_cuda_torch_the_recipe_version_stands_for():
     packages = lock_packages()
     pamica = [p for p in packages if p["name"] == "pamica"]
     assert [p["version"] for p in pamica] == [steps.PAMICA_VERSION]
+    onnxruntime = [p["version"] for p in packages if p["name"] == "onnxruntime"]
+    assert onnxruntime == [steps.ONNXRUNTIME_VERSION]
+    assert metadata.version("onnxruntime") == steps.ONNXRUNTIME_VERSION
     cuda = [
         p["version"]
         for p in packages
@@ -1144,13 +1425,15 @@ def test_the_images_pin_the_amica15_binary_the_recipe_version_stands_for():
     assert re.fullmatch(r"[0-9a-f]{64}", steps.AMICA15_SHA256)
 
 
-def test_eegprep_is_taken_from_one_full_commit_with_the_pamica_extra():
+def test_eegprep_is_taken_from_one_full_commit_with_the_pamica_and_iclabel_extras():
+    """The ``iclabel`` extra is onnxruntime, which ICLabel's packaged network runs on since
+    sccn/eegprep#386: without it ``pop_iclabel`` raises ``ImportError`` and every recording fails."""
     declared = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     (requirement,) = [
         r for r in declared["dependency-groups"]["runtime"] if str(r).startswith("eegprep[")
     ]
     assert re.fullmatch(
-        r"eegprep\[mne,pybids,picard,torch,pamica\] @ git\+https://github\.com/sccn/eegprep@"
+        r"eegprep\[mne,pybids,picard,torch,pamica,iclabel\] @ git\+https://github\.com/sccn/eegprep@"
         + PINNED_EEGPREP_COMMIT,
         requirement,
     )

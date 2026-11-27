@@ -23,7 +23,9 @@ from nemar_process.common.recipe import (
     Recipe,
     RecordingProduct,
     RunContext,
+    distributions_of,
 )
+from nemar_process.nemar_floor import outputs as floor_outputs
 from nemar_process.nemar_floor import recipe as floor
 from nemar_process.nemar_floor import zarr_recipe
 from nemar_process.nemar_ica import engines, options, outputs, pipeline, steps, tally
@@ -50,15 +52,48 @@ COLUMNS = (
     Column("device", "str"),
     Column("device_reason", "str"),
     Column("fallback", "str"),
+    Column("asr_burst_fraction", "float", 6),
+    Column("pct_good_channels", "float", 4),
+    Column("pct_good_samples", "float", 4),
+    Column("line_db_before", "float", 3),
+    Column("pct_brain_components", "float", 4),
+    Column("mir_nats", "float", 6),
+    Column("skipped_steps", "str"),
     Column("record_content_sha256", "str"),
 )
 
-RANK_EDGES = (0, 8, 16, 24, 32, 40, 48, 56, 64)
-ITERATION_EDGES = (0, 50, 100, 250, 500, 1000, 2000)
-
+# What the dataset record and the dataset dataQuality document summarize: nemar-ica's metrics, the
+# floor's three that the legacy summary bounded (good channels, good data, line noise before), and
+# nemar-quality's share of brain components and mutual information reduction, whose units and
+# descriptions are its manifest's (a test holds them equal). The MIR's edges are in nats, doubling from
+# a quarter: a recording below 0 (an unmixing that adds dependence) is in the underflow, one above 32
+# in the overflow.
+MIR_EDGES = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 DISTRIBUTIONS = (
-    Distribution("icaRank", "rank", RANK_EDGES),
-    Distribution("icaIterations", "iterations", ITERATION_EDGES),
+    *distributions_of(outputs.RECIPE_METRICS, ("icaRank", "icaIterations", "asrBurstFraction")),
+    *distributions_of(
+        floor_outputs.RECIPE_METRICS,
+        ("percentGoodChannels", "percentGoodSamples", "lineNoiseBeforeDb"),
+    ),
+    Distribution(
+        outputs.BRAIN_METRIC,
+        "pct_brain_components",
+        floor_outputs.PERCENT_EDGES,
+        "%",
+        "Share of components whose most probable ICLabel class is Brain.",
+    ),
+    Distribution(
+        outputs.MIR_METRIC,
+        "mir_nats",
+        MIR_EDGES,
+        "nat",
+        (
+            "Mutual information reduction of the decomposition: the mutual information its unmixing "
+            "removes from the sphered data, log|det W| + sum h(x_i) - sum h(y_i), each entropy over 256 "
+            "fixed bins (eegprep's eeg_mir). Not comparable with Delorme et al. 2012 or the legacy NEMAR "
+            "report, whose MIR includes the reduction sphering achieves."
+        ),
+    ),
 )
 
 
@@ -67,12 +102,13 @@ def dataset_steps_with_load(
 ) -> list[DatasetStep]:
     """The recipe's steps with their recipe-level parameters: a constant, never read from a recording.
 
-    The floor's steps (with the input's load step) and the four of this recipe. The decomposition's
+    The floor's steps (with the input's load step and nemar-ica's high-pass and threshold) and the
+    four of this recipe. The decomposition's
     settings that a run chooses (the engine, the device, the threads and the iterations) are not
     constants and are stated in the record's ``ica_run``, never here.
     """
     return [
-        *floor.steps_with_load(load_function, load_parameters),
+        *floor.steps_with_load(load_function, load_parameters, pipeline.FLOOR_EMBEDDING),
         DatasetStep(
             "asr", steps.ASR_FUNCTION, pipeline.asr_parameters(), steps.DESCRIPTIONS["asr"]
         ),
@@ -121,10 +157,16 @@ def run_recording(
     *,
     loaded: io.Loaded | None = None,
 ) -> RecordingProduct:
-    """Load (unless a loaded recording is handed in, as tests do), process and write the product."""
+    """Load (unless a loaded recording is handed in, as tests do), process and write the product, with
+    the serving index the run was given, if any (``--serving-index``)."""
     loaded = loaded if loaded is not None else io.load(recording)
     return outputs.produce(
-        recording, context, directory, loaded, profile=steps.INPUT_PROFILES["bids"]
+        recording,
+        context,
+        directory,
+        loaded,
+        profile=steps.INPUT_PROFILES["bids"],
+        serving=context.options.get(options.SERVING_INDEX.name),
     )
 
 
@@ -146,6 +188,14 @@ def zarr_run_recording(
         profile=steps.INPUT_PROFILES["zarr"],
         nemar_extra=source.recording_extras(recording.path),
     )
+
+
+def preflight(given: Mapping[str, Any]) -> None:
+    """Before anything is created: the engine asked for can run (``engines.preflight``, exit 8), and
+    the pinned quality plugins load (``outputs.quality_plugins``; a pin that cannot be loaded is
+    ``plugins.PluginLoadError``, which the command reports and exits on)."""
+    engines.preflight(given)
+    outputs.quality_plugins()
 
 
 def run_facts(context: RunContext) -> dict[str, Any]:
@@ -190,9 +240,10 @@ BIDS_RECIPE = Recipe(
     run_recording=run_recording,
     threads=threads,
     engine_extra=engine_extra,
-    options=(INPUT_OPTION, *options.OPTIONS),
-    preflight=engines.preflight,
+    options=(INPUT_OPTION, *options.OPTIONS, options.SERVING_INDEX),
+    preflight=preflight,
     dataset_extras=dataset_extras,
+    checkpoints=steps.CHECKPOINTS,
 )
 """``nemar-ica`` on a dataset directory."""
 

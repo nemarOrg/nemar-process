@@ -55,6 +55,14 @@ jobs:
       NEMAR_REQUIRE_SYSTEMD: "1"
       NEMAR_CLI_DIR: ${{ github.workspace }}/.nemar-cli
       NEMAR_TEST_SIF: ${{ github.workspace }}/.cache/runtime.sif
+      # The live progress contract (ADR 0134): the schema and vectors copies and the constants are
+      # compared with nemar-cli at the progress pin; a missing checkout fails, never skips.
+      NEMAR_REQUIRE_PROGRESS_DRIFT: "1"
+      NEMAR_CLI_PROGRESS_DIR: ${{ github.workspace }}/.nemar-cli-progress
+      # The runner protocol schema is pinned at the same commit (it refers to the progress schema), so
+      # the same checkout serves its drift test, which is required here too.
+      NEMAR_REQUIRE_RUNNER_DRIFT: "1"
+      NEMAR_CLI_RUNNER_DIR: ${{ github.workspace }}/.nemar-cli-progress
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -81,6 +89,22 @@ jobs:
             /test/compute-contract.unit.test.ts
             /package.json
             /bun.lock
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Read the nemar-cli pin of the progress contract
+        id: progress-pin
+        run: echo "ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-progress-pin.json"))["ref"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out nemar-cli at that commit (the progress and runner contracts are compared with its own)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: ${{ steps.progress-pin.outputs.ref }}
+          path: .nemar-cli-progress
+          sparse-checkout: |
+            /shared/
+            /backend/src/routes/callbacks/compute-job-callbacks.ts
           sparse-checkout-cone-mode: false
           fetch-depth: 1
 
@@ -130,6 +154,12 @@ jobs:
       - name: Launcher tests on 3.9
         if: matrix.python == '3.9'
         run: uv run --no-project --python 3.9 --with pytest --with jsonschema pytest tests/launcher
+
+      # The standalone entry's fence on 3.13, where subprocess may start a program through os.posix_spawn
+      # (the fence judges that event by the same rules); the floor's own leg (3.9) is above.
+      - name: Fence and standalone tests on 3.13
+        if: matrix.python == '3.9'
+        run: uv run --no-project --python 3.13 --with pytest --with jsonschema pytest tests/launcher/test_fence.py tests/launcher/test_local_run.py tests/launcher/test_local_pull.py tests/launcher/test_local_cli.py
 
       # The gates of the phase, in order, on 3.12. `lint` and the deploy group of `static` run ruff, ty and
       # the launcher zip check, so they are not repeated here.
@@ -215,8 +245,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - name: Docker version
         run: docker version
-      - name: Launch end to end (real Docker)
-        run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker -v
+      - name: Launch end to end, service and standalone (real Docker)
+        run: uv run --frozen pytest tests/e2e/test_docker_launch.py tests/e2e/test_docker_local.py -m docker -v
 
   podman:
     # The launcher with NEMAR_CONTAINER_RUNTIME=podman against this runner's own rootless Podman (card C4):

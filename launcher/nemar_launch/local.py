@@ -1,0 +1,766 @@
+"""The launcher's standalone entry (ADR 0134 decision 8): run one job on a person's own Linux machine from a
+local launch specification file and local directories, with no NEMAR service involved.
+
+    nemar-launch-local --spec FILE --out DIR [--data NAME=DIR ...] [--code BUNDLE.tar.gz]
+        [--engine apptainer|docker] [--sif-root DIR] [--cpus N] [--memory-mb N] [--scratch DIR]
+        [--time-limit-s N] [--allow-registry HOST ...] [--pull [--cosign PATH]]
+
+It never reads a NEMAR launch specification (``NEMAR_LAUNCH_SPEC``), a lease or a job token, and calls no
+NEMAR route: host paths come from the command line only, and the launcher's environment is built from an
+allowlist (``run.HOST_PASSTHROUGH``) plus the ``NEMAR_*`` values derived from the command line, which pass
+through ``settings.read_settings`` exactly as a runner's do. ``NEMAR_LAUNCH_SPEC``, ``NEMAR_LEASE_ID``,
+``_tapis*``, ``SLURM_*``, ``NEMAR_LOCAL_DATASETS_ROOT`` and the device variables of the person's shell are
+never read. The container phase is the service's own (``__main__._do_work``, ``run``, ``runtime``,
+``finalize_outputs``, the live progress reporter with no poster), so the isolation is identical; the
+differences are the inputs (``Steps``): the code from ``--code`` (``bundle.from_file``), each dataset bound
+read-only, whole, at ``/data/<name>``, an image that is never pulled except with ``--pull``, inside the
+fence's one window, after cosign verified it (``LocalImage``; Docker always runs with ``--pull=never``; a
+random ``rnr_<24 hex>`` runner label per run), SIGINT and SIGHUP stopping the job as SIGTERM does, and
+the fence (``fence.py``) closed for the whole run.
+
+Everything goes into ``<out>/launcher/``: ``result.json``, ``provenance.json``, ``manifest.json`` and
+``launcher.log`` as on the service path, ``progress.json`` (``nemar.progress.v1``, built once more after the
+container exited) and ``results-report.json`` (``nemar.results-report.v1``, ``report.py``). Nothing is
+uploaded. The exit number is ``result.json``'s (0, or 10 to 16); 2 is a command line that cannot be used,
+and then nothing is created.
+
+Standard library only, Python 3.9.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import itertools
+import os
+import re
+import signal
+import stat
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Generator, Mapping, Sequence
+from typing import Any
+
+from . import __main__ as service
+from . import bundle, fence, progress, report, run, runtime, spec, stage, verify
+from .codes import (
+    ENV_ALLOWED_REGISTRIES,
+    ENV_CONTAINER_RUNTIME,
+    ENV_CPUS,
+    ENV_ENFORCE_LIMITS,
+    ENV_MEMORY_MB,
+    ENV_RUNNER_END_TIME,
+    ENV_RUNNER_LABEL,
+    ENV_RUNNER_OUTPUT_DIR,
+    ENV_RUNNER_SCRATCH_DIR,
+    ENV_SIF_ROOT,
+    Env,
+    Failure,
+    Stopped,
+    exit_number,
+)
+from .provenance import Documents, Log
+from .settings import read_settings
+
+# imported before any fence closes: inside one, only the prctl lookup is allowed (run.py)
+with contextlib.suppress(ImportError):  # a Python built without ctypes has no prctl to look up
+    import ctypes  # noqa: F401
+
+PROGRAM = "nemar-launch-local"
+ENGINES = ("apptainer", "docker")
+SIGNALS = (int(signal.SIGTERM), int(signal.SIGINT), int(signal.SIGHUP), int(signal.SIGQUIT))
+FIRST_SECONDS = 0.1  # until the recipe's progress file is first read
+REPORT_SECONDS = 10.0  # then: progress.json is a local file, a person watches it
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_REGISTRY_HOST = re.compile(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?")
+
+
+class Usage(Exception):
+    """A command line that cannot be used: exit 2, nothing created."""
+
+
+def _positive(text: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]{0,8}", text):
+        raise argparse.ArgumentTypeError("a whole number above zero")
+    return int(text)
+
+
+def parser() -> argparse.ArgumentParser:
+    made = argparse.ArgumentParser(
+        prog=PROGRAM,
+        description="Run one job on this machine from a local launch specification (no NEMAR service).",
+    )
+    made.add_argument("--spec", required=True, help="the local launch specification file")
+    made.add_argument(
+        "--out", required=True, help="the output directory (work/ and launcher/ go in it)"
+    )
+    made.add_argument(
+        "--data",
+        action="append",
+        default=[],
+        metavar="NAME=DIR",
+        help="a dataset the specification names, bound read-only at /data/NAME (repeat)",
+    )
+    made.add_argument("--code", help="the code archive (.tar.gz) the specification's bundle names")
+    made.add_argument("--engine", choices=ENGINES, default="apptainer")
+    made.add_argument("--sif-root", help="the directory holding <hex>.sif (Apptainer)")
+    made.add_argument("--cpus", type=_positive, help="whole cores (required with docker)")
+    made.add_argument("--memory-mb", type=_positive, help="megabytes (required with docker)")
+    made.add_argument("--scratch", help="where code and temporary files go (default: TMPDIR)")
+    made.add_argument("--time-limit-s", type=_positive, help="stop the job after this many seconds")
+    made.add_argument(
+        "--allow-registry",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="a registry a Docker image may come from (default ghcr.io; repeat)",
+    )
+    made.add_argument(
+        "--pull",
+        action="store_true",
+        help="verify NEMAR's signed image with cosign and pull it if it is missing",
+    )
+    made.add_argument("--cosign", help="the cosign binary for --pull (default: cosign on PATH)")
+    return made
+
+
+class Options:
+    """The command line, checked."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.spec: str = args.spec
+        self.out: str = os.path.abspath(args.out)
+        self.code: str | None = args.code
+        self.engine: str = args.engine
+        self.sif_root: str | None = args.sif_root
+        self.cpus: int | None = args.cpus
+        self.memory_mb: int | None = args.memory_mb
+        self.scratch: str | None = None if args.scratch is None else os.path.abspath(args.scratch)
+        self.time_limit_s: int | None = args.time_limit_s
+        self.registries: list[str] = list(args.allow_registry)
+        self.pull: bool = args.pull
+        self.cosign: str | None = args.cosign
+        self.data: dict[str, str] = {}
+        for item in args.data:
+            name, sep, directory = item.partition("=")
+            if not sep or not directory or _NAME.fullmatch(name) is None:
+                raise Usage("--data takes NAME=DIR, NAME a dataset name of the specification")
+            if name in self.data:
+                raise Usage("--data names {} twice".format(name))
+            self.data[name] = directory
+        if self.code is not None and not self.code.endswith(".tar.gz"):
+            raise Usage("--code takes a .tar.gz archive")
+        if self.engine == "docker" and (self.cpus is None or self.memory_mb is None):
+            raise Usage("--engine docker needs --cpus and --memory-mb")
+        if self.engine == "apptainer" and self.sif_root is None:
+            raise Usage("--engine apptainer needs --sif-root")
+        if self.engine == "apptainer" and self.memory_mb is not None and self.cpus is None:
+            raise Usage("--memory-mb needs --cpus")
+        if self.registries and self.engine != "docker":
+            raise Usage("--allow-registry is for --engine docker")
+        if any(_REGISTRY_HOST.fullmatch(r) is None for r in self.registries):
+            raise Usage("--allow-registry takes a registry host")
+        if self.cosign is not None and not self.pull:
+            raise Usage("--cosign is for --pull")
+
+
+DEFAULT_PATH = b"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def standalone_path(path: bytes | None) -> tuple[bytes, bool]:
+    """The ``PATH`` the runtime and cosign are looked up on: the absolute directories of ``path`` only
+    (an empty or relative entry would find a program in whatever directory the run was started from),
+    or ``DEFAULT_PATH`` when none is left; and whether it is the default. It never holds an empty
+    entry, so no lookup can fall back to the working directory."""
+    kept = [entry for entry in (path or b"").split(b":") if entry.startswith(b"/")]
+    if not kept:
+        return DEFAULT_PATH, True
+    return b":".join(kept), False
+
+
+def environment(options: Options, environ: Mapping[bytes, bytes]) -> Env:
+    """The launcher's environment: the allowlisted host variables and the ``NEMAR_*`` values derived
+    from the command line, nothing else (no specification, lease, scheduler or device variable).
+    ``PATH`` keeps its absolute directories only, so the runtime and cosign are never found relative to
+    the working directory."""
+    mapping: dict[bytes, bytes] = {
+        name.encode(): environ[name.encode()]
+        for name in run.HOST_PASSTHROUGH
+        if name.encode() in environ
+    }
+    mapping[b"PATH"] = standalone_path(mapping.get(b"PATH"))[0]
+
+    def put(name: str, value: str) -> None:
+        mapping[name.encode()] = os.fsencode(value)
+
+    put(ENV_RUNNER_OUTPUT_DIR, options.out)
+    if options.scratch is not None:
+        put(ENV_RUNNER_SCRATCH_DIR, options.scratch)
+    if options.sif_root is not None:
+        put(ENV_SIF_ROOT, os.path.abspath(options.sif_root))
+    if options.engine == "docker":
+        put(ENV_CONTAINER_RUNTIME, "docker")
+        put(ENV_RUNNER_LABEL, "rnr_" + uuid.uuid4().hex[:24])
+        if options.registries:
+            put(ENV_ALLOWED_REGISTRIES, ",".join(options.registries))
+    elif options.cpus is not None:
+        put(ENV_ENFORCE_LIMITS, "1")
+    if options.cpus is not None:
+        put(ENV_CPUS, str(options.cpus))
+    if options.memory_mb is not None:
+        put(ENV_MEMORY_MB, str(options.memory_mb))
+    if options.time_limit_s is not None:
+        put(ENV_RUNNER_END_TIME, str(int(time.time()) + options.time_limit_s))
+    return Env(mapping)
+
+
+# ---- the inputs -------------------------------------------------------------------------------------------
+
+
+def read_spec(path: str) -> bytes:
+    """The specification file's bytes (at most one byte more than a specification may hold)."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(spec.MAX_SPEC_BYTES + 1)
+    except OSError:
+        raise Failure(
+            "runtime_error", "invalid_spec", "the specification file cannot be read"
+        ) from None
+
+
+def _overlaps(a: str, b: str) -> bool:
+    a, b = os.path.realpath(a), os.path.realpath(b)
+    return os.path.commonpath([a, b]) in (a, b)
+
+
+def _contains(directory: str, inner: str) -> bool:
+    """Whether ``inner`` is ``directory`` or below it (real paths)."""
+    directory, inner = os.path.realpath(directory), os.path.realpath(inner)
+    return os.path.commonpath([directory, inner]) == directory
+
+
+def bind_data(job: spec.Job, options: Options, scratch_base: str) -> list[tuple[str, stage.Staged]]:
+    """Each dataset's directory, real and whole, in the specification's order: the names on the command
+    line are exactly the specification's (``invalid_spec``), each a directory (``dataset_not_found``),
+    none overlapping the output directory or holding the scratch (``bind_source_unsafe``: the job would
+    read its own code and temporary files through it). A dataset inside the scratch base is fine."""
+    if sorted(options.data) != sorted(job.data_names):
+        raise Failure("runtime_error", "invalid_spec", "--data names are not the specification's")
+    bound = []
+    for name in job.data_names:
+        real = os.path.realpath(options.data[name])
+        if not os.path.isdir(real):
+            raise Failure(
+                "dataset_fetch_failed", "dataset_not_found", "a dataset directory is missing"
+            )
+        if _overlaps(real, options.out):
+            raise Failure("runtime_error", "bind_source_unsafe", "a dataset overlaps the output")
+        if _contains(real, scratch_base):
+            raise Failure("runtime_error", "bind_source_unsafe", "a dataset contains the scratch")
+        bound.append((name, stage.Staged({}, real)))
+    return bound
+
+
+def count_input(directory: str) -> dict[str, int]:
+    """The regular files under a dataset directory and their bytes (links are not followed). A directory
+    on another device (a mount point inside the dataset) is refused, ``bind_source_unsafe``: the bind
+    would hand the job a file system the person did not name."""
+    files = 0
+    size = 0
+    device = os.lstat(directory).st_dev
+    for root, dirs, names in os.walk(directory):
+        for name in dirs:
+            try:
+                if os.lstat(os.path.join(root, name)).st_dev != device:
+                    raise Failure(
+                        "runtime_error", "bind_source_unsafe", "a dataset holds a mount point"
+                    )
+            except OSError:
+                continue
+        for name in names:
+            try:
+                info = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            if not os.path.islink(os.path.join(root, name)) and os.path.isfile(
+                os.path.join(root, name)
+            ):
+                files += 1
+                size += info.st_size
+    return {"files": files, "bytes": size}
+
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _owned_stat(info: os.stat_result, *, directory: bool, word: str) -> None:
+    """Of the expected kind, owned by the person or by root (a read-only system cache), and writable
+    by no one else."""
+    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if not kind_ok or info.st_uid not in (os.getuid(), 0) or info.st_mode & 0o022:
+        raise verify.Unverified(word)
+
+
+def _hashed_identity(
+    fd: int, proof: verify.SifProof | None, stop: threading.Event
+) -> tuple[int, int, int, int]:
+    """The identity of the image file open on ``fd``, checked (``_owned_stat``) and, with a proof,
+    hashed through that descriptor against the proof's layer (``layer_mismatch``). A file whose
+    identity changed while it was read is ``sif_changed``."""
+    before = os.fstat(fd)
+    _owned_stat(before, directory=False, word="sif_unsafe")
+    if proof is not None:
+        digest = hashlib.sha256()
+        while True:
+            if stop.is_set():
+                raise Stopped
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if "sha256:" + digest.hexdigest() != proof.layer:
+            raise verify.Unverified("layer_mismatch", "present")
+    identity = _identity(os.fstat(fd))
+    if identity != _identity(before):
+        raise verify.Unverified("sif_changed", "while_hashed")
+    return identity
+
+
+def _link_into(sif: str, directory: str, identity: tuple[int, int, int, int]) -> str:
+    """A hard link to ``sif`` in ``directory`` (made 0700), if it can be made and is the file whose
+    identity was taken; else ``sif`` itself (another file system, or a file that changed since: the
+    original then fails ``before_exec``)."""
+    try:
+        os.mkdir(directory, 0o700)
+        link = os.path.join(directory, os.path.basename(sif))
+        os.link(sif, link, follow_symlinks=False)
+        if _identity(os.lstat(link)) == identity:
+            return link
+    except OSError:
+        pass  # another file system: the original runs, still checked before it does
+    return sif
+
+
+def _owned(path: str, *, directory: bool, word: str) -> None:
+    """``path`` is no link, of the expected kind, the person's own and writable by no one else."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise verify.Unverified(word, "missing") from None
+    _owned_stat(info, directory=directory, word=word)
+
+
+@contextlib.contextmanager
+def _unverified(log: Log) -> Generator[None, None, None]:
+    """An ``Unverified`` is ``runtime_error``, ``image_unverified`` (exit 13), its reason in the log."""
+    try:
+        yield
+    except verify.Unverified as unverified:
+        log.error(
+            "image_unverified reason={}{}".format(
+                unverified.reason, " ({})".format(unverified.why) if unverified.why else ""
+            )
+        )
+        raise Failure(
+            "runtime_error", "image_unverified", "the image is not the verified one"
+        ) from None
+
+
+class LocalImage(service.Image):
+    """The standalone entry's image. Without ``--pull`` nothing is pulled or verified: Apptainer runs
+    ``<sif-root>/<hex>.sif`` and under Docker an absent image is ``image_missing``
+    (``ensure_image(pull=False)``). With ``--pull`` the image must be NEMAR's own
+    (``verify.check_reference``, before anything starts), and the fence's window opens around the
+    verification and the pull only (``_pull_image``, ``_pull_sif``); a failed verification is
+    ``runtime_error``, ``image_unverified`` (exit 13), with the reason word in the log."""
+
+    def __init__(self, pull: bool = False, cosign: str | None = None, fenced: Any = None) -> None:
+        self.pull = pull
+        self.cosign = cosign
+        self.fenced = fenced
+        self.verification: dict[str, Any] | None = None
+        self._pinned: tuple[str, tuple[int, int, int, int]] | None = None
+        self._log: Log | None = None
+
+    def locate(self, job: spec.Job, env: Env) -> str:
+        if not self.pull:
+            return run.resolve_sif(job, env)
+        root = env.get(ENV_SIF_ROOT)
+        if not root or not os.path.isdir(root):
+            raise Failure("runtime_error", "image_missing", "the image directory is missing")
+        return os.path.join(root, job.image["sif"])  # verified, or pulled, by acquire
+
+    def acquire(
+        self,
+        runtime_path: str,
+        handle: runtime.Engine | None,
+        job: spec.Job,
+        reference: str,
+        sif: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> str:
+        if handle is None:  # Apptainer
+            return self._sif(runtime_path, job, sif, env, scratch, terminator, log)
+        if self.pull:
+            digest_hex = job.image["digest"].split(":", 1)[1]
+            path = env.get("PATH", "") or ""
+            with _unverified(log):
+                bare = verify.check_reference(job.image["uri"], digest_hex)
+                cosign = verify.find_cosign(self.cosign, path)
+                home = verify.cosign_home(scratch)
+                self._pull_image(handle, bare, digest_hex, cosign, path, home, env, terminator, log)
+            log.info("image: verified by cosign (image)")
+        runtime.ensure_image(handle, reference, env, terminator.stop, log, pull=False)
+        return sif
+
+    def _sif(
+        self,
+        apptainer: str,
+        job: spec.Job,
+        sif: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> str:
+        """Apptainer: with ``--pull`` verify (and pull if missing) the signed SIF artifact, then, in
+        every case, pin the file that will run (``_pin``)."""
+        proof: verify.SifProof | None = None
+        self._log = log
+        with _unverified(log):
+            if self.pull:
+                digest_hex = job.image["digest"].split(":", 1)[1]
+                path = env.get("PATH", "") or ""
+                verify.check_reference(job.image["uri"], digest_hex)
+                cosign = verify.find_cosign(self.cosign, path)
+                home = verify.cosign_home(scratch)
+                proof = self._pull_sif(
+                    apptainer, sif, digest_hex, cosign, path, home, env, scratch, terminator
+                )
+            pinned = self._pin(sif, scratch, proof, terminator)
+        if proof is not None:
+            log.info("image: verified by cosign (sif)")
+        return pinned
+
+    def _pin(
+        self,
+        sif: str,
+        scratch: str,
+        proof: verify.SifProof | None,
+        terminator: run.Terminator,
+    ) -> str:
+        """The image file that will run, pinned. The directory and the file must not be links, must be
+        the person's own and writable by no one else (``sif_root_unsafe``, ``sif_unsafe``); with
+        ``--pull`` the file is hashed through the descriptor it was checked on (``layer_mismatch``). Its
+        identity (device, inode, size, modification time) is kept, and ``before_exec`` refuses a file
+        that changed since (``sif_changed``). Where the scratch is on the same file system the file is
+        hard-linked into it (0700) and the link is what runs, so a rename over the original changes
+        nothing."""
+        _owned(os.path.dirname(sif), directory=True, word="sif_root_unsafe")
+        try:
+            fd = os.open(sif, os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        except OSError:
+            raise verify.Unverified("sif_unsafe", "not_opened") from None
+        try:
+            identity = _hashed_identity(fd, proof, terminator.stop)
+        finally:
+            os.close(fd)
+        target = _link_into(sif, os.path.join(scratch, "image"), identity)
+        self._pinned = (target, identity)
+        if self.fenced is not None:
+            self.fenced.pin_image(target)
+        return target
+
+    def before_exec(self, sif: str) -> None:
+        if self._pinned is None:
+            return
+        target, identity = self._pinned
+        try:
+            current = _identity(os.lstat(target))
+        except OSError:
+            current = None
+        if sif != target or current != identity:
+            if self._log is not None:
+                self._log.error("image_unverified reason=sif_changed")
+            raise Failure("runtime_error", "image_unverified", "the image file changed")
+
+    def _pull_image(
+        self,
+        engine: runtime.Engine,
+        bare: str,
+        digest_hex: str,
+        cosign: str,
+        path: str,
+        home: str,
+        env: Env,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> None:
+        """Docker: cosign verifies the digest (every entry names it), then the image is pulled by that
+        digest only if it is absent; the window allows exactly those three command lines. Every engine
+        call is built by ``engine.argv``, and the pull the window allows is that exact list. The
+        standalone entry pulls only under Docker: any other engine is ``runtime_unusable`` before the
+        window opens and before any engine or cosign call."""
+        if engine.name != runtime.DOCKER:
+            log.error("{}_pull_unsupported".format(engine.name))
+            raise Failure(
+                "runtime_error", "runtime_unusable", "the standalone entry pulls only under docker"
+            )
+        stop = terminator.stop
+        inspect = ["image", "inspect", "--format", "{{json .Config.Volumes}}", bare]
+        pull = engine.argv(*verify.image_pull_args(digest_hex))
+        allowed = [verify.version_argv(cosign), verify.verify_argv(cosign, bare), pull]
+        with self.fenced.window(allowed):
+            present, _ = runtime._run(
+                engine, inspect, env, runtime.INSPECT_SECONDS, stop, capture=True
+            )
+            version = verify.cosign_version(cosign, path, home, stop)
+            out = verify.run_cosign(cosign, bare, path, home, stop)
+            verify.verified_digests(out, "sha256:" + digest_hex)
+            if present != 0:
+                log.info("image: pulling the verified digest")
+                pulled, _ = runtime._run_argv(
+                    pull, engine.environment(env), runtime.PULL_SECONDS, stop
+                )
+                if pulled != 0:
+                    raise Failure("runtime_error", "image_missing", "the image could not be pulled")
+        self.verification = {"by": "cosign", "kind": "image", "cosign_version": version}
+
+    def _pull_sif(
+        self,
+        apptainer: str,
+        sif: str,
+        digest_hex: str,
+        cosign: str,
+        path: str,
+        home: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+    ) -> verify.SifProof:
+        """Apptainer: cosign verifies the SIF artifact found by its tag; the launcher reads that
+        artifact's manifest by the digest cosign named from the registry, and a missing file is pulled
+        by that digest into a part file and hashed against the manifest's one layer before it is renamed;
+        a file already there is hashed against it by ``_pin``, after the window. The window allows the two cosign command lines,
+        the registry's host and its token and manifest addresses, and (once cosign has passed) the
+        pull."""
+        stop = terminator.stop
+        tag = verify.sif_tag(digest_hex)
+        base = verify.REGISTRY_BASE
+        allowed = [verify.version_argv(cosign), verify.verify_argv(cosign, tag)]
+        with self.fenced.window(allowed, fence.Registry(base)):
+            version = verify.cosign_version(cosign, path, home, stop)
+            digests = verify.parse_digests(verify.run_cosign(cosign, tag, path, home, stop))
+            manifest = digests[0]
+            if verify._DIGEST_RE.fullmatch(manifest) is None or any(d != manifest for d in digests):
+                raise verify.Unverified("digest_mismatch")
+            self.fenced.allow_url(verify.token_url(base))
+            token = verify.fetch_token(base, stop)
+            self.fenced.allow_url(verify.manifest_url(base, manifest))
+            proof = verify.SifProof(manifest, verify.fetch_layer(base, manifest, token, stop))
+            if not os.path.lexists(
+                sif
+            ):  # a file already there is hashed by _pin, outside the window
+                verify.pull_sif(
+                    apptainer,
+                    os.path.dirname(sif),
+                    digest_hex,
+                    proof,
+                    path,
+                    scratch,
+                    stop,
+                    self.fenced.allow,
+                )
+        self.verification = {
+            "by": "cosign",
+            "kind": "sif",
+            "cosign_version": version,
+            "sif_manifest": proof.manifest,
+            "sif_layer": proof.layer,
+        }
+        return proof
+
+
+def _runtimes(options: Options, env: Env) -> list[str]:
+    """The runtime ``_do_work`` will find (the same lookup over the same environment), resolved before
+    the fence closes, so the fence allows the runtime's verbs from that file only. None found: the run
+    fails at its own lookup, and no runtime may start meanwhile."""
+    names = run.RUNTIME_BINARIES if options.engine == "apptainer" else (options.engine,)
+    try:
+        return [run.find_runtime(env, names)[1]]
+    except Failure:
+        return []
+
+
+# ---- one run ----------------------------------------------------------------------------------------------
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    environ: Mapping[bytes, bytes] | None = None,
+    *,
+    fenced: fence.Fence = fence.FENCE,
+) -> int:
+    """Run one standalone job; return the exit number."""
+    try:
+        options = Options(parser().parse_args(argv))
+    except Usage as problem:
+        sys.stderr.write("{}: {}\n".format(PROGRAM, problem))
+        return 2
+    except SystemExit as stop:  # argparse has said what is wrong
+        return 2 if stop.code else 0
+    os.umask(0o077)
+    env = environment(options, os.environb if environ is None else environ)
+    settings = read_settings(env)
+    started = time.time()
+    refused: Failure | None = None
+    layout: run.Layout | None = None
+    try:
+        os.makedirs(options.out, exist_ok=True)
+        layout = run.prepare_layout(options.out)
+    except Failure as failure:
+        refused = failure
+    except OSError:
+        refused = Failure(
+            "runtime_error", "output_dir_not_empty", "the output directory is unusable"
+        )
+    log = Log(layout.log_path if layout is not None else None)
+    if standalone_path((os.environb if environ is None else environ).get(b"PATH"))[1]:
+        log.info("PATH: no absolute directory given; using {}".format(DEFAULT_PATH.decode()))
+    docs = Documents(layout.launcher if layout is not None else None, log)
+    state = service.Run(options.out, layout, log, docs)
+    terminator = run.Terminator(own_deadline_only=True)
+    terminator.install(SIGNALS, keep_ignored=True)
+    image = LocalImage(options.pull, options.cosign, fenced)
+    inputs: list[dict[str, Any]] = []
+    try:
+        with fenced.run(runtimes=_runtimes(options, env)):
+            log.info("standalone: engine {}, fence closed".format(options.engine))
+            job = _start(state, options, env, settings, terminator, refused, image, inputs)
+            service._finalize(state, env, terminator)
+            if layout is not None:
+                _final_progress(state, layout, log)
+                _results_report(state, layout, job, image, inputs, started)
+            log.info("fence: refusals {}".format(fenced.words()))
+    finally:
+        terminator.restore()
+        log.close()
+    return exit_number(state.failure.code if state.failure else None)
+
+
+def _start(
+    state: service.Run,
+    options: Options,
+    env: Env,
+    settings: Any,
+    terminator: run.Terminator,
+    refused: Failure | None,
+    image: LocalImage,
+    inputs: list[dict[str, Any]],
+) -> spec.LocalSpec | None:
+    """Read the specification and run the job; every failure is recorded on ``state``."""
+    log = state.log
+    if refused is not None:
+        state.fail(refused)
+        state.outputs_blocked = True
+        return None
+    if settings.problem is not None:
+        state.fail(settings.problem)
+        return None
+    job: spec.LocalSpec | None = None
+    try:
+        text = read_spec(options.spec)
+        state.digest = spec.digest_of(text)
+        job = spec.parse_local_text(text)
+        state.image = {"uri": job.image["uri"], "digest": job.image["digest"]}
+        log.info("standalone job: runtime {}".format(job.runtime))
+        bound = bind_data(job, options, settings.scratch_base)
+        inputs.extend({"name": name, **count_input(held.source)} for name, held in bound)
+        steps = service.Steps(
+            code=lambda scratch: bundle.from_file(
+                options.code, job, scratch, log=log, stop=terminator.stop
+            ),
+            data=lambda _scratch: [held for _name, held in bound],
+            image=image,
+            post=None,
+            first_seconds=FIRST_SECONDS,
+            report_seconds=REPORT_SECONDS,
+            engine_pull="never",
+        )
+        service._do_work(state, job, env, settings, terminator, steps)
+    except spec.SpecError as problem:
+        state.fail(Failure("runtime_error", problem.detail, "the specification was refused"))
+    except Failure as failure:
+        state.fail(failure)
+    except Stopped:
+        state.fail(run.terminated_failure(terminator, env))
+    except Exception as error:  # noqa: BLE001 - a launcher bug must still leave a record
+        state.fail(service._unexpected("runtime_error", error, log))
+    return job
+
+
+def _final_progress(state: service.Run, layout: run.Layout, log: Log) -> None:
+    """``launcher/progress.json`` once more, after the container exited: nothing running."""
+    source = state.progress_source
+    if source is None:
+        return
+    try:
+        document = source.build(finished=True)
+        progress.write_report(layout.launcher, document, itertools.count())
+    except progress.Unusable as problem:
+        log.info("progress: no final report {}".format(problem.word))
+    except Exception as error:  # noqa: BLE001 - a report never changes the job's exit
+        log.warning("progress: final report not written {}".format(type(error).__name__))
+
+
+def _results_report(
+    state: service.Run,
+    layout: run.Layout,
+    job: spec.LocalSpec | None,
+    image: LocalImage,
+    inputs: list[dict[str, Any]],
+    started: float,
+) -> None:
+    log = state.log
+    if state.image is None:
+        # no specification was read (refused, unreadable, or a setting refused first): nothing ran,
+        # and there is no image to name, so there is no report
+        log.info("results report not written (no_specification)")
+        return
+    try:
+        built, word = report.build(
+            run_id=uuid.uuid4().hex,
+            started=started,
+            finished=max(time.time(), started),
+            spec_digest=state.digest,
+            image=state.image,
+            verification=image.verification,
+            bundle_sha256=state.bundle_digest,
+            inputs=inputs,
+            documents=state.docs.data,
+            launcher_dir=layout.launcher,
+            work=layout.work,
+            files=state.files,
+            recipe_state=None if state.progress_source is None else state.progress_source.state,
+        )
+        if built is None:
+            log.error("results report not written ({})".format(word))
+            return
+        report.write(layout.launcher, built)
+        log.info("results report written ({})".format(built["checkpoints_reason"] or "with counts"))
+    except Exception as error:  # noqa: BLE001 - a report never changes the job's exit
+        log.error("results report not written ({})".format(type(error).__name__))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

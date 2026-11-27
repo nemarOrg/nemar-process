@@ -854,6 +854,37 @@ def input_digest_v2(rows: Iterable[Mapping[str, str]]) -> str:
 # ---- the source -------------------------------------------------------------------------------
 
 
+class ServingStore(NamedTuple):
+    """What a recording read from the serving copy is, for a record that names the store it was
+    computed from (nemar-ica's ``decomposition_input`` and its browser weights): the store's source
+    path, the channel group read and its content digest (the record's ``stores_content`` row), the unit
+    its channels share as the store states it (None when they share none) and its labels in store row
+    order."""
+
+    path: str
+    group: str
+    content_sha256: str
+    unit: str | None
+    labels: tuple[str, ...]
+
+
+CHANNEL_TYPES_MISMATCH = "channel_types_mismatch"
+
+
+def apply_types(eeg: dict[str, Any], stated: Sequence[tuple[str, str | None]]) -> None:
+    """Give each channel of ``eeg`` the type stated for its row, row by row: a row stated with no type
+    keeps none, and a row's type never comes from another row. A row whose label is not the stated
+    label is ``convert_failed`` (``channel_types_mismatch``)."""
+    chanlocs = eeg["chanlocs"]
+    if len(stated) != len(chanlocs):
+        raise RecordingError(CONVERT_FAILED, "load", CHANNEL_TYPES_MISMATCH)
+    for chanloc, (label, kind) in zip(chanlocs, stated, strict=True):
+        if str(chanloc.get("labels", "")) != label:
+            raise RecordingError(CONVERT_FAILED, "load", CHANNEL_TYPES_MISMATCH)
+        if kind is not None:
+            chanloc["type"] = kind
+
+
 def location_source(located: int) -> str:
     """``electrodes.tsv`` when the positions the store declares located a channel, else ``none``: the
     BIDS route's words (``io._location_source``). The converter embeds the positions of the
@@ -1067,7 +1098,14 @@ class ZarrSource:
         from them, or refuses them with a reason it records); no template is ever applied. The load
         reports ``electrodes.tsv`` as the location source when at least one channel of the dictionary
         has coordinates, else ``none`` (``embedded`` cannot occur: the serving copy keeps no position
-        from inside a data file), and the count is the BIDS route's (``qc.count_located``).
+        from inside a data file), and the count is the BIDS route's (``qc.count_located``). The loaded
+        recording names its store (``Loaded.serving``, a ``ServingStore``).
+
+        Each row of ``chanlocs`` takes the ``channel_type`` the store states for that row, row by row
+        (the group's metadata is read once more; an interim measure until eegprep-lean's ``to_eeg``
+        types the channels, sccn/eegprep#669): a row with no stated type stays untyped, and no row's
+        type is ever taken from another row. A row whose label is not the window's is
+        ``convert_failed`` (``channel_types_mismatch``).
         """
         from eegprep import eeg_checkset
         from eegprep_lean import load_recording, to_eeg
@@ -1090,6 +1128,7 @@ class ZarrSource:
                     transport=self.transport,
                     index=self.index,
                 )
+                stated = self._stated_types(store, window)
             except MemoryError as error:
                 raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
             except Exception as error:
@@ -1112,6 +1151,9 @@ class ZarrSource:
         except MemoryError as error:
             raise RecordingError(OUT_OF_MEMORY, "load", type(error).__name__) from error
         self.contents[path] = content
+        serving = ServingStore(
+            path, content.group, content.sha256, window.unit, window.labels or ()
+        )
         try:
             eeg = to_eeg(window, dataset_id=self.dataset_id, store=path, index_digest=self.digest)
             del window
@@ -1127,6 +1169,9 @@ class ZarrSource:
             raise RecordingError(CONVERT_FAILED, "load", error.code) from error
         except Exception as error:
             raise RecordingError(CONVERT_FAILED, "load", type(error).__name__) from error
+        # outside the loader's checks, whose handler names the code it caught, so a row whose label is
+        # not the window's keeps its own detail (convert_failed, channel_types_mismatch)
+        apply_types(eeg, stated)
         self.reader_locations[path] = reader_locations
         return io.Loaded(
             eeg=eeg,
@@ -1138,7 +1183,26 @@ class ZarrSource:
             n_channels_with_locations=located,
             power_line_hz_declared=self.declared_power_line(path),
             inputs=self.inputs(store.zarr, self.store_bytes[path]),
+            serving=serving,
         )
+
+    def _stated_types(self, store: Any, window: Any) -> list[tuple[str, str | None]]:
+        """Each row's label and the ``channel_type`` its group states (None when it states none or
+        an empty one), from the group's metadata, row by row in the window's order."""
+        from eegprep_lean import read_group_metadata
+
+        group = store.group(window.group_name)
+        metadata = asyncio.run(
+            read_group_metadata(self.index, store, group, transport=self.transport)
+        )
+        by_row = {channel.row_index: channel for channel in metadata.channels}
+        stated = []
+        for row in window.channels:
+            channel = by_row.get(row)
+            label = "" if channel is None else channel.label
+            kind = None if channel is None or not channel.channel_type else channel.channel_type
+            stated.append((label, kind))
+        return stated
 
     # -- what the records say
 

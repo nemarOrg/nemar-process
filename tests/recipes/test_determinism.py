@@ -16,15 +16,16 @@ from recipe_support import PINNED_COMMON_VERSION, PINNED_EEGPREP_TEXT
 from threadpoolctl import threadpool_info
 
 
-def test_the_recorded_seed_is_the_one_in_eegprep_source():
+def test_the_recorded_seed_is_the_one_clean_channels_draws_from_when_given_none():
+    """The floor passes no ``seed``, so RANSAC draws from ``clean_channels``'s default
+    (``DEFAULT_RANSAC_SEED``, sccn/eegprep#605), which the record states as an engine seed."""
     from eegprep import clean_channels
+    from eegprep.plugins.clean_rawdata.clean_channels import DEFAULT_RANSAC_SEED
 
-    module = inspect.getmodule(clean_channels)
-    assert module is not None
-    source = inspect.getsource(module)
     seed = determinism.SEEDS["clean_channels.ransac"]
     assert seed == 5489
-    assert "RandomState({})".format(seed) in source
+    assert inspect.signature(clean_channels).parameters["seed"].default == seed
+    assert seed == DEFAULT_RANSAC_SEED
 
 
 def test_the_pool_inventory_is_one_thread_inside_the_pin_and_restored_after():

@@ -882,3 +882,38 @@ def test_selected_names_the_runtime():
     with pytest.raises(Failure) as caught:
         runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}))
     assert caught.value.detail == "image_missing"
+
+
+def test_without_pull_an_absent_image_is_image_missing_and_nothing_is_pulled(rig):
+    """The standalone entry's ``ensure_image(pull=False)``: an image already there is used, an absent
+    one ends the launch before any pull starts."""
+    engine = Engine(rig, "docker", present=False)
+    env = Env({b"PATH": str(rig.bin_dir).encode()})
+    docker = runtime.Engine("docker", str(rig.bin_dir / "docker"))
+    with pytest.raises(Failure) as caught:
+        runtime.ensure_image(docker, REFERENCE, env, threading.Event(), Log(None), pull=False)
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    assert engine.pulls() == []
+    present = Engine(rig, "docker", present=True)
+    runtime.ensure_image(docker, REFERENCE, env, threading.Event(), Log(None), pull=False)
+    assert present.pulls() == []
+
+
+def test_the_engine_pull_policy_is_one_the_launcher_uses(rig):
+    job = spec.Spec(entry_spec(rig), "0" * 64)
+    arguments = (
+        runtime.Engine("docker", "/usr/bin/docker"),
+        job,
+        REFERENCE,
+        "nemar-launch-0",
+        [],
+        settings.Limits(1, 64),
+        RUNNER,
+    )
+    assert "--pull=missing" in runtime.build_argv(*arguments)
+    never = runtime.build_argv(*arguments, pull="never")
+    assert "--pull=never" in never
+    assert "--pull=missing" not in never
+    assert never.index("--pull=never") == runtime.build_argv(*arguments).index("--pull=missing")
+    with pytest.raises(ValueError):
+        runtime.build_argv(*arguments, pull="always")

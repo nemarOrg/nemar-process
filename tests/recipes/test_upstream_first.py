@@ -10,7 +10,11 @@ An abstract syntax tree (AST) scan of every Python file under `recipes/nemar_pro
   NumPy (the single exception is `numpy.linalg.matrix_rank`, a rank test the location guard uses,
   not a decomposition of data);
 * a function or class whose name says it designs, makes or applies a filter, a window or a kernel,
-  or contains, as a whole word, one of the names of the transforms the rule keeps out.
+  or contains, as a whole word, one of the names of the transforms the rule keeps out;
+* an import of, or a reference to, a plotting library (matplotlib, seaborn, plotly, bokeh, Pillow,
+  pyqtgraph, vispy, eegprep-lean's plotting): no file of the recipes package draws or stores a figure
+  (nemar-cli ADR 0137: a plugin writes views, data a browser draws, never an image). The plugins are
+  scanned like every other file.
 
 A step id such as `bad_windows` is data (a string), not a definition, so it passes. The scanner is
 tested on snippets that must be flagged and snippets that must pass, so a scanner that stopped
@@ -29,6 +33,11 @@ PACKAGE = ROOT / "recipes" / "nemar_process"
 # The one file that may import torch: the device facts (is a GPU usable, its name, the versions torch
 # reports), never numerics. Every other file, nemar-ica's included, is held to the rule.
 TORCH_ALLOWED = frozenset({"common/device.py"})
+# The plotting libraries: imported by no file of the recipes package.
+PLOTTING_MODULES = frozenset(
+    {"matplotlib", "seaborn", "plotly", "bokeh", "PIL", "pyqtgraph", "vispy", "eegprep_lean.plot"}
+)
+
 
 BANNED_MODULES = (
     "scipy.signal",
@@ -86,7 +95,7 @@ def singular(word: str) -> str:
 
 
 def banned_module(dotted: str) -> str | None:
-    for module in BANNED_MODULES:
+    for module in (*BANNED_MODULES, *sorted(PLOTTING_MODULES)):
         if dotted == module or dotted.startswith(module + "."):
             return module
     return None
@@ -178,15 +187,20 @@ def package_files():
     return sorted(PACKAGE.rglob("*.py"))
 
 
+def allowance(relative: str) -> frozenset[str]:
+    """The banned libraries one file of the package may import."""
+    allowed: set[str] = set()
+    if relative in TORCH_ALLOWED:
+        allowed.add("torch")
+    return frozenset(allowed)
+
+
 def test_no_file_of_the_recipes_package_writes_signal_processing():
     files = package_files()
     assert files, "the scan found no file to scan, so it would pass for nothing"
     found = {
         path.relative_to(ROOT).as_posix(): scan(
-            path.read_text(encoding="utf-8"),
-            frozenset({"torch"})
-            if path.relative_to(PACKAGE).as_posix() in TORCH_ALLOWED
-            else frozenset(),
+            path.read_text(encoding="utf-8"), allowance(path.relative_to(PACKAGE).as_posix())
         )
         for path in files
     }
@@ -298,3 +312,38 @@ def test_words_split_snake_and_camel_case():
     assert words("PCAFit") == ["pca", "fit"]
     assert words("WhitenTransform") == ["whiten", "transform"]
     assert words("bad_windows") == ["bad", "windows"]
+
+
+# ---- plotting: no file of the recipes package draws a figure (views are data, ADR 0137) ---------------
+
+
+def test_the_scan_covers_the_plugins_and_their_runner():
+    names = [path.relative_to(PACKAGE).as_posix() for path in package_files()]
+    assert "plugins/__init__.py" in names
+    assert "common/plugins.py" in names
+    assert "common/contract.py" in names
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import matplotlib.pyplot as plt",
+        "from matplotlib import pyplot",
+        "import seaborn",
+        "from PIL import Image",
+        "import plotly.express",
+        "from eegprep_lean.plot import plot_window",
+        "import vispy",
+    ],
+)
+def test_a_plotting_import_is_flagged(source):
+    assert scan(source), source
+
+
+def test_no_file_is_allowed_to_plot():
+    for relative in (
+        "common/plugins.py",
+        "plugins/nemar_quality/__init__.py",
+        "nemar_ica/outputs.py",
+    ):
+        assert scan("import matplotlib", allowance(relative)), relative

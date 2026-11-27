@@ -5,7 +5,8 @@ Linux program, and neither the development environment nor a laptop can run it):
 
 * the E1R line (informational, by the owner's ruling), at the full length only: pAMICA's torch engine and
   the image's ``amica15`` binary on the repository's EEG fixture recording, one thread, the CPU in
-  float64, 2000 iterations, as the Hungarian-matched absolute correlations of the sensor-space unmixing
+  float64, pAMICA at the recipe's own iterations and the binary at 2000, as the Hungarian-matched
+  absolute correlations of the sensor-space unmixing
   rows and the Amari distance. The line is printed with the reference values beside it and nothing asserts
   anything about the numbers: the binary starts from the clock, so the comparison moves from run to run,
   and no document or record turns it into a claim;
@@ -16,8 +17,11 @@ Linux program, and neither the development environment nor a laptop can run it):
   record names the digest the recipe's version stands for.
 
 The module runs at one of two lengths, read once from ``NEMAR_ICA_E2E_LENGTH`` (docs/images.md): ``full``
-(the default, and what a variable that is not set means) runs pAMICA and the binary without
-``--ica-max-iter``, the recipe's 2000 iterations, as the registry runs them, and prints the E1R line;
+(the default, and what a variable that is not set means) runs pAMICA without ``--ica-max-iter``, as the
+registry runs it (the recipe's ``steps.DEFAULT_MAX_ITER``, 4000, with AMICA's convergence stops), the
+binary capped at 2000 iterations (a bound on the leg's time: its convergence stops reach it since
+sccn/eegprep#680 was fixed, so it may stop sooner, and the recipe's 4000 could double the leg), and
+prints the E1R line;
 ``short`` runs all four runs at 50 iterations and skips the E1R test, and every other assertion holds at
 both lengths. The image workflow sets the variable from the event and the base branch alone: short on a
 pull request whose base is not ``main``, full on a pull request into ``main``, on the image tag and on the
@@ -48,13 +52,41 @@ from recipe_support import (
     DATASET_ID,
     DATASET_VERSION,
     E1_REFERENCE,
+    ROOT,
     e1_statistics,
     read_matrix_tsv,
 )
 
 SHORT_ITERATIONS = 50
+# the binary's full-length run is capped, a bound on the leg's time: its convergence stops reach it
+# (sccn/eegprep#680 is fixed at the pin), so it may stop sooner, and the recipe's 4000 could double the leg
+BINARY_FULL_ITERATIONS = 2000
 LENGTH_VARIABLE = "NEMAR_ICA_E2E_LENGTH"
-EXPECTED_MAX_ITER = {"full": 2000, "short": SHORT_ITERATIONS}
+STEPS_SOURCE = ROOT / "recipes" / "nemar_process" / "nemar_ica" / "steps.py"
+
+
+def recipe_default_max_iter(source: str) -> int:
+    """``steps.DEFAULT_MAX_ITER`` as ``steps.py`` assigns it, read from the source rather than imported,
+    because importing the recipe imports eegprep, which the development environment lacks and in which
+    this module is collected."""
+    for node in ast.parse(source).body:
+        if (
+            isinstance(node, ast.Assign)
+            and [target.id for target in node.targets if isinstance(target, ast.Name)]
+            == ["DEFAULT_MAX_ITER"]
+            and isinstance(node.value, ast.Constant)
+            and type(node.value.value) is int
+        ):
+            return node.value.value
+    raise ValueError("steps.py assigns no whole number to DEFAULT_MAX_ITER")
+
+
+# what the registry's invocation (no --ica-max-iter) runs pAMICA for
+RECIPE_MAX_ITER = recipe_default_max_iter(STEPS_SOURCE.read_text(encoding="utf-8"))
+EXPECTED_MAX_ITER = {
+    "full": {"pamica": RECIPE_MAX_ITER, "amica15": BINARY_FULL_ITERATIONS},
+    "short": {"pamica": SHORT_ITERATIONS, "amica15": SHORT_ITERATIONS},
+}
 IMAGE_DIGEST = "sha256:" + "0" * 64
 STEM = "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_"
 
@@ -118,23 +150,26 @@ def check_length(length: str) -> str:
 
 def run_plan(length: str) -> dict[str, tuple[str, ...]]:
     """The arguments each of the four runs adds to ``nemar-recipe run nemar-ica``, a function of the length
-    alone: the full plan leaves pAMICA and the first binary run at the recipe's default of 2000
-    iterations and caps the two short binary runs at 50; the short plan caps all four at 50.
-    The names, engines and devices are the same at both lengths."""
+    alone: the full plan leaves pAMICA at the registry's invocation (no ``--ica-max-iter``: the
+    recipe's default), caps the first binary run at ``BINARY_FULL_ITERATIONS`` and the two short binary
+    runs at 50; the short plan caps all four at 50. The names, engines and devices are the same at both
+    lengths."""
     check_length(length)
     capped = ("--ica-max-iter", str(SHORT_ITERATIONS))
     binary = ("--ica-engine", "amica15", "--ica-device", "cpu")
-    default = capped if length == "short" else ()
+    full = length == "full"
     return {
-        "pamica": default,
-        "amica": (*binary, *default),
+        "pamica": () if full else capped,
+        "amica": (*binary, "--ica-max-iter", str(BINARY_FULL_ITERATIONS))
+        if full
+        else (*binary, *capped),
         "short_a": (*binary, *capped),
         "short_b": (*binary, *capped),
     }
 
 
-def expected_max_iter(length: str) -> int:
-    """The ``max_iter`` the pAMICA and binary records of a run of this length must state."""
+def expected_max_iter(length: str) -> dict[str, int]:
+    """The ``max_iter`` the pAMICA and the binary records of a run of this length must state, by engine."""
     return EXPECTED_MAX_ITER[check_length(length)]
 
 
@@ -245,20 +280,20 @@ def test_the_pamica_record_of_a_cpu_image_with_no_gpu_says_so(runs):
     assert facts["image_flavor"] == "cpu"
     assert facts["torch_version"].startswith("2.12.1")
     assert facts["torch_cuda"] is None
-    assert facts["max_iter"] == EXPECTED_ITERATIONS
+    assert facts["max_iter"] == EXPECTED_ITERATIONS["pamica"]
     assert facts["threads"] == 1
     assert facts["pamica"]["pipeline"] == "pamica.AMICA(backend='torch').fit"
 
 
 @pytest.mark.apptainer
 def test_the_binarys_record_is_internally_consistent_at_the_length_that_ran(runs):
-    """What eegprep read of the binary's output, on the run with the recipe's own invocation at the full
-    length and on the same run capped at 50 iterations at the short one (the path was written without a
-    binary to run it on, so this is the first reading of it): every value is consistent with the others."""
+    """What eegprep read of the binary's output, on the run capped at 2000 iterations at the full length
+    and at 50 at the short one (the path was written without a binary to run it on, so this is the first
+    reading of it): every value is consistent with the others."""
     base, _ = runs
     facts = ica_of(base, "amica")
     assert facts["engine"] == "amica15"
-    assert facts["max_iter"] == EXPECTED_ITERATIONS
+    assert facts["max_iter"] == EXPECTED_ITERATIONS["amica15"]
     assert 0 < facts["iterations"] <= facts["max_iter"]
     assert facts["best_ll"] < 0  # a log-likelihood per sample of whitened data
     assert facts["final_ll"] <= facts["best_ll"]
@@ -316,16 +351,29 @@ def test_any_other_value_of_the_length_variable_is_an_error_that_names_the_choic
     assert "short" in message
 
 
+def without_cap(arguments: tuple[str, ...]) -> list[str]:
+    """The arguments with ``--ica-max-iter`` and its value taken out."""
+    kept, skip = [], False
+    for argument in arguments:
+        if skip:
+            skip = False
+        elif argument == "--ica-max-iter":
+            skip = True
+        else:
+            kept.append(argument)
+    return kept
+
+
 def test_the_run_plan_changes_only_the_iteration_count_between_the_lengths():
     full, short = run_plan("full"), run_plan("short")
     assert list(full) == list(short) == ["pamica", "amica", "short_a", "short_b"]
     capped = ("--ica-max-iter", "50")
     binary = ("--ica-engine", "amica15", "--ica-device", "cpu")
-    # the full plan is the one the module ran before the short length existed: the recipe's own
-    # invocation (pAMICA, then the binary on the CPU) without --ica-max-iter, and two capped binary runs
+    # the full plan runs pAMICA as the registry does, with no --ica-max-iter (the recipe's default), the
+    # binary capped at 2000 (a bound on the leg's time), and two capped binary runs
     assert full == {
         "pamica": (),
-        "amica": binary,
+        "amica": (*binary, "--ica-max-iter", "2000"),
         "short_a": (*binary, *capped),
         "short_b": (*binary, *capped),
     }
@@ -337,14 +385,29 @@ def test_the_run_plan_changes_only_the_iteration_count_between_the_lengths():
         "short_b": (*binary, *capped),
     }
     for name in full:
-        assert [a for a in short[name] if a not in capped] == [
-            a for a in full[name] if a not in capped
-        ]
+        assert without_cap(short[name]) == without_cap(full[name])
 
 
-def test_the_expected_iteration_counts_are_the_recipes_default_and_the_short_cap():
-    assert EXPECTED_MAX_ITER == {"full": 2000, "short": 50}
+def test_the_expected_iteration_counts_are_the_recipes_default_the_binarys_cap_and_the_short_cap():
+    assert EXPECTED_MAX_ITER == {
+        "full": {"pamica": RECIPE_MAX_ITER, "amica15": 2000},
+        "short": {"pamica": 50, "amica15": 50},
+    }
+    assert RECIPE_MAX_ITER == 4000
     assert SHORT_ITERATIONS == 50
+
+
+def test_the_full_length_reads_the_recipes_default_from_its_source():
+    assert recipe_default_max_iter("X = 1\nDEFAULT_MAX_ITER = 123\n") == 123
+    for source in ("X = 1\n", 'DEFAULT_MAX_ITER = "4000"\n', "DEFAULT_MAX_ITER = True\n"):
+        with pytest.raises(ValueError, match="DEFAULT_MAX_ITER"):
+            recipe_default_max_iter(source)
+
+
+def test_the_value_read_is_the_recipes_own_constant():
+    """In the runtime environment (eegprep installed) the source reading is the imported constant."""
+    steps = pytest.importorskip("nemar_process.nemar_ica.steps")
+    assert steps.DEFAULT_MAX_ITER == RECIPE_MAX_ITER
 
 
 def test_an_unknown_length_has_no_plan_no_expectation_and_no_skip_reason():
@@ -359,9 +422,9 @@ def test_the_error_for_a_bad_value_reads_must_be_unset_full_or_short():
     assert str(caught.value) == "NEMAR_ICA_E2E_LENGTH must be unset, full or short, not 'quick'"
 
 
-def test_the_expected_max_iter_is_2000_at_the_full_length_and_50_at_the_short_one():
-    assert expected_max_iter("full") == 2000
-    assert expected_max_iter("short") == 50
+def test_the_expected_max_iter_is_the_recipes_and_the_binarys_cap_at_full_and_50_at_short():
+    assert expected_max_iter("full") == {"pamica": 4000, "amica15": 2000}
+    assert expected_max_iter("short") == {"pamica": 50, "amica15": 50}
 
 
 def test_the_e1r_test_runs_at_the_full_length_and_is_skipped_at_the_short_one_with_the_reason():
@@ -448,4 +511,4 @@ def test_the_fixture_and_the_tests_that_need_the_image_use_the_four_constants_an
         )  # the fixture re-reads the environment
         assert not (FUNCTIONS - allowed) & used, (name, (FUNCTIONS - allowed) & used)
         literals = {node.value for node in ast.walk(body) if isinstance(node, ast.Constant)}
-        assert not literals & {"short", "full", 2000, 50, "quick"}, (name, literals)
+        assert not literals & {"short", "full", 4000, 2000, 50, "quick"}, (name, literals)

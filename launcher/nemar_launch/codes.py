@@ -146,6 +146,8 @@ LAUNCHER_DETAILS: dict[str, tuple[str, ...]] = {
         "content_missing",
         "file_not_found",
         "disk_error",
+        # the serving index the Worker staged is not the size or SHA-256 the specification names
+        "serving_index_mismatch",
     ),
     "entry_not_found": (),
     "runtime_error": (
@@ -211,6 +213,7 @@ PLATFORM_LAUNCHER_DETAILS = (
     "manifest_too_large",
     "unsafe_path",
     "file_not_found",
+    "serving_index_mismatch",
     "incomplete_plan",
     "upload_failed",
     "outputs_refused",
@@ -222,6 +225,14 @@ CONTAINER_WORK = "/work"
 CONTAINER_OUTPUTS = "/work/outputs"
 CONTAINER_CODE = "/code"
 CONTAINER_DATA = "/data"
+# The staged serving index (``serving_index``, ADR 0141 of nemar-cli): the directory the launcher binds
+# read-only beside the datasets and the file in it, the path the Worker names after ``--serving-index``
+# (nemar-cli: ``SERVING_INDEX_CONTAINER_DIR`` and ``SERVING_INDEX_CONTAINER_PATH``). A dataset id is
+# two letters and six digits, so the name is never a dataset's.
+SERVING_INDEX_DIR_NAME = "serving-index"
+SERVING_INDEX_FILE_NAME = "index.json"
+CONTAINER_SERVING_INDEX = CONTAINER_DATA + "/" + SERVING_INDEX_DIR_NAME
+CONTAINER_SERVING_INDEX_FILE = CONTAINER_SERVING_INDEX + "/" + SERVING_INDEX_FILE_NAME
 
 # A fixed word: what a `detail` may be. Never a value a person or a response chose.
 _WORD = re.compile(r"^[a-z0-9_]{1,64}$")

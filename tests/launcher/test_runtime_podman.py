@@ -184,6 +184,21 @@ def test_a_refused_configuration_ends_the_launch_before_the_entry_runs(rig, podm
     assert result.result["entry_exit_code"] is None
 
 
+def test_a_refused_configuration_stops_the_progress_reporter(rig, podman):
+    """The reporter starts before Podman's create and check; a refusal there still stops it: no
+    ``progress-reporter`` thread of this launch is left alive."""
+
+    def reporters() -> set:
+        return {t for t in threading.enumerate() if t.name == "progress-reporter" and t.is_alive()}
+
+    before = reporters()
+    oci_extra(podman, mounts=[SECRETS])
+    result = launch(rig, podman, writing_entry(rig))
+    assert result.result["detail"] == "runtime_unusable"
+    assert "podman_config_refused" in result.log
+    assert reporters() - before == set()
+
+
 def test_the_refusal_line_never_holds_a_host_path_or_a_line_break(rig, podman):
     oci_extra(podman, mounts=[dict(SECRETS, destination="/x y\nz")])
     result = launch(rig, podman)
