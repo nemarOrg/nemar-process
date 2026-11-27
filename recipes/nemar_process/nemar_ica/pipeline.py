@@ -221,7 +221,7 @@ def decomposition_call(settings: Settings, resolution: device.Resolution, rank: 
     return {**engine, "reorder": steps.REORDER, **call}
 
 
-def check_locations(eeg: dict[str, Any]) -> None:
+def check_locations(eeg: dict[str, Any], detail: str = steps.ICLABEL_NO_LOCATIONS) -> None:
     """End the recording, before ASR and the fit, when ICLabel could not map its components.
 
     ICLabel draws each component's scalp map with eegprep's ``topoplot``, which raises when no channel
@@ -232,16 +232,15 @@ def check_locations(eeg: dict[str, Any]) -> None:
     ``steps.DEFAULT_MAX_ITER``, 4000, iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
     channels exactly as ICLabel calls it, with one value per channel: the rule is eegprep's own and
     cannot drift from it. The error is recognized by its class, never by its message. ICLabel is not
-    skipped: the recording fails, writing nothing.
+    skipped: the recording fails, writing nothing, with ``detail``: ``iclabel_no_locations``, or
+    ``iclabel_frame_unoriented`` when the positions were refused for their frame (``frame_unoriented``).
     """
     from eegprep import topoplot
 
     try:
         topoplot(np.ones(int(eeg["nbchan"])), eeg["chanlocs"], noplot="on", gridscale=32)
     except ValueError as error:
-        raise RecordingError(
-            STEP_FAILED, "iclabel_locations", steps.ICLABEL_NO_LOCATIONS
-        ) from error
+        raise RecordingError(STEP_FAILED, "iclabel_locations", detail) from error
 
 
 def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -342,6 +341,22 @@ def _stated(value: Any) -> str | None:
     return value
 
 
+def frame_unoriented(loaded: Loaded) -> bool:
+    """Whether a recording of a dataset directory has a coordsystem whose frame eegprep's BIDS import
+    gives no orientation (its ``bids_coordsystem_orientation`` is None: ``Other``, ``ACPC``, a name BIDS
+    does not define, or none named), so eegprep applied none of the electrodes file's positions
+    (sccn/eegprep#693). False on the serving copy, whose reader refuses such frames itself."""
+    if loaded.serving is not None:
+        return False
+    etc = loaded.eeg.get("etc")
+    stated = etc.get("BIDSCoordsystem") if isinstance(etc, dict) else None
+    if not isinstance(stated, dict):
+        return False
+    from eegprep.plugins.EEG_BIDS.coords import bids_coordsystem_orientation
+
+    return bids_coordsystem_orientation(stated) is None
+
+
 def position_facts(loaded: Loaded) -> dict[str, Any]:
     """Where the recording's channel positions came from, as the loader read them (read before the
     floor takes the recording): ``source`` is the loader's location source (``electrodes.tsv``,
@@ -356,8 +371,10 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
     eegprep converts the positions on loading to millimeters in EEGLAB's frame. Its BIDS import reads
     a frame by the orientation the BIDS coordinate-systems appendix gives it (sccn/eegprep#693, which
     fixed sccn/eegprep#692: CTF, 4DBti and KitYokogawa are ALS, as eegprep-lean, the serving copy's
-    reader, reads them), and applies no position of a frame the appendix gives no orientation
-    (``Other``, an unlisted name or none): the electrodes file is then not the source.
+    reader, reads them), and applies no position of a frame its table does not list (``Other``,
+    ``ACPC``, a name BIDS does not define, or none named: ``frame_unoriented``): the electrodes file is
+    then not the source, and when nothing else located the channels the block still says the frame the
+    dataset stated, the reason they have no positions.
     """
     etc = loaded.eeg.get("etc")
     etc = etc if isinstance(etc, dict) else {}
@@ -369,7 +386,9 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
         if not (isinstance(found, dict) and found.get("located")):
             found = None
         names = ("coordinate_system", "coordinate_units")
-    elif loaded.location_source == "electrodes.tsv":
+    elif loaded.location_source == "electrodes.tsv" or (
+        loaded.location_source == "none" and frame_unoriented(loaded)
+    ):
         found = etc.get("BIDSCoordsystem")
     found = found if isinstance(found, dict) else {}
     system = _stated(found.get(names[0]))
@@ -598,6 +617,7 @@ def process(
     serving = loaded.serving
     # what the loader read of the positions and the sidecar, before the floor takes the recording
     positions = position_facts(loaded)
+    unoriented = frame_unoriented(loaded)
     etc = loaded.eeg.get("etc")
     sidecar = views.sidecar_fields(etc.get("BIDS") if isinstance(etc, dict) else None)
     result = floor.process(
@@ -628,7 +648,9 @@ def process(
 
     # ICLabel needs a scalp map: a recording that cannot have one fails now, not after the fit
     with guarded("iclabel_locations"):
-        check_locations(eeg)
+        check_locations(
+            eeg, steps.ICLABEL_FRAME_UNORIENTED if unoriented else steps.ICLABEL_NO_LOCATIONS
+        )
 
     # ASR, keeping the state that reproduces it
     with guarded("asr"):

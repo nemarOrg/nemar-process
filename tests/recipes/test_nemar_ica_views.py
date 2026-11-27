@@ -30,6 +30,7 @@ from nemar_process.common import (
     files,
     io,
     plugins,
+    qc,
     records,
     serving_index,
     views,
@@ -1649,17 +1650,131 @@ def test_positions_in_the_frames_bids_defines_as_als_are_read_as_stated(
 
 @pytest.mark.parametrize("system", ["Other", "ACPC", "NoSuchFrame"])
 def test_positions_in_a_frame_with_no_orientation_are_not_applied(tmp_path, system):
-    """A frame the BIDS coordinate-systems appendix gives no orientation is not read at all
-    (sccn/eegprep#693): eegprep applies none of the electrodes file's positions, so the recording has
-    none, and the block says the electrodes file was not their source."""
+    """A frame eegprep's orientation table does not list (``Other``, ``ACPC``, a name BIDS does not
+    define) is not read at all (sccn/eegprep#693): eegprep applies none of the electrodes file's
+    positions, so the recording has none; the block says the electrodes file was not their source and
+    keeps the frame the dataset stated, the reason."""
     (found,) = io.discover(als_copy(tmp_path / "dataset", system))
     loaded = io.load(found)
     assert loaded.n_channels_with_locations == 0
+    assert pipeline.frame_unoriented(loaded) is True
     assert pipeline.position_facts(loaded) == {
         "source": "none",
-        "coordinate_system": None,
-        "coordinate_units": None,
+        "coordinate_system": system,
+        "coordinate_units": "mm",
     }
+
+
+def test_a_frame_eegprep_orients_and_a_recording_without_a_coordsystem_are_not_unoriented(tmp_path):
+    (found,) = io.discover(als_copy(tmp_path / "ctf", "CTF"))
+    assert pipeline.frame_unoriented(io.load(found)) is False
+    plain = copy_fixture(tmp_path / "plain", without=("sub-CUCOV076_coordsystem.json",))
+    (found,) = io.discover(plain)
+    assert pipeline.frame_unoriented(io.load(found)) is False
+
+
+def cut(loaded):
+    """A loaded recording cut to the channels and seconds the module's fit uses."""
+    eeg = loaded.eeg
+    samples = round(CUT_SECONDS * eeg["srate"])
+    eeg["data"] = np.ascontiguousarray(eeg["data"][CUT_CHANNELS, :samples])
+    eeg["nbchan"], eeg["pnts"] = len(CUT_CHANNELS), samples
+    eeg["xmax"] = (samples - 1) / eeg["srate"]
+    eeg["chanlocs"] = [eeg["chanlocs"][index] for index in CUT_CHANNELS]
+    return loaded
+
+
+def test_a_recording_in_a_frame_with_no_orientation_fails_closed(tmp_path):
+    """The owner's ruling (2026-11-26): no position is guessed for a frame eegprep gives no
+    orientation, so such a recording ends at the pre-check ``iclabel_locations`` with its own word,
+    ``iclabel_frame_unoriented``, before ASR and the fit; the same recording in CTF is decomposed."""
+    (found,) = io.discover(als_copy(tmp_path / "dataset", "Other"))
+    settings = Settings.from_options(RECIPE.option_values({"ica_max_iter": 5}))
+    with pytest.raises(RecordingError) as failed, determinism.pinned_threads(1), command.quiet():
+        pipeline.process(cut(io.load(found)), settings, device.resolve("cpu"))
+    assert (failed.value.code, failed.value.step, failed.value.detail) == (
+        "step_failed",
+        "iclabel_locations",
+        "iclabel_frame_unoriented",
+    )
+
+
+def unlocated_except(eeg, keep):
+    """The working copy with every channel but those named in ``keep`` given no position, as the
+    loaders give none."""
+    for chanloc in eeg["chanlocs"]:
+        if chanloc["labels"] not in keep:
+            for key in qc.POSITION_FIELDS:
+                chanloc[key] = np.empty(0)
+    return eeg
+
+
+def test_iclabel_needs_two_distinct_located_channels(fixture_fit):
+    """eegprep's ``topoplot``, which ICLabel maps components with, needs at least two distinct
+    located channels (sccn/eegprep#672 refuses a single one): one fails the pre-check with
+    ``iclabel_no_locations``, two pass it."""
+    one = unlocated_except(copy.deepcopy(fixture_fit.eeg), {"Fp1"})
+    with pytest.raises(RecordingError) as failed:
+        pipeline.check_locations(one)
+    assert (failed.value.step, failed.value.detail) == ("iclabel_locations", "iclabel_no_locations")
+    two = unlocated_except(copy.deepcopy(fixture_fit.eeg), {"Fp1", "Fp2"})
+    pipeline.check_locations(two)
+
+
+def test_a_channel_with_nan_coordinates_has_no_place_in_the_layout():
+    """A channel whose coordinates are NaN reaches RANSAC with no position (``qc.unlocated_cleared``)
+    and keeps none after it: its row of ``_chanlocs.tsv`` is ``n/a`` in every place, never a theta and
+    radius its coordinates do not support."""
+    loaded = cut(loaded_fixture())
+    fp1 = next(c for c in loaded.eeg["chanlocs"] if c["labels"] == "Fp1")
+    fp1["X"] = fp1["Y"] = fp1["Z"] = float("nan")
+    assert math.isfinite(float(np.asarray(fp1["theta"]).reshape(-1)[0]))  # a stale theta is there
+    settings = Settings.from_options(RECIPE.option_values({"ica_max_iter": 5}))
+    with determinism.pinned_threads(1), command.quiet():
+        fit = pipeline.process(loaded, settings, device.resolve("cpu"))
+    assert "Fp1" in fit.good_channels
+    (row,) = [row for row in outputs.chanlocs_rows(fit) if row[0] == "Fp1"]
+    assert row[2:] == [None] * 5
+    assert sum(1 for row in outputs.chanlocs_rows(fit) if row[2:] != [None] * 5) >= 2
+
+
+def test_the_record_names_iclabels_onnx_network_its_digest_and_its_threads(archive):
+    """ICLabel runs eegprep's packaged ONNX network through onnxruntime (sccn/eegprep#386): the record
+    names the file the classification says ran and the SHA-256 of eegprep's installed copy, in the
+    ``iclabel`` block and in the step's quality alike, the onnxruntime version beside pamica's and
+    torch's, and the session's threads as onnxruntime's default (outside the run's thread pin)."""
+    import hashlib
+    from importlib import metadata
+    from pathlib import Path
+
+    from eegprep.plugins.ICLabel import iclabel
+
+    _, product = archive
+    nemar = product.record["extensions"]["nemar"]
+    block = nemar["ica"]["iclabel"]
+    installed = Path(iclabel.__file__).resolve().parent / "iclabel.onnx"
+    assert block == {
+        "version": "default",
+        "network": "iclabel.onnx",
+        "weights_sha256": hashlib.sha256(installed.read_bytes()).hexdigest(),
+        "onnxruntime_threads": {"intra_op": "default", "inter_op": "default"},
+    }
+    (step,) = [s for s in product.record["processingSteps"] if s["stepId"] == "iclabel"]
+    quality = step["qualityMetrics"]
+    assert (quality["network"], quality["weightsSha256"]) == (
+        block["network"],
+        block["weights_sha256"],
+    )
+    version = metadata.version("onnxruntime")
+    assert version == steps.ONNXRUNTIME_VERSION
+    assert nemar["ica"]["versions"]["onnxruntime"] == version
+    assert nemar["engine"]["onnxruntime"] == version
+
+
+@pytest.mark.parametrize("network", ["../iclabel.onnx", "", "ICLabel/iclabel.onnx"])
+def test_a_network_that_is_not_a_packaged_file_name_is_refused(network):
+    with pytest.raises(ValueError, match="packaged file name"):
+        pipeline.iclabel_weights_sha256(network)
 
 
 @pytest.fixture(scope="module")

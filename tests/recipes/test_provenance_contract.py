@@ -389,7 +389,7 @@ VARIANTS = sorted(
 @pytest.fixture(scope="module")
 def served(tmp_path_factory):
     """The Zarr stand-in whose first store declares electrode positions (CapTrak, millimeters), so that
-    nemar-ica's precondition (eegprep's own rule: one located channel) passes on it and every recipe
+    nemar-ica's precondition (eegprep's own rule: at least two distinct located channels) passes on it and every recipe
     writes a recording record; the stand-in's other stores declare none."""
     declared = z.root_attributes(
         z.POSITIONS,

@@ -162,6 +162,11 @@ ASR_MAXMEM_DETAIL = "asr_maxmem"
 # the scalp), and it ends here, at the pre-check `iclabel_locations` (counted at `preprocess`), before
 # ASR and the fit.
 ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
+# The same end for a recording of a dataset directory whose coordsystem names a frame eegprep's BIDS
+# import gives no orientation (``Other``, a frame its table does not list, or none named:
+# sccn/eegprep#693): eegprep applies none of the electrodes file's positions, and nemar-ica places none
+# by guessing (the owner's ruling, 2026-11-26: such recordings fail closed).
+ICLABEL_FRAME_UNORIENTED = "iclabel_frame_unoriented"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 
 # What the decomposition was given (docs/recipes.md, "The decomposition input"), stated in the record's
