@@ -1,5 +1,7 @@
 """``nemar-ica``'s command-line options (``--ica-engine``, ``--ica-device``, ``--ica-threads``,
-``--ica-max-iter``, and on a dataset directory ``--serving-index``) and the settings a run takes from them.
+``--ica-max-iter``, and on a dataset directory ``--serving-index`` with the attestation of the commit it
+was built from, ``--serving-index-commit`` and ``--serving-index-delta-path``) and the settings a run
+takes from them.
 
 Only the registry's invocation is dispatched by the platform: ``pamica``, up to 4000 iterations, one
 thread, device ``auto``. The options that change values (engine, iterations, threads) are for
@@ -12,8 +14,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from nemar_process.common import device, serving_index
-from nemar_process.common.recipe import TIME_BUDGET_S, Option
+from nemar_process.common import device, serving_index, zarr_input
+from nemar_process.common.recipe import TIME_BUDGET_S, Identity, Option
 from nemar_process.nemar_ica import steps
 
 
@@ -73,9 +75,69 @@ SERVING_INDEX = Option(
     None,
     "the serving copy's index.json, as a file (dataset directories only): the views of the serving "
     "copy (activations, signal window) name each recording's EEG group as it lists it, used only when "
-    "the index's source_commit is exactly --source-commit (else serving_index_stale), and are "
-    "skipped with a word when it is not given, cannot be used, or does not list the recording",
+    "the index's source_commit is exactly --source-commit, or the attested --serving-index-commit "
+    "(else serving_index_stale), and are skipped with a word when it is not given, cannot be used, or "
+    "does not list the recording",
 )
+
+# The caller's attestation that the serving index, built at a commit after the version tag, describes
+# the tagged data (``serving_index.attest``; the owner's rulings of 2026-11-27): the run is handed the
+# tag's commit (``--source-commit``), and the index's commit and what changed between the two are only
+# recorded, as the provenance of the index. Checked against ``--source-commit`` and ``--serving-index``
+# once the arguments are parsed (``bind``).
+SERVING_INDEX_COMMIT = Option(
+    "serving_index_commit",
+    "--serving-index-commit",
+    zarr_input.commit,
+    None,
+    "the commit the serving index was built from, when it is not --source-commit, the version tag's "
+    "(dataset directories only, with --serving-index and --source-commit): the caller attests, from "
+    "GitHub's compare, that it is ahead of the tag and that every file the serving copy was built from "
+    "is the same at both; a row is then used when the index names this commit; recorded, never checked "
+    "here",
+)
+SERVING_INDEX_DELTA_PATH = Option(
+    "serving_index_delta_paths",
+    "--serving-index-delta-path",
+    serving_index.delta_path,
+    (),
+    "a path changed between --source-commit and --serving-index-commit, NEMAR-owned metadata only: "
+    "under .nemar/ or .github/, or a .gitattributes file at any depth; repeatable, at most 32, none when "
+    "the commits change no file; requires --serving-index-commit",
+    repeatable=True,
+)
+SERVING_INDEX_OPTIONS = (SERVING_INDEX, SERVING_INDEX_COMMIT, SERVING_INDEX_DELTA_PATH)
+
+
+def bind(given: Mapping[str, Any], identity: Identity) -> dict[str, Any]:
+    """The options a run takes (``Recipe.bind_options``): with ``--serving-index-commit``, the serving
+    index bound to the caller's attestation that it was built at that commit for the version whose tag
+    commit is ``--source-commit`` (``serving_index.attest``), else the options as given. ``ValueError``,
+    a usage error, for an attestation that contradicts the run or itself: delta paths with no commit, a
+    commit with no index or no ``--source-commit``, the two commits equal, or more than 32 paths."""
+    bound = dict(given)
+    commit = given.get(SERVING_INDEX_COMMIT.name)
+    paths = given.get(SERVING_INDEX_DELTA_PATH.name) or ()
+    if commit is None:
+        if paths:
+            raise ValueError(
+                "--serving-index-delta-path names what changed up to --serving-index-commit, and "
+                "none was given"
+            )
+        return bound
+    index = given.get(SERVING_INDEX.name)
+    if index is None:
+        raise ValueError(
+            "--serving-index-commit attests the commit of a serving index, and no --serving-index "
+            "was given"
+        )
+    if identity.source_commit is None:
+        raise ValueError(
+            "--serving-index-commit needs --source-commit, the commit of the version's tag"
+        )
+    attestation = serving_index.attest(identity.source_commit, commit, paths)
+    bound[SERVING_INDEX.name] = index.attested(attestation)
+    return bound
 
 
 @dataclass(frozen=True)

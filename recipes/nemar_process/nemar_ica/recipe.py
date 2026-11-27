@@ -158,7 +158,8 @@ def run_recording(
     loaded: io.Loaded | None = None,
 ) -> RecordingProduct:
     """Load (unless a loaded recording is handed in, as tests do), process and write the product, with
-    the serving index the run was given, if any (``--serving-index``)."""
+    the serving index the run was given, if any (``--serving-index``), bound to the caller's attestation
+    of its commit when there is one (``options.bind``)."""
     loaded = loaded if loaded is not None else io.load(recording)
     return outputs.produce(
         recording,
@@ -240,12 +241,14 @@ BIDS_RECIPE = Recipe(
     run_recording=run_recording,
     threads=threads,
     engine_extra=engine_extra,
-    options=(INPUT_OPTION, *options.OPTIONS, options.SERVING_INDEX),
+    options=(INPUT_OPTION, *options.OPTIONS, *options.SERVING_INDEX_OPTIONS),
     preflight=preflight,
     dataset_extras=dataset_extras,
     checkpoints=steps.CHECKPOINTS,
+    bind_options=options.bind,
 )
-"""``nemar-ica`` on a dataset directory."""
+"""``nemar-ica`` on a dataset directory, with the serving index and the attestation of its commit
+(``options.bind``)."""
 
 ZARR_RECIPE = replace(
     BIDS_RECIPE,
@@ -256,4 +259,5 @@ ZARR_RECIPE = replace(
     dataset_extras=zarr_dataset_extras,
 )
 """``nemar-ica --input zarr``: every EEG store of a dataset's Zarr serving copy (EEG resampled to
-250 Hz at most, 16 bit), not the archived recordings, and the records say so."""
+250 Hz at most, 16 bit), not the archived recordings, and the records say so. It declares none of the
+serving index's options, so the ``bind_options`` it keeps takes its options as given."""

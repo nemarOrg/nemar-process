@@ -202,6 +202,7 @@ def test_two_recipes_may_share_an_option_but_not_define_it_differently(monkeypat
 # ---- options bound to the run's identity -------------------------------------------------------------------
 
 TAG = "a" * 40
+AHEAD = "b" * 40
 
 
 def test_the_bound_options_are_the_ones_every_hook_and_recording_gets(
@@ -239,6 +240,61 @@ def test_options_that_contradict_the_run_are_a_usage_error_before_anything_is_ma
     assert caught.value.code == 2
     assert "the options contradict --source-commit" in capsys.readouterr().err
     assert not (tmp_path / "out").exists()
+
+
+def test_nemar_icas_attestation_reaches_each_recording_bound_to_the_runs_commit(
+    tmp_path, cli, monkeypatch, clock
+):
+    """nemar-ica's own options and binding (``options.bind``) on the floor's recordings: every
+    recording is handed the serving index bound to the attestation, which gives a row for a run of
+    the tag's commit, and the options as given stay as they were for the record."""
+    from nemar_process.common import serving_index
+    from nemar_process.nemar_ica import options as ica_options
+    from views_support import serving_index_text
+
+    seen = []
+    register(
+        monkeypatch,
+        options=(*ica_options.SERVING_INDEX_OPTIONS,),
+        bind_options=ica_options.bind,
+        run_recording=timed(clock, 1, seen),
+    )
+    dataset = dataset_of(tmp_path / "d", 2)
+    path = "sub-01/eeg/sub-01_task-smoke_eeg.set"
+    group = ("eeg_250hz", "EEG", 250.0, 32, 1000)
+    index = tmp_path / "index.json"
+    index.write_text(
+        serving_index_text([(path, (group,))], dataset_id="xx000001", source_commit=AHEAD),
+        encoding="utf-8",
+    )
+    code, _, _, out = run_toy(
+        cli,
+        tmp_path,
+        dataset,
+        "--dataset-id",
+        "xx000001",
+        "--source-commit",
+        TAG,
+        "--serving-index",
+        index,
+        "--serving-index-commit",
+        AHEAD,
+        "--serving-index-delta-path",
+        ".nemar/metadata.json",
+        "--serving-index-delta-path",
+        "sub-01/.gitattributes",
+    )
+    assert code == 0
+    assert len(seen) == 2
+    for options in seen:
+        bound = options["serving_index"]
+        assert bound.attestation == serving_index.Attestation(
+            TAG, AHEAD, (".nemar/metadata.json", "sub-01/.gitattributes")
+        )
+        assert bound.resolve(path, "xx000001", TAG).row is not None
+        assert options["serving_index_commit"] == AHEAD
+    # the run's identity is the tag's commit: the index's is only the provenance of the index
+    assert nemar_of(out)["dataset"]["source_commit"] == TAG
 
 
 # ---- threads, seeds and engine fields ------------------------------------------------------------------------

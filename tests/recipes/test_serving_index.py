@@ -508,6 +508,80 @@ def test_an_attested_index_the_run_cannot_use_says_so_and_keeps_the_attestation(
     assert attested.facts(resolved)["attestation"] == serving_index.attest(TAG, AHEAD).facts()
 
 
+# ---- binding the attestation to the run (``options.bind``) -----------------------------------------------
+
+
+def identity(source_commit=TAG):
+    from nemar_process.common.recipe import Identity
+
+    return Identity(DATASET, "v1.0.0", source_commit, None, "run")
+
+
+def options_of(**given):
+    from nemar_process.nemar_ica import recipe
+
+    return recipe.BIDS_RECIPE.option_values(given)
+
+
+def test_without_an_attestation_the_options_are_taken_as_given():
+    from nemar_process.nemar_ica import options
+
+    index = parsed(source_commit=AHEAD)
+    given = options_of(serving_index=index)
+    bound = options.bind(given, identity())
+    assert bound == given
+    assert bound["serving_index"].attestation is None
+    assert bound["serving_index"].resolve(PATH, DATASET, TAG).reason == "serving_index_stale"
+    assert options.bind(options_of(), identity(None)) == options_of()  # no index at all
+
+
+def test_an_attestation_binds_the_index_to_the_runs_tag_commit():
+    from nemar_process.nemar_ica import options
+
+    index = parsed(source_commit=AHEAD)
+    given = options_of(
+        serving_index=index,
+        serving_index_commit=AHEAD,
+        serving_index_delta_paths=list(ON007823_DELTA),
+    )
+    bound = options.bind(given, identity())
+    assert bound["serving_index"].attestation == serving_index.Attestation(
+        TAG, AHEAD, ON007823_DELTA
+    )
+    assert bound["serving_index"].resolve(PATH, DATASET, TAG).row is not None
+    assert given["serving_index"].attestation is None  # the options given are not changed
+
+
+@pytest.mark.parametrize(
+    ("given", "source_commit", "message"),
+    [
+        ({"serving_index_delta_paths": (".nemar/x",)}, TAG, "none was given"),
+        (
+            {"serving_index": "index", "serving_index_delta_paths": (".nemar/x",)},
+            TAG,
+            "none was given",
+        ),
+        ({"serving_index_commit": AHEAD}, TAG, "no --serving-index"),
+        ({"serving_index": "index", "serving_index_commit": AHEAD}, None, "needs --source-commit"),
+        ({"serving_index": "index", "serving_index_commit": TAG}, TAG, "own commit"),
+    ],
+    ids=[
+        "delta_paths_with_no_commit",
+        "delta_paths_with_an_index_and_no_commit",
+        "a_commit_with_no_index",
+        "a_commit_with_no_source_commit",
+        "the_tags_own_commit",
+    ],
+)
+def test_an_attestation_that_contradicts_the_run_is_refused(given, source_commit, message):
+    from nemar_process.nemar_ica import options
+
+    if given.get("serving_index") == "index":
+        given = {**given, "serving_index": parsed(source_commit=AHEAD)}
+    with pytest.raises(ValueError, match=message):
+        options.bind(options_of(**given), identity(source_commit))
+
+
 # ---- the command ------------------------------------------------------------------------------------
 
 
@@ -545,3 +619,127 @@ def test_only_nemar_ica_takes_a_serving_index(cli, tmp_path):
             good,
         )
     assert stopped.value.code == 2
+
+
+# ---- the attestation on the command line --------------------------------------------------------------
+
+
+def attested_argv(tmp_path, *extra):
+    good = tmp_path / "index.json"
+    good.write_text(text(source_commit=AHEAD), encoding="utf-8")
+    return (
+        "run",
+        "nemar-ica",
+        "--dataset-dir",
+        tmp_path,
+        "--out",
+        tmp_path / "o",
+        "--serving-index",
+        good,
+        *extra,
+    )
+
+
+DELTA_FLAG = "--serving-index-delta-path"
+
+
+@pytest.mark.parametrize(
+    ("extra", "said"),
+    [
+        (("--source-commit", TAG, DELTA_FLAG, ".nemar/x"), "none was given"),
+        (("--serving-index-commit", AHEAD), "needs --source-commit"),
+        (("--source-commit", TAG, "--serving-index-commit", TAG), "own commit"),
+        (
+            ("--source-commit", TAG, "--serving-index-commit", AHEAD.upper()),
+            "--serving-index-commit",
+        ),
+        (("--source-commit", TAG, "--serving-index-commit", AHEAD[:12]), "--serving-index-commit"),
+        (
+            (
+                "--source-commit",
+                TAG,
+                "--serving-index-commit",
+                AHEAD,
+                DELTA_FLAG,
+                "participants.tsv",
+            ),
+            DELTA_FLAG,
+        ),
+        (
+            ("--source-commit", TAG, "--serving-index-commit", AHEAD, DELTA_FLAG, "./.nemar/x"),
+            DELTA_FLAG,
+        ),
+        (
+            (
+                "--source-commit",
+                TAG,
+                "--serving-index-commit",
+                AHEAD,
+                *[arg for n in range(33) for arg in (DELTA_FLAG, ".nemar/{}".format(n))],
+            ),
+            "at most 32",
+        ),
+    ],
+    ids=[
+        "a_delta_path_with_no_commit",
+        "no_source_commit",
+        "the_tags_own_commit",
+        "an_upper_case_commit",
+        "a_short_commit",
+        "a_bids_file",
+        "a_leading_dot_slash",
+        "too_many_paths",
+    ],
+)
+def test_an_attestation_the_command_refuses_is_a_usage_error_before_anything_is_made(
+    cli, capsys, tmp_path, extra, said
+):
+    with pytest.raises(SystemExit) as stopped:
+        cli(*attested_argv(tmp_path, *extra))
+    assert stopped.value.code == 2
+    assert said in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
+def test_an_attestation_with_no_serving_index_is_a_usage_error(cli, capsys, tmp_path):
+    with pytest.raises(SystemExit) as stopped:
+        cli(
+            "run",
+            "nemar-ica",
+            "--dataset-dir",
+            tmp_path,
+            "--out",
+            tmp_path / "o",
+            "--source-commit",
+            TAG,
+            "--serving-index-commit",
+            AHEAD,
+        )
+    assert stopped.value.code == 2
+    assert "no --serving-index was given" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "flag"),
+    [
+        (
+            ("nemar-ica", "--input", "zarr", "--serving-index-commit", AHEAD),
+            "--serving-index-commit",
+        ),
+        (("nemar-ica", "--input", "zarr", DELTA_FLAG, ".nemar/x"), DELTA_FLAG),
+        (
+            ("nemar-floor", "--dataset-dir", ".", "--serving-index-commit", AHEAD),
+            "--serving-index-commit",
+        ),
+        (("nemar-floor", "--dataset-dir", ".", DELTA_FLAG, ".gitattributes"), DELTA_FLAG),
+    ],
+    ids=["zarr_commit", "zarr_delta_path", "floor_commit", "floor_delta_path"],
+)
+def test_only_nemar_ica_on_a_dataset_directory_takes_an_attestation(
+    cli, capsys, tmp_path, argv, flag
+):
+    with pytest.raises(SystemExit) as stopped:
+        cli("run", *argv, "--out", tmp_path / "o")
+    assert stopped.value.code == 2
+    assert "{} is not an option of".format(flag) in capsys.readouterr().err
