@@ -4,8 +4,9 @@ The node holds no storage credential. After the documents are written the launch
 
 1. ``POST <api_base>/compute/jobs/<job_id>/outputs`` with the job token: every output's ``path``,
    ``size`` and ``sha256`` and the sizes of the four launcher files. The request is validated
-   against the schema's ``outputs_request`` and capped at 1 MiB (the Worker's cap) BEFORE it is
-   sent. NEMAR answers with one presigned PUT address per file, or refuses (a size cap, a quota);
+   against the schema's ``outputs_request`` and capped at ``OUTPUTS_REQUEST_MAX_BYTES`` (64 MiB, the
+   most the Worker's own limit can be; the Worker refuses more for a job with a lower result limit)
+   BEFORE it is sent, and encoded once: a retry or a re-request sends the same bytes. NEMAR answers with one presigned PUT address per file, or refuses (a size cap, a quota);
 2. PUTs each file to its address (outputs four at a time, three attempts each with backoff, no
    redirect followed, the token NOT sent): the outputs first, then the launcher files with
    ``result.json`` LAST. The launcher files are sent from MEMORY (the documents and a snapshot of
@@ -98,6 +99,7 @@ class Uploader:
         self._version = 0
         self._rerequests = 0
         self._body: dict[str, Any] = {}
+        self._data = b""
         self._log_size = 0
         self._puts_logged = 0
 
@@ -129,10 +131,16 @@ class Uploader:
         if spec.validate(body, spec.schema_def("outputs_request")):
             self.log.error("the outputs request is not what the schema says")
             raise UploadFailed("internal_error")
-        if len(net.encode_json(body)) > OUTPUTS_REQUEST_MAX_BYTES:
-            self.log.error("the outputs request is over the 1 MiB cap")
+        data = net.encode_json(body)
+        if len(data) > OUTPUTS_REQUEST_MAX_BYTES:
+            self.log.error(
+                "the outputs request is {} bytes, over the {} byte cap".format(
+                    len(data), OUTPUTS_REQUEST_MAX_BYTES
+                )
+            )
             raise UploadFailed("too_many_outputs")
         self._body = body
+        self._data = data
 
     def _request_plan(self) -> dict[str, str]:
         url = self._base + "/outputs"
@@ -146,7 +154,7 @@ class Uploader:
 
         try:
             _status, answer = net.retrying(
-                lambda _n: net.post_json(url, self._body, self.job.job_token, self.lease),
+                lambda _n: net.post_json(url, self._data, self.job.job_token, self.lease),
                 attempts=net.ATTEMPTS,
                 sleep=self.sleep,
                 on_retry=note,

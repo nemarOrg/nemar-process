@@ -241,7 +241,7 @@ def encode_json(body: dict[str, Any]) -> bytes:
 
 def post_json(
     url: str,
-    body: dict[str, Any],
+    body: dict[str, Any] | bytes,
     token: str,
     lease: str | None = None,
     timeout: float = TIMEOUT,
@@ -249,9 +249,11 @@ def post_json(
     """POST ``body`` as JSON with the job token header (and the lease header, when ``lease`` is
     given); return (status, JSON object).
 
-    Never follows a redirect. A refusal is an ``HttpFailure`` with the response's ``code`` word.
+    ``body`` may be bytes ``encode_json`` already wrote, so a large body is encoded once and every
+    attempt sends the same bytes. Never follows a redirect. A refusal is an ``HttpFailure`` with
+    the response's ``code`` word.
     """
-    data = encode_json(body)
+    data = body if isinstance(body, bytes) else encode_json(body)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
