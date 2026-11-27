@@ -25,8 +25,10 @@ from packaging.tags import compatible_tags, cpython_tags, mac_platforms
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from repo_paths import LOCK, PYPROJECT, ROOT
 
-EXACT_PINS = {"mne": "1.13.2", "pamica": "0.4.0"}
-EEGPREP_EXTRAS = {"mne", "pybids", "picard", "torch", "pamica"}
+EXACT_PINS = {"mne": "1.13.2", "pamica": "0.4.0", "onnxruntime": "1.32.0"}
+# `iclabel` is onnxruntime, which ICLabel's packaged network runs on since sccn/eegprep#386: without it
+# `pop_iclabel` raises `ImportError` and nemar-ica classifies nothing.
+EEGPREP_EXTRAS = {"mne", "pybids", "picard", "torch", "pamica", "iclabel"}
 # eegprep's `eeglab` extra installs the Octave bridge `oct2py`; `full` and `all` include it.
 EEGPREP_FORBIDDEN_EXTRAS = {"eeglab", "full", "all"}
 
@@ -85,10 +87,12 @@ def test_the_runtime_group_pins_the_exact_versions():
         assert str(requirements[name].specifier) == "==" + version, name
 
 
-def test_eegprep_takes_the_five_extras_and_never_the_matlab_one():
+def test_eegprep_takes_the_six_extras_and_never_the_matlab_one():
     eegprep = next(r for r in runtime_requirements() if canonicalize_name(r.name) == "eegprep")
     assert set(eegprep.extras) == EEGPREP_EXTRAS
     assert not set(eegprep.extras) & EEGPREP_FORBIDDEN_EXTRAS
+    # the iclabel extra's runtime is in the lock, so the image installs it
+    assert any(p["name"] == "onnxruntime" for p in load_lock()["package"])
 
 
 def test_eegprep_is_one_full_commit_of_develop_and_not_a_branch_a_tag_or_a_release():

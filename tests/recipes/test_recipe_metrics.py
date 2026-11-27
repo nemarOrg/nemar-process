@@ -24,6 +24,16 @@ from nemar_process.nemar_ica import outputs as ica_outputs
 from recipe_support import DATASET, PINNED_RECIPE_VERSION, ROOT
 
 VECTORS = ROOT / "tests" / "contract" / "neuroschema-views" / "record-checks.v1.json"
+PLUGINS = ROOT / "recipes" / "nemar_process" / "plugins"
+
+
+def declared_metric(name: str) -> dict:
+    """A plugin's metric as its manifest declares it, by ``<plugin>:<name>``."""
+    plugin = name.partition(":")[0]
+    manifest = json.loads((PLUGINS / plugin.replace("-", "_") / "manifest.json").read_text())
+    return manifest["outputs"]["metrics"][name]
+
+
 IDENTITY = ["--dataset-id", "on007823", "--dataset-version", "v1.0.0"]
 
 
@@ -75,16 +85,19 @@ def test_the_floor_and_nemar_ica_name_no_metric_twice_and_none_is_a_plugins():
 def test_every_distribution_is_a_metric_of_its_recipe_or_a_plugins_with_its_unit():
     floor_metrics = {m.name: m for m in floor_outputs.RECIPE_METRICS}
     ica_metrics = {m.name: m for m in (*floor_outputs.RECIPE_METRICS, *ica_outputs.RECIPE_METRICS)}
-    # a plugin's metric that a recipe's table carries states the plugin's unit and description, which
-    # neuroschema's example entry gives for nemar-quality's share of brain components
+    # a plugin's metric that a recipe's table carries states the plugin's unit and description, as its
+    # manifest declares them; neuroschema's example entry gives nemar-quality's share of brain components
     example = json.loads(VECTORS.read_text(encoding="utf-8"))["cases"][0]["entry"]["metrics"]
     checked = 0
     for recipe, metrics in ((FLOOR, floor_metrics), (ICA, ica_metrics)):
         for spec in recipe.distributions:
             if ":" in spec.name:
-                stated = example[spec.name]
-                assert (spec.unit, spec.description) == (stated["unit"], stated["description"])
-                assert stated["plugin"]["name"] == spec.name.partition(":")[0]
+                declared = declared_metric(spec.name)
+                assert (spec.unit, spec.description) == (declared["unit"], declared["description"])
+                if spec.name in example:
+                    stated = example[spec.name]
+                    assert (spec.unit, spec.description) == (stated["unit"], stated["description"])
+                    assert stated["plugin"]["name"] == spec.name.partition(":")[0]
                 checked += 1
                 continue
             metric = metrics[spec.name]
@@ -102,8 +115,9 @@ def test_every_distribution_is_a_metric_of_its_recipe_or_a_plugins_with_its_unit
         "percentGoodSamples",
         "lineNoiseBeforeDb",
         "nemar-quality:percentBrainComponents",
+        "nemar-quality:mutualInformationReduction",
     ]
-    assert checked == 1  # the plugin distribution was compared, not skipped
+    assert checked == 2  # the plugin distributions were compared, not skipped
 
 
 def test_the_neuroschema_example_states_icarank_as_nemar_ica_does():
@@ -114,7 +128,7 @@ def test_the_neuroschema_example_states_icarank_as_nemar_ica_does():
         rank.unit,
         rank.description,
     )
-    brain = ICA.distributions[-1]
+    (brain,) = [d for d in ICA.distributions if d.name == "nemar-quality:percentBrainComponents"]
     stated = example["nemar-quality:percentBrainComponents"]
     assert (brain.unit, brain.description) == (stated["unit"], stated["description"])
 

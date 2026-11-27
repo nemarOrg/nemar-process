@@ -3,8 +3,10 @@
 A plugin is a package ``nemar_process.plugins.<name with - as _>`` holding a ``manifest.json`` (the
 nemar-cli contract ``nemar.plugin-manifest.v1``) and a ``run(inputs, parameters)`` that returns a
 ``PluginResult``: a value for every declared metric (named ``<plugin>:<name>``), a finite number or
-None when it could not be computed, and the data of every declared view. A plugin is given only what
-its manifest ``reads`` and never a path; it writes nothing itself.
+None when it could not be computed, and the data of every declared view. A None may come with why, a
+word the module declares (``METRIC_SKIP_WORDS``, ``PluginResult.metrics_skipped``): the plugin ran, its
+other metrics and views are kept, and the record's entry for it lists the metric with that word. A
+plugin is given only what its manifest ``reads`` and never a path; it writes nothing itself.
 
 A view is data a browser draws, never an image (ADR 0137). The loader refuses a declared view whose
 kind is not in the vendored registry, whose role or dimensions the registry does not list for that
@@ -20,7 +22,7 @@ overriding the role's), never from the plugin (``docs/contracts.md``). Then the 
 makes the files and declarations, which ``CheckpointRun.views`` hands to the recipe's product writer; a
 skipped plugin's views are listed in ``CheckpointRun.views_skipped`` with the reason ``plugin_failed``,
 and a view of a plugin that ran, on a recipe role the host withholds for this recording
-(``views.Host.withheld``: nemar-ica's layout of turned positions), with the host's reason.
+(``views.Host.withheld``: nemar-ica's layout over the caps), with the host's reason.
 
 What runs is fixed in the image: a recipe declares ``PLUGINS = ((name, version), ...)`` beside its
 step order, and ``load`` refuses a plugin whose entry, name, version, checkpoint or reads differ from
@@ -74,6 +76,11 @@ PLUGIN_FAILED = "plugin_failed"
 # The detail of a skip for an exception: its class name when it is a plain identifier, else this word.
 EXCEPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 UNNAMED_EXCEPTION = "exception"
+# Why a metric a plugin declares has no value for a recording: a word its module declares in
+# ``METRIC_SKIP_WORDS`` (a frozenset of them), shaped like a failure code, so only a closed list of
+# words, never text, reaches the record and the log line.
+METRIC_SKIP_WORDS = "METRIC_SKIP_WORDS"
+SKIP_WORD = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 class PluginLoadError(Exception):
@@ -94,11 +101,13 @@ class PluginResult:
     """What a plugin's ``run`` returns: every declared metric, by name, and every declared view, by key.
 
     A view's value is ``{"roles": {role: TableArray | Mapping}, "parameters": {...}}``; ``parameters`` is
-    optional and validated against the view kind's schema.
+    optional and validated against the view kind's schema. ``metrics_skipped`` says why a metric is
+    None, by name: one of the words the plugin's module declares (``METRIC_SKIP_WORDS``).
     """
 
     metrics: Mapping[str, Any]
     views: Mapping[str, Any] = field(default_factory=dict)
+    metrics_skipped: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -113,6 +122,8 @@ class Plugin:
     manifest_sha256: str
     tree_sha256: str
     run: Callable[..., Any]
+    # the words its module declares for a metric it could not compute (``METRIC_SKIP_WORDS``)
+    skip_words: frozenset[str] = frozenset()
 
     @property
     def function(self) -> str:
@@ -138,6 +149,8 @@ class PluginOutcome:
     status: str
     code: str | None = None
     detail: str | None = None
+    # the metrics of a plugin that ran with no value, each with its word: ``{metric, reason}``
+    metrics_skipped: list[dict[str, str]] = field(default_factory=list)
 
     def entry(self) -> dict[str, Any]:
         """The plugin's entry in the record's ``extensions.nemar.plugins``."""
@@ -153,6 +166,8 @@ class PluginOutcome:
             entry["code"] = self.code
         if self.detail is not None:
             entry["detail"] = self.detail
+        if self.metrics_skipped:
+            entry["metrics_skipped"] = [dict(item) for item in self.metrics_skipped]
         return entry
 
 
@@ -286,6 +301,11 @@ def _load_one(
     run = getattr(module, "run", None)
     if not callable(run):
         raise PluginLoadError(name, "no_run")
+    words = getattr(module, METRIC_SKIP_WORDS, frozenset())
+    if type(words) is not frozenset or not all(
+        type(word) is str and SKIP_WORD.fullmatch(word) for word in words
+    ):
+        raise PluginLoadError(name, "skip_words_invalid")
     return Plugin(
         name=name,
         version=version,
@@ -295,6 +315,7 @@ def _load_one(
         manifest_sha256=hashlib.sha256(raw).hexdigest(),
         tree_sha256=tree_sha256(directory),
         run=run,
+        skip_words=words,
     )
 
 
@@ -375,6 +396,8 @@ OUTPUT_WORDS = frozenset(
         "metric_not_finite",
         "metric_out_of_bounds",
         "metric_invalid",
+        "metric_skip_invalid",
+        "metric_skip_undeclared",
         "views_differ",
         "view_malformed",
         "parameters_invalid",
@@ -421,6 +444,41 @@ def _quality_metrics(plugin: Plugin, values: Mapping[str, Any]) -> dict[str, dic
             raise _OutputRefused("metric_invalid")
         out[name] = metric
     return out
+
+
+def _metric_skips(
+    plugin: Plugin, skipped: Any, quality: Mapping[str, Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    """Why each metric with no value has none, ``{metric, reason}`` in manifest order.
+
+    ``metric_skip_invalid``: ``metrics_skipped`` is not a mapping of declared metric names to words,
+    or names a metric that has a value. ``metric_skip_undeclared``: a word the plugin's module does
+    not declare (``METRIC_SKIP_WORDS``).
+    """
+    if not isinstance(skipped, Mapping) or not all(type(name) is str for name in skipped):
+        raise _OutputRefused("metric_skip_invalid")
+    if not set(skipped) <= set(quality):
+        raise _OutputRefused("metric_skip_invalid")
+    out: list[dict[str, str]] = []
+    for name in quality:
+        if name not in skipped:
+            continue
+        if quality[name]["value"] is not None:
+            raise _OutputRefused("metric_skip_invalid")
+        word = skipped[name]
+        if type(word) is not str or word not in plugin.skip_words:
+            raise _OutputRefused("metric_skip_undeclared")
+        out.append({"metric": name, "reason": word})
+    return out
+
+
+def _log_metric_skips(plugin: Plugin, skips: Sequence[Mapping[str, str]]) -> None:
+    for item in skips:
+        sys.stderr.write(
+            "plugin_metric_skipped: {} metric={} reason={}\n".format(
+                plugin.name, item["metric"], item["reason"]
+            )
+        )
 
 
 _VIEW_KEYS = frozenset(("roles", "parameters"))
@@ -552,7 +610,7 @@ def plain(value: Any) -> Any:
     if kind in _PLAIN_SCALARS or kind in _NUMPY_SCALARS:
         return value
     if kind is PluginResult:
-        return PluginResult(plain(value.metrics), plain(value.views))
+        return PluginResult(plain(value.metrics), plain(value.views), plain(value.metrics_skipped))
     if kind is TableArray:
         return TableArray(plain(value.header), plain(value.values))
     if issubclass(kind, np.ndarray):
@@ -660,6 +718,7 @@ def run_checkpoint(
                 if not isinstance(returned, PluginResult):
                     raise _OutputRefused("result_not_a_plugin_result")
                 quality = _quality_metrics(plugin, returned.metrics)
+                metric_skips = _metric_skips(plugin, returned.metrics_skipped, quality)
                 prepared, withheld = _checked_views(plugin, returned, host)
             except Exception as error:  # noqa: BLE001  (an output that fails a check skips the plugin)
                 detail = _skip_detail(error)
@@ -692,6 +751,8 @@ def run_checkpoint(
         if prepared:
             result.views[plugin.name] = prepared
         result.views_skipped += withheld
+        outcome.metrics_skipped = metric_skips
+        _log_metric_skips(plugin, metric_skips)
         plan.add_plugin_outcome(outcome.entry())
         result.outcomes.append(outcome)
     return result

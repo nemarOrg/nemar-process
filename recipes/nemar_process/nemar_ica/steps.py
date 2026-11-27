@@ -7,10 +7,10 @@ two cannot drift apart. Values eegprep applies without being asked are read from
 run time, never copied here.
 
 The constants below are what ``RECIPE_VERSION`` stands for. A change of any of them, of the pamica
-pin, of the CUDA flavor's torch or of the ``amica15`` binary is a new recipe version: the derivative
-key names eegprep alone (ADR 0123), so the version is the only thing that tells two products apart
-(``tests/recipes/test_nemar_ica.py`` fails when the lock or the image pins differ from the three
-constants at the end).
+pin, of the onnxruntime pin ICLabel runs on, of the CUDA flavor's torch or of the ``amica15`` binary
+is a new recipe version: the derivative key names eegprep alone (ADR 0123), so the version is the
+only thing that tells two products apart (``tests/recipes/test_nemar_ica.py`` fails when the lock or
+the image pins differ from the four constants at the end).
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ CHECKPOINTS = (
 # tests/recipes/plugin_digests.json pins each version's source tree. A literal, like CHECKPOINTS:
 # nemar-cli's process-drift test reads the names, which must be the map's `quality` steps in order.
 PLUGINS = (
-    ("nemar-quality", "0.1.0"),
+    ("nemar-quality", "0.2.0"),
     ("nemar-spectrum", "0.1.0"),
 )
 # The recipes whose outputs nemar-ica hands a plugin (``outputs.plugin_inputs``): its own decomposition
@@ -152,6 +152,7 @@ AMICA15_SHA256_FILE = "/opt/amica/amica15.sha256"
 
 # What a change of RECIPE_VERSION stands for (see the module docstring).
 PAMICA_VERSION = "0.4.0"
+ONNXRUNTIME_VERSION = "1.32.0"  # ICLabel's network runs on it (sccn/eegprep#386)
 CUDA_TORCH_VERSION = "2.12.1+cu129"
 AMICA15_SHA256 = "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a"
 
@@ -161,6 +162,11 @@ ASR_MAXMEM_DETAIL = "asr_maxmem"
 # the scalp), and it ends here, at the pre-check `iclabel_locations` (counted at `preprocess`), before
 # ASR and the fit.
 ICLABEL_NO_LOCATIONS = "iclabel_no_locations"
+# The same end for a recording of a dataset directory whose coordsystem names a frame eegprep's BIDS
+# import gives no orientation (``Other``, a frame its table does not list, or none named:
+# sccn/eegprep#693): eegprep applies none of the electrodes file's positions, and nemar-ica places none
+# by guessing (the owner's ruling, 2026-11-26: such recordings fail closed).
+ICLABEL_FRAME_UNORIENTED = "iclabel_frame_unoriented"
 INPUT_PROFILES = {"bids": "archive", "zarr": "serving"}
 
 # What the decomposition was given (docs/recipes.md, "The decomposition input"), stated in the record's
@@ -232,8 +238,8 @@ VIEW_KIND_VERSION = 1
 # sensor views): ``_chanlocs.tsv``, one row per column of ``_unmixing.tsv`` in its order, named by that
 # header, each row's type as the floor's ``_channels.tsv`` gives it, EEGLAB's theta and radius, and x,
 # y and z as eegprep holds them after loading (millimeters in what eegprep takes for EEGLAB's frame: +x
-# toward the nose, +y left, +z up), every place n/a when they are known to be misread
-# (``FRAME_ROTATED``). Written at ``iclabel``, the step that classified the components on them.
+# toward the nose, +y left, +z up). Written at ``iclabel``, the step that classified the components on
+# them.
 CHANLOCS = "chanlocs"
 CHANLOCS_STEP = "iclabel"
 CHANLOCS_COLUMNS = ("name", "sensor_type", "theta_deg", "radius", "x", "y", "z")
@@ -263,15 +269,6 @@ NO_SERVING_INDEX = "no_serving_index"  # views.OWN_SKIP_REASONS
 NOT_IN_SERVING_INDEX = "not_in_serving_index"  # views.OWN_SKIP_REASONS, serving_index.NOT_LISTED
 SERVING_INDEX_STALE = "serving_index_stale"  # views.OWN_SKIP_REASONS, serving_index.STALE
 SERVING_INDEX_UNUSABLE = "serving_index_unusable"  # views.OWN_SKIP_REASONS, serving_index.UNUSABLE
-# The frames BIDS defines as anterior-left-superior (ALS) besides EEGLAB's own, which eegprep's BIDS
-# import (``pop_load_frombids``) reads as right-anterior-superior (RAS), unless the coordsystem's
-# description is ``EEGLAB``: on a dataset directory it turns positions in them by 90 degrees
-# (sccn/eegprep#692; eegprep-lean, the serving copy's reader, reads them as stated). nemar-ica withholds
-# such positions (``pipeline.position_facts``): ``_chanlocs.tsv`` holds no place and ``icmaps`` is
-# skipped with this word, never drawn on positions known to be turned. ICLabel still classified on them
-# (nemarOrg/nemar-process#94).
-ROTATED_FRAMES = ("CTF", "4DBti", "KitYokogawa")
-FRAME_ROTATED = "frame_rotated"  # views.OWN_SKIP_REASONS
 ICMAPS_CAPTION = (
     "Scalp maps of the independent components, each with its share of the variance and its ICLabel "
     "probabilities."

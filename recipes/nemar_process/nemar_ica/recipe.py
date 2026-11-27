@@ -57,13 +57,18 @@ COLUMNS = (
     Column("pct_good_samples", "float", 4),
     Column("line_db_before", "float", 3),
     Column("pct_brain_components", "float", 4),
+    Column("mir_nats", "float", 6),
     Column("skipped_steps", "str"),
     Column("record_content_sha256", "str"),
 )
 
 # What the dataset record and the dataset dataQuality document summarize: nemar-ica's metrics, the
 # floor's three that the legacy summary bounded (good channels, good data, line noise before), and
-# nemar-quality's share of brain components, whose unit and description are its manifest's.
+# nemar-quality's share of brain components and mutual information reduction, whose units and
+# descriptions are its manifest's (a test holds them equal). The MIR's edges are in nats, doubling from
+# a quarter: a recording below 0 (an unmixing that adds dependence) is in the underflow, one above 32
+# in the overflow.
+MIR_EDGES = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 DISTRIBUTIONS = (
     *distributions_of(outputs.RECIPE_METRICS, ("icaRank", "icaIterations", "asrBurstFraction")),
     *distributions_of(
@@ -76,6 +81,18 @@ DISTRIBUTIONS = (
         floor_outputs.PERCENT_EDGES,
         "%",
         "Share of components whose most probable ICLabel class is Brain.",
+    ),
+    Distribution(
+        outputs.MIR_METRIC,
+        "mir_nats",
+        MIR_EDGES,
+        "nat",
+        (
+            "Mutual information reduction of the decomposition: the mutual information its unmixing "
+            "removes from the sphered data, log|det W| + sum h(x_i) - sum h(y_i), each entropy over 256 "
+            "fixed bins (eegprep's eeg_mir). Not comparable with Delorme et al. 2012 or the legacy NEMAR "
+            "report, whose MIR includes the reduction sphering achieves."
+        ),
     ),
 )
 

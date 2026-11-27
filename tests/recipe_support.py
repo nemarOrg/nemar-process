@@ -44,7 +44,7 @@ PINNED_ICA_RECIPE_VERSION = "1.0.0-b2"
 # release that lacks what it holds: the distribution's own version is `0.5.0`, and every record, stamp
 # and `nemar-recipe version` names the commit too (`0.5.0+<commit>`, common/versions.py).
 PINNED_EEGPREP_VERSION = "0.5.0"
-PINNED_EEGPREP_COMMIT = "edf694c8344b9c4c68672eac3acf9a819f1462a8"
+PINNED_EEGPREP_COMMIT = "871bc7f8a03b6d925330c598e8dcd18b835614d3"
 PINNED_EEGPREP_TEXT = "{}+{}".format(PINNED_EEGPREP_VERSION, PINNED_EEGPREP_COMMIT)
 
 

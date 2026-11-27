@@ -4,8 +4,8 @@
   variables are set first, so a library that loads later (SciPy's BLAS, an OpenMP runtime) starts
   with one thread, and ``threadpoolctl`` then limits the pools that are already loaded.
 * ``engine_info`` is the engine stamp every record carries, with the pool inventory as found.
-* ``SEEDS`` names the seeds the engine uses that a recipe cannot change (eegprep's RANSAC seed is a
-  constant inside ``clean_channels``); a test compares it with eegprep's source.
+* ``SEEDS`` names the seeds the engine draws from that no recipe passes (eegprep's RANSAC seed is
+  ``clean_channels``'s ``seed`` default); a test compares it with that default.
 * ``canonical_json`` is the text a plan is hashed from; ``rounded`` is the one rounding rule.
 * ``jcs`` is the JSON Canonicalization Scheme (RFC 8785) for the values a digest that other
   languages recompute is taken over (``channel_types_sha256``): the canonical form of neuroschema's
@@ -28,8 +28,9 @@ from threadpoolctl import threadpool_info, threadpool_limits
 
 from nemar_process.common import COMMON_VERSION, build, versions
 
-# Seeds inside the engine that no argument reaches (sccn/eegprep#540 asks for a parameter). Recorded in every record (extensions.nemar.seeds)
-# and compared with eegprep's source by tests/recipes/test_determinism.py.
+# Seeds the engine draws from that no recipe passes: RANSAC's is ``clean_channels``'s ``seed`` default
+# (sccn/eegprep#605), which the floor leaves as it is. Recorded in every record (extensions.nemar.seeds)
+# and compared with that default by tests/recipes/test_determinism.py.
 SEEDS: dict[str, int] = {"clean_channels.ransac": 5489}
 
 THREAD_ENVIRONMENT = (
@@ -40,8 +41,9 @@ THREAD_ENVIRONMENT = (
 )
 RECORDED_ENVIRONMENT = ("PYTHONHASHSEED", *THREAD_ENVIRONMENT)
 # Engine distributions an ICA recipe runs on; each is recorded when it is installed, so such a recipe
-# needs no change of its own to record them.
-OPTIONAL_ENGINES = ("torch", "pamica")
+# needs no change of its own to record them. onnxruntime runs ICLabel's network (sccn/eegprep#386), so
+# the classification's probabilities depend on its version.
+OPTIONAL_ENGINES = ("torch", "pamica", "onnxruntime")
 
 
 @contextlib.contextmanager

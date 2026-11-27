@@ -1,7 +1,7 @@
 {
   "format": "nemar.plugin-manifest.v1",
   "name": "nemar-quality",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "nemar_process.plugins.nemar_quality",
   "checkpoint": "quality",
   "reads": {
@@ -10,7 +10,9 @@
       "nemar-ica"
     ]
   },
-  "parameters": {},
+  "parameters": {
+    "nbins": 256
+  },
   "outputs": {
     "metrics": {
       "nemar-quality:percentBrainComponents": {
@@ -21,6 +23,10 @@
           "max": 100
         },
         "headline": true
+      },
+      "nemar-quality:mutualInformationReduction": {
+        "unit": "nat",
+        "description": "Mutual information reduction of the decomposition: the mutual information its unmixing removes from the sphered data, log|det W| + sum h(x_i) - sum h(y_i), each entropy over 256 fixed bins (eegprep's eeg_mir). Not comparable with Delorme et al. 2012 or the legacy NEMAR report, whose MIR includes the reduction sphering achieves."
       }
     },
     "views": {

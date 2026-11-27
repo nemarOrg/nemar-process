@@ -111,8 +111,8 @@ BAND_STOP_APPLIED: dict[str, Any] = {
     "plotfreqz": False,
 }
 
-# What a criterion measured is not returned, only the mask (sccn/eegprep#535); the RANSAC seed is fixed
-# inside eegprep (sccn/eegprep#540).
+# What a criterion measured is not returned, only the mask (sccn/eegprep#535); the RANSAC seed is
+# ``clean_channels``'s default, which the floor does not pass (``determinism.SEEDS``).
 RANSAC_FUNCTION = "eegprep.clean_channels"
 RANSAC_CALL: dict[str, Any] = {
     "corr_threshold": 0.8,

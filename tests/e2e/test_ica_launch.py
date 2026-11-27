@@ -19,8 +19,8 @@ Linux program, and neither the development environment nor a laptop can run it):
 The module runs at one of two lengths, read once from ``NEMAR_ICA_E2E_LENGTH`` (docs/images.md): ``full``
 (the default, and what a variable that is not set means) runs pAMICA without ``--ica-max-iter``, as the
 registry runs it (the recipe's ``steps.DEFAULT_MAX_ITER``, 4000, with AMICA's convergence stops), the
-binary capped at 2000 iterations (its stops are inert, sccn/eegprep#680, so it always runs to its cap,
-and a cap at the recipe's 4000 would double the leg for no reading the cap does not already give), and
+binary capped at 2000 iterations (a bound on the leg's time: its convergence stops reach it since
+sccn/eegprep#680 was fixed, so it may stop sooner, and the recipe's 4000 could double the leg), and
 prints the E1R line;
 ``short`` runs all four runs at 50 iterations and skips the E1R test, and every other assertion holds at
 both lengths. The image workflow sets the variable from the event and the base branch alone: short on a
@@ -58,8 +58,8 @@ from recipe_support import (
 )
 
 SHORT_ITERATIONS = 50
-# the binary's full-length run is capped: its convergence stops reach it as 0.000000 (sccn/eegprep#680),
-# so it always runs to the cap, and the recipe's 4000 would double the leg's time for nothing new
+# the binary's full-length run is capped, a bound on the leg's time: its convergence stops reach it
+# (sccn/eegprep#680 is fixed at the pin), so it may stop sooner, and the recipe's 4000 could double the leg
 BINARY_FULL_ITERATIONS = 2000
 LENGTH_VARIABLE = "NEMAR_ICA_E2E_LENGTH"
 STEPS_SOURCE = ROOT / "recipes" / "nemar_process" / "nemar_ica" / "steps.py"
@@ -370,7 +370,7 @@ def test_the_run_plan_changes_only_the_iteration_count_between_the_lengths():
     capped = ("--ica-max-iter", "50")
     binary = ("--ica-engine", "amica15", "--ica-device", "cpu")
     # the full plan runs pAMICA as the registry does, with no --ica-max-iter (the recipe's default), the
-    # binary capped at 2000 (its stops are inert, sccn/eegprep#680), and two capped binary runs
+    # binary capped at 2000 (a bound on the leg's time), and two capped binary runs
     assert full == {
         "pamica": (),
         "amica": (*binary, "--ica-max-iter", "2000"),

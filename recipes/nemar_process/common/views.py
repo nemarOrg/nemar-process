@@ -172,15 +172,12 @@ WORDS = frozenset(
 SKIP_REASONS = ("labels_unusable", "plugin_failed", "step_failed", "step_skipped", "cap_exceeded")
 # nemar-process's own reasons beside neuroschema's, which dataQuality admits ("another word, which a
 # renderer shows as it is"): a signal window with no two seconds of the recording inside the
-# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``); views drawn on positions the
-# loader is known to have turned (nemar-ica's ``icmaps``, and a plugin view on its layout,
-# ``steps.FRAME_ROTATED``); and the views of the serving copy of a dataset directory's run given no
-# serving index, one with no row for the recording, one built from another commit, or a file it cannot use
-# as one (``steps.NO_SERVING_INDEX``, ``steps.NOT_IN_SERVING_INDEX``, ``steps.SERVING_INDEX_STALE``,
-# ``steps.SERVING_INDEX_UNUSABLE``).
+# good-sample mask (nemar-ica's ``midsegment``, ``steps.NO_GOOD_WINDOW``); and the views of the serving
+# copy of a dataset directory's run given no serving index, one with no row for the recording, one built
+# from another commit, or a file it cannot use as one (``steps.NO_SERVING_INDEX``,
+# ``steps.NOT_IN_SERVING_INDEX``, ``steps.SERVING_INDEX_STALE``, ``steps.SERVING_INDEX_UNUSABLE``).
 OWN_SKIP_REASONS = (
     "no_good_window",
-    "frame_rotated",
     "no_serving_index",
     "not_in_serving_index",
     "serving_index_stale",
@@ -415,8 +412,8 @@ class Host:
     classes in its order; each None when the recipe has none. ``roles`` are the data entries the recipe
     gives a plugin's ``{"from": "recipe"}`` role (its layout); ``withheld`` the roles it gives for other
     recordings and not for this one, each with why, a skip reason (``SKIP_REASONS`` or
-    ``OWN_SKIP_REASONS``: nemar-ica's layout of positions known to be turned, ``frame_rotated``, or over
-    the caps, ``cap_exceeded``), so a plugin view on that role is skipped with the reason
+    ``OWN_SKIP_REASONS``: nemar-ica's layout over the caps, ``cap_exceeded``), so a plugin view on that
+    role is skipped with the reason
     (``ViewWithheld``) and never refused as ``role_unprovided``; ``sidecar`` the recording's
     ``cap_model`` and ``reference`` (``sidecar_fields``); ``reserved`` the suffixes of the recipe's own
     product files, which no plugin's view file may take (``view_repeated``).

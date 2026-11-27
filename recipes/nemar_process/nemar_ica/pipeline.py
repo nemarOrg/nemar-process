@@ -73,8 +73,9 @@ FLOOR_EMBEDDING = floor_steps.Embedding(
     max_broken_time=steps.MAX_BROKEN_TIME,
 )
 
-# eegprep's ICLabel network, the file the classification reads (hashed into the record).
-ICLABEL_WEIGHTS = "netICL.mat"
+# The ICLabel network is the packaged file eegprep's classification names as the one that ran
+# (``network``: ``iclabel.onnx``, the full-precision network its native backend runs through onnxruntime,
+# sccn/eegprep#386), hashed into the record beside its name.
 
 
 @dataclass
@@ -131,12 +132,39 @@ def state_text(document: dict[str, Any]) -> str:
     )
 
 
+# A thread count of 0 in an onnxruntime session's options: onnxruntime's own default, recorded as this word.
+ONNXRUNTIME_DEFAULT_THREADS = "default"
+
+
+def iclabel_threads() -> dict[str, int | str]:
+    """The threads ICLabel's ONNX session runs with, read from the session eegprep built and cached
+    (``iclabel_net_onnx._get_session``, the one the classification ran on): each count as the session
+    states it, or ``default`` for 0, onnxruntime's own default. eegprep sets none, so ICLabel runs on
+    onnxruntime's default pools, which the run's thread pin (``determinism.pinned_threads``) does not
+    reach; the record says so rather than claiming one thread (sccn/eegprep#763 asks for a thread
+    count and a public way to read the session's)."""
+    from eegprep.plugins.ICLabel.iclabel_net_onnx import _get_session
+
+    options = _get_session().get_session_options()
+
+    def stated(count: int) -> int | str:
+        return int(count) if count > 0 else ONNXRUNTIME_DEFAULT_THREADS
+
+    return {
+        "intra_op": stated(options.intra_op_num_threads),
+        "inter_op": stated(options.inter_op_num_threads),
+    }
+
+
 @functools.cache
-def iclabel_weights_sha256() -> str:
-    """The SHA-256 of the network file ICLabel classifies with: the weights the record names."""
+def iclabel_weights_sha256(network: str) -> str:
+    """The SHA-256 of the network file ICLabel classified with, the packaged file the classification
+    names (``classify``); a name that is not a bare file name is refused (``ValueError``)."""
     from eegprep.plugins.ICLabel import iclabel
 
-    path = Path(iclabel.__file__).resolve().parent / ICLABEL_WEIGHTS
+    if not network or Path(network).name != network:
+        raise ValueError("ICLabel's network is not a packaged file name: {!r}".format(network))
+    path = Path(iclabel.__file__).resolve().parent / network
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(1 << 20):
@@ -193,7 +221,7 @@ def decomposition_call(settings: Settings, resolution: device.Resolution, rank: 
     return {**engine, "reorder": steps.REORDER, **call}
 
 
-def check_locations(eeg: dict[str, Any]) -> None:
+def check_locations(eeg: dict[str, Any], detail: str = steps.ICLABEL_NO_LOCATIONS) -> None:
     """End the recording, before ASR and the fit, when ICLabel could not map its components.
 
     ICLabel draws each component's scalp map with eegprep's ``topoplot``, which raises when no channel
@@ -204,16 +232,15 @@ def check_locations(eeg: dict[str, Any]) -> None:
     ``steps.DEFAULT_MAX_ITER``, 4000, iterations) would run and be discarded, so ``topoplot`` is called here on the working copy's
     channels exactly as ICLabel calls it, with one value per channel: the rule is eegprep's own and
     cannot drift from it. The error is recognized by its class, never by its message. ICLabel is not
-    skipped: the recording fails, writing nothing.
+    skipped: the recording fails, writing nothing, with ``detail``: ``iclabel_no_locations``, or
+    ``iclabel_frame_unoriented`` when the positions were refused for their frame (``frame_unoriented``).
     """
     from eegprep import topoplot
 
     try:
         topoplot(np.ones(int(eeg["nbchan"])), eeg["chanlocs"], noplot="on", gridscale=32)
     except ValueError as error:
-        raise RecordingError(
-            STEP_FAILED, "iclabel_locations", steps.ICLABEL_NO_LOCATIONS
-        ) from error
+        raise RecordingError(STEP_FAILED, "iclabel_locations", detail) from error
 
 
 def asr_repair(eeg: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -314,6 +341,22 @@ def _stated(value: Any) -> str | None:
     return value
 
 
+def frame_unoriented(loaded: Loaded) -> bool:
+    """Whether a recording of a dataset directory has a coordsystem whose frame eegprep's BIDS import
+    gives no orientation (its ``bids_coordsystem_orientation`` is None: ``Other``, ``ACPC``, a name BIDS
+    does not define, or none named), so eegprep applied none of the electrodes file's positions
+    (sccn/eegprep#693). False on the serving copy, whose reader refuses such frames itself."""
+    if loaded.serving is not None:
+        return False
+    etc = loaded.eeg.get("etc")
+    stated = etc.get("BIDSCoordsystem") if isinstance(etc, dict) else None
+    if not isinstance(stated, dict):
+        return False
+    from eegprep.plugins.EEG_BIDS.coords import bids_coordsystem_orientation
+
+    return bids_coordsystem_orientation(stated) is None
+
+
 def position_facts(loaded: Loaded) -> dict[str, Any]:
     """Where the recording's channel positions came from, as the loader read them (read before the
     floor takes the recording): ``source`` is the loader's location source (``electrodes.tsv``,
@@ -325,13 +368,13 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
     located a channel). Each is None when nothing stated it: positions embedded in the data file, or
     an electrodes file eegprep read with no coordsystem (it then assumed a frame and guessed a unit).
 
-    eegprep converts the positions on loading to millimeters in EEGLAB's frame, correctly for a frame
-    it reads as stated. Its BIDS import reads every frame but EEGLAB's as RAS (unless the
-    coordsystem's description is ``EEGLAB``), so on a dataset directory positions in the frames BIDS
-    defines as ALS (``steps.ROTATED_FRAMES``: CTF, 4DBti, KitYokogawa) come out turned by 90 degrees
-    (sccn/eegprep#692). ``withheld`` is then ``frame_rotated`` (``steps.FRAME_ROTATED``), and the
-    recipe writes no place of them and draws no map on them; otherwise it is None. eegprep-lean, the
-    serving copy's reader, reads those frames as stated, so nothing is withheld there.
+    eegprep converts the positions on loading to millimeters in EEGLAB's frame. Its BIDS import reads
+    a frame by the orientation the BIDS coordinate-systems appendix gives it (sccn/eegprep#693, which
+    fixed sccn/eegprep#692: CTF, 4DBti and KitYokogawa are ALS, as eegprep-lean, the serving copy's
+    reader, reads them), and applies no position of a frame its table does not list (``Other``,
+    ``ACPC``, a name BIDS does not define, or none named: ``frame_unoriented``): the electrodes file is
+    then not the source, and when nothing else located the channels the block still says the frame the
+    dataset stated, the reason they have no positions.
     """
     etc = loaded.eeg.get("etc")
     etc = etc if isinstance(etc, dict) else {}
@@ -343,21 +386,16 @@ def position_facts(loaded: Loaded) -> dict[str, Any]:
         if not (isinstance(found, dict) and found.get("located")):
             found = None
         names = ("coordinate_system", "coordinate_units")
-    elif loaded.location_source == "electrodes.tsv":
+    elif loaded.location_source == "electrodes.tsv" or (
+        loaded.location_source == "none" and frame_unoriented(loaded)
+    ):
         found = etc.get("BIDSCoordsystem")
     found = found if isinstance(found, dict) else {}
     system = _stated(found.get(names[0]))
-    # the coordsystem is read on a dataset directory only beside an electrodes file (above)
-    rotated = (
-        loaded.serving is None
-        and system in steps.ROTATED_FRAMES
-        and found.get("EEGCoordinateSystemDescription") != "EEGLAB"
-    )
     return {
         "source": loaded.location_source,
         "coordinate_system": system,
         "coordinate_units": _stated(found.get(names[1])),
-        "withheld": steps.FRAME_ROTATED if rotated else None,
     }
 
 
@@ -545,14 +583,20 @@ def component_variance(eeg: dict[str, Any], rank: int) -> list[float]:
     return [float(value) for value in found if value is not None]
 
 
-def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray]:
-    """``pop_iclabel`` (eegprep's default network): the classified EEG, the class names and the
-    probabilities of every component (components by classes)."""
+def classify(eeg: dict[str, Any]) -> tuple[dict[str, Any], list[str], np.ndarray, str]:
+    """``pop_iclabel`` (eegprep's default network): the classified EEG, the class names, the
+    probabilities of every component (components by classes) and the packaged network file that ran,
+    as the classification names it (``network``)."""
     from eegprep import pop_iclabel
 
     labeled = pop_iclabel(eeg, steps.ICLABEL_VERSION)
     found = labeled["etc"]["ic_classification"]["ICLabel"]
-    return labeled, [str(name) for name in found["classes"]], np.asarray(found["classifications"])
+    return (
+        labeled,
+        [str(name) for name in found["classes"]],
+        np.asarray(found["classifications"]),
+        str(found["network"]),
+    )
 
 
 def process(
@@ -573,6 +617,7 @@ def process(
     serving = loaded.serving
     # what the loader read of the positions and the sidecar, before the floor takes the recording
     positions = position_facts(loaded)
+    unoriented = frame_unoriented(loaded)
     etc = loaded.eeg.get("etc")
     sidecar = views.sidecar_fields(etc.get("BIDS") if isinstance(etc, dict) else None)
     result = floor.process(
@@ -603,7 +648,9 @@ def process(
 
     # ICLabel needs a scalp map: a recording that cannot have one fails now, not after the fit
     with guarded("iclabel_locations"):
-        check_locations(eeg)
+        check_locations(
+            eeg, steps.ICLABEL_FRAME_UNORIENTED if unoriented else steps.ICLABEL_NO_LOCATIONS
+        )
 
     # ASR, keeping the state that reproduces it
     with guarded("asr"):
@@ -675,14 +722,14 @@ def process(
 
     # ICLabel
     with guarded("iclabel"):
-        eeg, classes, probabilities = classify(eeg)
-        weights_sha256 = iclabel_weights_sha256()
+        eeg, classes, probabilities, network = classify(eeg)
+        weights_sha256 = iclabel_weights_sha256(network)
         plan.add_step(
             "iclabel",
             steps.ICLABEL_FUNCTION,
             iclabel_parameters(),
             description=steps.DESCRIPTIONS["iclabel"],
-            quality={"classes": classes, "weightsSha256": weights_sha256},
+            quality={"classes": classes, "network": network, "weightsSha256": weights_sha256},
         )
 
     return Decomposition(
@@ -704,7 +751,12 @@ def process(
         serving=serving,
         bursts=bursts,
         store_rows=None if serving is None else kept_rows(result),
-        iclabel={"version": steps.ICLABEL_VERSION, "weights_sha256": weights_sha256},
+        iclabel={
+            "version": steps.ICLABEL_VERSION,
+            "network": network,
+            "weights_sha256": weights_sha256,
+            "onnxruntime_threads": iclabel_threads(),
+        },
         positions=positions,
         sidecar=sidecar,
         window=midsegment(

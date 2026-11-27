@@ -29,7 +29,7 @@ from recipe_support import DATASET, ROOT, loaded_fixture, make_context
 from scipy.signal import get_window, welch
 from views_support import ICLABEL, check_view_files, layout, product_files, read_record
 
-PINS = (("nemar-quality", "0.1.0"), ("nemar-spectrum", "0.1.0"))
+PINS = (("nemar-quality", "0.2.0"), ("nemar-spectrum", "0.1.0"))
 PROVIDES = ("nemar-floor", "nemar-ica")
 VECTORS = ROOT / "tests" / "contract" / "neuroschema-views"
 CUT_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 8]  # Fp1 .. P3 and O1, which the floor removes from the cut
@@ -102,6 +102,9 @@ def host_inputs(fit, line_hz, **changes):
         "classes": list(fit.classes),
         "classifications": fit.probabilities,
         "variance_pct": list(fit.variance_pct),
+        "weights": fit.eeg["icaweights"],
+        "sphere": fit.eeg["icasphere"],
+        "icachansind": fit.eeg["icachansind"],
     }
     ica.update(changes)
     return {"nemar-ica": ica, "nemar-floor": {"line_hz": line_hz}}
@@ -170,7 +173,7 @@ def test_both_load_as_a_recipe_pins_them(loaded):
     assert [loaded[name].checkpoint for name, _ in PINS] == ["quality", "quality"]
     assert loaded["nemar-quality"].manifest["reads"]["recipes"] == ["nemar-ica"]
     assert loaded["nemar-spectrum"].manifest["reads"]["recipes"] == ["nemar-floor", "nemar-ica"]
-    assert loaded["nemar-quality"].manifest["parameters"] == {}
+    assert loaded["nemar-quality"].manifest["parameters"] == {"nbins": 256}
     assert loaded["nemar-spectrum"].manifest["parameters"] == {}  # the spectrum's are the run's
 
 
@@ -304,17 +307,182 @@ def test_the_class_view_is_held_to_the_hosts_components(loaded, decomposition, r
     assert (outcome.status, outcome.detail) == ("skipped", views.DIM_MISMATCH)
 
 
-# ---- a layout the host withholds (nemar-ica's turned positions, a layout over the caps) -------------
+# ---- nemar-quality's mutual information reduction (eegprep's eeg_mir) -------------------------------
 
 
-@pytest.mark.parametrize("reason", ["frame_rotated", "cap_exceeded"])
+def quality_step(plan):
+    (step,) = [step for step in plan.steps if step.step_id == "nemar-quality"]
+    return step
+
+
+def test_the_manifest_fixes_eegpreps_bins_and_declares_the_mir_in_nats(loaded):
+    from eegprep.functions.popfunc.eeg_mir import MIR_NBINS
+
+    plugin = loaded["nemar-quality"]
+    assert plugin.manifest["parameters"] == {"nbins": MIR_NBINS} == {"nbins": 256}
+    declared = plugin.manifest["outputs"]["metrics"][nemar_quality.MIR_METRIC]
+    assert declared["unit"] == "nat"
+    assert "bounds" not in declared  # an unmixing that adds dependence reads below 0
+    assert not declared.get("headline")
+    assert "Delorme et al. 2012" in declared["description"]
+    assert "legacy NEMAR report" in declared["description"]
+    assert plugin.skip_words == frozenset({"mir_refused", "mir_bins_changed"})
+
+
+def test_the_mir_is_eegpreps_of_the_decomposition_and_pamicas_reference(ran, decomposition):
+    """The value is eegprep's eeg_mir of the classified EEG nemar-ica holds, and equals pAMICA's own
+    estimator (``pamica.metrics.mir``, which eeg_mir ports) of icaweights over the sphered data at the
+    same 256 bins: a value computed from other matrices, other channels or other bins differs."""
+    from eegprep import eeg_mir
+    from pamica.metrics import mir as pamica_mir
+
+    fit, _ = decomposition
+    plan, run, _ = ran
+    step = quality_step(plan)
+    assert step.parameters == {"nbins": 256}
+    metric = step.quality[nemar_quality.MIR_METRIC]
+    expected, _ = eeg_mir(fit.eeg)
+    assert metric["value"] == expected
+    weights, sphere = np.asarray(fit.eeg["icaweights"]), np.asarray(fit.eeg["icasphere"])
+    channels = np.asarray(fit.eeg["icachansind"], dtype=int)
+    sphered = sphere @ np.asarray(fit.eeg["data"], dtype=np.float64)[channels]
+    reference, _ = pamica_mir(weights, sphered, nbins=256)
+    assert metric["value"] == pytest.approx(reference, abs=1e-12)
+    assert metric["value"] > 0  # a fitted unmixing removes dependence
+    assert metric["unit"] == "nat"
+    assert contract.quality_metric_errors(metric) == []
+    assert nemar_quality.MIR_METRIC not in run.summary_metrics
+    (outcome,) = [o for o in run.outcomes if o.name == "nemar-quality"]
+    assert "metrics_skipped" not in outcome.entry()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda i: i.update(weights=np.zeros_like(i["weights"])),
+        lambda i: i.update(sphere=np.full_like(i["sphere"], np.nan)),
+        lambda i: i.update(data=np.zeros_like(i["data"])),
+    ],
+    ids=["singular_weights", "nan_sphere", "constant_data"],
+)
+def test_a_decomposition_eeg_mir_refuses_keeps_the_plugin_with_the_mir_skipped(
+    loaded, decomposition, recording, capsys, change
+):
+    """eeg_mir's ValueError never fails the plugin: the MIR is null with the declared word
+    ``mir_refused``, the brain share and the class view are kept, and a fixed line says so."""
+    fit, line_hz = decomposition
+    inputs = host_inputs(fit, line_hz)
+    change(inputs["nemar-ica"])
+    plan = plans.Plan(steps.RECIPE_ID, steps.RECIPE_VERSION)
+    run = plugins.run_checkpoint(
+        [loaded["nemar-quality"]], "quality", inputs, plan, host=host_of(fit, recording.path)
+    )
+    (outcome,) = run.outcomes
+    assert outcome.entry()["status"] == "ran"
+    assert outcome.entry()["metrics_skipped"] == [
+        {"metric": nemar_quality.MIR_METRIC, "reason": "mir_refused"}
+    ]
+    step = quality_step(plan)
+    assert step.quality[nemar_quality.MIR_METRIC]["value"] is None
+    assert step.quality[nemar_quality.METRIC]["value"] is not None
+    assert [view.key for view in run.views["nemar-quality"]] == ["icclasses"]
+    assert run.views_skipped == []
+    assert capsys.readouterr().err == (
+        "plugin_metric_skipped: nemar-quality metric={} reason=mir_refused\n".format(
+            nemar_quality.MIR_METRIC
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda i: i.update(weights=np.asarray(i["weights"])[:, :-1]),
+        lambda i: i.update(icachansind=np.asarray(i["icachansind"])[:-1]),
+        lambda i: i.update(sphere=np.asarray(i["sphere"])[:-1]),
+        lambda i: i.update(icachansind=np.asarray(i["icachansind"]) + 1),
+        lambda i: i.update(icachansind=np.zeros_like(np.asarray(i["icachansind"]))),
+        lambda i: i.update(icachansind=np.asarray(i["icachansind"]) + 0.5),
+        lambda i: i.update(data=np.asarray(i["data"])[0]),
+    ],
+    ids=[
+        "weights_not_square",
+        "channels_fewer_than_sphere_columns",
+        "sphere_rows_not_weights",
+        "channel_past_data",
+        "channels_repeated",
+        "channels_not_whole",
+        "data_one_dimension",
+    ],
+)
+def test_a_decomposition_that_breaks_the_shape_contract_is_the_hosts_fault(
+    loaded, decomposition, recording, capsys, change
+):
+    """Shapes eeg_mir's contract does not allow are refused before it runs, as the host's fault: the
+    plugin is skipped (``plugin_failed``, ``DecompositionMismatch``), never a ``mir_refused``."""
+    fit, line_hz = decomposition
+    inputs = host_inputs(fit, line_hz)
+    change(inputs["nemar-ica"])
+    outcome, _ = quality_only(loaded, fit, host_of(fit, recording.path), inputs)
+    assert (outcome.status, outcome.code, outcome.detail) == (
+        "skipped",
+        "plugin_failed",
+        "DecompositionMismatch",
+    )
+    assert capsys.readouterr().err.endswith("detail=DecompositionMismatch\n")
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_a_mir_that_is_not_finite_is_refused(value):
+    assert nemar_quality.mir_value(value) == (None, "mir_refused")
+    assert nemar_quality.mir_value(0.25) == (0.25, None)
+
+
+def test_bins_other_than_eegpreps_are_refused_rather_than_shifting_the_mir(
+    loaded, decomposition, recording, capsys
+):
+    """A manifest whose nbins is not eegprep's MIR_NBINS (as after an eegprep change of the rule)
+    gives no MIR, with ``mir_bins_changed``, instead of a value on other bins."""
+    fit, line_hz = decomposition
+    manifest = copy.deepcopy(loaded["nemar-quality"].manifest)
+    manifest["parameters"] = {"nbins": 128}
+    plugin = replace(loaded["nemar-quality"], manifest=manifest)
+    plan = plans.Plan(steps.RECIPE_ID, steps.RECIPE_VERSION)
+    run = plugins.run_checkpoint(
+        [plugin], "quality", host_inputs(fit, line_hz), plan, host=host_of(fit, recording.path)
+    )
+    (outcome,) = run.outcomes
+    assert outcome.entry()["metrics_skipped"] == [
+        {"metric": nemar_quality.MIR_METRIC, "reason": "mir_bins_changed"}
+    ]
+    assert quality_step(plan).quality[nemar_quality.MIR_METRIC]["value"] is None
+    assert "reason=mir_bins_changed" in capsys.readouterr().err
+
+
+def test_a_missing_decomposition_input_skips_the_whole_plugin(
+    loaded, decomposition, recording, capsys
+):
+    """A host that does not hand the decomposition is a fault of the recipe, not a refusal of the
+    data: the plugin is skipped (``KeyError``), never a null MIR."""
+    fit, line_hz = decomposition
+    inputs = host_inputs(fit, line_hz)
+    del inputs["nemar-ica"]["sphere"]
+    outcome, _ = quality_only(loaded, fit, host_of(fit, recording.path), inputs)
+    assert (outcome.status, outcome.detail) == ("skipped", "KeyError")
+    capsys.readouterr()
+
+
+# ---- a layout the host withholds (nemar-ica's layout over the caps) ------------------------------------
+
+
 def test_a_withheld_layout_skips_the_spectrum_view_with_the_hosts_word_and_the_plugin_runs(
-    loaded, decomposition, recording, capsys, reason
+    loaded, decomposition, recording, capsys
 ):
     """The host has no layout for this recording and says why (``Host.withheld``): the spectrum, whose
     layout is the recipe's, is skipped with that word, never refused as role_unprovided; the plugin
     ran, its step is in the plan, and nemar-quality's view and metric are kept."""
     fit, line_hz = decomposition
+    reason = "cap_exceeded"
     host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": reason})
     plan, run = run_both(loaded, fit, host, host_inputs(fit, line_hz))
     assert [(o.name, o.status) for o in run.outcomes] == [
@@ -337,7 +505,7 @@ def test_a_plugins_fault_is_still_its_own_when_its_layout_is_withheld(
     fit, line_hz = decomposition
     data = np.array(fit.eeg["data"], dtype=np.float64)
     data[0, 100:300] = np.nan
-    host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": "frame_rotated"})
+    host = replace(host_of(fit, recording.path), roles={}, withheld={"layout": "cap_exceeded"})
     _, run = run_both(loaded, fit, host, host_inputs(fit, line_hz, data=data))
     spectrum = run.outcomes[1]
     assert (spectrum.status, spectrum.code, spectrum.detail) == (
@@ -369,7 +537,7 @@ def test_a_withheld_role_is_a_skip_reason_and_never_also_given(decomposition, re
     with pytest.raises(ValueError, match="skip reason"):
         replace(host, roles={}, withheld={"layout": "no_layout_today"})
     with pytest.raises(ValueError, match="both given and withheld"):
-        replace(host, withheld={"layout": "frame_rotated"})
+        replace(host, withheld={"layout": "cap_exceeded"})
 
 
 # ---- nemar-spectrum on the decomposition ----------------------------------------------------------
@@ -629,7 +797,8 @@ def test_the_product_holds_both_views_and_every_file_they_name(written, recordin
     assert views.record_findings(ICA_INFO.id, {"metrics": {}, "views": nemar["views"]}) == []
     for declaration in nemar["views"]:
         assert views.declaration_errors(declaration) == []
-        assert declaration["source"]["plugin"]["version"] == "0.1.0"
+        plugin = declaration["source"]["plugin"]
+        assert plugin["version"] == dict(PINS)[plugin["name"]]
     found = check_view_files(directory, record)
     assert set(found) <= set(names)
     text = (directory / product.record_path).read_text(encoding="utf-8")

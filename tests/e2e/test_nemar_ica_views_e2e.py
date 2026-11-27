@@ -334,11 +334,14 @@ def test_the_recordings_data_quality_entry_validates_and_passes_the_record_check
     assert sorted(error.message for error in validator.iter_errors(document)) == []
     assert views.record_findings("nemar-ica", entry) == []
     brain = entry["metrics"]["nemar-quality:percentBrainComponents"]
-    assert brain["plugin"] == {"name": "nemar-quality", "version": "0.1.0"}
+    assert brain["plugin"] == {"name": "nemar-quality", "version": "0.2.0"}
+    mir = entry["metrics"]["nemar-quality:mutualInformationReduction"]
+    assert (mir["plugin"], mir["unit"]) == ({"name": "nemar-quality", "version": "0.2.0"}, "nat")
+    assert isinstance(mir["value"], float)
     assert entry["metrics"]["icaRank"]["recipe"]["name"] == "nemar-ica"
 
 
-def test_the_table_row_fills_the_brain_share_and_counts_every_checkpoint_passed(produced):
+def test_the_table_row_fills_the_brain_share_and_mir_and_counts_every_checkpoint_passed(produced):
     from nemar_launch import checkpoints as rules
     from nemar_process.nemar_ica import steps
 
@@ -347,13 +350,16 @@ def test_the_table_row_fills_the_brain_share_and_counts_every_checkpoint_passed(
     (row,) = table_rows(produced)
     value = record["summaryMetrics"]["nemar-quality:percentBrainComponents"]
     assert float(row["pct_brain_components"]) == value
+    (quality,) = [s for s in record["processingSteps"] if s["stepId"] == "nemar-quality"]
+    mir = quality["qualityMetrics"]["nemar-quality:mutualInformationReduction"]["value"]
+    assert float(row["mir_nats"]) == round(mir, 6)
     assert row["skipped_steps"] == "line_noise_50:below_threshold,line_noise_60:below_threshold"
     (parsed,) = rules.parse_recordings_lines(lines)
     outcomes = rules.recording_outcomes(parsed, steps.CHECKPOINTS)
     assert [outcome["status"] for outcome in outcomes] == ["passed"] * len(steps.CHECKPOINTS)
 
 
-def test_the_dataset_data_quality_document_holds_the_plugins_metric(produced):
+def test_the_dataset_data_quality_document_holds_the_plugins_metrics(produced):
     from nemar_process.common import dataquality
 
     document = read_json(produced / "desc-nemarica_dataquality.json")
@@ -367,6 +373,13 @@ def test_the_dataset_data_quality_document_holds_the_plugins_metric(produced):
     assert (brain["n"], brain["unit"]) == (1, "%")
     value = float(row["pct_brain_components"])
     assert entry["observed_range"]["nemar-quality:percentBrainComponents"] == {
+        "min": value,
+        "max": value,
+    }
+    mir = entry["distributions"]["nemar-quality:mutualInformationReduction"]
+    assert (mir["n"], mir["unit"], mir["histogram"]["missing"]) == (1, "nat", 0)
+    value = float(row["mir_nats"])
+    assert entry["observed_range"]["nemar-quality:mutualInformationReduction"] == {
         "min": value,
         "max": value,
     }

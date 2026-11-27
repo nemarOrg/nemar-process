@@ -233,7 +233,7 @@ def facts(
         "reference": steps.REREF_REFERENCE,
         "versions": {
             "eegprep": versions.distribution_version("eegprep"),
-            **installed_versions(("pamica", "torch")),
+            **installed_versions(("pamica", "torch", "onnxruntime")),
         },
         # the binary reads the 32-bit data file eegprep writes for it, so it sees the data rounded
         # to float32 (about 1e-7 relative); the weights it gives back are float64
@@ -496,22 +496,15 @@ def chanlocs_rows(fit: pipeline.Decomposition) -> list[list[Any]]:
     """The rows of ``_chanlocs.tsv``: one per column of ``_unmixing.tsv``, in its order and named by
     its header (``channel_labels``), each with its type as the floor's ``_channels.tsv`` writes it
     (``files.tsv_cell``) and its places as eegprep holds them after the chain (``theta``, ``radius``,
-    ``X``, ``Y``, ``Z``; ``n/a`` for a channel without a position). When the positions are known to be
-    misread (``fit.positions["withheld"]``, ``pipeline.position_facts``), every place is ``n/a``: no
-    position known to be turned is written. The decomposition's ``chanlocs`` must be its channels in
-    that order: anything else is a fault of the recipe (``ValueError``)."""
+    ``X``, ``Y``, ``Z``; ``n/a`` for a channel without a position). The decomposition's ``chanlocs``
+    must be its channels in that order: anything else is a fault of the recipe (``ValueError``)."""
     chanlocs = list(fit.eeg["chanlocs"])
     if io.channel_labels(fit.eeg) != list(fit.good_channels):
         raise ValueError("the decomposition's chanlocs are not its channels in order")
     names = channel_labels(fit.good_channels)
     kinds = io.channel_types(fit.eeg)
-    withheld = fit.positions.get("withheld") is not None
     return [
-        [
-            name,
-            files.tsv_cell(kind),
-            *(None if withheld else _place(chanloc.get(key)) for key in PLACE_FIELDS),
-        ]
+        [name, files.tsv_cell(kind), *(_place(chanloc.get(key)) for key in PLACE_FIELDS)]
         for name, kind, chanloc in zip(names, kinds, chanlocs, strict=True)
     ]
 
@@ -528,8 +521,7 @@ def chanlocs_file(recording: Recording, fit: pipeline.Decomposition) -> views.Vi
         steps.CHANLOCS_STEP,
         "Positions of the decomposition's channels, in the unmixing's column order: name, type, "
         "EEGLAB's theta (degrees) and radius, and x, y, z in millimeters in the frame eegprep "
-        "takes for EEGLAB's (+x nose, +y left, +z up), as it holds them after loading; every "
-        "place n/a when they are known to be misread (extensions.nemar.ica.positions.withheld)",
+        "takes for EEGLAB's (+x nose, +y left, +z up), as it holds them after loading",
     )
 
 
@@ -561,10 +553,10 @@ def view_host(
 ) -> views.Host:
     """What nemar-ica knows of one recording, for its own views and for a plugin's (``views.Host``):
     the decomposition's channels in layout order, its components, ICLabel's classes, the floor's
-    sampling rate, the layout (none when the component maps have none: positions withheld, or a
-    layout over the caps, and then the layout is withheld with ``layout_reason``, ``frame_rotated`` or
-    ``cap_exceeded``, so a plugin's view on it is skipped with the same word), the sidecar's cap model
-    and reference, and the suffixes of its own files."""
+    sampling rate, the layout (none when the component maps have none, a layout over the caps, and
+    then the layout is withheld with ``layout_reason``, ``cap_exceeded``, so a plugin's view on it is
+    skipped with the same word), the sidecar's cap model and reference, and the suffixes of its own
+    files."""
     withheld = (
         {} if layout is not None or layout_reason is None else {steps.LAYOUT_ROLE: layout_reason}
     )
@@ -815,11 +807,9 @@ def recipe_views(
     """nemar-ica's own views of one recording, in ``steps.RECIPE_VIEWS`` order, and the ones it
     skipped, with why; and the host its plugins get.
 
-    ``icmaps`` on the layout ``_chanlocs.tsv`` (``layout_role``), or skipped with the word for why there
-    is no layout: positions the loader is known to have turned (``fit.positions["withheld"]``,
-    ``frame_rotated``), or a layout over the caps (``cap_exceeded``); the host then withholds the layout
-    with that word, so a plugin's view on it is skipped with it too. A map over the caps is skipped
-    with ``cap_exceeded``. ``icactivity`` and ``midsegment`` read the serving copy, so they are declared
+    ``icmaps`` on the layout ``_chanlocs.tsv`` (``layout_role``), or skipped with ``cap_exceeded`` when
+    the layout is over the caps; the host then withholds the layout with that word, so a plugin's view
+    on it is skipped with it too. A map over the caps is skipped with ``cap_exceeded``. ``icactivity`` and ``midsegment`` read the serving copy, so they are declared
     when the recipe names its store (``signal_store``): on the serving copy the store the decomposition
     read, with the window chosen on the grid the floor read (``fit.window``, the same grid), and on a
     dataset directory the row the serving index the run read (``serving``) gives the recording
@@ -839,17 +829,16 @@ def recipe_views(
     classes = [class_column(name) for name in fit.classes]
     found = views.ViewSet(INFO.id, INFO.version)
     layout: views.RoleData | None = None
-    reason = fit.positions.get("withheld")
-    if reason is None:
-        try:
-            layout = layout_role(named[steps.CHANLOCS], fit)
-        except views.ViewRefused as refused:
-            reason = views.SKIP_REASON_OF.get(refused.word)
-            if reason is None:
-                raise
+    reason: str | None = None
+    try:
+        layout = layout_role(named[steps.CHANLOCS], fit)
+    except views.ViewRefused as refused:
+        reason = views.SKIP_REASON_OF.get(refused.word)
+        if reason is None:
+            raise
     host = view_host(recording, fit, layout, reason)
     if layout is None:
-        assert reason is not None  # positions withheld, or a layout over the caps
+        assert reason is not None  # a layout over the caps
         found.skip(steps.ICMAPS_VIEW, views.IC_MAPS, reason)
     else:
         placed = layout
@@ -928,9 +917,12 @@ def plugin_inputs(fit: pipeline.Decomposition, host: views.Host) -> dict[str, di
     ``nemar-ica`` the decomposition's input (``data``: the good channels by samples the fit was given,
     in ``unit`` ``uV``), the host's sampling rate (``srate``) and channel names in layout order
     (``channels``: the unmixing's header, the layout's names), ICLabel's ``classes`` in its order with
-    its ``classifications`` (components by classes) and each component's own ``variance_pct``; from
-    ``nemar-floor`` the line frequency it measured (``line_hz``, its table's, or None).
-    ``plugins.run_checkpoint`` hands each plugin read-only views of the ones its manifest reads."""
+    its ``classifications`` (components by classes), each component's own ``variance_pct``, and the
+    decomposition as eegprep holds it: ``weights`` (``icaweights``, components by principal
+    components), ``sphere`` (``icasphere``, principal components by channels) and ``icachansind`` (the
+    rows of ``data`` it was computed on); from ``nemar-floor`` the line frequency it measured
+    (``line_hz``, its table's, or None). ``plugins.run_checkpoint`` hands each plugin read-only views
+    of the ones its manifest reads."""
     return {
         "nemar-ica": {
             "data": fit.eeg["data"],
@@ -940,6 +932,9 @@ def plugin_inputs(fit: pipeline.Decomposition, host: views.Host) -> dict[str, di
             "classes": list(fit.classes),
             "classifications": fit.probabilities,
             "variance_pct": list(fit.variance_pct),
+            "weights": np.asarray(fit.eeg["icaweights"]),
+            "sphere": np.asarray(fit.eeg["icasphere"]),
+            "icachansind": np.asarray(fit.eeg["icachansind"]),
         },
         "nemar-floor": {"line_hz": floor_outputs.line_frequency(fit.floor_result)},
     }
@@ -979,11 +974,13 @@ RECIPE_METRICS = (
     ),
 )
 
-# The share of brain components is nemar-quality's metric, never a recipe value (ADR 0137 C6): the
-# table's ``pct_brain_components`` is its value in the recording's record, and null when the plugin was
-# skipped; nothing here computes the share itself.
+# The share of brain components and the mutual information reduction are nemar-quality's metrics, never
+# recipe values (ADR 0137 C6): the table's ``pct_brain_components`` and ``mir_nats`` are their values in
+# the recording's record, and null when the plugin was skipped or the metric has none (``mir_refused``,
+# ``mir_bins_changed``); nothing here computes either.
 BRAIN_PLUGIN = "nemar-quality"
 BRAIN_METRIC = "nemar-quality:percentBrainComponents"
+MIR_METRIC = "nemar-quality:mutualInformationReduction"
 
 
 def plugin_metric(record: Mapping[str, Any], step_id: str, name: str) -> Any:
@@ -1040,6 +1037,7 @@ def table_row(
         "pct_good_samples": floor_values["percentGoodSamples"],
         "line_db_before": floor_values["lineNoiseBeforeDb"],
         "pct_brain_components": plugin_metric(record, BRAIN_PLUGIN, BRAIN_METRIC),
+        "mir_nats": plugin_metric(record, BRAIN_PLUGIN, MIR_METRIC),
         "skipped_steps": skipped or None,
         "record_content_sha256": content,
     }

@@ -5,7 +5,7 @@ A store whose dataset has no electrodes file carries no positions, so eegprep-le
 label-only channel locations and ICLabel has no scalp map: eegprep's ``topoplot`` raises on every channel,
 and the recording ends ``step_failed`` at ``iclabel`` with the detail ``iclabel_no_locations``, found right
 after the floor and before ASR and the fit, with nothing written (the owner decided that eegprep's own
-rule stays: one located channel passes, none fails). The stand-in's stores here carry no root attributes;
+rule stays: at least two distinct located channels pass, none or one fails). The stand-in's stores here carry no root attributes;
 the same run on stores that declare positions, where ICLabel's probabilities are written, is in
 ``test_zarr_locations.py``. The Zarr input itself works: the index is checked, the store is read in full
 and named by its content and its locations, and the dataset record states what was read and what was asked

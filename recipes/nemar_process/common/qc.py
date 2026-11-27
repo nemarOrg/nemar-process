@@ -76,8 +76,12 @@ class LocationGuard:
 
 
 def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
-    """At least half of the signal channels and at least four have finite X, Y, Z, and the
+    """More than half of the signal channels and at least four have finite X, Y, Z, and the
     unit-length position vectors have numerical rank 3.
+
+    More than half, as ``clean_channels`` requires since sccn/eegprep#650 (``clean_channels.m``'s
+    ``length([chanlocs.X]) > n/2``): exactly half located would be refused there with a
+    ``ValueError``, so it takes the no-locations branch here.
 
     ``clean_channels`` raises nothing for positions that are one point, a line or a plane through
     the origin and silently removes a large part of the channels (sccn/eegprep#539), so the rank is tested
@@ -90,13 +94,57 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
         if flag
     ]
     n_located = len(points)
-    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located < len(chanlocs):
+    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located <= len(chanlocs):
         return LocationGuard(False, flags)
     matrix = np.asarray(points, dtype=np.float64)
     lengths = np.sqrt((matrix**2).sum(axis=1))
     unit = matrix[lengths > 0] / lengths[lengths > 0][:, None]
     rank = int(np.linalg.matrix_rank(unit)) if len(unit) else 0
     return LocationGuard(rank >= 3, flags)
+
+
+# A channel's position fields in eegprep's ``chanlocs``: the Cartesian, EEGLAB's polar and the spherical.
+POSITION_FIELDS = ("X", "Y", "Z", "theta", "radius", "sph_theta", "sph_phi", "sph_radius")
+
+
+def unlocated_cleared(eeg: dict[str, Any], located: tuple[bool, ...]) -> dict[str, Any]:
+    """A shallow copy of ``eeg`` in which each channel the guard counts as unlocated (``located``)
+    has no position, for ``clean_channels``.
+
+    eegprep's ``chanloc_has_coords``, which the guard follows, counts a channel with a NaN coordinate
+    as unlocated; ``clean_channels`` counts it as located (sccn/eegprep#650) and then refuses the
+    non-finite position with a ``ValueError`` (sccn/eegprep#609). Such a channel, unlocated for the
+    guard but with a coordinate given (``_given``), gets every position field (``POSITION_FIELDS``) as
+    the loaders give a channel with no position, an empty array, which both count as missing, so
+    RANSAC uses the channels the guard counted, as it did before those changes; a channel with no
+    coordinate given is left as it is. The clearing persists: ``clean_channels`` returns the copy's
+    entries, so every later step, nemar-ica's ICLabel and its ``_chanlocs.tsv`` (``n/a`` in every
+    place) included, sees the channel as one with no position, never with a theta and radius its
+    coordinates do not support. The recording's own entries are not changed.
+    """
+    chanlocs = list(eeg["chanlocs"])
+    if len(located) != len(chanlocs):
+        raise ValueError("one located flag per channel")
+    cleared = [
+        {**chanloc, **{key: np.empty(0) for key in POSITION_FIELDS}}
+        if not flag and any(_given(chanloc.get(key)) for key in ("X", "Y", "Z"))
+        else chanloc
+        for chanloc, flag in zip(chanlocs, located, strict=True)
+    ]
+    return {**eeg, "chanlocs": cleared}
+
+
+def _given(value: Any) -> bool:
+    """Whether a coordinate is there at all, by ``clean_channels``'s rule (its ``_is_missing_coord``,
+    sccn/eegprep#650, MATLAB's ``isempty``): None, ``''`` and an empty sequence or array are missing;
+    anything else, NaN included, is given."""
+    if value is None or (isinstance(value, str) and value == ""):
+        return False
+    if isinstance(value, np.ndarray):
+        return value.size > 0
+    if isinstance(value, (list, tuple)):
+        return len(value) > 0
+    return True
 
 
 # ---- spectra ----------------------------------------------------------------------------------

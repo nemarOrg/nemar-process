@@ -137,7 +137,18 @@ def test_the_host_inputs_are_what_the_plugins_documentation_states(recording, fi
     assert sorted(given) == ["nemar-floor", "nemar-ica"]
     ica, floor = given["nemar-ica"], given["nemar-floor"]
     assert sorted(ica) == sorted(
-        ["data", "unit", "srate", "channels", "classes", "classifications", "variance_pct"]
+        [
+            "data",
+            "unit",
+            "srate",
+            "channels",
+            "classes",
+            "classifications",
+            "variance_pct",
+            "weights",
+            "sphere",
+            "icachansind",
+        ]
     )
     assert sorted(floor) == ["line_hz"]
     assert ica["data"] is fit.eeg["data"]  # the decomposition's input, never a copy of the samples
@@ -149,6 +160,13 @@ def test_the_host_inputs_are_what_the_plugins_documentation_states(recording, fi
     assert np.asarray(ica["classifications"]).shape == (fit.rank, len(ICLABEL))
     assert ica["variance_pct"] == list(fit.variance_pct)
     assert len(ica["variance_pct"]) == fit.rank
+    # the decomposition as eegprep holds it, never copies: square weights over the principal
+    # components, the sphere from the good channels, the rows of ``data`` it was computed on
+    assert ica["weights"] is fit.eeg["icaweights"]
+    assert ica["weights"].shape == (fit.rank, fit.rank)
+    assert ica["sphere"] is fit.eeg["icasphere"]
+    assert ica["sphere"].shape == (fit.rank, len(fit.good_channels))
+    assert np.array_equal(ica["icachansind"], np.arange(len(fit.good_channels)))
     row = floor_outputs.table_row(recording, fit.floor_result, "0" * 64)
     assert floor["line_hz"] == row["line_hz"]  # the floor's own table's line frequency
 
@@ -175,7 +193,7 @@ def test_the_plugins_views_follow_the_recipes_and_their_metric_is_a_summary_metr
     sources = [view["source"] for view in nemar["views"]]
     assert sources[0] == {"recipe": {"name": "nemar-ica", "version": steps.RECIPE_VERSION}}
     assert sources[1:] == [
-        {"plugin": {"name": "nemar-quality", "version": "0.1.0"}},
+        {"plugin": {"name": "nemar-quality", "version": "0.2.0"}},
         {"plugin": {"name": "nemar-spectrum", "version": "0.1.0"}},
     ]
     (spectrum,) = [view for view in nemar["views"] if view["key"] == "spectrum"]
@@ -257,6 +275,44 @@ def test_a_plugin_that_fails_keeps_the_recording_and_counts_as_skipped_at_qualit
     assert "plugin_skipped: nemar-spectrum code=plugin_failed detail=not_finite" in (
         capsys.readouterr().err
     )
+
+
+def test_a_mir_eeg_mir_refuses_leaves_the_cell_missing_and_the_recording_passed(
+    recording, fit, tmp_path, capsys
+):
+    """A decomposition eeg_mir refuses (here a singular unmixing, one of its rows zero): nemar-quality
+    runs, the MIR is null in the record with ``mir_refused`` and missing from the row, the brain share
+    and both views are kept, and nemar-cli counts the recording as passed at quality."""
+    weights = np.array(fit.eeg["icaweights"], dtype=np.float64)
+    weights[0] = 0.0
+    spoiled = dataclasses.replace(fit, eeg={**fit.eeg, "icaweights": weights})
+    written = write(recording, spoiled, tmp_path)
+    assert written.row["mir_nats"] is None
+    assert written.row["pct_brain_components"] is not None
+    assert not [pair for pair in written.row["skipped_steps"].split(",") if "nemar-" in pair]
+    nemar = written.record["extensions"]["nemar"]
+    (quality,) = [entry for entry in nemar["plugins"] if entry["name"] == "nemar-quality"]
+    assert quality["status"] == "ran"
+    assert quality["metrics_skipped"] == [{"metric": outputs.MIR_METRIC, "reason": "mir_refused"}]
+    assert [view["key"] for view in nemar["views"]] == ["icmaps", "icclasses", "spectrum"]
+    assert counted_at(written.row)["quality"]["status"] == "passed"
+    assert plans.verify(written.record) == []
+    assert "reason=mir_refused" in capsys.readouterr().err
+
+
+def test_the_mir_distribution_is_nemar_qualitys_metric():
+    """The dataset's distribution of the MIR is nemar-quality's metric: its unit and description are
+    the manifest's, and a value outside the edges is counted, never dropped."""
+    declared = manifest("nemar-quality")["outputs"]["metrics"][outputs.MIR_METRIC]
+    (spec,) = [d for d in ica_recipe.DISTRIBUTIONS if d.name == outputs.MIR_METRIC]
+    assert (spec.unit, spec.description) == (declared["unit"], declared["description"])
+    assert spec.column == "mir_nats"
+    assert spec.edges == ica_recipe.MIR_EDGES
+    summary = records.distribution([-0.01, 0.3, 40.0, None], spec.edges, spec.unit)
+    histogram = summary["histogram"]
+    assert (summary["n"], histogram["underflow"], histogram["overflow"]) == (3, 1, 1)
+    assert histogram["missing"] == 1
+    assert outputs.MIR_METRIC.split(":")[0] == outputs.BRAIN_PLUGIN
 
 
 def test_classes_that_are_not_iclabels_leave_the_brain_share_missing(recording, fit, tmp_path):
