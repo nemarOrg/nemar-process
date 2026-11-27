@@ -1,6 +1,6 @@
 # nemar-ica's views: a product with every view
 
-`product/` is what `nemar-recipe run nemar-ica` writes for the repository's EEG fixture (`tests/fixtures/eeg/dataset`: one recording, 22 channels, 282 seconds at 200 Hz), five iterations of pAMICA on the CPU with one thread, given `index.json`, the serving index the data plane lists for that recording, built from the commit the run read (`--source-commit 5555...`: a run uses an index of its own commit only).
+`product/` is what `nemar-recipe run nemar-ica` writes for the repository's EEG fixture (`tests/fixtures/eeg/dataset`: one recording, 22 channels, 282 seconds at 200 Hz), five iterations of pAMICA on the CPU with one thread, given `index.json`, the serving index the data plane lists for that recording, built from the commit the run read (`--source-commit 5555...`: a run uses an index of its own commit, or of a later commit the caller attests holds the same files, which this one needs no attestation for, so its `attestation` is null).
 The converter keeps 200 Hz (its ceiling is 250 Hz), so the index lists one EEG group, `eeg_200hz`, of 56,400 samples, the grid the floor read.
 It holds every view nemar-ica declares: the recipe's `icmaps`, `icactivity` and `midsegment` (nemar-cli ADR 0137), then nemar-quality's `icclasses` and nemar-spectrum's `spectrum` ([docs/plugins.md](../../../docs/plugins.md)), with each file they name, the recording's signalJourney record, the recordings table, the dataset record and the dataset `dataQuality` document.
 
@@ -12,7 +12,7 @@ What a backend reads of it:
 
 - the recording's `dataQuality` entry, projected from its record as `record_entry` in [`tests/e2e/test_nemar_ica_views_e2e.py`](../../e2e/test_nemar_ica_views_e2e.py) shows: the recipe's metrics (`extensions.nemar.metrics`), each plugin's that ran (its step's `qualityMetrics`), the views and the views skipped, and the SHA-256 of the record's bytes;
 - the views of the serving copy (`icactivity`, `midsegment`) name the store as a dataset directory's run does: the group the index lists, `content_sha256` null and the profile `archive`, matched by label;
-- `extensions.nemar.ica.serving_index` names the index and the row it read (or why it gave none: `not_in_serving_index`, `serving_index_stale`), and `extensions.nemar.ica.positions` where the layout's positions came from;
+- `extensions.nemar.ica.serving_index` names the index, the row it read (or why it gave none: `not_in_serving_index`, `serving_index_stale`) and the caller's attestation of its commit (null here), and `extensions.nemar.ica.positions` where the layout's positions came from;
 - every file a view names is an output of a step of the record, with its size and SHA-256 in `extensions.nemar.outputs`.
 
 ## Making it again

@@ -47,6 +47,7 @@ def test_a_row_is_the_recordings_store_and_its_one_eeg_group():
         "source_commit": COMMIT,
         "row": {"path": PATH, "group": "eeg_250hz", "rate": 250.0, "n_samples": 75_000},
         "reason": None,
+        "attestation": None,
     }
 
 
@@ -253,6 +254,7 @@ def test_an_index_the_run_cannot_use_lists_nothing_and_says_why(tmp_path, data):
         "source_commit": None,
         "row": None,
         "reason": "serving_index_unusable",
+        "attestation": None,
     }
     assert not given.lists(
         serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 1, given.sha256 or "")
@@ -265,6 +267,245 @@ def test_a_usable_index_through_the_option_is_the_parsed_one(tmp_path):
     given = serving_index.serving_index(str(path))
     assert not given.unusable
     assert given.resolve(PATH, DATASET, COMMIT).row is not None
+
+
+# ---- the attestation of the index's commit ------------------------------------------------------------
+
+TAG = COMMIT  # the version tag's commit, the run's --source-commit
+AHEAD = "b" * 40  # the commit the index was built from, after the tag
+ON007823_DELTA = (  # on007823's own delta between its tag and its index (nemar-cli ADR 0144)
+    ".gitattributes",
+    ".github/workflows/nemar-review.yml",
+    ".github/workflows/nemar-validate.yml",
+    ".nemar/metadata.json",
+    ".nemar/review.json",
+)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".nemar/metadata.json",
+        ".github/workflows/ci.yml",
+        ".gitattributes",
+        "sub-01/.gitattributes",
+        ".datalad/.gitattributes",
+        "sub-01/ses-01/eeg/.gitattributes",
+        ".nemar/a b/c.json",  # a space is a plain path
+    ],
+)
+def test_a_delta_path_is_nemar_owned_metadata(path):
+    assert serving_index.delta_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "participants.tsv",
+        "sub-01/eeg/sub-01_task-rest_events.tsv",
+        "sub-01/eeg/sub-01_task-rest_eeg.set",
+        ".bidsignore",
+        "README",
+        ".datalad/config",
+        ".nemar",
+        ".github",
+        ".nemar/",
+        "./.nemar/metadata.json",
+        "/.nemar/metadata.json",
+        ".nemar//metadata.json",
+        ".nemar/./metadata.json",
+        ".nemar/../participants.tsv",
+        ".github/../sub-01/eeg/sub-01_task-rest_eeg.set",
+        "sub-01/../.gitattributes",
+        "./.gitattributes",
+        ".gitattributes/",
+        ".gitattributes/participants.tsv",
+        "sub-01/.gitattributes.orig",
+        "x.gitattributes",
+        ".Gitattributes",
+        ".GITATTRIBUTES",
+        ".NEMAR/metadata.json",
+        ".Github/workflows/ci.yml",
+        ".nemar/a\nb",
+        ".nemar/a\tb",
+        ".nemar/a\x00b",
+        ".nemar/a\x7fb",
+        ".nemar/a\udcffb",  # an argument that is not UTF-8, as Python reads it
+        ".nemar/" + "a" * 506,  # 513 characters
+    ],
+)
+def test_anything_else_is_not_a_delta_path(path):
+    with pytest.raises(ValueError, match="not a path under"):
+        serving_index.delta_path(path)
+
+
+def test_the_longest_delta_path_is_512_characters():
+    longest = ".nemar/" + "a" * 505
+    assert len(longest) == 512
+    assert serving_index.delta_path(longest) == longest
+
+
+def test_the_zarr_inputs_rule_is_unchanged_and_admits_no_gitattributes():
+    """The two rules share the path's shape (``zarr_input.plain_path``) and its roots; only the serving
+    index admits a .gitattributes file (the owner's ruling for it; the Zarr input's was not widened)."""
+    assert serving_index.DELTA_ROOTS == zarr_input.DELTA_ROOTS == (".nemar/", ".github/")
+    for path in (".nemar/metadata.json", ".github/workflows/ci.yml"):
+        assert zarr_input.delta_path(path) == serving_index.delta_path(path)
+    for path in (".gitattributes", "sub-01/.gitattributes"):
+        assert serving_index.delta_path(path) == path
+        with pytest.raises(ValueError):
+            zarr_input.delta_path(path)
+    for path in (
+        "./.nemar/x",
+        ".nemar/../x",
+        ".nemar//x",
+        ".nemar/a\nb",
+        ".nemar/a\udcffb",
+        ".nemar/" + "a" * 506,
+    ):
+        assert not zarr_input.plain_path(path)
+        with pytest.raises(ValueError):
+            zarr_input.delta_path(path)
+
+
+def test_an_attestation_names_the_tag_the_index_and_what_changed():
+    attestation = serving_index.attest(TAG, AHEAD, reversed(ON007823_DELTA))
+    assert attestation == serving_index.Attestation(TAG, AHEAD, ON007823_DELTA)  # sorted
+    assert attestation.facts() == {
+        "tag_commit": TAG,
+        "index_commit": AHEAD,
+        "equivalence": "metadata_only",
+        "delta_paths": list(ON007823_DELTA),
+        "invariant": "same_files_as_tag",
+        "commit_check": "attested_by_caller",
+    }
+    # a path named twice is kept once; commits that change no file name none
+    assert serving_index.attest(TAG, AHEAD, [".gitattributes", ".gitattributes"]).delta_paths == (
+        ".gitattributes",
+    )
+    assert serving_index.attest(TAG, AHEAD).delta_paths == ()
+
+
+@pytest.mark.parametrize(
+    ("tag", "index", "paths", "message"),
+    [
+        (TAG, TAG, (), "an index of the tag's own commit"),
+        (TAG, "B" * 40, (), "--serving-index-commit is not a 40-digit"),
+        (TAG, "b" * 39, (), "--serving-index-commit is not a 40-digit"),
+        ("a" * 41, AHEAD, (), "--source-commit is not a 40-digit"),
+        (TAG, AHEAD, ("participants.tsv",), "not a path under"),
+        (TAG, AHEAD, (".nemar/../participants.tsv",), "not a path under"),
+        (TAG, AHEAD, ["{}/{}".format(".nemar", n) for n in range(33)], "at most 32"),
+        (TAG, AHEAD, [".gitattributes"] * 33, "at most 32"),  # counted as given
+    ],
+    ids=[
+        "the_tags_own_commit",
+        "upper_case",
+        "short",
+        "a_run_commit_too_long",
+        "a_bids_file",
+        "a_path_that_climbs",
+        "too_many_paths",
+        "too_many_paths_given",
+    ],
+)
+def test_an_attestation_that_contradicts_itself_is_refused(tag, index, paths, message):
+    with pytest.raises(ValueError, match=message):
+        serving_index.attest(tag, index, paths)
+
+
+def test_an_attestation_made_by_hand_is_checked_the_same():
+    with pytest.raises(ValueError, match="sorted"):
+        serving_index.Attestation(TAG, AHEAD, (".nemar/b", ".nemar/a"))
+    with pytest.raises(ValueError, match="sorted"):
+        serving_index.Attestation(TAG, AHEAD, (".nemar/a", ".nemar/a"))
+    with pytest.raises(ValueError, match="not a path under"):
+        serving_index.Attestation(TAG, AHEAD, ("README",))
+    with pytest.raises(ValueError, match="own commit"):
+        serving_index.Attestation(TAG, TAG, ())
+    index = parsed(source_commit=AHEAD)
+    with pytest.raises(ValueError, match="made by attest"):
+        index.attested({"tag_commit": TAG, "index_commit": AHEAD})  # type: ignore[arg-type]
+
+
+def test_an_attested_index_of_the_later_commit_gives_the_row_for_a_run_of_the_tag():
+    """The owner's rulings of 2026-11-27: the run is handed the tag's commit, the index names the commit
+    it was built from, and the caller attests the two hold the same files; the row is used, and the
+    record states the attestation beside what the index names."""
+    index = parsed(source_commit=AHEAD)
+    assert index.resolve(PATH, DATASET, TAG).reason == "serving_index_stale"  # unattested: exact
+    attested = index.attested(serving_index.attest(TAG, AHEAD, ON007823_DELTA))
+    resolved = attested.resolve(PATH, DATASET, TAG)
+    row = serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 75_000, index.sha256 or "")
+    assert resolved == serving_index.Resolution(row, None)
+    assert attested.lists(row)
+    assert attested.facts(resolved) == {
+        "sha256": index.sha256,
+        "dataset_id": DATASET,
+        "source_commit": AHEAD,  # what the index names: its provenance
+        "row": {"path": PATH, "group": "eeg_250hz", "rate": 250.0, "n_samples": 75_000},
+        "reason": None,
+        "attestation": {
+            "tag_commit": TAG,
+            "index_commit": AHEAD,
+            "equivalence": "metadata_only",
+            "delta_paths": list(ON007823_DELTA),
+            "invariant": "same_files_as_tag",
+            "commit_check": "attested_by_caller",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("built_from", "run"),
+    [
+        (TAG, TAG),  # the index names the tag's commit, not the one attested
+        ("c" * 40, TAG),  # a third commit
+        (None, TAG),  # an index that names none
+        (AHEAD, "c" * 40),  # a run of another commit than the attested tag
+        (AHEAD, None),  # a run that names none
+        (AHEAD, AHEAD),  # a run handed the index's commit: the attestation is of the tag
+    ],
+    ids=[
+        "an_index_of_the_tags_own_commit",
+        "an_index_of_a_third_commit",
+        "an_index_that_names_no_commit",
+        "a_run_of_another_commit",
+        "a_run_that_names_none",
+        "a_run_handed_the_index_commit",
+    ],
+)
+def test_an_attested_index_gives_a_row_only_for_the_commits_attested(built_from, run):
+    """Fail closed: the row is used only when the run's commit is the attested tag's and the index
+    names the attested commit; anything else is stale, and the record keeps the attestation."""
+    if built_from is None:
+        document = json.loads(text())
+        del document["source_commit"]
+        index = serving_index.parse(json.dumps(document).encode("utf-8"))
+    else:
+        index = parsed(source_commit=built_from)
+    attested = index.attested(serving_index.attest(TAG, AHEAD, (".nemar/metadata.json",)))
+    resolved = attested.resolve(PATH, DATASET, run)
+    assert resolved == serving_index.Resolution(None, "serving_index_stale")
+    assert attested.facts(resolved)["attestation"]["index_commit"] == AHEAD
+
+
+def test_an_attested_index_is_still_read_for_the_runs_dataset_first():
+    attested = parsed(dataset_id="xx000002", source_commit=AHEAD).attested(
+        serving_index.attest(TAG, AHEAD)
+    )
+    assert attested.resolve(PATH, DATASET, TAG).reason == "not_in_serving_index"
+    assert attested.resolve(OTHER, "xx000002", TAG).reason == "not_in_serving_index"
+
+
+def test_an_attested_index_the_run_cannot_use_says_so_and_keeps_the_attestation(tmp_path):
+    path = tmp_path / "index.json"
+    path.write_bytes(b"{}")
+    attested = serving_index.serving_index(str(path)).attested(serving_index.attest(TAG, AHEAD))
+    resolved = attested.resolve(PATH, DATASET, TAG)
+    assert resolved == serving_index.Resolution(None, "serving_index_unusable")
+    assert attested.facts(resolved)["attestation"] == serving_index.attest(TAG, AHEAD).facts()
 
 
 # ---- the command ------------------------------------------------------------------------------------

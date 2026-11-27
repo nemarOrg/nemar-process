@@ -62,7 +62,7 @@
       "process": {
         "build": "source",
         "commit": null,
-        "version": "0.1.2-dev5"
+        "version": "0.1.2-dev7"
       },
       "profile": "dataset",
       "recipe": {
@@ -98,7 +98,7 @@
           44.4444,
           0.0222,
           "line_noise_50:below_threshold,line_noise_60:below_threshold",
-          "3146baf69b64269cf856c906072f8dc703f445993e16d32663819b39d4a4ec8e"
+          "fa97f110505476f68b9fa05b90c62a58cc360b7966eaadf2a0f6d09e62416e99"
         ]
       ],
       "recordings_table": {
@@ -135,20 +135,20 @@
         "location": "desc-nemarica_recordings.tsv",
         "rows_in_record": 1,
         "rows_truncated": 0,
-        "sha256": "82739e0f42cc2adf7554f68812641dc299000911d02925d9a1ebd4012a49ea9f",
+        "sha256": "b1249f8328d40437d3c8855fe3cc45d85c80190f9e56172a6bc2338881abc0f3",
         "size": 728
       },
       "report": {
         "discovered_count": 1,
         "engine_version": "nemar-ica@1.0.0-b2/eegprep==0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3/sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "failed_count": 0,
-        "finished_utc": "2026-11-27T04:37:38Z",
+        "finished_utc": "2026-11-27T11:42:31Z",
         "pending_count": 0,
         "process": "nemar-ica",
         "records": [],
         "records_truncated": 0,
         "source_commit": "5555555555555555555555555555555555555555",
-        "started_utc": "2026-11-27T04:37:34Z",
+        "started_utc": "2026-11-27T11:42:28Z",
         "succeeded_count": 1
       },
       "run_id": "ica-views-e2e",
@@ -159,7 +159,7 @@
   },
   "pipelineInfo": {
     "description": "NEMAR decomposition, dataset level.",
-    "executionDate": "2026-11-27T04:37:38Z",
+    "executionDate": "2026-11-27T11:42:31Z",
     "name": "nemar-ica",
     "pipelineType": "ica",
     "version": "1.0.0-b2"

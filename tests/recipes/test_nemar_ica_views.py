@@ -1020,6 +1020,7 @@ def test_an_unusable_index_skips_the_views_of_the_serving_copy_with_its_own_word
         "source_commit": None,
         "row": None,
         "reason": "serving_index_unusable",
+        "attestation": None,
     }
     assert records.views_problems(product.record) == []
     check_view_files(tmp_path, product.record)
@@ -1060,6 +1061,7 @@ def test_with_its_row_in_the_serving_index_an_archive_run_declares_the_views_of_
             "n_samples": CUT_SAMPLES,
         },
         "reason": None,
+        "attestation": None,
     }
     transform = activity["transform"]["parameters"]
     block = nemar["ica"]
@@ -1310,7 +1312,79 @@ def test_a_stale_serving_index_skips_the_serving_views_with_its_own_word(
         "source_commit": built_from,
         "row": None,
         "reason": "serving_index_stale",
+        "attestation": None,
     }
+    assert records.views_problems(product.record) == []
+
+
+AHEAD = "b" * 40  # a commit after the tag's (SOURCE_COMMIT), where the serving index was built
+DELTA = (".gitattributes", ".github/workflows/nemar-validate.yml", ".nemar/metadata.json")
+
+
+def test_an_attested_index_of_a_later_commit_declares_the_views_of_the_copy_of_the_tag(
+    recording, fixture_fit, tmp_path
+):
+    """The owner's rulings of 2026-11-27: the run is handed the tag's commit, and the caller attests
+    that the index, built a few NEMAR-metadata commits later, describes the same files. The views of
+    the serving copy are declared on the index's row as for an index of the tag's own commit; the
+    record's identity says the tag's commit, and the index's commit is only the provenance the
+    attestation states."""
+    attestation = serving_index.attest(SOURCE_COMMIT, AHEAD, DELTA)
+    given = index_for(recording.path, source_commit=AHEAD).attested(attestation)
+    product = write(recording, fixture_fit, tmp_path, serving=given)
+    nemar = product.record["extensions"]["nemar"]
+    assert [view["key"] for view in nemar["views"]] == [
+        "icmaps",
+        "icactivity",
+        "midsegment",
+        *PLUGIN_VIEWS,
+    ]
+    assert "views_skipped" not in nemar
+    assert nemar["dataset"]["source_commit"] == SOURCE_COMMIT  # the run's: the version's tag
+    assert nemar["ica"]["serving_index"] == {
+        "sha256": given.sha256,
+        "dataset_id": DATASET_ID,
+        "source_commit": AHEAD,  # what the index names
+        "row": {
+            "path": recording.path,
+            "group": SERVING_GROUP,
+            "rate": 200.0,
+            "n_samples": CUT_SAMPLES,
+        },
+        "reason": None,
+        "attestation": {
+            "tag_commit": SOURCE_COMMIT,
+            "index_commit": AHEAD,
+            "equivalence": "metadata_only",
+            "delta_paths": list(DELTA),
+            "invariant": "same_files_as_tag",
+            "commit_check": "attested_by_caller",
+        },
+    }
+    (tmp_path / "exact").mkdir()
+    exact = write(recording, fixture_fit, tmp_path / "exact", serving=index_for(recording.path))
+    # the views name the same store and group as a run given an index of the tag's own commit
+    for key in ("icactivity", "midsegment"):
+        assert views_of(product)[key]["inputs"] == views_of(exact)[key]["inputs"]
+    assert records.views_problems(product.record) == []
+    check_view_files(tmp_path, product.record)
+
+
+def test_an_attested_index_that_names_another_commit_than_attested_is_stale(
+    recording, fixture_fit, tmp_path
+):
+    """Fail closed: an index whose commit is not the one attested (here the tag's own, which the
+    caller said it was not) names no group, and the record keeps the attestation and why."""
+    attestation = serving_index.attest(SOURCE_COMMIT, AHEAD, DELTA)
+    given = index_for(recording.path).attested(attestation)
+    product = write(recording, fixture_fit, tmp_path, serving=given)
+    nemar = product.record["extensions"]["nemar"]
+    assert nemar["views_skipped"] == [
+        {"key": "icactivity", "kind": "nemar.ic-activity", "reason": "serving_index_stale"},
+        {"key": "midsegment", "kind": "nemar.signal-window", "reason": "serving_index_stale"},
+    ]
+    assert nemar["ica"]["serving_index"]["attestation"] == attestation.facts()
+    assert nemar["ica"]["serving_index"]["row"] is None
     assert records.views_problems(product.record) == []
 
 

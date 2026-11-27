@@ -127,6 +127,8 @@ def test_the_flags_parse_what_the_attestation_checks():
         ".nemar/a\nb",
         ".nemar/a\udcffb",  # an argument that is not UTF-8, as Python reads it
         "/.nemar/x",
+        ".gitattributes",  # the serving index admits it (serving_index.delta_path); this rule does not
+        "sub-01/.gitattributes",
     ):
         with pytest.raises(ValueError):
             zarr_input.delta_path(bad)
