@@ -48,7 +48,8 @@ import urllib.request
 from typing import Any, NamedTuple
 
 from . import __version__
-from .codes import Failure, Stopped
+from .codes import Stopped
+from .provenance import Log, image_missing, pull_failure
 
 IMAGE_REPOSITORY = "ghcr.io/nemarorg/nemar-python"
 SIF_REPOSITORY = "ghcr.io/nemarorg/nemar-python-sif"
@@ -405,10 +406,14 @@ def pull_sif(
     scratch: str,
     stop: threading.Event,
     allow: Any = None,
+    *,
+    log: Log,
 ) -> str:
     """Pull the signed SIF artifact by its manifest digest into a hidden part file under ``sif_root``,
     hash it against the proof's layer and rename it to ``<hex>.sif``. A failed pull is
-    ``image_missing``; a file that does not hash to the layer is ``Unverified("layer_mismatch")``. The
+    ``image_missing``, its reason in ``log`` (``sif_pull_failed (exit N)``, ``sif_pull_timeout``,
+    ``sif_pull_not_started``, or ``sif_pull_empty`` for an exit 0 that wrote nothing); a file that does
+    not hash to the layer is ``Unverified("layer_mismatch")``. The
     part file is removed whatever goes wrong. ``allow`` is called with the pull's command line first
     (the fence's window). Stale part files of this image are removed first."""
     final = os.path.join(sif_root, digest_hex + ".sif")
@@ -434,9 +439,12 @@ def pull_sif(
     if allow is not None:
         allow(argv)
     try:
+        started = time.monotonic()
         status, _ = _run(argv, env, PULL_SECONDS, stop)
-        if status != 0 or not os.path.isfile(part) or os.path.getsize(part) == 0:
-            raise Failure("runtime_error", "image_missing", "the image could not be pulled")
+        if status != 0:
+            raise pull_failure(status, started, PULL_SECONDS, log, "sif_pull")
+        if not os.path.isfile(part) or os.path.getsize(part) == 0:
+            raise image_missing(log, "sif_pull_empty")
         if file_sha256(part, stop) != proof.layer:
             raise Unverified("layer_mismatch", "pulled")
         os.replace(part, final)

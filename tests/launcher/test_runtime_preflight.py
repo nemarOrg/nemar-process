@@ -327,25 +327,27 @@ def uri(host: str) -> str:
     ],
 )
 def test_a_registry_that_is_not_on_the_allowlist_is_refused(host):
+    log = Log(None)
     with pytest.raises(Failure) as caught:
-        runtime.check_registry(uri(host), Env({}))
+        runtime.check_registry(uri(host), Env({}), log)
     assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    assert b" ERROR image_missing reason=registry_not_allowed\n" in log.snapshot(log.size())
 
 
 def test_ghcr_io_is_the_default_and_the_only_one():
-    runtime.check_registry(uri("ghcr.io"), Env({}))
+    runtime.check_registry(uri("ghcr.io"), Env({}), Log(None))
     with pytest.raises(Failure):
-        runtime.check_registry(uri("public.ecr.aws"), Env({}))
+        runtime.check_registry(uri("public.ecr.aws"), Env({}), Log(None))
 
 
 def test_the_allowlist_is_comma_separated_exact_and_may_be_empty():
     names = Env({b"NEMAR_ALLOWED_REGISTRIES": b" ghcr.io , public.ecr.aws,,127.0.0.1:5000 "})
     for host in ("ghcr.io", "public.ecr.aws", "127.0.0.1:5000"):
-        runtime.check_registry(uri(host), names)
+        runtime.check_registry(uri(host), names, Log(None))
     with pytest.raises(Failure):
-        runtime.check_registry(uri("127.0.0.1:5001"), names)
+        runtime.check_registry(uri("127.0.0.1:5001"), names, Log(None))
     with pytest.raises(Failure):
-        runtime.check_registry(uri("ghcr.io"), Env({b"NEMAR_ALLOWED_REGISTRIES": b""}))
+        runtime.check_registry(uri("ghcr.io"), Env({b"NEMAR_ALLOWED_REGISTRIES": b""}), Log(None))
 
 
 def test_a_launch_with_a_registry_off_the_list_pulls_and_runs_nothing(rig, engine):
@@ -357,7 +359,9 @@ def test_a_launch_with_a_registry_off_the_list_pulls_and_runs_nothing(rig, engin
             "sif": harness.SIF_NAME,
         },
     )
-    refused(rig, engine, launch(rig, engine, job), "image_missing")
+    result = launch(rig, engine, job)
+    refused(rig, engine, result, "image_missing")
+    assert "ERROR image_missing reason=registry_not_allowed\n" in result.log
     assert engine._read(".inspects") == []
 
 
@@ -459,7 +463,9 @@ def test_a_registry_entry_is_a_host(entry, ok):
 @pytest.mark.parametrize("volumes", ['{"/data": {}}', '{"/a": {}, "/b": {}}', "garbage", ""])
 def test_an_image_that_declares_a_volume_is_refused(rig, engine, volumes):
     Path(str(engine.record) + ".volumes").write_text(volumes)
-    refused(rig, engine, launch(rig, engine), "image_missing")
+    result = launch(rig, engine)
+    refused(rig, engine, result, "image_missing")
+    assert "ERROR image_missing reason=volumes_declared\n" in result.log
 
 
 @pytest.mark.parametrize("volumes", ["null", "{}"])

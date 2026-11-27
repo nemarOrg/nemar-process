@@ -15,16 +15,23 @@ from pathlib import Path
 import pytest
 from harness import SIF_NAME, Rig
 
-# The recipe tests' gate and fixtures (tests/recipe_plugin.py). A plugin and not a second conftest.py,
-# because a second one would take the name `conftest` that the launcher tests import from.
-pytest_plugins = ["recipe_plugin"]
+# The recipe tests' gate and fixtures (tests/recipe_plugin.py), and the Docker end to end's session image
+# (tests/docker_support.py). Plugins and not a second conftest.py, because a second one would take the
+# name `conftest` that the launcher tests import from.
+pytest_plugins = ["recipe_plugin", "docker_support"]
 
 REQUIRE = os.environ.get("NEMAR_REQUIRE_APPTAINER") == "1"
 BINARY = shutil.which("apptainer") or shutil.which("singularity")
 # The small public image the container tests run, pinned by digest (an OCI index). It is pulled
 # once and converted to a SIF; CI caches the result. Override with NEMAR_TEST_SIF for a local one.
+# Docker Hub's copy of the same digest is the second source, for a public.ecr.aws that refuses an
+# anonymous pull (tests/docker_support.py).
 TEST_IMAGE = (
     "docker://public.ecr.aws/docker/library/python"
+    "@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
+)
+TEST_IMAGE_MIRROR = (
+    "docker://docker.io/library/python"
     "@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
 )
 SKIP_REASON = (
@@ -59,8 +66,15 @@ def test_sif(tmp_path_factory) -> Path:
     if given:
         return Path(given)
     sif = tmp_path_factory.mktemp("sif") / "runtime.sif"
-    subprocess.run([BINARY, "build", "--force", str(sif), TEST_IMAGE], check=True)
-    return sif
+    for source in (TEST_IMAGE, TEST_IMAGE_MIRROR):
+        if (
+            subprocess.run([BINARY, "build", "--force", str(sif), source], check=False).returncode
+            == 0
+        ):
+            return sif
+    pytest.fail(
+        "neither registry served the test image: " + TEST_IMAGE + " or " + TEST_IMAGE_MIRROR
+    )
 
 
 @pytest.fixture

@@ -575,6 +575,7 @@ def test_any_other_runtime_value_is_the_image_missing_exit(rig, value):
     assert result.exit == 13
     assert result.result["failure_code"] == "runtime_error"
     assert result.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=runtime_unsupported\n" in result.log
     assert engine.runs() == []
     assert engine.pulls() == []
     assert rig.runtime_calls() == []
@@ -641,6 +642,17 @@ def test_a_pull_failure_is_image_missing_and_runs_nothing(rig):
     assert engine.runs() == []
     assert not [r for r in rig.server.requests if r.path.endswith("/bundle")]
     assert "pull access denied" not in result.launcher_text()  # the engine's words are not copied
+    assert "ERROR image_missing reason=pull_failed (exit 1)\n" in result.log  # its reason word is
+
+
+def test_a_pull_that_succeeds_but_leaves_no_image_is_image_missing_not_inspectable(rig):
+    engine = Engine(rig, "docker", present=False)
+    engine.mark(".pullnoimage")
+    result = launch(rig, engine)
+    assert (result.exit, result.result["detail"]) == (13, "image_missing")
+    assert len(engine.pulls()) == 1
+    assert engine.runs() == []
+    assert "ERROR image_missing reason=not_inspectable\n" in result.log
 
 
 def test_a_pull_that_never_finishes_is_image_missing(rig, monkeypatch):
@@ -650,6 +662,7 @@ def test_a_pull_that_never_finishes_is_image_missing(rig, monkeypatch):
     result = launch(rig, engine)
     assert result.exit == 13
     assert result.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=pull_timeout\n" in result.log
     Path(str(engine.record) + ".pullhang").unlink()
 
 
@@ -676,15 +689,17 @@ def test_an_engine_that_cannot_be_started_cannot_pull_an_image(tmp_path):
     broken = tmp_path / "docker"
     broken.write_text("#!/nonexistent/interpreter\n")
     broken.chmod(0o755)
+    log = Log(None)
     with pytest.raises(Failure) as caught:
         runtime.ensure_image(
             runtime.Engine("docker", str(broken)),
             REFERENCE,
             Env({b"PATH": b"/usr/bin"}),
             threading.Event(),
-            Log(None),
+            log,
         )
     assert caught.value.detail == "image_missing"
+    assert b" ERROR image_missing reason=pull_not_started\n" in log.snapshot(log.size())
 
 
 # ---- how the container ends ----------------------------------------------------------------------
@@ -876,12 +891,15 @@ def test_assess_reads_cpu_shares_from_each_engines_own_document():
 
 
 def test_selected_names_the_runtime():
-    assert runtime.selected(Env({})) == "apptainer"
-    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"apptainer"})) == "apptainer"
-    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"podman"})) == "podman"
+    log = Log(None)
+    assert runtime.selected(Env({}), log) == "apptainer"
+    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"apptainer"}), log) == "apptainer"
+    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"podman"}), log) == "podman"
+    assert log.size() == 0
     with pytest.raises(Failure) as caught:
-        runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}))
+        runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}), log)
     assert caught.value.detail == "image_missing"
+    assert b" ERROR image_missing reason=runtime_unsupported\n" in log.snapshot(log.size())
 
 
 def test_without_pull_an_absent_image_is_image_missing_and_nothing_is_pulled(rig):
@@ -890,9 +908,11 @@ def test_without_pull_an_absent_image_is_image_missing_and_nothing_is_pulled(rig
     engine = Engine(rig, "docker", present=False)
     env = Env({b"PATH": str(rig.bin_dir).encode()})
     docker = runtime.Engine("docker", str(rig.bin_dir / "docker"))
+    log = Log(None)
     with pytest.raises(Failure) as caught:
-        runtime.ensure_image(docker, REFERENCE, env, threading.Event(), Log(None), pull=False)
+        runtime.ensure_image(docker, REFERENCE, env, threading.Event(), log, pull=False)
     assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    assert b" ERROR image_missing reason=absent\n" in log.snapshot(log.size())
     assert engine.pulls() == []
     present = Engine(rig, "docker", present=True)
     runtime.ensure_image(docker, REFERENCE, env, threading.Event(), Log(None), pull=False)

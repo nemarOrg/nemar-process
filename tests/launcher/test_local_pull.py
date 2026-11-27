@@ -211,6 +211,18 @@ def test_docker_verifies_a_present_image_and_does_not_pull_it(docker_rig):
     assert [c["argv"][0] for c in docker_rig.cosign_calls()] == ["version", "verify"]
 
 
+def test_docker_a_verified_digest_the_registry_refuses_is_image_missing_with_its_reason(docker_rig):
+    Path(str(docker_rig.rig.record) + ".pullfail").write_text("1")
+    docker_rig.spec()
+    launch = docker_rig.run()
+    assert (launch.exit, launch.result["detail"]) == (13, "image_missing")
+    assert len(docker_rig.rig.calls(".pulls")) == 1
+    assert docker_rig.rig.calls() == []  # nothing ran
+    assert "ERROR image_missing reason=pull_failed (exit 1)\n" in launch.log
+    # the engine's words are not copied
+    assert "pull access denied" not in launch.log + launch.stderr
+
+
 def unverified(launch, reason: str) -> None:
     assert (launch.exit, launch.result["detail"]) == (13, "image_unverified")
     assert "image_unverified reason={}".format(reason) in launch.log
@@ -356,6 +368,7 @@ def test_apptainer_failures_leave_no_part_file_and_run_nothing(sif_rig, case):
     launch = sif_rig.run()
     if case == "pullfail":
         assert (launch.exit, launch.result["detail"]) == (13, "image_missing")
+        assert "ERROR image_missing reason=sif_pull_failed (exit 1)\n" in launch.log
     else:
         unverified(launch, {"layer": "layer_mismatch", "manifest": "manifest_mismatch"}[case])
     assert list(sif_rig.rig.sif_root.iterdir()) == []

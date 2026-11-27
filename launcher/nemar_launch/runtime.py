@@ -119,7 +119,7 @@ from .codes import (
     Failure,
     Stopped,
 )
-from .provenance import Log
+from .provenance import Log, image_missing, pull_failure
 from .run import (
     TERM_GRACE_SECONDS,
     Bind,
@@ -181,14 +181,15 @@ CPU_SHARES = 2
 PULL_POLICIES = ("missing", "never")
 
 
-def selected(env: Env) -> str:
-    """``apptainer`` (unset, or said), ``docker`` or ``podman``; anything else is ``image_missing``."""
+def selected(env: Env, log: Log) -> str:
+    """``apptainer`` (unset, or said), ``docker`` or ``podman``; anything else is ``image_missing``
+    (``runtime_unsupported`` in the log)."""
     value = env.get(ENV_CONTAINER_RUNTIME)
     if value is None or value == APPTAINER:
         return APPTAINER
     if value in ENGINE_RUNTIMES:
         return value
-    raise Failure("runtime_error", "image_missing", "the container runtime named is not supported")
+    raise image_missing(log, "runtime_unsupported")
 
 
 def refuse_unsupported(engine: str, log: Log | None = None) -> None:
@@ -421,13 +422,14 @@ def allowed_registries(env: Env) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def check_registry(reference: str, env: Env) -> None:
+def check_registry(reference: str, env: Env, log: Log) -> None:
     """The reference's registry (everything before the first ``/``) must be on the allowlist, by
     exact match: a loopback address, an IP literal, a name with user information (``a@b``) or a
-    bare Docker Hub name is refused unless it is named. ``image_missing``, before anything is pulled."""
+    bare Docker Hub name is refused unless it is named. ``image_missing`` (``registry_not_allowed`` in
+    the log), before anything is pulled."""
     registry = reference.split("/", 1)[0]
     if registry not in allowed_registries(env):
-        raise Failure("runtime_error", "image_missing", "the image registry is not allowed")
+        raise image_missing(log, "registry_not_allowed")
 
 
 def check_mount_sources(binds: list[Bind]) -> None:
@@ -793,6 +795,7 @@ def ensure_image(
     with the image already cached never needs the registry). An image whose configuration declares
     a ``VOLUME`` is ``image_missing`` too: the engine would mount a writable volume that is none of
     the declared binds. A set ``stop`` event (SIGTERM) ends any of these at once with ``Stopped``.
+    Each ``image_missing`` names its reason in the log (``provenance.image_missing``).
 
     ``pull`` False (the standalone entry) never pulls: an absent image is ``image_missing`` at once.
     """
@@ -801,20 +804,19 @@ def ensure_image(
     if status == 0:
         log.info("image: present locally")
     elif not pull:
-        raise Failure(
-            "runtime_error", "image_missing", "the image is not present and is not pulled"
-        )
+        raise image_missing(log, "absent")
     else:
         log.info("image: pulling")
+        started = time.monotonic()
         pulled, _ = _run(engine, ["pull", "--quiet", reference], env, PULL_SECONDS, stop)
         if pulled != 0:
-            raise Failure("runtime_error", "image_missing", "the image could not be pulled")
+            raise pull_failure(pulled, started, PULL_SECONDS, log)
         log.info("image: pulled")
         status, output = _run(engine, inspect, env, INSPECT_SECONDS, stop, capture=True)
         if status != 0:
-            raise Failure("runtime_error", "image_missing", "the image cannot be inspected")
+            raise image_missing(log, "not_inspectable")
     if _volumes_declared(output):
-        raise Failure("runtime_error", "image_missing", "the image declares volumes")
+        raise image_missing(log, "volumes_declared")
 
 
 def oom_killed(engine: Engine, name: str, env: Env) -> bool:

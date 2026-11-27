@@ -389,12 +389,14 @@ class LocalImage(service.Image):
         self._pinned: tuple[str, tuple[int, int, int, int]] | None = None
         self._log: Log | None = None
 
-    def locate(self, job: spec.Job, env: Env) -> str:
+    def locate(self, job: spec.Job, env: Env, log: Log) -> str:
         if not self.pull:
-            return run.resolve_sif(job, env)
+            return run.resolve_sif(job, env, log)
         root = env.get(ENV_SIF_ROOT)
-        if not root or not os.path.isdir(root):
-            raise Failure("runtime_error", "image_missing", "the image directory is missing")
+        if not root:
+            raise runtime.image_missing(log, "sif_root_unset")
+        if not os.path.isdir(root):
+            raise runtime.image_missing(log, "sif_root_missing")
         return os.path.join(root, job.image["sif"])  # verified, or pulled, by acquire
 
     def acquire(
@@ -445,7 +447,7 @@ class LocalImage(service.Image):
                 cosign = verify.find_cosign(self.cosign, path)
                 home = verify.cosign_home(scratch)
                 proof = self._pull_sif(
-                    apptainer, sif, digest_hex, cosign, path, home, env, scratch, terminator
+                    apptainer, sif, digest_hex, cosign, path, home, env, scratch, terminator, log
                 )
             pinned = self._pin(sif, scratch, proof, terminator)
         if proof is not None:
@@ -529,11 +531,12 @@ class LocalImage(service.Image):
             verify.verified_digests(out, "sha256:" + digest_hex)
             if present != 0:
                 log.info("image: pulling the verified digest")
+                started = time.monotonic()
                 pulled, _ = runtime._run_argv(
                     pull, engine.environment(env), runtime.PULL_SECONDS, stop
                 )
                 if pulled != 0:
-                    raise Failure("runtime_error", "image_missing", "the image could not be pulled")
+                    raise runtime.pull_failure(pulled, started, runtime.PULL_SECONDS, log)
         self.verification = {"by": "cosign", "kind": "image", "cosign_version": version}
 
     def _pull_sif(
@@ -547,6 +550,7 @@ class LocalImage(service.Image):
         env: Env,
         scratch: str,
         terminator: run.Terminator,
+        log: Log,
     ) -> verify.SifProof:
         """Apptainer: cosign verifies the SIF artifact found by its tag; the launcher reads that
         artifact's manifest by the digest cosign named from the registry, and a missing file is pulled
@@ -580,6 +584,7 @@ class LocalImage(service.Image):
                     scratch,
                     stop,
                     self.fenced.allow,
+                    log=log,
                 )
         self.verification = {
             "by": "cosign",

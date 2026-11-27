@@ -85,7 +85,7 @@ def acquire(lrig, scratch):
     }
     job = spec.LocalSpec(document, "0" * 64)
     env = Env({b"NEMAR_SIF_ROOT": str(lrig.sif_root).encode()})
-    sif = image.locate(job, env)
+    sif = image.locate(job, env, Log(None))
     path = image.acquire(
         "apptainer",
         None,
@@ -171,7 +171,7 @@ def test_the_fence_is_told_the_pinned_image(lrig, tmp_path):
             None,
             job,
             "x",
-            image.locate(job, env),
+            image.locate(job, env, Log(None)),
             env,
             str(scratch),
             run.Terminator(),
@@ -284,3 +284,28 @@ def test_a_root_owned_read_only_image_is_accepted():
         if info.st_uid != 0 or info.st_mode & 0o022:
             pytest.skip("{} is not root-owned and closed here".format(path))
         local._owned_stat(info, directory=directory, word="sif_unsafe")
+
+
+@pytest.mark.parametrize("case", ["unset", "not_a_directory"])
+def test_with_pull_a_sif_root_that_is_unset_or_no_directory_is_image_missing(tmp_path, case):
+    """``--pull`` names the file it will pull into: the root must be set and be a directory."""
+    document = {
+        "runtime": "image",
+        "command": ["true"],
+        "args": [],
+        "image": {"uri": "x", "digest": "sha256:" + IMAGE_HEX, "sif": SIF_NAME},
+        "env": {},
+        "resources": {"gpus": 0},
+        "datasets": [],
+    }
+    job = spec.LocalSpec(document, "0" * 64)
+    a_file = tmp_path / "a-file"
+    a_file.write_text("not a directory")
+    root = b"" if case == "unset" else str(a_file).encode()
+    log = Log(None)
+    with pytest.raises(Failure) as caught:
+        local.LocalImage(pull=True).locate(job, Env({b"NEMAR_SIF_ROOT": root}), log)
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    reason = "sif_root_unset" if case == "unset" else "sif_root_missing"
+    line = " ERROR image_missing reason={}\n".format(reason).encode()
+    assert line in log.snapshot(log.size())

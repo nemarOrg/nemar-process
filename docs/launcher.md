@@ -111,7 +111,7 @@ The container then gets exactly that GPU, or none:
 With `NEMAR_CONTAINER_RUNTIME=docker` the launcher runs the same image digest through Docker instead of Apptainer, for a host that has a rootful Docker daemon and no Apptainer.
 With `NEMAR_CONTAINER_RUNTIME=podman` it runs it through rootless Podman, and only through the one verified path of [Podman](#podman-one-verified-path).
 Unset or `apptainer` is the path described everywhere else on this page, byte for byte unchanged.
-Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing`, before anything is fetched.
+Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing` (`runtime_unsupported` in the log), before anything is fetched.
 On a shared host, where only rootless engines are allowed, rootless Docker is refused, so Apptainer and rootless Podman through that path are the engines there.
 
 ### Podman, one verified path
@@ -209,10 +209,11 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Each entry must be a host: it holds a dot or a colon, or is `localhost`, and has no `/`, `@` or white space.
   A bare word such as `myorg` is a Docker Hub namespace to Docker and a short name resolved through search registries to Podman, so it ends the launch at the start with exit 13 and detail `invalid_spec`.
   A loopback address, an IP literal, a name with user information and a bare Docker Hub name are refused unless named.
-  Detail `image_missing`.
+  Detail `image_missing` (`registry_not_allowed` in the log).
 - The image is present or can be pulled, and its configuration declares no `VOLUME`: an image volume is a writable mount outside the declared binds.
   The launcher asks `image inspect` (a pull only when the image is absent, with the digest verified by the engine), and a pull that fails or takes longer than 30 minutes, or an image with a declared volume, is `image_missing`.
   A cancel ends a pull at once, and the engine's own words are never copied into the log.
+  The log names the reason in their place, as `image_missing reason=<word>`: `pull_failed (exit <status>)` (the engine ran and refused: a registry that refused the pull, an anonymous pull quota per source address for one, a digest the registry does not serve, or no network), `pull_timeout`, `pull_not_started` (the engine could not be started), `not_inspectable` (pulled, but `image inspect` cannot find it), `volumes_declared`, or, for the standalone entry without `--pull`, `absent`.
 
 ### For a runner's doctor
 
@@ -313,8 +314,12 @@ Residuals, stated plainly:
 `tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a `--cpu-shares` below 2, a duplicate mount point).
 `tests/launcher/test_runtime_podman.py` runs Podman's sequence against the same stand-in, which refuses any call without the prevention and writes the CI fixture's OCI configuration on `init`, and shows a refused configuration removing the container before the entry runs and every other Podman path recording no call; `tests/launcher/test_podman_oci_config.py` runs the check on the fixture and on copies of it with one change each (no Podman needed); and `tests/launcher/test_group_kill.py` shows the group kill with a real child and grandchild.
 `tests/launcher/test_podman_e2e.py` (marker `podman`) runs against a real rootless Podman in CI's `podman (rootless)` job (`NEMAR_REQUIRE_PODMAN=1`; site files are written through `sudo -n` only there, with `NEMAR_PODMAN_E2E_SUDO=1`): the clean case, each configuration path prevented through the launcher and refused by the check when the prevention is bypassed, and the FIPS mounts refused; elsewhere it is skipped with that reason.
-`tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`.
+`tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`; a digest no registry serves shows the launcher's own pull refused by the real engine as `image_missing reason=pull_failed`.
 It skips where there is no usable daemon and fails in the CI job that sets `NEMAR_REQUIRE_DOCKER=1`.
+The test image is pulled once per session, before the launches, by the `docker_image` fixture of `tests/docker_support.py` (a plugin of `tests/conftest.py`), from the first registry that serves its digest (`public.ecr.aws`, then Docker Hub), in up to four rounds with a growing wait between them: anonymous pulls are capped per source address (public.ecr.aws answers "Data limit exceeded" past 500 GB a month), and a CI runner shares its address with other tenants.
+Each pull gets at most 3 minutes and the whole of it 12, well inside the docker job's 30 and the release gate step's 20.
+A pull no registry serves fails the test with each registry's words, never a skip.
+The Apptainer tests' SIF of the same digest is built the same way, `public.ecr.aws` then Docker Hub, in the workflows' "Build the test image" steps (on a cache miss: the cache key is the digest) and in `tests/conftest.py`.
 
 ## The launch specification
 
@@ -400,7 +405,7 @@ The local copy and the data plane's routes use the same string.
 
 **The image file is named by the image digest.**
 `image.sif` must equal the 64 hexadecimal digits of `image.digest`, then `.sif`, and `image.uri` must end with `image.digest`; any other value is `invalid_spec` (NEMAR's encoder never writes one).
-The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it).
+The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (`sif_root_unset` in the log; there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it: `sif_outside_root`) and be a file (`sif_absent`).
 The launcher does not hash the image: only its name ties it to the digest.
 
 The launcher reads the environment value as bytes (`os.environb`), decodes it, hashes the JSON text it decodes to before it parses that text, and records the SHA-256 as `launch_spec_digest` in `provenance.json`, even for a text it then refuses.
@@ -639,6 +644,27 @@ The three results refusals `results_too_large`, `results_quota_exceeded` and `to
 
 Who pays: a detail is the platform's, and the job is refunded, if and only if a submitter cannot cause it with a valid specification and bundle (`codes.PLATFORM_LAUNCHER_DETAILS`): everything above except `unsafe_archive`, `archive_too_large`, `bad_include`, `too_many_files`, `too_many_bytes`, `entry_failed`, `terminated`, `outputs_unreadable`, `results_too_large`, `results_quota_exceeded` and `too_many_outputs`, which are the submitter's and are charged, even under a fetch code.
 A signal death of the entry is reported as 128 plus the signal, as a shell does, in `entry_exit_code`.
+
+**Every `image_missing` names its reason in the log**, as `image_missing reason=<word>` with at most a number in brackets, from a closed list (`provenance.IMAGE_MISSING_REASONS`); the words are log words only, and the detail stays `image_missing` for every one:
+
+| Reason | When |
+|---|---|
+| `runtime_unsupported` | `NEMAR_CONTAINER_RUNTIME` names no runtime the launcher drives |
+| `registry_not_allowed` | the image's registry is not on `NEMAR_ALLOWED_REGISTRIES` |
+| `absent` | the standalone entry without `--pull`: the engine does not have the image |
+| `pull_failed (exit <status>)` | the engine ran the pull and refused: a registry that refused it (an anonymous pull quota per source address, for one), a digest it does not serve, or no network |
+| `pull_timeout` | the engine's pull did not finish in 30 minutes, and was killed |
+| `pull_not_started` | the engine could not be started to pull |
+| `not_inspectable` | pulled, but `image inspect` cannot find it |
+| `volumes_declared` | the image's configuration declares a `VOLUME` |
+| `sif_root_unset` | `NEMAR_SIF_ROOT` is unset or empty |
+| `sif_root_missing` | the standalone entry with `--pull`: `NEMAR_SIF_ROOT` is not a directory |
+| `sif_absent` | no image file named by the digest under `NEMAR_SIF_ROOT` |
+| `sif_outside_root` | the image file resolves outside `NEMAR_SIF_ROOT` |
+| `sif_pull_failed (exit <status>)` | the standalone entry with `--pull`: Apptainer ran the pull of the signed SIF artifact and refused |
+| `sif_pull_timeout` | that pull did not finish in 30 minutes, and was killed |
+| `sif_pull_not_started` | Apptainer could not be started to pull |
+| `sif_pull_empty` | that pull exited 0 and wrote no file, or an empty one |
 
 ## Environment
 

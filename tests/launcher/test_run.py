@@ -222,6 +222,7 @@ def test_a_missing_image_file_is_a_runtime_error_before_the_container_starts(rig
     launch = rig.launch(entry_spec(rig))
     assert launch.exit == 13
     assert launch.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=sif_absent\n" in launch.log
     assert rig.runtime_calls() == []
     assert not fetched(rig)  # the bundle was not downloaded for a missing image
 
@@ -240,8 +241,10 @@ def test_an_unset_or_empty_sif_root_has_no_fallback_and_is_image_missing(
     unset = dict(rig.env(None))
     del unset[b"NEMAR_SIF_ROOT"]
     unset[b"NEMAR_LAUNCH_SPEC"] = harness.encode_spec(entry_spec(rig))
+    log = rig.out / "launcher" / "launcher.log"
     assert launcher.main(unset, sleep=lambda s: None) == 13
     assert rig.runtime_calls() == []
+    assert "ERROR image_missing reason=sif_root_unset\n" in log.read_text()
     rig.reset_out()
     empty = dict(unset)
     empty[b"NEMAR_SIF_ROOT"] = b""
@@ -249,6 +252,7 @@ def test_an_unset_or_empty_sif_root_has_no_fallback_and_is_image_missing(
     assert rig.runtime_calls() == []
     result = json.loads((rig.out / "launcher" / "result.json").read_text())
     assert result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=sif_root_unset\n" in log.read_text()
 
 
 def test_a_sif_that_is_a_symlink_out_of_the_root_is_image_missing(rig, tmp_path):
@@ -259,6 +263,7 @@ def test_a_sif_that_is_a_symlink_out_of_the_root_is_image_missing(rig, tmp_path)
     launch = rig.launch(entry_spec(rig))
     assert launch.exit == 13
     assert launch.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=sif_outside_root\n" in launch.log
     assert rig.runtime_calls() == []
 
 
