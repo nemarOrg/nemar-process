@@ -4,9 +4,11 @@ The node holds no storage credential. After the documents are written the launch
 
 1. ``POST <api_base>/compute/jobs/<job_id>/outputs`` with the job token: every output's ``path``,
    ``size`` and ``sha256`` and the sizes of the four launcher files. The request is validated
-   against the schema's ``outputs_request`` and capped at ``OUTPUTS_REQUEST_MAX_BYTES`` (64 MiB, the
-   most the Worker's own limit can be; the Worker refuses more for a job with a lower result limit)
-   BEFORE it is sent, and encoded once: a retry or a re-request sends the same bytes. NEMAR answers with one presigned PUT address per file, or refuses (a size cap, a quota);
+   against the schema's ``outputs_request`` and capped at ``OUTPUTS_REQUEST_MAX_BYTES`` (64 MiB,
+   the most the Worker's own limit can be; the Worker refuses more for a job with a lower result
+   limit) BEFORE it is sent, and encoded once: a retry or a re-request sends the same bytes. NEMAR
+   answers with one presigned PUT address per file (read up to a bound that grows with the number
+   of files, ``outputs_response_limit``), or refuses (a size cap, a quota);
 2. PUTs each file to its address (outputs four at a time, three attempts each with backoff, no
    redirect followed, the token NOT sent): the outputs first, then the launcher files with
    ``result.json`` LAST. The launcher files are sent from MEMORY (the documents and a snapshot of
@@ -61,6 +63,20 @@ class UploadFailed(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail if is_word(detail) else "upload_failed"
+
+
+# The room the outputs answer gets for each file, on top of net.MAX_JSON_RESPONSE: an upload item
+# holds the path (512 UTF-16 units, at most 3,072 bytes as JSON escapes) and a presigned address
+# that carries the path again, percent-encoded (at most 9 bytes a unit, 4,608), with its host and
+# signature; 8 KiB holds both, and the 64 MiB base adds about 670 bytes a file even at 100,000
+# files. The Worker's own bound on what it answers is nemarOrg/nemar-cli#2499.
+OUTPUTS_RESPONSE_ENTRY_BYTES = 8 * 1024
+
+
+def outputs_response_limit(files: int) -> int:
+    """The most bytes of the outputs route's answer the launcher reads for ``files`` files (the
+    outputs and the launcher's four); a longer answer is ``too_large``."""
+    return net.MAX_JSON_RESPONSE + files * OUTPUTS_RESPONSE_ENTRY_BYTES
 
 
 def _detail(failure: net.HttpFailure, refused: str) -> str:
@@ -144,6 +160,7 @@ class Uploader:
 
     def _request_plan(self) -> dict[str, str]:
         url = self._base + "/outputs"
+        limit = outputs_response_limit(len(self._body["outputs"]) + len(self._body["launcher"]))
 
         def note(attempt: int, failure: net.HttpFailure, delay: float) -> None:
             self.log.warning(
@@ -154,7 +171,9 @@ class Uploader:
 
         try:
             _status, answer = net.retrying(
-                lambda _n: net.post_json(url, self._data, self.job.job_token, self.lease),
+                lambda _n: net.post_json(
+                    url, self._data, self.job.job_token, self.lease, response_limit=limit
+                ),
                 attempts=net.ATTEMPTS,
                 sleep=self.sleep,
                 on_retry=note,
