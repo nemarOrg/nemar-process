@@ -123,7 +123,7 @@ PROGRESS_JOB = "nemar-cli-progress-latest"
 PROGRESS_PIN = json.loads(
     (ts.ROOT / "tests" / "contract" / "nemar-cli-progress-pin.json").read_text()
 )
-PROGRESS_BRANCH = "feature/issue-2324-epic-pipeline-progress"
+PROGRESS_BRANCH = "dev"
 
 
 def test_the_progress_job_says_a_failed_comparison_and_never_unchanged(tmp_path):
