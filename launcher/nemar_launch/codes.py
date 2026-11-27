@@ -104,10 +104,25 @@ ENV_SLURM_END_TIME = "SLURM_JOB_END_TIME"
 ENV_SLURM_JOB_ID = "SLURM_JOB_ID"
 
 # The limits the Worker enforces on a job's results (nemar-cli: `COMPUTE_MAX_OUTPUT_FILES` and
-# `RESULT_MAX_FILE_BYTES` in shared/contract/compute.ts; the request cap is the Worker's own).
+# `RESULT_MAX_FILE_BYTES` in shared/contract/compute.ts).
 MAX_OUTPUT_FILES = 100_000
 MAX_OUTPUT_FILE_BYTES = 5_000_000_000
-OUTPUTS_REQUEST_MAX_BYTES = 1024 * 1024
+
+# How the Worker bounds the outputs request body (nemar-cli: `OUTPUT_ENTRY_BYTES_MAX`,
+# `OUTPUTS_BODY_BASE_BYTES`, `OUTPUTS_BODY_FLOOR_BYTES` and `OUTPUTS_BODY_CEILING_BYTES` in
+# backend/src/services/compute-records.ts, compared by tests/contract/test_progress_drift.py). The
+# Worker is the authority: it reads at most `outputsBodyLimitBytes(maxFiles)`, which is
+# min(CEILING, max(FLOOR, BASE + maxFiles * ENTRY)) for the job's own result limit `maxFiles`.
+OUTPUT_ENTRY_BYTES_MAX = 1700
+OUTPUTS_BODY_BASE_BYTES = 8192
+OUTPUTS_BODY_FLOOR_BYTES = 1024 * 1024
+OUTPUTS_BODY_CEILING_BYTES = 64 * 1024 * 1024
+# The launcher's own cap on the request it sends. The launch specification does not carry the job's
+# result `maxFiles` (its `limits.max_files` bounds the dataset selection only), so the launcher
+# cannot derive the Worker's exact limit and takes the most the formula can give, the ceiling: it
+# never refuses a body the Worker would accept, and a body the Worker refuses is answered with the
+# Worker's own `too_many_outputs`.
+OUTPUTS_REQUEST_MAX_BYTES = OUTPUTS_BODY_CEILING_BYTES
 
 # The three refusal words the outputs route answers with that are the SUBMITTER's (nemar-cli:
 # RESULT_REFUSAL_DETAILS). A route's body names a `code`; the launcher records it as a detail only
