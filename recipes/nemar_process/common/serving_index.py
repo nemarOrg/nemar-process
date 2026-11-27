@@ -138,8 +138,8 @@ class Attestation:
 def attest(tag_commit: str, index_commit: str, delta_paths: Iterable[str] = ()) -> Attestation:
     """The caller's attestation of an index built at ``index_commit`` for a run of ``tag_commit``, or
     ``ValueError`` (a usage error) when it contradicts itself: a commit that is not 40 lower-case
-    hexadecimal digits, the two commits equal, more than ``MAX_DELTA_PATHS`` paths, or a path that is
-    not NEMAR-owned metadata. A path named twice is kept once."""
+    hexadecimal digits, the two commits equal, more than ``MAX_DELTA_PATHS`` paths (counted as given),
+    or a path that is not NEMAR-owned metadata. A path named twice is then kept once."""
     paths = tuple(delta_paths)
     if len(paths) > MAX_DELTA_PATHS:
         raise ValueError("at most {} --serving-index-delta-path values".format(MAX_DELTA_PATHS))
@@ -245,26 +245,34 @@ class ServingIndex:
         found = self.stores.get(row.path, ())
         return len(found) == 1 and found[0] == ((row.group, row.rate_hz, row.n_samples),)
 
-    def stands_for(self) -> str | None:
-        """The commit of the version this index stands for, as a record states it: the tag's commit
-        when the caller attested the commit the index names (the copy of version T, kept as having the
-        tag: the owner's rulings of 2026-11-27), else the commit the index names, or None when it names
-        none. An attested index that names another commit than the one attested stands for nothing
-        attested, so its record keeps the commit it names, which says why it gave no row."""
-        if self.attestation is not None and self.source_commit == self.attestation.index_commit:
-            return self.attestation.tag_commit
+    def stands_for(self, dataset_id: str | None) -> str | None:
+        """The commit of the version this index stands for in a run of the dataset ``dataset_id``, as a
+        record states it: the tag's commit when the index is of the run's dataset and names the commit
+        the caller attested (the copy of version T, kept as having the tag: the owner's rulings of
+        2026-11-27), else the commit the index names, or None when it names none. An attested index of
+        another dataset, or that names another commit than the one attested, stands for nothing
+        attested, so its record keeps the dataset and commit it names, which say why it gave no row."""
+        attestation = self.attestation
+        if (
+            attestation is not None
+            and self.dataset_id is not None
+            and self.dataset_id == dataset_id
+            and self.source_commit == attestation.index_commit
+        ):
+            return attestation.tag_commit
         return self.source_commit
 
-    def facts(self, resolved: Resolution) -> dict[str, Any]:
-        """What a record says of the index it was given (``extensions.nemar.ica.serving_index``): its
-        digest, the dataset it names and the commit of the version it stands for (``stands_for``: the
-        tag's under an attestation it matches, the index's own otherwise), the recording's row, or null
-        with the word for why there is none, and the caller's attestation (``Attestation.facts``, where
-        the commit the index was built from is ``index_commit``), or null without one."""
+    def facts(self, resolved: Resolution, dataset_id: str | None) -> dict[str, Any]:
+        """What a record of the run's dataset ``dataset_id`` says of the index it was given
+        (``extensions.nemar.ica.serving_index``): its digest, the dataset it names and the commit of the
+        version it stands for (``stands_for``: the tag's under an attestation it matches, the index's
+        own otherwise), the recording's row, or null with the word for why there is none, and the
+        caller's attestation (``Attestation.facts``, where the commit the index was built from is
+        ``index_commit``), or null without one."""
         return {
             "sha256": self.sha256,
             "dataset_id": self.dataset_id,
-            "source_commit": self.stands_for(),
+            "source_commit": self.stands_for(dataset_id),
             "row": None if resolved.row is None else resolved.row.facts(),
             "reason": resolved.reason,
             "attestation": None if self.attestation is None else self.attestation.facts(),

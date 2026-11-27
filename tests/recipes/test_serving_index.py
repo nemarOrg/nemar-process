@@ -41,7 +41,7 @@ def test_a_row_is_the_recordings_store_and_its_one_eeg_group():
     row = serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 75_000, index.sha256)
     assert resolved == serving_index.Resolution(row, None)
     assert index.lists(row)
-    assert index.facts(resolved) == {
+    assert index.facts(resolved, DATASET) == {
         "sha256": index.sha256,
         "dataset_id": DATASET,
         "source_commit": COMMIT,
@@ -86,8 +86,8 @@ def test_anything_else_has_no_row_and_nothing_is_guessed(rows, dataset_id, asked
     index = parsed(rows, dataset_id)
     resolved = index.resolve(PATH, asked, COMMIT)
     assert resolved == serving_index.Resolution(None, "not_in_serving_index")
-    assert index.facts(resolved)["row"] is None
-    assert index.facts(resolved)["reason"] == "not_in_serving_index"
+    assert index.facts(resolved, DATASET)["row"] is None
+    assert index.facts(resolved, DATASET)["reason"] == "not_in_serving_index"
 
 
 @pytest.mark.parametrize(
@@ -111,7 +111,7 @@ def test_an_index_of_another_commit_is_stale_and_has_no_row(built_from, run):
         index = parsed(source_commit=built_from)
     resolved = index.resolve(PATH, DATASET, run)
     assert resolved == serving_index.Resolution(None, "serving_index_stale")
-    assert index.facts(resolved)["reason"] == "serving_index_stale"
+    assert index.facts(resolved, DATASET)["reason"] == "serving_index_stale"
 
 
 def test_another_datasets_index_is_not_the_recordings_whatever_its_commit():
@@ -230,7 +230,7 @@ def test_a_file_that_cannot_be_read_is_refused_by_a_phrase_that_names_no_path(tm
     assert (given.unusable, given.sha256) == (True, None)
     resolved = given.resolve(PATH, DATASET, COMMIT)
     assert resolved == serving_index.Resolution(None, serving_index.UNUSABLE)
-    assert given.facts(resolved)["reason"] == "serving_index_unusable"
+    assert given.facts(resolved, DATASET)["reason"] == "serving_index_unusable"
 
 
 @pytest.mark.parametrize(
@@ -248,7 +248,7 @@ def test_an_index_the_run_cannot_use_lists_nothing_and_says_why(tmp_path, data):
     assert given.sha256 == hashlib.sha256(data).hexdigest()
     resolved = given.resolve(PATH, DATASET, COMMIT)
     assert resolved == serving_index.Resolution(None, "serving_index_unusable")
-    assert given.facts(resolved) == {
+    assert given.facts(resolved, DATASET) == {
         "sha256": hashlib.sha256(data).hexdigest(),
         "dataset_id": None,
         "source_commit": None,
@@ -435,14 +435,14 @@ def test_an_attested_index_of_the_later_commit_gives_the_row_for_a_run_of_the_ta
     record states the attestation beside what the index names."""
     index = parsed(source_commit=AHEAD)
     assert index.resolve(PATH, DATASET, TAG).reason == "serving_index_stale"  # unattested: exact
-    assert index.stands_for() == AHEAD  # unattested, an index stands for the commit it names
+    assert index.stands_for(DATASET) == AHEAD  # unattested, an index stands for the commit it names
     attested = index.attested(serving_index.attest(TAG, AHEAD, ON007823_DELTA))
-    assert attested.stands_for() == TAG  # the copy of version T, kept as having the tag
+    assert attested.stands_for(DATASET) == TAG  # the copy of version T, kept as having the tag
     resolved = attested.resolve(PATH, DATASET, TAG)
     row = serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 75_000, index.sha256 or "")
     assert resolved == serving_index.Resolution(row, None)
     assert attested.lists(row)
-    assert attested.facts(resolved) == {
+    assert attested.facts(resolved, DATASET) == {
         "sha256": index.sha256,
         "dataset_id": DATASET,
         "source_commit": TAG,  # the version it stands for; AHEAD is only the index_commit
@@ -490,7 +490,7 @@ def test_an_attested_index_gives_a_row_only_for_the_commits_attested(built_from,
     attested = index.attested(serving_index.attest(TAG, AHEAD, (".nemar/metadata.json",)))
     resolved = attested.resolve(PATH, DATASET, run)
     assert resolved == serving_index.Resolution(None, "serving_index_stale")
-    facts = attested.facts(resolved)
+    facts = attested.facts(resolved, DATASET)
     assert facts["attestation"]["index_commit"] == AHEAD
     # an index that names the attested commit stands for the tag even when the run is not the tag's;
     # one that names another commit keeps it, which says why it gave no row
@@ -498,12 +498,37 @@ def test_an_attested_index_gives_a_row_only_for_the_commits_attested(built_from,
 
 
 def test_an_attested_index_is_still_read_for_the_runs_dataset_first():
+    """Another dataset's index has no row, and stands for nothing attested: the record pairs the
+    dataset it names with the commit it names, never with the run's tag."""
     attested = parsed(dataset_id="xx000002", source_commit=AHEAD).attested(
         serving_index.attest(TAG, AHEAD)
     )
-    assert attested.resolve(PATH, DATASET, TAG).reason == "not_in_serving_index"
-    assert attested.resolve(OTHER, "xx000002", TAG).reason == "not_in_serving_index"
-    assert attested.stands_for() == TAG  # it names the attested commit, whatever dataset it is
+    resolved = attested.resolve(PATH, DATASET, TAG)
+    assert resolved.reason == "not_in_serving_index"
+    assert attested.stands_for(DATASET) == AHEAD
+    facts = attested.facts(resolved, DATASET)
+    assert (facts["dataset_id"], facts["source_commit"]) == ("xx000002", AHEAD)
+    # nor does an index that names no dataset, nor a run that names none
+    document = json.loads(text(source_commit=AHEAD))
+    del document["dataset_id"]
+    unnamed = serving_index.parse(json.dumps(document).encode("utf-8"))
+    unnamed = unnamed.attested(serving_index.attest(TAG, AHEAD))
+    assert unnamed.stands_for(DATASET) == AHEAD
+    assert unnamed.stands_for(None) == AHEAD  # neither naming a dataset is no match
+    assert attested.stands_for(None) == AHEAD
+
+
+def test_an_attested_index_of_the_runs_dataset_stands_for_the_tag_without_a_row_too():
+    """The copy is the tag's whatever it lists: an index of the run's dataset that names the attested
+    commit and has no store at the recording's path still stands for T, and S stays in the attestation."""
+    attested = parsed(rows=((OTHER, (EEG,)),), source_commit=AHEAD).attested(
+        serving_index.attest(TAG, AHEAD)
+    )
+    resolved = attested.resolve(PATH, DATASET, TAG)
+    assert resolved.reason == "not_in_serving_index"
+    facts = attested.facts(resolved, DATASET)
+    assert (facts["dataset_id"], facts["source_commit"]) == (DATASET, TAG)
+    assert facts["attestation"]["index_commit"] == AHEAD
 
 
 def test_an_attested_index_the_run_cannot_use_says_so_and_keeps_the_attestation(tmp_path):
@@ -512,8 +537,12 @@ def test_an_attested_index_the_run_cannot_use_says_so_and_keeps_the_attestation(
     attested = serving_index.serving_index(str(path)).attested(serving_index.attest(TAG, AHEAD))
     resolved = attested.resolve(PATH, DATASET, TAG)
     assert resolved == serving_index.Resolution(None, "serving_index_unusable")
-    assert attested.facts(resolved)["attestation"] == serving_index.attest(TAG, AHEAD).facts()
-    assert attested.facts(resolved)["source_commit"] is None  # it names none, so stands for none
+    assert (
+        attested.facts(resolved, DATASET)["attestation"] == serving_index.attest(TAG, AHEAD).facts()
+    )
+    assert (
+        attested.facts(resolved, DATASET)["source_commit"] is None
+    )  # it names none, so stands for none
 
 
 # ---- binding the attestation to the run (``options.bind``) -----------------------------------------------

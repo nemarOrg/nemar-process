@@ -1111,7 +1111,9 @@ def write_product(
         profile,
         browser_transform(recording, fit, written),
         browser_unavailable(fit),
-        None if serving is None or resolved is None else serving.facts(resolved),
+        None
+        if serving is None or resolved is None
+        else serving.facts(resolved, identity.dataset_id),
     )
     values = (
         block["rank"],

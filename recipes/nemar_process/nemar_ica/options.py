@@ -102,7 +102,8 @@ SERVING_INDEX_DELTA_PATH = Option(
     serving_index.delta_path,
     (),
     "a path changed between --source-commit and --serving-index-commit, NEMAR-owned metadata only: "
-    "under .nemar/ or .github/, or a .gitattributes file at any depth; repeatable, at most 32, none when "
+    "under .nemar/ or .github/, or a .gitattributes file at any depth; repeatable, at most 32 values "
+    "(counted as given, a path given twice then kept once), none when "
     "the commits change no file; requires --serving-index-commit",
     repeatable=True,
 )
@@ -114,7 +115,8 @@ def bind(given: Mapping[str, Any], identity: Identity) -> dict[str, Any]:
     index bound to the caller's attestation that it was built at that commit for the version whose tag
     commit is ``--source-commit`` (``serving_index.attest``), else the options as given. ``ValueError``,
     a usage error, for an attestation that contradicts the run or itself: delta paths with no commit, a
-    commit with no index or no ``--source-commit``, the two commits equal, or more than 32 paths."""
+    commit with no index or no ``--source-commit``, the two commits equal, or more than 32 values of
+    ``--serving-index-delta-path`` (counted as given)."""
     bound = dict(given)
     commit = given.get(SERVING_INDEX_COMMIT.name)
     paths = given.get(SERVING_INDEX_DELTA_PATH.name) or ()
