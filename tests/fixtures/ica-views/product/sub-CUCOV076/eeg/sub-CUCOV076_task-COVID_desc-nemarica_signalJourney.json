@@ -18,6 +18,7 @@
         },
         "ica_engine": "pamica-torch",
         "numpy": "2.5.4",
+        "onnxruntime": "1.32.0",
         "package": "eegprep",
         "pamica": "0.4.0",
         "python": "3.12.13",
@@ -560,6 +561,10 @@
         "gpu_name": null,
         "iclabel": {
           "network": "iclabel.onnx",
+          "onnxruntime_threads": {
+            "inter_op": "default",
+            "intra_op": "default"
+          },
           "version": "default",
           "weights_sha256": "1f16c67ebdbd8e6a30759ab628b61b693a0c4011e35a20e538acbebc1d4ebce4"
         },
@@ -646,6 +651,7 @@
         "torch_version": "2.12.1",
         "versions": {
           "eegprep": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
+          "onnxruntime": "1.32.0",
           "pamica": "0.4.0",
           "torch": "2.12.1"
         }
@@ -1119,8 +1125,8 @@
         {
           "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
           "role": "ica.json",
-          "sha256": "74cf01b67039965ffa2d3bafeae7169cfab955d908878bcec615f81f98e7cf32",
-          "size": 9601
+          "sha256": "4b67ddd4eafb5857eb1b59a0e1a0190d3e724ad0f592bcd65e5e4f41c6ea573f",
+          "size": 9723
         },
         {
           "columnLabels": [
@@ -1194,14 +1200,14 @@
           "size": 76263
         }
       ],
-      "plan_hash": "sha256:72413c60c53c4b430e66ff12853bb31f4e3f5d889654ef22fb34ec1d8c7c5059",
+      "plan_hash": "sha256:484a4e14ee568965f8ea642d2a8cdd42331b65bbf2c5db3448ce1d18cdabc3e1",
       "plugins": [
         {
           "checkpoint": "quality",
           "manifest_sha256": "872dc91506c34b747b7921d77c790a25fb98c6aeeea31890ae0936ad7938a88f",
           "name": "nemar-quality",
           "status": "ran",
-          "tree_sha256": "58563bc03e2f58a7abad959b8529aebdbde4c5f316ddd39c968ef97e18165e8b",
+          "tree_sha256": "03913210174a4d05cf7ce0193b09257e90851d3299a03f0a2dcb6739bded93bb",
           "version": "0.2.0"
         },
         {
@@ -1968,7 +1974,7 @@
   },
   "pipelineInfo": {
     "description": "NEMAR decomposition: the quality floor, ASR with its state, the average reference, pAMICA's independent components and ICLabel (eegprep).",
-    "executionDate": "2026-11-26T22:06:00Z",
+    "executionDate": "2026-11-27T04:37:38Z",
     "name": "nemar-ica",
     "pipelineType": "ica",
     "version": "1.0.0-b2"
@@ -1976,7 +1982,7 @@
   "processingSteps": [
     {
       "description": "Load recording",
-      "executionDateTime": "2026-11-26T22:05:56Z",
+      "executionDateTime": "2026-11-27T04:37:35Z",
       "inputSources": [
         {
           "entityLabels": {
@@ -2032,7 +2038,7 @@
         "load"
       ],
       "description": "Select the channels typed EEG",
-      "executionDateTime": "2026-11-26T22:05:56Z",
+      "executionDateTime": "2026-11-27T04:37:35Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after load",
@@ -2074,7 +2080,7 @@
         "signal_channels"
       ],
       "description": "Detect flat-line channels",
-      "executionDateTime": "2026-11-26T22:05:56Z",
+      "executionDateTime": "2026-11-27T04:37:35Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after signal_channels",
@@ -2111,7 +2117,7 @@
         "flatline"
       ],
       "description": "Remove slow drifts",
-      "executionDateTime": "2026-11-26T22:05:57Z",
+      "executionDateTime": "2026-11-27T04:37:35Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after flatline",
@@ -2161,7 +2167,7 @@
         "drift"
       ],
       "description": "Measure line noise",
-      "executionDateTime": "2026-11-26T22:05:57Z",
+      "executionDateTime": "2026-11-27T04:37:35Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after drift",
@@ -2239,7 +2245,7 @@
         "line_noise_measure"
       ],
       "description": "Detect bad channels",
-      "executionDateTime": "2026-11-26T22:05:57Z",
+      "executionDateTime": "2026-11-27T04:37:36Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after line_noise_measure",
@@ -2309,7 +2315,7 @@
         "bad_channels"
       ],
       "description": "Detect bad windows",
-      "executionDateTime": "2026-11-26T22:05:58Z",
+      "executionDateTime": "2026-11-27T04:37:36Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after bad_channels",
@@ -2402,7 +2408,7 @@
         "bad_windows"
       ],
       "description": "Quality metrics",
-      "executionDateTime": "2026-11-26T22:05:58Z",
+      "executionDateTime": "2026-11-27T04:37:36Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after bad_windows",
@@ -2452,7 +2458,7 @@
         "qc"
       ],
       "description": "Repair bursts with artifact subspace reconstruction, keeping its calibration state, and measure the share of samples it repairs",
-      "executionDateTime": "2026-11-26T22:05:58Z",
+      "executionDateTime": "2026-11-27T04:37:37Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after qc",
@@ -2516,7 +2522,7 @@
         "asr"
       ],
       "description": "Re-reference to the average of the good channels",
-      "executionDateTime": "2026-11-26T22:05:58Z",
+      "executionDateTime": "2026-11-27T04:37:37Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after asr",
@@ -2552,7 +2558,7 @@
         "reref"
       ],
       "description": "Decompose the repaired, re-referenced data into independent components",
-      "executionDateTime": "2026-11-26T22:05:59Z",
+      "executionDateTime": "2026-11-27T04:37:38Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after reref",
@@ -2680,7 +2686,7 @@
         "ica"
       ],
       "description": "Classify the components with ICLabel",
-      "executionDateTime": "2026-11-26T22:06:00Z",
+      "executionDateTime": "2026-11-27T04:37:38Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after ica",
@@ -2747,7 +2753,7 @@
         "iclabel"
       ],
       "description": "Quality plugin nemar-quality 0.2.0 (quality)",
-      "executionDateTime": "2026-11-26T22:06:00Z",
+      "executionDateTime": "2026-11-27T04:37:38Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after iclabel",
@@ -2813,7 +2819,7 @@
         "nemar-quality"
       ],
       "description": "Quality plugin nemar-spectrum 0.1.0 (quality)",
-      "executionDateTime": "2026-11-26T22:06:00Z",
+      "executionDateTime": "2026-11-27T04:37:38Z",
       "inputSources": [
         {
           "outputId": "EEG working copy after nemar-quality",

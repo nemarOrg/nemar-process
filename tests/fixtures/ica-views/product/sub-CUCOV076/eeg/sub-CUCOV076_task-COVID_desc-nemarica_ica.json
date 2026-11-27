@@ -524,6 +524,10 @@
   "gpu_name": null,
   "iclabel": {
     "network": "iclabel.onnx",
+    "onnxruntime_threads": {
+      "inter_op": "default",
+      "intra_op": "default"
+    },
     "version": "default",
     "weights_sha256": "1f16c67ebdbd8e6a30759ab628b61b693a0c4011e35a20e538acbebc1d4ebce4"
   },
@@ -612,6 +616,7 @@
   "torch_version": "2.12.1",
   "versions": {
     "eegprep": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
+    "onnxruntime": "1.32.0",
     "pamica": "0.4.0",
     "torch": "2.12.1"
   }
