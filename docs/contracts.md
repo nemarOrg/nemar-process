@@ -125,13 +125,13 @@ Since phase P5 it holds a fourth, the cases and refusals of `nemar.ic-activity.v
 Since phase P4 (ADR 0137 C6) the recipes write two more things that bundle checks: each recording's recipe metrics (`extensions.nemar.metrics`), every one held to `nsc:/definitions/qualityMetric.schema.json` with the recipe as its producer, and the dataset document `desc-<label>_dataquality.json`, held to `nsc:/extensions/dataQuality.schema.json` at `level: dataset` with the writer's rules beside it (`common/dataquality.py`, [recipes.md](recipes.md)); `tests/recipes/test_recipe_metrics.py` replays the record-check vectors' `metric_producer_mismatch` cases on bare names, and the retired `docs/schemas/qc-summary.v1.json` has no copy anywhere.
 It also holds the three contracts of the launcher's standalone entry (ADR 0134 decision 8, [standalone.md](standalone.md)): the local launch specification (`shared/contract/compute-local-launch.schema.json`, copied to `launcher/schema/compute-local-launch.v1.json`), the recipe progress file (`shared/contract/compute-recipe-progress.schema.json`, copied to `launcher/schema/compute-recipe-progress.v1.json`) and the results report (`shared/contract/compute-results-report.schema.json`, copied to `launcher/schema/compute-results-report.v1.json`).
 `test_the_local_launch_shares_the_launch_specifications_members_and_rules` holds the local launch specification's shared members equal to the launch specification's copy, across the two pins.
-The commit is on nemar-cli's pipeline progress epic branch (`feature/issue-2324-epic-pipeline-progress`): it stays reachable once that epic is merged into `dev` with a merge commit, and the pin then moves to the `dev` commit that holds the same bytes (only `ref` changes).
+The commit is on nemar-cli's `dev` branch, where the pipeline progress epic (nemarOrg/nemar-cli#2324) merged; the bundle copy is neuroschema 0.6.1, re-vendored by nemarOrg/nemar-cli#2411.
 
 - `test_each_copy_is_the_pinned_bytes` needs no checkout and always runs.
 - `test_each_copy_matches_nemar_cli_at_the_pinned_ref` and the constant tests compare with nemar-cli's own files at the pinned commit through `git show`, using a checkout named by `NEMAR_CLI_PROGRESS_DIR` or a `nemar-cli` directory beside this checkout.
   Without one they skip with a message that says the check did not run.
   In CI the `launcher` job checks out exactly the pinned commit (sparse, `shared/` and the job-token callbacks) and sets `NEMAR_REQUIRE_PROGRESS_DRIFT=1`, which turns that skip into a failure.
-- An advisory CI job, `nemar-cli-progress-latest` (in `nemar-cli-drift.yml`), warns without failing when nemar-cli's epic branch has changed the schema, the vectors, the counting rules, the recipe checkpoint maps or the runner schema since the pinned commit (or when the comparison cannot be made).
+- An advisory CI job, `nemar-cli-progress-latest` (in `nemar-cli-drift.yml`), warns without failing when nemar-cli's `dev` branch has changed the schema, the vectors, the counting rules, the recipe checkpoint maps or the runner schema since the pinned commit (or when the comparison cannot be made).
 
 ### Bumping the progress pin
 
