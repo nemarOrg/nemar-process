@@ -1344,7 +1344,7 @@ def test_an_attested_index_of_a_later_commit_declares_the_views_of_the_copy_of_t
     assert nemar["ica"]["serving_index"] == {
         "sha256": given.sha256,
         "dataset_id": DATASET_ID,
-        "source_commit": AHEAD,  # what the index names
+        "source_commit": SOURCE_COMMIT,  # the version the copy stands for: the tag's
         "row": {
             "path": recording.path,
             "group": SERVING_GROUP,
@@ -1361,6 +1361,12 @@ def test_an_attested_index_of_a_later_commit_declares_the_views_of_the_copy_of_t
             "commit_check": "attested_by_caller",
         },
     }
+    # _ica.json is the same block: the tag's commit, and the index's only as the attested index_commit
+    written = json.loads(named(tmp_path, "ica.json").read_text(encoding="utf-8"))
+    assert written["serving_index"] == nemar["ica"]["serving_index"]
+    assert AHEAD not in json.dumps(
+        {key: value for key, value in written["serving_index"].items() if key != "attestation"}
+    )
     (tmp_path / "exact").mkdir()
     exact = write(recording, fixture_fit, tmp_path / "exact", serving=index_for(recording.path))
     # the views name the same store and group as a run given an index of the tag's own commit
@@ -1385,6 +1391,8 @@ def test_an_attested_index_that_names_another_commit_than_attested_is_stale(
     ]
     assert nemar["ica"]["serving_index"]["attestation"] == attestation.facts()
     assert nemar["ica"]["serving_index"]["row"] is None
+    # it named another commit than attested: the record keeps the one it named (here the tag's own)
+    assert nemar["ica"]["serving_index"]["source_commit"] == given.source_commit
     assert records.views_problems(product.record) == []
 
 

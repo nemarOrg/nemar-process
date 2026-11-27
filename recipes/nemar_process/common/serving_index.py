@@ -29,9 +29,10 @@ one digest per version: the copy of version T, which is what the records say), a
 (``--serving-index-delta-path``), after it checked with GitHub's compare that S is ahead of T and that
 every changed path is NEMAR-owned metadata (``delta_path``). The invariant the caller attests is that
 every file the serving copy was built from (the recordings, their events and every other BIDS file) is
-the same, byte for byte, at S as at T. A row is then used when the index names S, and the record states
-the attestation beside the index (``Attestation.facts``): T is the run's commit, S is only the
-provenance of the index. The run cannot make the check (its network reaches no host at all), so it
+the same, byte for byte, at S as at T. A row is then used when the index names S, and the record keeps
+the copy as having the tag: the index's ``source_commit`` reads T, the version it stands for
+(``ServingIndex.stands_for``), and S appears only as the attestation's ``index_commit``
+(``Attestation.facts``). The run cannot make the check (its network reaches no host at all), so it
 checks the attestation's shape only and records it as the caller's (``attested_by_caller``).
 """
 
@@ -244,14 +245,26 @@ class ServingIndex:
         found = self.stores.get(row.path, ())
         return len(found) == 1 and found[0] == ((row.group, row.rate_hz, row.n_samples),)
 
+    def stands_for(self) -> str | None:
+        """The commit of the version this index stands for, as a record states it: the tag's commit
+        when the caller attested the commit the index names (the copy of version T, kept as having the
+        tag: the owner's rulings of 2026-11-27), else the commit the index names, or None when it names
+        none. An attested index that names another commit than the one attested stands for nothing
+        attested, so its record keeps the commit it names, which says why it gave no row."""
+        if self.attestation is not None and self.source_commit == self.attestation.index_commit:
+            return self.attestation.tag_commit
+        return self.source_commit
+
     def facts(self, resolved: Resolution) -> dict[str, Any]:
         """What a record says of the index it was given (``extensions.nemar.ica.serving_index``): its
-        digest, the dataset and commit it names, the recording's row, or null with the word for why
-        there is none, and the caller's attestation (``Attestation.facts``), or null without one."""
+        digest, the dataset it names and the commit of the version it stands for (``stands_for``: the
+        tag's under an attestation it matches, the index's own otherwise), the recording's row, or null
+        with the word for why there is none, and the caller's attestation (``Attestation.facts``, where
+        the commit the index was built from is ``index_commit``), or null without one."""
         return {
             "sha256": self.sha256,
             "dataset_id": self.dataset_id,
-            "source_commit": self.source_commit,
+            "source_commit": self.stands_for(),
             "row": None if resolved.row is None else resolved.row.facts(),
             "reason": resolved.reason,
             "attestation": None if self.attestation is None else self.attestation.facts(),

@@ -200,7 +200,8 @@ def facts(
     """The block ``extensions.nemar.ica`` and ``_ica.json`` hold.
 
     ``served`` is what the run says of the serving index it was given on a dataset directory
-    (``serving_index.ServingIndex.facts``: its digest, the dataset and commit it names, the recording's
+    (``serving_index.ServingIndex.facts``: its digest, the dataset it names and the commit of the version
+    it stands for (the tag's under an attestation it matches), the recording's
     row, or null with the word for why there is none, and the caller's attestation of its commit, or
     null); null on the serving copy, and on a dataset directory given no index.
 

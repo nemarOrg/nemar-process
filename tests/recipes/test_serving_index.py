@@ -435,7 +435,9 @@ def test_an_attested_index_of_the_later_commit_gives_the_row_for_a_run_of_the_ta
     record states the attestation beside what the index names."""
     index = parsed(source_commit=AHEAD)
     assert index.resolve(PATH, DATASET, TAG).reason == "serving_index_stale"  # unattested: exact
+    assert index.stands_for() == AHEAD  # unattested, an index stands for the commit it names
     attested = index.attested(serving_index.attest(TAG, AHEAD, ON007823_DELTA))
+    assert attested.stands_for() == TAG  # the copy of version T, kept as having the tag
     resolved = attested.resolve(PATH, DATASET, TAG)
     row = serving_index.ServingRow(PATH, "eeg_250hz", 250.0, 75_000, index.sha256 or "")
     assert resolved == serving_index.Resolution(row, None)
@@ -443,7 +445,7 @@ def test_an_attested_index_of_the_later_commit_gives_the_row_for_a_run_of_the_ta
     assert attested.facts(resolved) == {
         "sha256": index.sha256,
         "dataset_id": DATASET,
-        "source_commit": AHEAD,  # what the index names: its provenance
+        "source_commit": TAG,  # the version it stands for; AHEAD is only the index_commit
         "row": {"path": PATH, "group": "eeg_250hz", "rate": 250.0, "n_samples": 75_000},
         "reason": None,
         "attestation": {
@@ -488,7 +490,11 @@ def test_an_attested_index_gives_a_row_only_for_the_commits_attested(built_from,
     attested = index.attested(serving_index.attest(TAG, AHEAD, (".nemar/metadata.json",)))
     resolved = attested.resolve(PATH, DATASET, run)
     assert resolved == serving_index.Resolution(None, "serving_index_stale")
-    assert attested.facts(resolved)["attestation"]["index_commit"] == AHEAD
+    facts = attested.facts(resolved)
+    assert facts["attestation"]["index_commit"] == AHEAD
+    # an index that names the attested commit stands for the tag even when the run is not the tag's;
+    # one that names another commit keeps it, which says why it gave no row
+    assert facts["source_commit"] == (TAG if built_from == AHEAD else built_from)
 
 
 def test_an_attested_index_is_still_read_for_the_runs_dataset_first():
@@ -497,6 +503,7 @@ def test_an_attested_index_is_still_read_for_the_runs_dataset_first():
     )
     assert attested.resolve(PATH, DATASET, TAG).reason == "not_in_serving_index"
     assert attested.resolve(OTHER, "xx000002", TAG).reason == "not_in_serving_index"
+    assert attested.stands_for() == TAG  # it names the attested commit, whatever dataset it is
 
 
 def test_an_attested_index_the_run_cannot_use_says_so_and_keeps_the_attestation(tmp_path):
@@ -506,6 +513,7 @@ def test_an_attested_index_the_run_cannot_use_says_so_and_keeps_the_attestation(
     resolved = attested.resolve(PATH, DATASET, TAG)
     assert resolved == serving_index.Resolution(None, "serving_index_unusable")
     assert attested.facts(resolved)["attestation"] == serving_index.attest(TAG, AHEAD).facts()
+    assert attested.facts(resolved)["source_commit"] is None  # it names none, so stands for none
 
 
 # ---- binding the attestation to the run (``options.bind``) -----------------------------------------------
