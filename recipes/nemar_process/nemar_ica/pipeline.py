@@ -132,6 +132,30 @@ def state_text(document: dict[str, Any]) -> str:
     )
 
 
+# A thread count of 0 in an onnxruntime session's options: onnxruntime's own default, recorded as this word.
+ONNXRUNTIME_DEFAULT_THREADS = "default"
+
+
+def iclabel_threads() -> dict[str, int | str]:
+    """The threads ICLabel's ONNX session runs with, read from the session eegprep built and cached
+    (``iclabel_net_onnx._get_session``, the one the classification ran on): each count as the session
+    states it, or ``default`` for 0, onnxruntime's own default. eegprep sets none, so ICLabel runs on
+    onnxruntime's default pools, which the run's thread pin (``determinism.pinned_threads``) does not
+    reach; the record says so rather than claiming one thread (an eegprep issue asking for a thread
+    count is to be filed, docs/upstream.md)."""
+    from eegprep.plugins.ICLabel.iclabel_net_onnx import _get_session
+
+    options = _get_session().get_session_options()
+
+    def stated(count: int) -> int | str:
+        return int(count) if count > 0 else ONNXRUNTIME_DEFAULT_THREADS
+
+    return {
+        "intra_op": stated(options.intra_op_num_threads),
+        "inter_op": stated(options.inter_op_num_threads),
+    }
+
+
 @functools.cache
 def iclabel_weights_sha256(network: str) -> str:
     """The SHA-256 of the network file ICLabel classified with, the packaged file the classification
@@ -709,6 +733,7 @@ def process(
             "version": steps.ICLABEL_VERSION,
             "network": network,
             "weights_sha256": weights_sha256,
+            "onnxruntime_threads": iclabel_threads(),
         },
         positions=positions,
         sidecar=sidecar,
