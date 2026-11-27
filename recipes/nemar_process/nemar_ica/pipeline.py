@@ -141,8 +141,8 @@ def iclabel_threads() -> dict[str, int | str]:
     (``iclabel_net_onnx._get_session``, the one the classification ran on): each count as the session
     states it, or ``default`` for 0, onnxruntime's own default. eegprep sets none, so ICLabel runs on
     onnxruntime's default pools, which the run's thread pin (``determinism.pinned_threads``) does not
-    reach; the record says so rather than claiming one thread (an eegprep issue asking for a thread
-    count is to be filed, docs/upstream.md)."""
+    reach; the record says so rather than claiming one thread (sccn/eegprep#763 asks for a thread
+    count and a public way to read the session's)."""
     from eegprep.plugins.ICLabel.iclabel_net_onnx import _get_session
 
     options = _get_session().get_session_options()
