@@ -61,13 +61,6 @@ class Engine:
         return call["argv"]
 
 
-@pytest.fixture(autouse=True)
-def podman_code_paths_are_tested_behind_the_refusal(monkeypatch):
-    """Podman is refused by default (`runtime.UNSUPPORTED_ENGINES`); its argv and checks stay tested
-    here with the refusal lifted. `test_runtime_podman_refused.py` tests the refusal itself."""
-    monkeypatch.setattr(runtime, "UNSUPPORTED_ENGINES", ())
-
-
 @pytest.fixture(params=["docker", "podman"])
 def engine(request, rig):
     return Engine(rig, request.param, present=True)
@@ -83,8 +76,18 @@ def entry_spec(rig, **overrides):
     return rig.spec(runtime="python", entry="run.py", bundle=bundle, **overrides)
 
 
+def runtime_dir(rig) -> str:
+    """A user runtime directory as Podman needs it: the user's own, mode 0700."""
+    path = rig.tmp / "xdg-runtime"
+    path.mkdir(exist_ok=True)
+    path.chmod(0o700)
+    return str(path)
+
+
 def launch(rig, engine, job=None, **extra):
     environment = {"NEMAR_CONTAINER_RUNTIME": engine.name, **LIMITS, **extra}
+    if engine.name == "podman":
+        environment.setdefault("XDG_RUNTIME_DIR", runtime_dir(rig))
     environment = {k: v for k, v in environment.items() if v is not None}
     return rig.launch(job if job is not None else entry_spec(rig), **environment)
 
@@ -138,7 +141,7 @@ def test_the_engine_arguments_are_exactly_these(rig, engine):
     assert str(rig.scratch) in sources["/code"]  # code and data stage in node-local scratch,
     assert str(rig.out) not in sources["/code"] + sources["/data/nm000104"] + sources["/tmp"]
     expected = [
-        "run",
+        "run" if engine.name == "docker" else "create",
         "--name",
         name,
         "--label",
@@ -206,6 +209,7 @@ PODMAN_FLAGS = {
         "--env-host=false",
         "--read-only-tmpfs=false",
         "--image-volume=ignore",
+        "--systemd=false",
     ],
 }
 FORBIDDEN = (
@@ -231,7 +235,8 @@ FORBIDDEN = (
 
 
 def test_no_flag_that_weakens_the_isolation_is_ever_passed(rig, engine):
-    job = entry_spec(rig, datasets=DATASET, resources={"gpus": 2}, env={"OMP_NUM_THREADS": "2"})
+    gpus = 2 if engine.name == "docker" else 0  # Podman hands over no GPU (test_runtime_podman.py)
+    job = entry_spec(rig, datasets=DATASET, resources={"gpus": gpus}, env={"OMP_NUM_THREADS": "2"})
     assert launch(rig, engine, job).exit == 0
     argv = engine.run_argv()
     for flag in FORBIDDEN:
@@ -271,10 +276,11 @@ def test_the_launcher_directory_is_never_in_the_engine_arguments(rig, engine):
     assert "/launcher" not in joined
 
 
-def test_a_gpu_job_gets_gpus_and_no_cuda_visible_devices(rig, engine):
+def test_a_gpu_job_gets_gpus_and_no_cuda_visible_devices(rig, docker):
+    """Docker only: Podman refuses a launch that would hand over a GPU (test_runtime_podman.py)."""
     job = entry_spec(rig, resources={"gpus": 2})
-    assert launch(rig, engine, job, CUDA_VISIBLE_DEVICES="3,4").exit == 0
-    argv = engine.run_argv()
+    assert launch(rig, docker, job, CUDA_VISIBLE_DEVICES="3,4").exit == 0
+    argv = docker.run_argv()
     assert value_after(argv, "--gpus") == "2"
     assert not any("CUDA_VISIBLE_DEVICES" in part for part in argv)
     # no runner decided the device: the count is the specification's, nothing is hidden, nothing added
@@ -569,6 +575,7 @@ def test_any_other_runtime_value_is_the_image_missing_exit(rig, value):
     assert result.exit == 13
     assert result.result["failure_code"] == "runtime_error"
     assert result.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=runtime_unsupported\n" in result.log
     assert engine.runs() == []
     assert engine.pulls() == []
     assert rig.runtime_calls() == []
@@ -635,6 +642,17 @@ def test_a_pull_failure_is_image_missing_and_runs_nothing(rig):
     assert engine.runs() == []
     assert not [r for r in rig.server.requests if r.path.endswith("/bundle")]
     assert "pull access denied" not in result.launcher_text()  # the engine's words are not copied
+    assert "ERROR image_missing reason=pull_failed (exit 1)\n" in result.log  # its reason word is
+
+
+def test_a_pull_that_succeeds_but_leaves_no_image_is_image_missing_not_inspectable(rig):
+    engine = Engine(rig, "docker", present=False)
+    engine.mark(".pullnoimage")
+    result = launch(rig, engine)
+    assert (result.exit, result.result["detail"]) == (13, "image_missing")
+    assert len(engine.pulls()) == 1
+    assert engine.runs() == []
+    assert "ERROR image_missing reason=not_inspectable\n" in result.log
 
 
 def test_a_pull_that_never_finishes_is_image_missing(rig, monkeypatch):
@@ -644,6 +662,7 @@ def test_a_pull_that_never_finishes_is_image_missing(rig, monkeypatch):
     result = launch(rig, engine)
     assert result.exit == 13
     assert result.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=pull_timeout\n" in result.log
     Path(str(engine.record) + ".pullhang").unlink()
 
 
@@ -656,7 +675,7 @@ def test_a_cancel_ends_a_pull_at_once(rig):
     started = time.monotonic()
     with pytest.raises(Stopped):
         runtime.ensure_image(
-            str(rig.bin_dir / "docker"),
+            runtime.Engine("docker", str(rig.bin_dir / "docker")),
             REFERENCE,
             Env({b"PATH": str(rig.bin_dir).encode()}),
             stop,
@@ -670,11 +689,17 @@ def test_an_engine_that_cannot_be_started_cannot_pull_an_image(tmp_path):
     broken = tmp_path / "docker"
     broken.write_text("#!/nonexistent/interpreter\n")
     broken.chmod(0o755)
+    log = Log(None)
     with pytest.raises(Failure) as caught:
         runtime.ensure_image(
-            str(broken), REFERENCE, Env({b"PATH": b"/usr/bin"}), threading.Event(), Log(None)
+            runtime.Engine("docker", str(broken)),
+            REFERENCE,
+            Env({b"PATH": b"/usr/bin"}),
+            threading.Event(),
+            log,
         )
     assert caught.value.detail == "image_missing"
+    assert b" ERROR image_missing reason=pull_not_started\n" in log.snapshot(log.size())
 
 
 # ---- how the container ends ----------------------------------------------------------------------
@@ -770,8 +795,7 @@ def test_build_argv_has_one_mount_per_bind_in_order_and_the_image_last_before_th
     job = parsed_spec(command=["echo", "x"], args=["y"])
     binds = [run.Bind("/w", "/work", False), run.Bind("/c", "/code", True)]
     argv = runtime.build_argv(
-        "docker",
-        "/bin/docker",
+        runtime.Engine("docker", "/bin/docker"),
         job,
         "r@sha256:" + "0" * 64,
         "n",
@@ -792,8 +816,7 @@ def test_build_argv_has_one_mount_per_bind_in_order_and_the_image_last_before_th
 def test_build_argv_refuses_a_run_without_a_memory_size():
     with pytest.raises(Failure) as caught:
         runtime.build_argv(
-            "docker",
-            "/bin/docker",
+            runtime.Engine("docker", "/bin/docker"),
             parsed_spec(),
             REFERENCE,
             "n",
@@ -807,8 +830,7 @@ def test_build_argv_refuses_a_run_without_a_memory_size():
 def build(cpu_shares=None):
     extra = {} if cpu_shares is None else {"cpu_shares": cpu_shares}
     return runtime.build_argv(
-        "docker",
-        "/bin/docker",
+        runtime.Engine("docker", "/bin/docker"),
         parsed_spec(),
         REFERENCE,
         "n",
@@ -869,9 +891,49 @@ def test_assess_reads_cpu_shares_from_each_engines_own_document():
 
 
 def test_selected_names_the_runtime():
-    assert runtime.selected(Env({})) == "apptainer"
-    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"apptainer"})) == "apptainer"
-    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"podman"})) == "podman"
+    log = Log(None)
+    assert runtime.selected(Env({}), log) == "apptainer"
+    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"apptainer"}), log) == "apptainer"
+    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"podman"}), log) == "podman"
+    assert log.size() == 0
     with pytest.raises(Failure) as caught:
-        runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}))
+        runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}), log)
     assert caught.value.detail == "image_missing"
+    assert b" ERROR image_missing reason=runtime_unsupported\n" in log.snapshot(log.size())
+
+
+def test_without_pull_an_absent_image_is_image_missing_and_nothing_is_pulled(rig):
+    """The standalone entry's ``ensure_image(pull=False)``: an image already there is used, an absent
+    one ends the launch before any pull starts."""
+    engine = Engine(rig, "docker", present=False)
+    env = Env({b"PATH": str(rig.bin_dir).encode()})
+    docker = runtime.Engine("docker", str(rig.bin_dir / "docker"))
+    log = Log(None)
+    with pytest.raises(Failure) as caught:
+        runtime.ensure_image(docker, REFERENCE, env, threading.Event(), log, pull=False)
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    assert b" ERROR image_missing reason=absent\n" in log.snapshot(log.size())
+    assert engine.pulls() == []
+    present = Engine(rig, "docker", present=True)
+    runtime.ensure_image(docker, REFERENCE, env, threading.Event(), Log(None), pull=False)
+    assert present.pulls() == []
+
+
+def test_the_engine_pull_policy_is_one_the_launcher_uses(rig):
+    job = spec.Spec(entry_spec(rig), "0" * 64)
+    arguments = (
+        runtime.Engine("docker", "/usr/bin/docker"),
+        job,
+        REFERENCE,
+        "nemar-launch-0",
+        [],
+        settings.Limits(1, 64),
+        RUNNER,
+    )
+    assert "--pull=missing" in runtime.build_argv(*arguments)
+    never = runtime.build_argv(*arguments, pull="never")
+    assert "--pull=never" in never
+    assert "--pull=missing" not in never
+    assert never.index("--pull=never") == runtime.build_argv(*arguments).index("--pull=missing")
+    with pytest.raises(ValueError):
+        runtime.build_argv(*arguments, pull="always")

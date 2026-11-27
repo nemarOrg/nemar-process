@@ -6,6 +6,13 @@ writes what it can see to ``/work/outputs/facts.json``; the assertions are made 
 against that file, never against what the launcher asked for. The memory test starts a second
 container that allocates past its limit and checks it is killed and recorded as ``out_of_memory``.
 
+The image is pulled once per session, before the launches, by the ``docker_image`` fixture
+(``tests/docker_support.py``): a registry that refuses an anonymous pull (a quota per source address,
+which a CI runner shares) is retried and the next registry serving the same digest is tried, inside one
+deadline, and a pull no registry serves fails with the registries' own words. The launches find the
+image present; the launcher's real pull is what
+``test_a_digest_no_registry_serves_is_image_missing_and_the_log_says_why`` runs.
+
 Where there is no usable Docker the tests skip with the reason stated; in the docker CI job
 (``NEMAR_REQUIRE_DOCKER=1``) that is a failure, never a skip. ``NEMAR_TEST_ENGINE=podman`` runs the
 same tests against Podman.
@@ -15,23 +22,24 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
+from docker_support import (
+    ENGINE,
+    IMAGE_DIGEST,
+    IMAGE_HEX,
+    REPOSITORIES,
+    UNPULLED_HEX,
+    PulledImage,
+    engine_ready,
+)
 from harness import DATASET_ID, DATASET_VERSION, Rig, make_bundle
 
 pytestmark = pytest.mark.docker
 
-ENGINE = os.environ.get("NEMAR_TEST_ENGINE", "docker")
-REQUIRE = os.environ.get("NEMAR_REQUIRE_DOCKER") == "1"
-# The small public image the container tests run, the one the Apptainer tests build their SIF from,
-# pinned by digest (an OCI index): the engine verifies the digest when it pulls.
-IMAGE_HEX = "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
-IMAGE_DIGEST = "sha256:" + IMAGE_HEX
-IMAGE_URI = "docker://public.ecr.aws/docker/library/python@" + IMAGE_DIGEST
-# The registry is on the launcher's allowlist only because the test names it (the default is ghcr.io).
-REGISTRY = "public.ecr.aws"
+# The small public image the container tests run is docker_support's, pinned by digest (an OCI index);
+# its registry is on the launcher's allowlist only because the test names it (the default is ghcr.io).
 RUNNER_LABEL = "rnr_0123456789abcdef01234567"
 MEMORY_LIMIT_MB = 128
 
@@ -99,26 +107,9 @@ with open(os.path.join(os.environ["NEMAR_OUT"], "facts.json"), "w") as handle:
 EAT_MEMORY = "chunks = []\nwhile True:\n    chunks.append(b'x' * (16 << 20))\n"
 
 
-def engine_ready() -> None:
-    reason = None
-    if shutil.which(ENGINE) is None:
-        reason = "no {} binary on PATH".format(ENGINE)
-    else:
-        probe = subprocess.run(
-            [ENGINE, "info"], capture_output=True, stdin=subprocess.DEVNULL, check=False, timeout=60
-        )
-        if probe.returncode != 0:
-            reason = "{} is installed but its daemon is not usable".format(ENGINE)
-    if reason is None:
-        return
-    if REQUIRE:
-        pytest.fail("NEMAR_REQUIRE_DOCKER=1 but " + reason)
-    pytest.skip(reason)
-
-
-def image_spec(rig: Rig, **overrides) -> dict:
+def image_spec(rig: Rig, image: PulledImage, **overrides) -> dict:
     spec = rig.spec(**overrides)
-    spec["image"] = {"uri": IMAGE_URI, "digest": IMAGE_DIGEST, "sif": IMAGE_HEX + ".sif"}
+    spec["image"] = {"uri": image.uri, "digest": IMAGE_DIGEST, "sif": IMAGE_HEX + ".sif"}
     return spec
 
 
@@ -136,13 +127,13 @@ def containers_left() -> str:
 
 
 @pytest.fixture(scope="module")
-def probed(tmp_path_factory):
-    engine_ready()
+def probed(tmp_path_factory, docker_image):
     tmp = tmp_path_factory.mktemp("docker")
     rig = Rig(tmp, "docker")
     bundle = rig.set_bundle(make_bundle({"probe.py": PROBE}))
     spec = image_spec(
         rig,
+        docker_image,
         runtime="python",
         entry="probe.py",
         bundle=bundle,
@@ -160,7 +151,7 @@ def probed(tmp_path_factory):
         NEMAR_CONTAINER_RUNTIME=ENGINE,
         NEMAR_CPUS="1",
         NEMAR_MEMORY_MB="512",
-        NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+        NEMAR_ALLOWED_REGISTRIES=docker_image.registry,
         NEMAR_RUNNER_LABEL=RUNNER_LABEL,
         NEMAR_TEST_CANARY="host-only-secret-canary",
     )
@@ -249,18 +240,17 @@ def test_no_container_is_left_behind(probed):
     assert containers_left() == ""
 
 
-def test_a_container_that_outgrows_its_memory_limit_is_killed_and_recorded(tmp_path):
-    engine_ready()
+def test_a_container_that_outgrows_its_memory_limit_is_killed_and_recorded(tmp_path, docker_image):
     rig = Rig(tmp_path, "docker")
     try:
         bundle = rig.set_bundle(make_bundle({"eat.py": EAT_MEMORY}))
-        spec = image_spec(rig, runtime="python", entry="eat.py", bundle=bundle)
+        spec = image_spec(rig, docker_image, runtime="python", entry="eat.py", bundle=bundle)
         launch = rig.launch(
             spec,
             NEMAR_CONTAINER_RUNTIME=ENGINE,
             NEMAR_CPUS="1",
             NEMAR_MEMORY_MB=str(MEMORY_LIMIT_MB),
-            NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+            NEMAR_ALLOWED_REGISTRIES=docker_image.registry,
             NEMAR_RUNNER_LABEL=RUNNER_LABEL,
         )
         assert launch.exit == 14, launch.log + launch.stderr
@@ -273,18 +263,19 @@ def test_a_container_that_outgrows_its_memory_limit_is_killed_and_recorded(tmp_p
         rig.close()
 
 
-def test_the_containers_output_reaches_the_launcher_though_the_daemon_keeps_no_log(tmp_path, capfd):
-    engine_ready()
+def test_the_containers_output_reaches_the_launcher_though_the_daemon_keeps_no_log(
+    tmp_path, capfd, docker_image
+):
     rig = Rig(tmp_path, "docker")
     try:
         bundle = rig.set_bundle(make_bundle({"say.py": "print('said-from-the-container')\n"}))
-        spec = image_spec(rig, runtime="python", entry="say.py", bundle=bundle)
+        spec = image_spec(rig, docker_image, runtime="python", entry="say.py", bundle=bundle)
         launch = rig.launch(
             spec,
             NEMAR_CONTAINER_RUNTIME=ENGINE,
             NEMAR_CPUS="1",
             NEMAR_MEMORY_MB="256",
-            NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+            NEMAR_ALLOWED_REGISTRIES=docker_image.registry,
             NEMAR_RUNNER_LABEL=RUNNER_LABEL,
         )
         assert launch.exit == 0, launch.log + launch.stderr
@@ -294,11 +285,12 @@ def test_the_containers_output_reaches_the_launcher_though_the_daemon_keeps_no_l
         rig.close()
 
 
-def test_a_cpu_decision_for_a_gpu_job_tells_the_recipe_cpu_and_hands_over_no_gpu(tmp_path):
+def test_a_cpu_decision_for_a_gpu_job_tells_the_recipe_cpu_and_hands_over_no_gpu(
+    tmp_path, docker_image
+):
     """The card L3 case: a job that asked for a GPU, on a host with none (this daemon), whose runner
     decided the CPU. The launcher passes no `--gpus` (which a daemon without one would refuse), hides every
     GPU, and the recipe, inside a real container, reads `cpu` and the reason."""
-    engine_ready()
     rig = Rig(tmp_path, "docker")
     try:
         probe = (
@@ -309,14 +301,19 @@ def test_a_cpu_decision_for_a_gpu_job_tells_the_recipe_cpu_and_hands_over_no_gpu
         )
         bundle = rig.set_bundle(make_bundle({"device.py": probe}))
         spec = image_spec(
-            rig, runtime="python", entry="device.py", bundle=bundle, resources={"gpus": 1}
+            rig,
+            docker_image,
+            runtime="python",
+            entry="device.py",
+            bundle=bundle,
+            resources={"gpus": 1},
         )
         launch = rig.launch(
             spec,
             NEMAR_CONTAINER_RUNTIME=ENGINE,
             NEMAR_CPUS="1",
             NEMAR_MEMORY_MB="256",
-            NEMAR_ALLOWED_REGISTRIES=REGISTRY,
+            NEMAR_ALLOWED_REGISTRIES=docker_image.registry,
             NEMAR_RUNNER_LABEL=RUNNER_LABEL,
             NEMAR_DEVICE="cpu",
             NEMAR_DEVICE_REASON="gpu_busy",
@@ -340,11 +337,10 @@ def test_a_cpu_decision_for_a_gpu_job_tells_the_recipe_cpu_and_hands_over_no_gpu
         rig.close()
 
 
-def test_docker_reads_the_flag_that_names_one_gpu_by_its_identifier(tmp_path):
+def test_docker_reads_the_flag_that_names_one_gpu_by_its_identifier(docker_image):
     """What the launcher passes for a `cuda` decision is `--gpus device=<GPU identifier>`. A daemon without
     a GPU refuses to start such a container, for the lack of one; what this pins is that the client reads the
     flag (a malformed value is a refusal of the flag itself). Where there is a GPU the container may run."""
-    engine_ready()
     if ENGINE != "docker":
         pytest.skip("only Docker's reading of --gpus is asked here")
     done = subprocess.run(
@@ -355,7 +351,7 @@ def test_docker_reads_the_flag_that_names_one_gpu_by_its_identifier(tmp_path):
             "--pull=never",
             "--gpus",
             "device=GPU-3a23c669-1f69-c64e-cf85-44e04bf4c3d4",
-            IMAGE_URI[len("docker://") :],
+            docker_image.reference,
             "true",
         ],
         capture_output=True,
@@ -365,3 +361,39 @@ def test_docker_reads_the_flag_that_names_one_gpu_by_its_identifier(tmp_path):
         timeout=120,
     )
     assert 'for "--gpus" flag' not in done.stderr, done.stderr
+
+
+def test_a_digest_no_registry_serves_is_image_missing_and_the_log_says_why(tmp_path):
+    """The launcher's own pull against the real engine and a real registry: a digest the registry does
+    not serve (or a registry that refuses, or no network: each is the engine refusing) ends the launch
+    as ``image_missing`` before anything is fetched, and the log names the reason, never the engine's
+    words."""
+    engine_ready()
+    image = PulledImage(REPOSITORIES[0])
+    rig = Rig(tmp_path, "docker")
+    try:
+        bundle = rig.set_bundle(make_bundle({"main.py": "print('never runs')\n"}))
+        spec = rig.spec(runtime="python", entry="main.py", bundle=bundle)
+        spec["image"] = {
+            "uri": "docker://" + image.unpulled(),
+            "digest": "sha256:" + UNPULLED_HEX,
+            "sif": UNPULLED_HEX + ".sif",
+        }
+        launch = rig.launch(
+            spec,
+            NEMAR_CONTAINER_RUNTIME=ENGINE,
+            NEMAR_CPUS="1",
+            NEMAR_MEMORY_MB="256",
+            NEMAR_ALLOWED_REGISTRIES=image.registry,
+            NEMAR_RUNNER_LABEL=RUNNER_LABEL,
+        )
+        result = launch.result
+        assert result is not None, launch.log
+        assert (launch.exit, result["detail"]) == (13, "image_missing"), launch.log
+        assert "INFO image: pulling\n" in launch.log
+        assert "ERROR image_missing reason=pull_failed (exit " in launch.log
+        assert "Error response from daemon" not in launch.launcher_text()
+        assert not [r for r in rig.server.requests if r.path.endswith("/bundle")]
+        assert containers_left() == ""
+    finally:
+        rig.close()

@@ -8,7 +8,10 @@ with the upstream gap it stands for (docs/upstream.md):
   the line-noise excess and the median spectrum are arithmetic on its output;
 * the robust amplitude is a median absolute deviation, NumPy median arithmetic (sccn/eegprep#536);
 * the location guard is a rank test of the channel positions (sccn/eegprep#539: ``clean_channels`` accepts
-  degenerate locations silently).
+  degenerate locations silently);
+* the samples ASR repaired (``asr_repaired``) are found by comparing its input and its output with
+  eegprep's own rule from ``clean_artifacts`` (sccn/eegprep#684: ``clean_asr`` does not return its
+  repaired mask).
 
 The percentages are read from eegprep's own masks (``etc.clean_channel_mask`` for channels and the
 sample mask ``clean_windows`` returns), never recomputed from the data.
@@ -73,8 +76,12 @@ class LocationGuard:
 
 
 def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
-    """At least half of the signal channels and at least four have finite X, Y, Z, and the
+    """More than half of the signal channels and at least four have finite X, Y, Z, and the
     unit-length position vectors have numerical rank 3.
+
+    More than half, as ``clean_channels`` requires since sccn/eegprep#650 (``clean_channels.m``'s
+    ``length([chanlocs.X]) > n/2``): exactly half located would be refused there with a
+    ``ValueError``, so it takes the no-locations branch here.
 
     ``clean_channels`` raises nothing for positions that are one point, a line or a plane through
     the origin and silently removes a large part of the channels (sccn/eegprep#539), so the rank is tested
@@ -87,13 +94,57 @@ def location_guard(chanlocs: list[dict[str, Any]]) -> LocationGuard:
         if flag
     ]
     n_located = len(points)
-    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located < len(chanlocs):
+    if n_located < MIN_LOCATED_CHANNELS or 2 * n_located <= len(chanlocs):
         return LocationGuard(False, flags)
     matrix = np.asarray(points, dtype=np.float64)
     lengths = np.sqrt((matrix**2).sum(axis=1))
     unit = matrix[lengths > 0] / lengths[lengths > 0][:, None]
     rank = int(np.linalg.matrix_rank(unit)) if len(unit) else 0
     return LocationGuard(rank >= 3, flags)
+
+
+# A channel's position fields in eegprep's ``chanlocs``: the Cartesian, EEGLAB's polar and the spherical.
+POSITION_FIELDS = ("X", "Y", "Z", "theta", "radius", "sph_theta", "sph_phi", "sph_radius")
+
+
+def unlocated_cleared(eeg: dict[str, Any], located: tuple[bool, ...]) -> dict[str, Any]:
+    """A shallow copy of ``eeg`` in which each channel the guard counts as unlocated (``located``)
+    has no position, for ``clean_channels``.
+
+    eegprep's ``chanloc_has_coords``, which the guard follows, counts a channel with a NaN coordinate
+    as unlocated; ``clean_channels`` counts it as located (sccn/eegprep#650) and then refuses the
+    non-finite position with a ``ValueError`` (sccn/eegprep#609). Such a channel, unlocated for the
+    guard but with a coordinate given (``_given``), gets every position field (``POSITION_FIELDS``) as
+    the loaders give a channel with no position, an empty array, which both count as missing, so
+    RANSAC uses the channels the guard counted, as it did before those changes; a channel with no
+    coordinate given is left as it is. The clearing persists: ``clean_channels`` returns the copy's
+    entries, so every later step, nemar-ica's ICLabel and its ``_chanlocs.tsv`` (``n/a`` in every
+    place) included, sees the channel as one with no position, never with a theta and radius its
+    coordinates do not support. The recording's own entries are not changed.
+    """
+    chanlocs = list(eeg["chanlocs"])
+    if len(located) != len(chanlocs):
+        raise ValueError("one located flag per channel")
+    cleared = [
+        {**chanloc, **{key: np.empty(0) for key in POSITION_FIELDS}}
+        if not flag and any(_given(chanloc.get(key)) for key in ("X", "Y", "Z"))
+        else chanloc
+        for chanloc, flag in zip(chanlocs, located, strict=True)
+    ]
+    return {**eeg, "chanlocs": cleared}
+
+
+def _given(value: Any) -> bool:
+    """Whether a coordinate is there at all, by ``clean_channels``'s rule (its ``_is_missing_coord``,
+    sccn/eegprep#650, MATLAB's ``isempty``): None, ``''`` and an empty sequence or array are missing;
+    anything else, NaN included, is given."""
+    if value is None or (isinstance(value, str) and value == ""):
+        return False
+    if isinstance(value, np.ndarray):
+        return value.size > 0
+    if isinstance(value, (list, tuple)):
+        return len(value) > 0
+    return True
 
 
 # ---- spectra ----------------------------------------------------------------------------------
@@ -169,6 +220,30 @@ def robust_amplitude(data: np.ndarray) -> np.ndarray:
     """Per channel: 1.4826 times the median absolute deviation, in the unit the loader delivered."""
     centers = np.median(data, axis=1, keepdims=True)
     return MAD_SCALE * np.median(np.abs(data - centers), axis=1)
+
+
+# A sample counts as unchanged by ASR's repair when the sum over the channels of the absolute change is
+# below this, in microvolts: eegprep's own rule, the one clean_artifacts applies when it cuts the bursts
+# ASR repairs (BurstRejection). clean_asr returns no mask of what it repaired (an upstream gap).
+ASR_UNCHANGED_UV = 1e-8
+ASR_COMPARE_BLOCK = 65536  # samples compared at a time, so the comparison holds no third full copy
+
+
+def asr_repaired(before: np.ndarray, after: np.ndarray) -> np.ndarray:
+    """Which samples ASR's repair changed: True where the sum over the channels of
+    ``|after - before|`` reaches ``ASR_UNCHANGED_UV`` (eegprep's rule in ``clean_artifacts``).
+    Arithmetic on the input and on eegprep's output, block by block; nothing is changed. It stands for
+    a mask ``clean_asr`` does not return (sccn/eegprep#684), and goes when eegprep returns one."""
+    before = np.asarray(before)
+    after = np.asarray(after)
+    if before.shape != after.shape or before.ndim != 2:
+        raise ValueError("the repair is not the input's shape")
+    changed = np.zeros(before.shape[1], dtype=bool)
+    for start in range(0, before.shape[1], ASR_COMPARE_BLOCK):
+        stop = start + ASR_COMPARE_BLOCK
+        moved = np.sum(np.abs(after[:, start:stop] - before[:, start:stop]), axis=0)
+        changed[start:stop] = moved >= ASR_UNCHANGED_UV
+    return changed
 
 
 def runs(mask: np.ndarray) -> list[tuple[int, int]]:

@@ -8,6 +8,11 @@ response, the outputs request and response):
     of the job's archive, with an extra key a reader must ignore.
 ``GET  /s3/bundle/<id>.tar.gz``
     the archive bytes the test supplied, with ``Range`` support.
+``POST /compute/jobs/<id>/serving-index``
+    header required; answers ``{url, expires_at}``, a presigned-style GET of the serving index the
+    test supplied (``serving_index_bytes``), with an extra key a reader must ignore.
+``GET  /s3/serving-index/<id>.json``
+    those bytes, with ``Range`` support.
 ``POST /compute/jobs/<id>/outputs``
     header required; the body is the outputs request; answers ``{uploads, expires_at}`` with one
     presigned-style PUT address per requested file, each carrying a signature in its query string.
@@ -15,6 +20,12 @@ response, the outputs request and response):
     stores the body (kept in ``objects``), checks the declared length against the bytes received.
 ``POST /compute/jobs/<id>/outputs/complete``
     header required; records the call.
+``POST /compute/jobs/<id>/progress``
+    header required (``job_not_found`` otherwise, as the Worker answers); the body must be the closed
+    ``nemar.progress.v1`` object of the pinned schema copy (``invalid_spec`` otherwise); a report sooner
+    than ``progress_floor`` seconds after the last accepted one is 429 ``report_too_soon`` with
+    ``Retry-After``; ``progress_queue`` answers statuses in order first. Accepted bodies and their
+    times are kept in ``progress_reports``.
 
 No response here was recorded from NEMAR's Worker (it does not exist yet); the shapes come from the
 contract file. Failure modes are configured on the attributes below. ``events`` is the ordered log
@@ -36,6 +47,25 @@ PRESIGN_SIGNATURE = "SIGNATURESECRET0123456789abcdef"
 PRESIGN_QUERY = "X-Amz-Signature=" + PRESIGN_SIGNATURE + "&X-Amz-Expires=3600"
 
 
+def _progress_problems(body) -> list:
+    """What the pinned progress schema copy refuses in ``body`` (jsonschema: the test oracle)."""
+    import json
+    from pathlib import Path
+
+    import jsonschema
+
+    root = Path(__file__).resolve().parents[2] / "launcher" / "schema" / "compute-progress.v1.json"
+    schema = json.loads(root.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator({**schema, "$ref": "#/$defs/Progress"})
+    return [error.message for error in validator.iter_errors(body)]
+
+
+def _too_soon(headers: dict) -> Response:
+    answer = Response.json_body(429, {"error": "too soon", "code": "report_too_soon"})
+    answer.headers.update(headers)
+    return answer
+
+
 def _expires() -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -46,6 +76,9 @@ class Callbacks:
         self.token = token
         self.server: StandinServer | None = None
         self.bundle_bytes: bytes = b""
+        self.serving_index_bytes: bytes = b""
+        self.serving_index_refusal: tuple[int, str] | None = None
+        self.serving_index_response_override: dict | None = None
         # failure modes -------------------------------------------------------------------------
         self.bundle_route_statuses: list[int] = []  # answered in order before success
         self.bundle_refusal: tuple[int, str] | None = None
@@ -72,6 +105,12 @@ class Callbacks:
         self.upload_url_base: str | None = None  # give every upload address this base instead
         self.outputs_raw: bytes | None = None  # answer the outputs route with exactly these bytes
         self.expire_urls_once = False  # first PUT of the run answers 403
+        # the live progress route (ADR 0134)
+        self.progress_floor = 0.0  # seconds after an accepted report before another is accepted
+        self.progress_retry_after: str | None = "1"  # the Retry-After header of a 429
+        self.progress_queue: list[tuple] = []  # (status, code) answered in order first
+        self.progress_reports: list[tuple[float, dict]] = []  # accepted: (time, body)
+        self.progress_requests: list[float] = []  # every request's time
         # records -------------------------------------------------------------------------------
         self.objects: dict[str, bytes] = {}
         self.events: list[str] = []
@@ -94,10 +133,18 @@ class Callbacks:
         base = "/compute/jobs/{}/".format(self.job_id)
         if request.method == "POST" and request.path == base + "bundle":
             return self._bundle(request)
+        if request.method == "POST" and request.path == base + "serving-index":
+            return self._serving_index(request)
+        if request.method == "GET" and request.path == "/s3/serving-index/{}.json".format(
+            self.job_id
+        ):
+            return self._ranged(request, self.serving_index_bytes)
         if request.method == "POST" and request.path == base + "outputs":
             return self._outputs(request)
         if request.method == "POST" and request.path == base + "outputs/complete":
             return self._complete(request)
+        if request.method == "POST" and request.path == base + "progress":
+            return self._progress(request)
         if request.method == "GET" and request.path == "/s3/bundle/{}.tar.gz".format(self.job_id):
             if self.bundle_get_redirect is not None:
                 return Response(status=302, headers={"Location": self.bundle_get_redirect})
@@ -117,6 +164,44 @@ class Callbacks:
                 self.token, PRESIGN_QUERY
             )
         return Response.json_body(status, payload)
+
+    def _progress(self, request: Request) -> Response:
+        now = time.monotonic()
+        with self._lock:
+            self.progress_requests.append(now)
+        if not self._token_ok(request):
+            return self._refuse(404, "job_not_found")
+        with self._lock:
+            if self.progress_queue:
+                status, code = self.progress_queue.pop(0)
+                if status == 429:
+                    headers = {}
+                    if self.progress_retry_after is not None:
+                        headers["Retry-After"] = self.progress_retry_after
+                    return _too_soon(headers)
+                if code is None:  # a proxy's answer: a page, not the route's JSON
+                    return Response(
+                        status=status,
+                        body=b"<html>ok</html>",
+                        headers={"Content-Type": "text/html"},
+                    )
+                return self._refuse(status, code)
+        try:
+            body = request.json()
+        except ValueError:
+            return self._refuse(400, "invalid_spec")
+        if _progress_problems(body):
+            return self._refuse(400, "invalid_spec")
+        with self._lock:
+            last = self.progress_reports[-1][0] if self.progress_reports else None
+            if last is not None and now - last < self.progress_floor:
+                headers = {}
+                if self.progress_retry_after is not None:
+                    headers["Retry-After"] = self.progress_retry_after
+                return _too_soon(headers)
+            self.progress_reports.append((now, body))
+        self._event("progress")
+        return Response.json_body(200, {"ok": True, "a_key_added_later": 1})
 
     def _bundle(self, request: Request) -> Response:
         self._event("bundle")
@@ -138,6 +223,35 @@ class Callbacks:
         return Response.json_body(
             200, {"url": url, "expires_at": _expires(), "a_key_added_later": {"x": 1}}
         )
+
+    def _serving_index(self, request: Request) -> Response:
+        self._event("serving-index")
+        if not self._token_ok(request):
+            return self._refuse(404, "job_not_found")
+        if self.serving_index_refusal is not None:
+            return self._refuse(*self.serving_index_refusal)
+        if self.serving_index_response_override is not None:
+            return Response.json_body(200, self.serving_index_response_override)
+        assert self.server is not None
+        url = "{}/s3/serving-index/{}.json?{}".format(
+            self.server.base_url, self.job_id, PRESIGN_QUERY
+        )
+        return Response.json_body(
+            200, {"url": url, "expires_at": _expires(), "a_key_added_later": {"x": 1}}
+        )
+
+    @staticmethod
+    def _ranged(request: Request, data: bytes) -> Response:
+        mode, start, end = parse_range(request.headers.get("range"), len(data))
+        if mode == "unsatisfiable":
+            return Response(status=416, headers={"Content-Range": f"bytes */{len(data)}"})
+        if mode == "partial":
+            return Response(
+                status=206,
+                body=data[start:end],
+                headers={"Content-Range": f"bytes {start}-{end - 1}/{len(data)}"},
+            )
+        return Response(status=200, body=data)
 
     def _bundle_get(self, request: Request) -> Response:
         with self._lock:

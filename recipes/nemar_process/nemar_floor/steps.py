@@ -9,6 +9,7 @@ The values are the issue's and the plan's (docs/recipes.md has the table with th
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from eegprep import clean_flatlines, clean_windows
@@ -18,7 +19,7 @@ from nemar_process.common.determinism import SEEDS
 from nemar_process.common.params import signature_defaults
 
 RECIPE_ID = "nemar-floor"
-RECIPE_VERSION = "1.0.0-b1"
+RECIPE_VERSION = "1.0.0-b2"
 
 # The order of the steps (docs/recipes.md). Flatline runs on the unfiltered copy, before the drift
 # filter: after it, a flat stretch is no longer constant to within 20 machine epsilons, and none
@@ -35,6 +36,33 @@ STEP_ORDER = (
     "bad_windows",
     "qc",
 )
+
+# The checkpoints the floor reports progress at (ADR 0134 decision 2): each step belongs to exactly one,
+# in STEP_ORDER's order. A literal, like STEP_ORDER: nemar-cli's registry holds the same map for this
+# recipe version (shared/compute-recipes.ts), and tests/contract/test_checkpoint_maps.py compares this
+# text with the pinned vectors. A change of either is a new recipe version on both sides.
+CHECKPOINTS = (
+    ("import", ("load", "signal_channels")),
+    (
+        "preprocess",
+        (
+            "flatline",
+            "drift",
+            "line_noise_measure",
+            "line_noise_50",
+            "line_noise_60",
+            "qc_amplitude",
+            "bad_channels",
+            "bad_windows",
+        ),
+    ),
+    ("quality", ("qc",)),
+)
+
+# Step ids that are not steps of the record but name where a recording can end: a measurement or a check
+# made early, under its own id so a recording it refuses is counted where it stopped (ADR 0134). They are
+# in CHECKPOINTS and not in STEP_ORDER (the record's processing steps are unchanged).
+PRE_CHECKS = ("qc_amplitude",)
 
 DESCRIPTIONS = {
     "load": "Load recording",
@@ -65,6 +93,9 @@ FLATLINE_LOGGER = clean_flatlines.__module__
 
 DRIFT_FUNCTION = "eegprep.clean_drifts"
 DRIFT_CALL: dict[str, Any] = {"transition": (0.25, 0.75), "attenuation": 80.0, "method": "fft"}
+# The FIR high-pass a recipe that embeds the floor may take in place of clean_drifts (``Embedding``):
+# pop_eegfiltnew with only its lower passband edge, legacy NEMAR's call, eegprep's default design.
+HIGHPASS_FUNCTION = "eegprep.pop_eegfiltnew"
 
 # A fixed band-stop: eegprep has no adaptive line-noise removal (sccn/eegprep#534 asks for ZapLine).
 BAND_STOP_FUNCTION = "eegprep.pop_eegfiltnew"
@@ -80,8 +111,8 @@ BAND_STOP_APPLIED: dict[str, Any] = {
     "plotfreqz": False,
 }
 
-# What a criterion measured is not returned, only the mask (sccn/eegprep#535); the RANSAC seed is fixed
-# inside eegprep (sccn/eegprep#540).
+# What a criterion measured is not returned, only the mask (sccn/eegprep#535); the RANSAC seed is
+# ``clean_channels``'s default, which the floor does not pass (``determinism.SEEDS``).
 RANSAC_FUNCTION = "eegprep.clean_channels"
 RANSAC_CALL: dict[str, Any] = {
     "corr_threshold": 0.8,
@@ -153,10 +184,56 @@ def bad_channel_rules() -> dict[str, Any]:
     }
 
 
-def ransac_parameters() -> dict[str, Any]:
+@dataclass(frozen=True)
+class Embedding:
+    """Three of the floor's values a recipe that embeds the floor may set in place of its own.
+
+    ``highpass_hz`` replaces the drift step's ``clean_drifts`` by a FIR high-pass with that lower
+    passband edge (``pop_eegfiltnew``, the step id stays ``drift``); ``corr_threshold`` and
+    ``max_broken_time`` replace RANSAC's correlation threshold and the share of the recording a
+    channel may be bad in before it is removed. The floor itself runs with ``FLOOR``, its own values,
+    and its products and golden decisions do not depend on this class. nemar-ica passes legacy
+    NEMAR's.
+    """
+
+    highpass_hz: float | None = None
+    corr_threshold: float = RANSAC_CALL["corr_threshold"]
+    max_broken_time: float = RANSAC_CALL["max_broken_time"]
+
+
+FLOOR = Embedding()
+
+
+def highpass_call(passband_hz: float) -> dict[str, Any]:
+    """The FIR high-pass's arguments: the lower passband edge only, eegprep choosing the order."""
+    return {"locutoff": passband_hz, "hicutoff": None, "revfilt": False, "gui": False}
+
+
+def drift_step(embedding: Embedding = FLOOR) -> tuple[str, dict[str, Any]]:
+    """The drift step's function and recorded parameters: the floor's ``clean_drifts``, or the
+    embedding's FIR high-pass (what pop_eegfiltnew applies, then the call)."""
+    if embedding.highpass_hz is None:
+        return DRIFT_FUNCTION, dict(DRIFT_CALL)
+    return HIGHPASS_FUNCTION, {**BAND_STOP_APPLIED, **highpass_call(embedding.highpass_hz)}
+
+
+def ransac_call(embedding: Embedding = FLOOR) -> dict[str, Any]:
+    """RANSAC's call, with the embedding's correlation threshold and longest broken share."""
+    return {
+        **RANSAC_CALL,
+        "corr_threshold": embedding.corr_threshold,
+        "max_broken_time": embedding.max_broken_time,
+    }
+
+
+def ransac_parameters(embedding: Embedding = FLOOR) -> dict[str, Any]:
     """The RANSAC branch's parameters: the call, the seed eegprep fixes inside (no argument) and
     the rules that decided to run it."""
-    return {**RANSAC_CALL, "rng_seed": SEEDS["clean_channels.ransac"], "rules": bad_channel_rules()}
+    return {
+        **ransac_call(embedding),
+        "rng_seed": SEEDS["clean_channels.ransac"],
+        "rules": bad_channel_rules(),
+    }
 
 
 def nolocs_parameters() -> dict[str, Any]:

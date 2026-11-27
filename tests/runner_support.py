@@ -40,6 +40,12 @@ from server import Request, Response, StandinServer
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "runner" / "schema" / "compute-runner.v1.json"
 SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+# The heartbeat's `progress` refers to the live progress schema by its `$id` (ADR 0134); the copy of it
+# that the same nemar-cli commit wrote is the launcher's (tests/contract/nemar-cli-progress-pin.json).
+PROGRESS_SCHEMA = json.loads(
+    (ROOT / "launcher" / "schema" / "compute-progress.v1.json").read_text(encoding="utf-8")
+)
+EXTERNAL = {PROGRESS_SCHEMA["$id"]: PROGRESS_SCHEMA}
 
 SECRET = "nmr_" + "ab" * 32
 HEX = "cd" * 32
@@ -51,12 +57,17 @@ IMAGE_URI = "docker://ghcr.io/nemarorg/nemar-python@" + DIGEST
 # ---- a JSON Schema checker for the runner schema (the keywords it uses) -------------------------------
 
 
-def _resolve(root: dict, ref: str) -> dict:
-    assert ref.startswith("#/")
+def _resolve(root: dict, ref: str) -> tuple[dict, dict]:
+    """The schema ``ref`` names and the root its own ``#/`` references are read against: a reference
+    within ``root``, or one to the ``$id`` of a schema in ``EXTERNAL`` (any other is refused)."""
+    base, _, fragment = ref.partition("#")
+    if base:
+        root = EXTERNAL[base]
+    assert fragment.startswith("/")
     node: Any = root
-    for part in ref[2:].split("/"):
+    for part in fragment[1:].split("/"):
         node = node[part]
-    return node
+    return node, root
 
 
 def _type_ok(value: Any, name: str) -> bool:
@@ -74,7 +85,8 @@ def violations(value: Any, schema: dict, root: dict | None = None, path: str = "
     """What is wrong with ``value`` against ``schema`` (a path and a keyword each), no values."""
     root = SCHEMA if root is None else root
     if "$ref" in schema:
-        return violations(value, _resolve(root, schema["$ref"]), root, path)
+        target, target_root = _resolve(root, schema["$ref"])
+        return violations(value, target, target_root, path)
     found: list[str] = []
     if "anyOf" in schema and not any(
         not violations(value, sub, root, path) for sub in schema["anyOf"]
@@ -120,10 +132,22 @@ def violations(value: Any, schema: dict, root: dict | None = None, path: str = "
         for name, sub in properties.items():
             if name in value:
                 found += violations(value[name], sub, root, path + "." + name)
-        if schema.get("additionalProperties") is False:
+        extra = schema.get("additionalProperties")
+        if extra is False:
             for name in value:
                 if name not in properties:
                     found.append("{}: additional {}".format(path, name))
+        elif isinstance(extra, dict):
+            for name, item in value.items():
+                if name not in properties:
+                    found += violations(item, extra, root, "{}.{}".format(path, name))
+        if "propertyNames" in schema:
+            for name in value:
+                found += violations(name, schema["propertyNames"], root, path + ".(name)")
+        if "minProperties" in schema and len(value) < schema["minProperties"]:
+            found.append(path + ": minProperties")
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            found.append(path + ": maxProperties")
     return found
 
 

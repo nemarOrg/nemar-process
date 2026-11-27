@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from nemar_process.common import io
+from nemar_process.common import io, qc
 from nemar_process.nemar_floor import outputs, process
 from recipe_support import (
     copy_fixture,
@@ -105,6 +105,58 @@ def test_fewer_than_half_of_the_signal_channels_located_takes_the_nolocs_branch(
     step = bad_channel_step(result)
     assert step.quality["branch"] == "nolocs"
     assert step.quality["nUsableLocations"] == 10
+
+
+def drop_channel(loaded, index):
+    """The loaded recording without one channel, in memory."""
+    eeg = loaded.eeg
+    keep = [i for i in range(int(eeg["nbchan"])) if i != index]
+    eeg["data"] = np.ascontiguousarray(eeg["data"][keep])
+    eeg["nbchan"] = len(keep)
+    eeg["chanlocs"] = [eeg["chanlocs"][i] for i in keep]
+    return loaded
+
+
+def test_exactly_half_of_the_signal_channels_located_takes_the_nolocs_branch():
+    """eegprep's RANSAC refuses exactly half of the channels located (it needs more than half,
+    sccn/eegprep#650), so the floor's guard sends exactly half to the no-locations criterion."""
+    from eegprep import clean_channels
+
+    loaded = drop_channel(loaded_fixture(), io.signal_channel_indices(loaded_fixture().eeg)[0])
+    signal = io.signal_channel_indices(loaded.eeg)
+    assert len(signal) == 20
+    located = [i for i in signal if qc.located(loaded.eeg["chanlocs"][i])]
+    for index in located[: len(located) - 10]:  # 10 of 20 left located
+        chanloc = loaded.eeg["chanlocs"][index]
+        chanloc["X"] = chanloc["Y"] = chanloc["Z"] = None
+    subset = {
+        **loaded.eeg,
+        "data": np.array(loaded.eeg["data"][signal], dtype=np.float64),
+        "nbchan": len(signal),
+        "chanlocs": [loaded.eeg["chanlocs"][i] for i in signal],
+    }
+    with pytest.raises(ValueError, match="most of your channels"):
+        clean_channels(subset)
+    result = process(loaded)
+    step = bad_channel_step(result)
+    assert step.quality["branch"] == "nolocs"
+    assert step.quality["nUsableLocations"] == 10
+
+
+def test_a_channel_with_nan_coordinates_is_unlocated_for_ransac_as_for_the_guard():
+    """eegprep's ``chanloc_has_coords``, which the guard follows, counts a NaN coordinate as no
+    position; ``clean_channels`` counts it as one and refuses it (sccn/eegprep#650, #609). The floor
+    hands RANSAC that channel with no position, so it runs on the other 18 and the recording is kept."""
+    loaded = loaded_fixture()
+    signal = io.signal_channel_indices(loaded.eeg)
+    chanloc = loaded.eeg["chanlocs"][signal[0]]
+    assert qc.located(chanloc)
+    chanloc["X"] = chanloc["Y"] = chanloc["Z"] = float("nan")
+    result = process(loaded)
+    step = bad_channel_step(result)
+    assert step.quality["branch"] == "ransac"
+    assert step.quality["nUsableLocations"] == 18
+    assert np.isfinite(result.work["data"]).all()
 
 
 def two_unlocated_channels(tmp_path, srate, *, tone_hz=None):

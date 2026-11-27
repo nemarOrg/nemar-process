@@ -18,7 +18,7 @@ import pytest
 from recipe_support import DATASET, ROOT
 
 EXCLUDED_STEP = "executionDateTime"
-SUMMARY = "desc-nemarfloor_qcsummary.json"
+SUMMARY = "desc-nemarfloor_dataquality.json"
 RECORD = "desc-nemarfloor_signalJourney.json"
 DIGEST = re.compile(r'"record_sha256": "[0-9a-f]{64}"')
 STATE_SUFFIXES = (
@@ -149,10 +149,10 @@ def test_a_different_thread_environment_changes_nothing_because_the_run_pins_its
         assert without_clock(first / name) == without_clock(other_threads_run / name), name
 
 
-def test_the_qc_summary_is_the_same_bytes_in_every_run_but_for_the_digest_of_the_record_file(
+def test_the_dataquality_document_is_the_same_bytes_in_every_run_but_for_the_record_digest(
     two_runs, other_threads_run
 ):
-    """The summary holds no clock, but ``record_sha256`` is the digest of a record file that does."""
+    """The document holds no clock, but ``record_sha256`` is the digest of a record file that does."""
     first, second = two_runs
     texts = [
         (run / SUMMARY).read_text(encoding="utf-8") for run in (first, second, other_threads_run)
@@ -162,6 +162,6 @@ def test_the_qc_summary_is_the_same_bytes_in_every_run_but_for_the_digest_of_the
     assert DIGEST.sub("", texts[0]) == DIGEST.sub("", texts[1]) == DIGEST.sub("", texts[2])
     for run, text in zip((first, second, other_threads_run), texts, strict=True):
         assert (
-            json.loads(text)["record_sha256"]
+            json.loads(text)["recipes"]["nemar-floor"]["record_sha256"]
             == hashlib.sha256((run / RECORD).read_bytes()).hexdigest()
         )

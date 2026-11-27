@@ -350,12 +350,12 @@ def runner(host: RunnerHost, command: str) -> subprocess.CompletedProcess:
 
 
 def dispatch(stack: Stack) -> str:
-    """``nemar admin compute pipeline run nemar-floor-zarr --dataset <fixture> --executor runner``."""
+    """``nemar admin compute pipeline run nemar-floor --dataset <fixture> --executor runner`` (the runner reads the Zarr input)."""
     status, body = stack.call(
         "POST",
         "/admin/compute/pipeline/run",
         stack.admin_key,
-        {"recipe": "nemar-floor-zarr", "dataset": FIXTURE_DATASET, "executor": "runner"},
+        {"recipe": "nemar-floor", "dataset": FIXTURE_DATASET, "executor": "runner"},
     )
     assert status < 300, stack.explain(body)
     assert body["ok"] is True, stack.explain(body)

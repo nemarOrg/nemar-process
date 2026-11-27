@@ -36,10 +36,10 @@ import stat
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, NamedTuple
 
-from . import bundle, net, provenance, run, runtime, spec, stage, upload
+from . import bundle, net, progress, provenance, run, runtime, serving_index, spec, stage, upload
 from .codes import (
     ENV_SLURM_JOB_ID,
     ENV_SPEC,
@@ -85,6 +85,8 @@ class Run:
         self.outputs_blocked = False
         # The runner's lease on the job, sent with its bundle, outputs and complete calls.
         self.lease: str | None = None
+        # Where live progress is read from while the container runs (set when it is about to start).
+        self.progress_source: progress.Source | None = None
 
     def fail(self, failure: Failure) -> None:
         """Record a failure unless one already stands: the first failure wins."""
@@ -129,6 +131,89 @@ class Run:
         )
 
 
+class Image:
+    """How the job's image is made available, the service's way: under Apptainer the image file named
+    by the digest under ``NEMAR_SIF_ROOT`` (``locate``, before the runtime is asked its version), and
+    under an engine ``runtime.ensure_image``, which pulls a missing image (``acquire``, after the
+    preflight and before anything is fetched). The standalone entry gives its own (``local.py``)."""
+
+    def locate(self, job: spec.Job, env: Env, log: Log) -> str:
+        return run.resolve_sif(job, env, log)
+
+    def acquire(
+        self,
+        runtime_path: str,
+        handle: runtime.Engine | None,
+        job: spec.Job,
+        reference: str,
+        sif: str,
+        env: Env,
+        scratch: str,
+        terminator: run.Terminator,
+        log: Log,
+    ) -> str:
+        """The image file to run (``sif``, unchanged here); under an engine (``handle``, None under
+        Apptainer) the image is present."""
+        if handle is not None:
+            runtime.ensure_image(handle, reference, env, terminator.stop, log)
+        return sif
+
+    def before_exec(self, sif: str) -> None:
+        """Immediately before the runtime is started on ``sif`` (the PID probe, the job): nothing for
+        the service; the standalone entry refuses an image file that changed since it was pinned."""
+
+
+class Steps(NamedTuple):
+    """What ``_do_work`` gets its inputs from, injected so the standalone entry (``local.py``) can give
+    its own while the container phase stays one piece of code: the code (``scratch`` -> the code
+    directory and the archive's SHA-256, or None and None without a bundle), the datasets (``scratch``
+    -> the staged directories, in the order of ``job.data_names``), the image, where live progress is
+    posted (None: only written to ``launcher/progress.json``), the reporter's cadence (None: the
+    module's constants) and the engine's pull policy (``runtime.build_argv``: the standalone entry's
+    is ``never``). ``service_steps`` gives the service's."""
+
+    code: Callable[[str], tuple[str | None, str | None]]
+    data: Callable[[str], list[stage.Staged]]
+    image: Image
+    post: Callable[[dict[str, Any]], None] | None
+    first_seconds: float | None = None
+    report_seconds: float | None = None
+    engine_pull: str = "missing"
+    # ``scratch`` -> the directory holding the staged serving index, or None (``serving_index.py``):
+    # only a launch from NEMAR's service has one.
+    serving_index: Callable[[str], str | None] = lambda _scratch: None
+
+
+def service_steps(
+    state: Run, job: spec.Spec, env: Env, terminator: run.Terminator, sleep: net.Sleep
+) -> Steps:
+    """The service's inputs: the bundle from the Worker, the datasets from the data plane, the image
+    as ``Image`` finds it, and on Tapis (no lease) live progress posted to the job-token route."""
+    log = state.log
+
+    def code(scratch: str) -> tuple[str | None, str | None]:
+        if job.bundle is None:
+            return None, None
+        return bundle.fetch(
+            job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
+        )
+
+    def data(scratch: str) -> list[stage.Staged]:
+        return stage.stage_all(job, env, scratch, sleep=sleep, log=log, stop=terminator.stop)
+
+    def index(scratch: str) -> str | None:
+        return serving_index.fetch(
+            job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
+        )
+
+    post = (
+        None
+        if state.lease is not None
+        else progress.poster(job.api_base, job.job_id, job.job_token)
+    )
+    return Steps(code, data, Image(), post, serving_index=index)
+
+
 def _inside(child: str, parent: str) -> bool:
     child, parent = os.path.realpath(child), os.path.realpath(parent)
     return os.path.commonpath([child, parent]) == parent
@@ -136,13 +221,16 @@ def _inside(child: str, parent: str) -> bool:
 
 def _do_work(
     state: Run,
-    job: spec.Spec,
+    job: spec.Job,
     env: Env,
     settings: Settings,
     terminator: run.Terminator,
-    sleep: net.Sleep,
+    steps: Steps,
 ) -> None:
     """Fetch, stage and run. Raises ``Failure`` (or ``Stopped``) at the first phase that fails.
+
+    ``steps`` gives the code, the datasets, the image and where progress goes (``service_steps`` for
+    NEMAR's service, ``local.py`` for the standalone entry); everything else is one path for both.
 
     Cheap refusals come first, so nothing is downloaded for a job that cannot run: the runtime and
     the image, then the bundle and the entry, then the PID namespace check, then the datasets.
@@ -167,32 +255,47 @@ def _do_work(
         tmp_dir = os.path.join(scratch, "tmp")
         os.mkdir(tmp_dir, 0o700)
 
-        engine = runtime.selected(env)
+        engine = runtime.selected(env, log)
         runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
+        runtime.refuse_podman_gpu(engine, job, settings.device, log)  # Podman hands over no GPU
         sif = ""
+        handle: runtime.Engine | None = None
         if engine == runtime.APPTAINER:
             runtime_name, runtime_path = run.find_runtime(env)
-            sif = run.resolve_sif(job, env)
+            sif = steps.image.locate(job, env, log)
+            state.runtime_version = run.runtime_version(
+                runtime_path, env, platform.python_version()
+            )
         else:  # Docker or Podman: the image comes from the registry, there is no image file
             runtime_name, runtime_path = run.find_runtime(env, (engine,))
-        state.runtime_version = run.runtime_version(runtime_path, env, platform.python_version())
+            # Podman's configuration is shut out before its first call, `--version` included
+            prevention = (
+                runtime.prepare_prevention(scratch, env) if engine == runtime.PODMAN else None
+            )
+            handle = runtime.Engine(engine, runtime_path, prevention)
+            state.runtime_version = run.runtime_version(
+                runtime_path,
+                env,
+                platform.python_version(),
+                handle.argv("--version"),
+                handle.environment(env),
+            )
         reference = runtime.image_reference(job)
         engine_found: runtime.Assessment | None = None
-        if engine != runtime.APPTAINER:  # like the image file: before anything is fetched
+        if handle is not None:  # like the image file: before anything is fetched
             assert settings.limits is not None  # read_settings refuses a launch without them
-            runtime.check_registry(reference, env)
-            engine_found = runtime.preflight(
-                engine, runtime_path, settings.limits, env, terminator.stop, log
-            )
-            runtime.ensure_image(runtime_path, reference, env, terminator.stop, log)
+            runtime.check_registry(reference, env, log)
+            engine_found = runtime.preflight(handle, settings.limits, env, terminator.stop, log)
+        sif = steps.image.acquire(
+            runtime_path, handle, job, reference, sif, env, scratch, terminator, log
+        )
 
         code_dir: str | None = None
         started = time.monotonic()
         try:
-            if job.bundle is not None:
-                code_dir, state.bundle_digest = bundle.fetch(
-                    job, scratch, sleep=sleep, log=log, stop=terminator.stop, lease=state.lease
-                )
+            code_dir, digest = steps.code(scratch)
+            if digest is not None:
+                state.bundle_digest = digest
         finally:
             state.phase("code_fetch", started)
 
@@ -202,22 +305,25 @@ def _do_work(
                 raise Failure("entry_not_found", None, "the entry is not in the bundle")
 
         if engine == runtime.APPTAINER:
+            steps.image.before_exec(sif)
             run.require_pid_namespace(runtime_path, sif, job, state.layout, tmp_dir, env, log)
         else:
             log.info("pid namespace: private, the engine is never given a host namespace flag")
 
         started = time.monotonic()
         try:
-            staged = stage.stage_all(job, env, scratch, sleep=sleep, log=log, stop=terminator.stop)
-            state.staging = [item.record for item in staged]
+            staged = steps.data(scratch)
+            state.staging = [item.record for item in staged if item.record]
+            # The staged serving index, fetched like the bundle and before the container runs.
+            index_dir = steps.serving_index(scratch)
         finally:
             state.phase("staging", started)
         if terminator.stop.is_set():
             raise Stopped  # a cancel must not run the entry
 
-        binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged)
+        binds = run.build_binds(job, state.layout.work, tmp_dir, code_dir, staged, index_dir)
         container: str | None = None
-        if engine == runtime.APPTAINER:
+        if handle is None:
             run.check_bind_sources(binds)
             argv = run.build_argv(
                 runtime_path,
@@ -236,8 +342,7 @@ def _do_work(
             container = runtime.container_name()
             log.info("container: named {}".format(container))
             argv = runtime.build_argv(
-                engine,
-                runtime_path,
+                handle,
                 job,
                 reference,
                 container,
@@ -246,24 +351,60 @@ def _do_work(
                 settings.runner_label,
                 cpu_shares=engine_found.cpu_shares,
                 device=settings.device,
+                pull=steps.engine_pull,
             )
-        if settings.device is not None:
-            state.device = settings.device  # recorded only for a container that is about to start
-            log.info("device: {} ({})".format(settings.device.device, settings.device.reason))
         oom_check = (
             None
-            if container is None
-            else functools.partial(runtime.oom_killed, runtime_path, container, env)
+            if handle is None or container is None
+            else functools.partial(runtime.oom_killed, handle, container, env)
+        )
+        # live progress (ADR 0134) beside the container: written to launcher/progress.json, where a
+        # runner reads it for its heartbeat, and on Tapis (no lease) posted to the job-token route.
+        # It never touches the container and never fails the job.
+        state.progress_source = progress.Source(state.layout.work)
+        reporter: progress.Reporter | None = progress.Reporter(
+            state.progress_source,
+            state.layout.launcher,
+            steps.post,
+            log,
+            first_seconds=steps.first_seconds,
+            report_seconds=steps.report_seconds,
         )
         started = time.monotonic()
         try:
+            reporter.start()
+        except RuntimeError:  # no thread to be had: the job runs, without live progress
+            log.warning("progress_reporter_not_started")
+            reporter = None
+        try:
+            if engine == runtime.APPTAINER:
+                steps.image.before_exec(sif)
+            environment: dict[bytes, bytes] | None = None
+            if handle is not None and handle.name == runtime.PODMAN:
+                # create, init and the check of the OCI configuration the runtime was given, before
+                # any user code runs; only then the attached start of that same configuration
+                assert container is not None
+                runtime.create_verified(handle, argv, container, binds, env, terminator.stop, log)
+                argv = runtime.start_argv(handle, container)
+                environment = handle.environment(env)
+            if settings.device is not None:
+                state.device = settings.device  # recorded only for a container about to start
+                log.info("device: {} ({})".format(settings.device.device, settings.device.reason))
             outcome = run.run_container(
-                argv, env, state.layout.work, terminator, log, oom_check=oom_check
+                argv,
+                env,
+                state.layout.work,
+                terminator,
+                log,
+                oom_check=oom_check,
+                environment=environment,
             )
         finally:
+            if reporter is not None:
+                reporter.stop()
             state.phase("run", started)
-            if container is not None:
-                runtime.remove_container(runtime_path, container, env)
+            if handle is not None and container is not None:
+                runtime.remove_container(handle, container, env)
         state.entry_exit_code = outcome.entry_exit_code
         if outcome.failure is not None:
             raise outcome.failure
@@ -407,7 +548,14 @@ def main(environ: Mapping[bytes, bytes] | None = None, *, sleep: net.Sleep = tim
         if job is not None and refused is None and settings.problem is None:
             log.info("job {}: runtime {}".format(job.job_id, job.runtime))
             try:
-                _do_work(state, job, env, settings, terminator, sleep)
+                _do_work(
+                    state,
+                    job,
+                    env,
+                    settings,
+                    terminator,
+                    service_steps(state, job, env, terminator, sleep),
+                )
             except Failure as failure:
                 state.fail(failure)
             except Stopped:
@@ -426,6 +574,14 @@ def _finish(
 ) -> None:
     """Read back the outputs, write the documents, upload: each under its own error handling, so
     ``result.json`` is written and the launcher-only upload happens whatever goes wrong."""
+    _finalize(state, env, terminator)
+    if job is not None:
+        _upload(state, job, sleep, env, terminator)
+
+
+def _finalize(state: Run, env: Env, terminator: run.Terminator) -> None:
+    """Read back the outputs and write the documents, each under its own error handling, so
+    ``result.json`` is written whatever goes wrong. Never raises."""
     log = state.log
     if state.layout is not None:
         started = time.monotonic()
@@ -464,8 +620,6 @@ def _finish(
             state.write_result()
         except Exception:  # noqa: BLE001
             log.error("result.json could not be built")
-    if job is not None:
-        _upload(state, job, sleep, env, terminator)
 
 
 if __name__ == "__main__":

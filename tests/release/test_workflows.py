@@ -12,7 +12,9 @@ import re
 import shutil
 import subprocess
 from collections import Counter
+from pathlib import Path
 
+import docker_support
 import pytest
 import release_support
 from nemar_runner import install
@@ -893,6 +895,58 @@ def test_the_tools_a_release_gate_runs_are_the_versions_ci_runs():
         assert gate[key] == ci[key], key
 
 
+def test_the_test_image_and_its_mirror_are_one_digest_and_each_sif_build_tries_both():
+    """public.ecr.aws can refuse an anonymous pull for a quota the runner shares (#107): the SIF build
+    then tries Docker Hub's copy of the same digest, under the same cache key, as the Docker end to end
+    does (tests/docker_support.py)."""
+    for name in ("ci.yml", "release-gate.yml"):
+        workflow = load(name)
+        env = workflow["env"]
+        key = env["TEST_IMAGE_KEY"]
+        assert key == docker_support.IMAGE_HEX
+        sources = ["docker://{}@sha256:{}".format(r, key) for r in docker_support.REPOSITORIES]
+        assert [env["TEST_IMAGE"], env["TEST_IMAGE_MIRROR"]] == sources
+        (build,) = [
+            s
+            for job in workflow["jobs"].values()
+            for s in job["steps"]
+            if s.get("name") == "Build the test image"
+        ]
+        assert 'for source in "$TEST_IMAGE" "$TEST_IMAGE_MIRROR"; do' in build["run"]
+        assert 'apptainer build --force .cache/runtime.sif "$source" && exit 0' in build["run"]
+        (cache,) = [
+            s
+            for job in workflow["jobs"].values()
+            for s in job["steps"]
+            if s.get("name") == "Cache the test image"
+        ]
+        assert cache["with"]["key"] == (
+            "sif-${{ env.TEST_IMAGE_KEY }}-apptainer-${{ env.APPTAINER_VERSION }}"
+        )
+    assert [conftest_source(n) for n in ("TEST_IMAGE", "TEST_IMAGE_MIRROR")] == sources
+
+
+def conftest_source(name: str) -> str:
+    """A string constant of tests/conftest.py, read from its text (importing it by name could find
+    another module called ``conftest``)."""
+    text = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+    found = re.search(r"^{} = \(\n((?:\s+\"[^\"]*\"\n)+)\)".format(name), text, re.MULTILINE)
+    assert found is not None, name
+    return "".join(re.findall(r'"([^"]*)"', found.group(1)))
+
+
+def test_the_docker_end_to_end_has_a_limit_the_image_pull_ends_well_inside():
+    (docker,) = [
+        s
+        for s in load("release-gate.yml")["jobs"]["release-gate"]["steps"]
+        if "test_docker_launch.py" in s.get("run", "")
+    ]
+    assert docker["timeout-minutes"] == 20
+    assert load("ci.yml")["jobs"]["docker"]["timeout-minutes"] == 30
+    # the pull's deadline leaves the launches at least five minutes of the shorter limit
+    assert docker_support.DEADLINE_SECONDS <= (20 - 5) * 60
+
+
 SUITES_WITHOUT_THE_RUNNER_STACK = ("tests/release", "tests/images", "tests/recipes")
 
 
@@ -1176,7 +1230,7 @@ def test_every_required_check_is_reported_by_exactly_one_job():
     assert set(job_names(load(LINT))) == {"lint"}
     ci_names = set(job_names(load("ci.yml")))
     assert set(REQUIRED_ON_DEV) - {"lint", "bump-validator"} <= ci_names
-    assert ci_names - set(REQUIRED_ON_DEV) == {"docker backend (end to end)"}
+    assert ci_names - set(REQUIRED_ON_DEV) == {"docker backend (end to end)", "podman (rootless)"}
     assert set(RETIRED_CHECKS) & set(REQUIRED_ON_MAIN) == set()
 
 
@@ -1269,10 +1323,12 @@ def test_no_job_or_step_of_ci_can_hide_a_failure():
         "launcher": {
             "Build the test image": "steps.sif-cache.outputs.cache-hit != 'true'",
             "Launcher tests on 3.9": "matrix.python == '3.9'",
+            "Fence and standalone tests on 3.13": "matrix.python == '3.9'",
             "Gates": on_3_12,
             **dict.fromkeys(names_of_fold(), on_3_12),
         },
         "docker": {},
+        "podman": {},
         "static": dict.fromkeys(static_deploy_group_names(), ALWAYS),
         "recipes": {},
     }
@@ -1407,9 +1463,11 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         ".github/workflows/nemar-cli-drift.yml",
         "tests/contract/**",
         "launcher/schema/**",
+        "runner/schema/**",
         "observer/schema/**",
         "tests/observer/fixtures/**",
         "deploy/tapis/**",
+        "recipes/nemar_process/common/contract/**",
     ]
     for pattern in paths:  # a path that matches no file would never start the workflow
         files = ROOT.glob(pattern.removesuffix("/**") + "/**/*" if "**" in pattern else pattern)
@@ -1421,6 +1479,7 @@ def test_the_nemar_cli_advisories_are_a_workflow_of_their_own_that_never_fails()
         "nemar-cli-latest",
         "nemar-cli-observation-latest",
         "nemar-cli-tapis-latest",
+        "nemar-cli-progress-latest",
     }
     for name, job in document["jobs"].items():
         assert job["continue-on-error"] is True, name

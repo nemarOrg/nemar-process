@@ -20,6 +20,7 @@ import http.client
 import json
 import os
 import random
+import re
 import socket
 import ssl
 import stat
@@ -101,6 +102,7 @@ class HttpFailure(Exception):
         code: str | None = None,
         retryable: bool = False,
         lost: bool = False,
+        retry_after: int | None = None,
     ) -> None:
         super().__init__(word)
         self.word = word
@@ -108,6 +110,8 @@ class HttpFailure(Exception):
         self.code = code  # a fixed word the response named in its `code`, if it was one
         self.retryable = retryable
         self.lost = lost
+        # the seconds a refusal's `Retry-After` header asked for (whole seconds only), else None
+        self.retry_after = retry_after
 
 
 def _read_error_json(error: urllib.error.HTTPError) -> dict[str, Any]:
@@ -132,6 +136,20 @@ def transport_detail(failure: HttpFailure) -> str:
     return "bad_response" if failure.word == "bad_response" else "fetch_failed"
 
 
+# ASCII digits only: `str.isdigit()` is also true for "\u00b2" (superscript two), which `int` refuses.
+_DIGITS = re.compile(r"[0-9]{1,6}")
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+
+
+def _retry_after(error: urllib.error.HTTPError) -> int | None:
+    """The whole seconds of a ``Retry-After`` header, or None (absent, a date, or not digits)."""
+    headers = getattr(error, "headers", None)
+    value = headers.get("Retry-After") if headers is not None else None
+    if not isinstance(value, str) or _DIGITS.fullmatch(value.strip()) is None:
+        return None
+    return int(value.strip())
+
+
 def classify(exc: BaseException) -> HttpFailure:
     """Turn what urllib raised into an ``HttpFailure``."""
     if isinstance(exc, HttpFailure):
@@ -146,7 +164,13 @@ def classify(exc: BaseException) -> HttpFailure:
         if 300 <= status < 400:
             return HttpFailure("redirect_refused", status=status)
         retryable = status in (408, 425, 429) or status >= 500
-        return HttpFailure("http_{}".format(status), status=status, code=word, retryable=retryable)
+        return HttpFailure(
+            "http_{}".format(status),
+            status=status,
+            code=word,
+            retryable=retryable,
+            retry_after=_retry_after(exc),
+        )
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return HttpFailure("timeout", retryable=True)
     if isinstance(exc, urllib.error.URLError):
@@ -185,8 +209,8 @@ def _opener(follow: bool) -> Any:
     return _OPENERS[follow]
 
 
-def open_url(request: urllib.request.Request, follow: bool) -> Any:
-    return _opener(follow).open(request, timeout=TIMEOUT)
+def open_url(request: urllib.request.Request, follow: bool, timeout: float = TIMEOUT) -> Any:
+    return _opener(follow).open(request, timeout=timeout)
 
 
 def retrying(
@@ -216,7 +240,11 @@ def encode_json(body: dict[str, Any]) -> bytes:
 
 
 def post_json(
-    url: str, body: dict[str, Any], token: str, lease: str | None = None
+    url: str,
+    body: dict[str, Any],
+    token: str,
+    lease: str | None = None,
+    timeout: float = TIMEOUT,
 ) -> tuple[int, dict[str, Any]]:
     """POST ``body`` as JSON with the job token header (and the lease header, when ``lease`` is
     given); return (status, JSON object).
@@ -234,7 +262,7 @@ def post_json(
         headers[LEASE_HEADER] = lease
     request = urllib.request.Request(url, data=data, method="POST", headers=headers)
     try:
-        with open_url(request, follow=False) as response:
+        with open_url(request, follow=False, timeout=timeout) as response:
             raw = response.read(MAX_JSON_RESPONSE)
             status = response.status
     except BaseException as exc:  # noqa: BLE001 - classified, or re-raised when it is not ours
@@ -355,7 +383,7 @@ def _content_range_start(header: str | None) -> int | None:
     if not header or not header.startswith("bytes "):
         return None
     first = header[len("bytes ") :].split("-", 1)[0]
-    return int(first) if first.isdigit() else None
+    return int(first) if _ASCII_DIGITS.fullmatch(first) else None
 
 
 def download(
@@ -441,7 +469,7 @@ def download(
         if state.have < checker.size:
             if (
                 length_header is not None
-                and length_header.isdigit()
+                and _ASCII_DIGITS.fullmatch(length_header) is not None
                 and received >= int(length_header)
             ):
                 # The server's own body ended where it said it would: a short file, not a dropped

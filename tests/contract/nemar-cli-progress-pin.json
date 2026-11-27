@@ -1,0 +1,100 @@
+{
+  "comment": "The nemar-cli commit the live progress contract is copied from (ADR 0134, epic nemarOrg/nemar-cli#2324): the closed nemar.progress.v1 schema and the counting vectors, the plugin manifest schema and its vectors, the vendored neuroschema bundle and its view registry the recipes validate plugin outputs against (ADR 0137), the naming vectors of nemar-cli's port of common/naming.py, four of neuroschema's view vectors (the record checks, the preset checks, the view digest and the component activations) that the views writer's tests replay, and the three standalone contracts (the local launch specification, the recipe progress file and the results report). All are written in nemar-cli and copied here byte for byte. The commit is on nemar-cli's dev branch (the pipeline progress epic merged there); the neuroschema bundle is the 0.6.1 re-vendor of nemar-cli #2439 (issue #2411). Bump it deliberately: see docs/contracts.md. CI checks out exactly this commit; tests/contract/test_progress_drift.py compares against it.",
+  "repository": "nemarOrg/nemar-cli",
+  "ref": "8e8e11e39354e63c1c1cb9401de4453aeb1c0c51",
+  "schema": {
+    "source": "shared/contract/compute-progress.schema.json",
+    "copy": "launcher/schema/compute-progress.v1.json",
+    "sha256": "731045a6121c758d8c37a71db0102f2607bc4359c70fb1494fce4ca1dc1bd061",
+    "bytes": 4665
+  },
+  "vectors": {
+    "source": "shared/contract/compute-progress-vectors.json",
+    "copy": "tests/contract/compute-progress-vectors.json",
+    "sha256": "fb959fc549498b5ce2d37fa2030c141886c6f7053a9d193795d06a367202ef53",
+    "bytes": 20596
+  },
+  "plugin_manifest": {
+    "source": "shared/contract/plugin-manifest.schema.json",
+    "copy": "recipes/nemar_process/common/contract/plugin-manifest.v1.json",
+    "sha256": "f93a4941f21b0af6bced1e9f99b28dc9329ea694225cb5f95bc2eb9bf43ea8aa",
+    "bytes": 8193
+  },
+  "neuroschema_bundle": {
+    "source": "shared/contract/neuroschema/dataset.bundle.json",
+    "copy": "recipes/nemar_process/common/contract/neuroschema.bundle.json",
+    "sha256": "2f2219b4f5fde9cf7c3b48d897d6aae037563ecbdced86ae821c45dc7cdc1c0e",
+    "bytes": 296218
+  },
+  "local_launch": {
+    "source": "shared/contract/compute-local-launch.schema.json",
+    "copy": "launcher/schema/compute-local-launch.v1.json",
+    "sha256": "e96c5d6e6d7a4224b50fd2532a2ef18c87ca4f218b094164b2e4bb5c15283328",
+    "bytes": 7630
+  },
+  "recipe_progress": {
+    "source": "shared/contract/compute-recipe-progress.schema.json",
+    "copy": "launcher/schema/compute-recipe-progress.v1.json",
+    "sha256": "5a873a1fa216473b00123ead64251940a80d7ebaf25f8a9342b87af56c93c62c",
+    "bytes": 5273
+  },
+  "results_report": {
+    "source": "shared/contract/compute-results-report.schema.json",
+    "copy": "launcher/schema/compute-results-report.v1.json",
+    "sha256": "f5cb348a7a650cb8f12b3d33a02f910f615b18e54858bf14c07341f40a11b84c",
+    "bytes": 21836
+  },
+  "plugin_manifest_vectors": {
+    "source": "shared/contract/plugin-manifest-vectors.json",
+    "copy": "tests/contract/plugin-manifest-vectors.json",
+    "sha256": "a914fa228bd1713a876468fc4f1adab4619e2a0f9ae794bcf28e04ee60168dc8",
+    "bytes": 39140
+  },
+  "views_registry": {
+    "source": "shared/contract/neuroschema/views/registry.json",
+    "copy": "recipes/nemar_process/common/contract/views-registry.json",
+    "sha256": "039bc17fc2d88d3c5f99f5037c916821082535e7ef554aa0355f88c991066974",
+    "bytes": 7872
+  },
+  "naming_vectors": {
+    "source": "shared/contract/compute-naming-vectors.json",
+    "copy": "tests/contract/compute-naming-vectors.json",
+    "sha256": "b8b41f8fa0e9a06a7783da172a6ad2374e61f0cc2be5165be4b834813a44a8a0",
+    "bytes": 5775
+  },
+  "record_checks_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/record-checks.v1.json",
+    "copy": "tests/contract/neuroschema-views/record-checks.v1.json",
+    "sha256": "4d9e641606037d351a93621c8eeef588f3862cf4981187fc366c504c15c28905",
+    "bytes": 196899
+  },
+  "preset_checks_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/preset-checks.v1.json",
+    "copy": "tests/contract/neuroschema-views/preset-checks.v1.json",
+    "sha256": "a4517dda1546f7213823ada152a4284ae7e9d5df57604ad1f9df147a4301d67e",
+    "bytes": 311507
+  },
+  "view_digest_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/view-digest.v1.json",
+    "copy": "tests/contract/neuroschema-views/view-digest.v1.json",
+    "sha256": "ddc048c896b098302300eabaedfd289f596df2df3a03a3e40450cbc87ac07b70",
+    "bytes": 22145
+  },
+  "ic_activity_vectors": {
+    "source": "shared/contract/neuroschema/views/vectors/ic-activity.v1.json",
+    "copy": "tests/contract/neuroschema-views/ic-activity.v1.json",
+    "sha256": "05a8a4cea72def73ab7c2891a451f6669877d47aad7d3cd95f763c9b1e564e3e",
+    "bytes": 1247782
+  },
+  "words": {
+    "progress_contract": "shared/contract/compute-progress.ts",
+    "checkpoint_rules": "shared/compute-checkpoints.ts",
+    "recipes": "shared/compute-recipes.ts",
+    "compute_state": "shared/compute-state.ts",
+    "job_callbacks": "backend/src/routes/callbacks/compute-job-callbacks.ts",
+    "local_launch_contract": "shared/contract/compute-local-launch.ts",
+    "recipe_progress_contract": "shared/contract/compute-recipe-progress.ts",
+    "results_report_contract": "shared/contract/compute-results-report.ts",
+    "launch_contract": "shared/contract/compute-launch.ts"
+  }
+}

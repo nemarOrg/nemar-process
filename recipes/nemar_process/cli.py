@@ -17,7 +17,10 @@ name and one label. A name that was a recipe of its own (``nemar-floor-zarr``) i
 with the command that replaces it.
 
 The command is an argument vector, so a launch specification names it without a shell. It reads only
-``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``). It opens no
+``--dataset-dir`` and writes only under ``--out`` (by default ``$NEMAR_OUT/product``), and, when
+``--out`` is inside ``$NEMAR_OUT``, a small progress file at ``$NEMAR_OUT/.nemar-progress/`` that the
+launcher reports live progress from and that is removed when the run ends (``common/progress.py``,
+ADR 0134). It opens no
 network connection, with one exception: a recipe run with ``--input zarr`` (``nemar-floor``)
 reads the dataset's Zarr serving copy over HTTPS from the hosts in the allowlist of
 ``common/zarr_hosts.py`` only (the Zarr host and, after one redirect, the data bucket), refuses
@@ -86,10 +89,13 @@ from nemar_process import sj
 from nemar_process.common import (
     COMMON_VERSION,
     build,
+    dataquality,
     determinism,
     files,
     io,
     naming,
+    plugins,
+    progress,
     records,
     table,
     versions,
@@ -115,7 +121,6 @@ from nemar_process.common.errors import (
     is_cuda_out_of_memory,
 )
 from nemar_process.common.recipe import INPUTS, Identity, Option, Recipe, RunContext
-from nemar_process.nemar_floor import qc_summary
 from nemar_process.recipes import REGISTRY, RETIRED
 
 EXIT_OK = 0
@@ -437,7 +442,7 @@ def finalize(
     built_by: tuple[dict[str, Any] | None, str | None] | None = None,
     resumed: int | None = None,
 ) -> tuple[dict[str, Any], int, int]:
-    """Build and write the dataset record from the table in ``out``, and the recipe's QC summary.
+    """Build and write the dataset record from the table in ``out``, and its dataQuality document.
 
     Returns the record, how many of the recordings in the table were skipped for their format, and
     how many were left out by the time budget, which with the counts in the record tell the exit
@@ -467,8 +472,7 @@ def finalize(
     if problems:
         raise RuntimeError("the dataset record does not pass its checks")
     files.write_json(out / naming.dataset_path(label, "signalJourney", "json"), record)
-    if qc_summary.applies(recipe):  # after the record: it names the record file by its digest
-        qc_summary.write(recipe, out, record, rows)
+    dataquality.write(recipe, out, record, rows)  # after the record: it names the record by digest
     return (
         record,
         sum(1 for row in rows if row["code"] == UNSUPPORTED_FORMAT),
@@ -477,10 +481,11 @@ def finalize(
 
 
 def dataset_files(recipe: Recipe) -> list[str]:
-    """The files at the root of a product besides its table and its record: the QC summary of the
-    floor. ``run`` writes them from the table and the record, and ``aggregate`` writes them from the
-    merged table and record and never copies an input's."""
-    return [qc_summary.path(recipe)] if qc_summary.applies(recipe) else []
+    """The files at the root of a product besides its table and its record: the dataset dataQuality
+    document (``common/dataquality.py``), which every recipe writes. ``run`` writes them from the table
+    and the record, and ``aggregate`` writes them from the merged table and record and never copies an
+    input's."""
+    return [dataquality.path(recipe)]
 
 
 def result_line(
@@ -693,6 +698,9 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
             return EXIT_DATASET_UNREADABLE
     try:
         identity = identity_of(args, dataset_dir if recipe.input == "bids" else None)
+        # options that must agree with the identity (nemar-ica's attested serving index), checked
+        # before anything is created: a contradiction is the caller's, a usage error
+        options = recipe.bind_options(options, identity)
     except ValueError as error:
         parser.error(str(error))
     validator = (
@@ -710,6 +718,11 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         except EngineUnavailable as error:
             print("engine_unavailable: {}".format(error.reason), file=sys.stderr)
             return EXIT_ENGINE_UNAVAILABLE
+        except plugins.PluginLoadError as error:
+            # a pinned plugin of the image that cannot be loaded as declared: a fault of the image,
+            # named by the plugin and the loader's word
+            print("plugin_unloadable: {} {}".format(error.name, error.word), file=sys.stderr)
+            return EXIT_INTERNAL
         # the recipe's seeds and engine fields are checked before anything is created too: a hook
         # that is refused is a fault of the recipe, named by its hook and the class of the refusal
         try:
@@ -758,27 +771,41 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
                 )
                 return EXIT_DATASET_UNREADABLE
         seen: set[str] = set()
+        table_path = out / naming.dataset_path(recipe.label, "recordings", "tsv")
+        # the local progress file the launcher reports live progress from (ADR 0134); it stays through
+        # finalize (the `finally` below) and is removed once the dataset record is written or refused
+        tracker = progress.begin(recipe, out, table_path)
         try:
-            with table.TableWriter(
-                out / naming.dataset_path(recipe.label, "recordings", "tsv"), recipe.columns
-            ) as writer:
-                for counter, (path, target) in enumerate(items):
-                    row = run_one(recipe, target, path, context, out, counter, seen, budget)
-                    writer.append(row)
-                    report(path, row)
-        except OSError as error:
-            print("the table cannot be written: {}".format(type(error).__name__), file=sys.stderr)
-            return EXIT_OUTPUT_UNUSABLE
+            try:
+                with table.TableWriter(table_path, recipe.columns) as writer:
+                    if tracker is not None:
+                        tracker.discovered(len(items))  # every item gets exactly one row
+                    for counter, (path, target) in enumerate(items):
+                        if tracker is not None:
+                            tracker.started(path)
+                        row = run_one(recipe, target, path, context, out, counter, seen, budget)
+                        writer.append(row)
+                        if tracker is not None:
+                            tracker.ended()
+                        report(path, row)
+            except OSError as error:
+                print(
+                    "the table cannot be written: {}".format(type(error).__name__),
+                    file=sys.stderr,
+                )
+                return EXIT_OUTPUT_UNUSABLE
+            finally:
+                shutil.rmtree(out / PARTIAL, ignore_errors=True)
+            try:
+                record, unsupported, unfinished = finalize(recipe, out, context, ignored, started)
+            except OSError as error:
+                print(
+                    "the dataset record cannot be written: {}".format(type(error).__name__),
+                    file=sys.stderr,
+                )
+                return EXIT_OUTPUT_UNUSABLE
         finally:
-            shutil.rmtree(out / PARTIAL, ignore_errors=True)
-        try:
-            record, unsupported, unfinished = finalize(recipe, out, context, ignored, started)
-        except OSError as error:
-            print(
-                "the dataset record cannot be written: {}".format(type(error).__name__),
-                file=sys.stderr,
-            )
-            return EXIT_OUTPUT_UNUSABLE
+            progress.end()
     code, word = exit_for(record["extensions"]["nemar"]["counts"], unsupported, unfinished)
     extra = None
     if source is not None:
@@ -1154,6 +1181,15 @@ def version_command() -> int:
     document = {
         "recipes": {key: REGISTRY[key].version for key in sorted(REGISTRY)},
         "inputs": {key: list(REGISTRY[key].inputs) for key in sorted(REGISTRY)},
+        # each recipe's checkpoints and their steps (ADR 0134): the map nemar-cli's registry holds for
+        # the same recipe version, in the shape of its RecipeCheckpoint
+        "checkpoints": {
+            key: [
+                {"checkpoint": name, "steps": list(steps)}
+                for name, steps in REGISTRY[key].checkpoints
+            ]
+            for key in sorted(REGISTRY)
+        },
         "common": COMMON_VERSION,
         # with the commit it was installed from, as the engine stamp and every step name it
         "eegprep": versions.distribution_version("eegprep"),

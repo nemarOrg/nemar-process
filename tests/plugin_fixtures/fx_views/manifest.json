@@ -1,0 +1,57 @@
+{
+  "format": "nemar.plugin-manifest.v1",
+  "name": "fx-views",
+  "version": "0.1.0",
+  "entry": "plugin_fixtures.fx_views",
+  "checkpoint": "quality",
+  "reads": {
+    "dataset": false,
+    "recipes": [
+      "nemar-ica"
+    ]
+  },
+  "parameters": {},
+  "outputs": {
+    "metrics": {},
+    "views": {
+      "icclasses": {
+        "kind": "nemar.ic-classes",
+        "kind_version": 1,
+        "caption": "Components by ICLabel class.",
+        "roles": {
+          "histogram": {
+            "format": "json",
+            "max_bytes": 65536,
+            "dims": []
+          }
+        }
+      },
+      "spectrum": {
+        "kind": "nemar.spectrum",
+        "kind_version": 1,
+        "caption": "Power spectrum per sensor.",
+        "roles": {
+          "values": {
+            "format": "tsv",
+            "max_bytes": 4194304,
+            "dims": [
+              "freq",
+              "sensor"
+            ],
+            "unit": "dB",
+            "columns": [
+              {
+                "name": "freq_hz",
+                "type": "number",
+                "unit": "Hz"
+              }
+            ]
+          },
+          "layout": {
+            "from": "recipe"
+          }
+        }
+      }
+    }
+  }
+}

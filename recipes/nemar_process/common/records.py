@@ -8,8 +8,11 @@ record and the distributions to summarize (``recipe.py``).
 
 What the schema cannot say goes in ``extensions.nemar`` (docs/upstream.md; signalJourney/signalJourney#7 to #9): the
 checksum of every output file (``outputTargets`` has no checksum field), the identity of the run,
-the engine, the plan hash. The PyPI validator checks neither timestamps nor non-finite numbers
-nor references, so ``check`` does (``TIMESTAMP``; the writer refuses NaN; ``references_problems``).
+the engine, the plan hash, the recording's quality views (``views`` and ``views_skipped``,
+neuroschema 0.6.0 declarations, ADR 0137) and its recipe metrics (``metrics``, neuroschema
+``qualityMetric`` objects whose producer is the recipe). The PyPI validator checks neither timestamps nor non-finite
+numbers nor references, and knows nothing of views or metrics, so ``check`` does (``TIMESTAMP``; the
+writer refuses NaN; ``references_problems``; ``views_problems``; ``metrics_problems``).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import bisect
 import copy
 import hashlib
+import math
 import re
 import statistics
 from collections.abc import Mapping, Sequence
@@ -24,12 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nemar_process.common import build, files, naming
+from nemar_process.common import build, contract, files, naming, views
 from nemar_process.common import plan as plans
 from nemar_process.common.determinism import canonical_json, rounded, utc_now
 from nemar_process.common.errors import TIME_BUDGET
 from nemar_process.common.io import Recording
-from nemar_process.common.recipe import Recipe, RecipeInfo, RunContext
+from nemar_process.common.recipe import BARE_METRIC_RE, Recipe, RecipeInfo, RecipeMetric, RunContext
 
 SJ_VERSION = "0.1.0"
 SCHEMA_VERSION = "0.1.0"
@@ -117,7 +121,9 @@ def _processing_steps(
             "stepId": step.step_id,
             "name": step.function,
             "description": step.description,
-            "software": plans.software_of(step.function),
+            "software": step.software
+            if step.software is not None
+            else plans.software_of(step.function),
             "parameters": step.parameters,
             "inputSources": sources,
             "outputTargets": targets,
@@ -156,8 +162,12 @@ def build_recording_record(
     """The per-recording record: the plan as executed, its hash, and what was read and written.
 
     ``nemar_extra`` are keys a recipe adds to ``extensions.nemar`` (where a remote input came from);
-    one the record already has is refused.
+    one the record already has is refused, and so is ``plugins``: the plugins' entries come from the
+    plan (``Plan.plugin_outcomes``), the same place as the identities its hash holds, and are written
+    only when a plugin ran or was skipped.
     """
+    if "plugins" in (nemar_extra or {}):
+        raise ValueError("plugins is written from the plan, never given")
     identity = context.identity
     process, tag = provenance()
     record = {
@@ -200,6 +210,8 @@ def build_recording_record(
             }
         },
     }
+    if plan.plugin_outcomes:
+        record["extensions"]["nemar"]["plugins"] = [dict(e) for e in plan.plugin_outcomes]
     add_extras(record["extensions"]["nemar"], nemar_extra)
     return record
 
@@ -277,15 +289,74 @@ def references_problems(record: Mapping[str, Any]) -> list[str]:
     return problems
 
 
+def _view_targets(declaration: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The files a declaration names: its data entries and its file inputs."""
+    named: list[Mapping[str, Any]] = list(declaration.get("data", []))
+    named += [item["file"] for item in declaration.get("inputs", []) if "file" in item]
+    return named
+
+
+def views_problems(record: Mapping[str, Any]) -> list[str]:
+    """What is wrong with a record's views (ADR 0137), or nothing when it declares none.
+
+    ``views`` and ``views_skipped`` are lists of at most 32; each declaration is valid against the
+    bundle's ``view.schema.json#/$defs/view`` and is a recording view (no ``scope``), each skipped view
+    against ``dataQuality``'s ``viewSkipped``; the record checks pass (``views.record_findings``: unique
+    keys, a recipe source that is the record's recipe); and every file a view names is a file output of
+    a step of the record (``outputTargets``) whose ``extensions.nemar.outputs`` entry has the declared
+    size and SHA-256, so a declaration never names bytes the product does not hold.
+    """
+    nemar = record.get("extensions", {}).get("nemar", {})
+    if "views" not in nemar and "views_skipped" not in nemar:
+        return []
+    declared, skipped = nemar.get("views"), nemar.get("views_skipped", [])
+    if not isinstance(declared, list) or len(declared) > views.MAX_VIEWS:
+        return ["views is not a list of at most {}".format(views.MAX_VIEWS)]
+    if not isinstance(skipped, list) or len(skipped) > views.MAX_VIEWS:
+        return ["views_skipped is not a list of at most {}".format(views.MAX_VIEWS)]
+    problems: list[str] = []
+    validator = views.contract.bundle_validator(views.VIEW_SKIPPED_ID)
+    for index, item in enumerate(skipped):
+        if not validator.is_valid(item):
+            problems.append("views_skipped[{}] is not a skipped view".format(index))
+    for index, declaration in enumerate(declared):
+        if views.declaration_errors(declaration) or "scope" in declaration:
+            problems.append("views[{}] is not a valid recording view".format(index))
+    if problems:
+        return problems
+    recipe = nemar.get("recipe", {}).get("id")
+    for finding in views.record_findings(recipe, {"views": declared, "views_skipped": skipped}):
+        problems.append("{} at {}".format(finding["word"], finding["at"]))
+    targets = {
+        target.get("location")
+        for step in record.get("processingSteps", [])
+        for target in step.get("outputTargets", [])
+        if target.get("targetType") == "file"
+    }
+    written = {
+        entry["location"]: (entry["size"], entry["sha256"]) for entry in nemar.get("outputs", [])
+    }
+    for index, declaration in enumerate(declared):
+        for target in _view_targets(declaration):
+            location = target["location"]
+            if location not in targets:
+                problems.append("views[{}] names {}, no step's output".format(index, location))
+            elif written.get(location) != (target["size"], target["sha256"]):
+                problems.append("views[{}] names {} with other bytes".format(index, location))
+    return problems
+
+
 def problems_of(record: Mapping[str, Any], validator: Any) -> list[tuple[str, str]]:
     """Everything wrong with a record, each as (category, text): the schema, the timestamps, the
-    references, the plan hash. The category is a fixed word; the text can quote the record."""
+    references, the views, the plan hash. The category is a fixed word; the text can quote the record."""
     found = [
         ("schema", str(problem))
         for problem in validator.validate(dict(record), raise_exceptions=False)
     ]
     found += [("timestamp", problem) for problem in timestamp_problems(record)]
     found += [("reference", problem) for problem in references_problems(record)]
+    found += [("views", problem) for problem in views_problems(record)]
+    found += [("metrics", problem) for problem in metrics_problems(record)]
     if record.get("extensions", {}).get("nemar", {}).get("profile") == "recording":
         found += [("plan_hash", problem) for problem in plans.verify(dict(record))]
     return found
@@ -299,33 +370,120 @@ def check(record: Mapping[str, Any], validator: Any) -> list[str]:
 # ---- the dataset record -----------------------------------------------------------------------
 
 
-def distribution(values: Sequence[float], edges: Sequence[int]) -> dict[str, Any]:
-    """The count, min, median and max of the values and a histogram with fixed edges.
+def distribution(
+    values: Sequence[float | None],
+    edges: Sequence[float],
+    unit: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """The count, min, median and max of the values, their unit, and a histogram with fixed edges.
 
     A value belongs to the bin ``[edge_i, edge_i+1)``; the last bin is closed; a value outside the
-    edges is counted under ``underflow`` or ``overflow``.
+    edges is counted under ``underflow`` or ``overflow``, and a value that is missing (None) or not
+    finite is in no bin and not in ``n``, counted under ``missing``. So ``n`` is the sum of the bins,
+    ``underflow`` and ``overflow``, and min, median and max are None exactly when ``n`` is 0
+    (neuroschema 0.6.0 ``dataQuality`` ``distribution``). The median is rounded to four decimals and
+    kept within min and max.
     """
+    present: list[float] = []
+    missing = 0
+    for value in values:
+        if value is None or not math.isfinite(value):
+            missing += 1
+        else:
+            present.append(value)
     counts = [0] * (len(edges) - 1)
     underflow = overflow = 0
-    for value in values:
+    for value in present:
         if value < edges[0]:
             underflow += 1
         elif value > edges[-1]:
             overflow += 1
         else:
             counts[min(bisect.bisect_right(edges, value) - 1, len(counts) - 1)] += 1
-    return {
-        "n": len(values),
-        "min": min(values) if values else None,
-        "median": rounded(statistics.median(values), 4) if values else None,
-        "max": max(values) if values else None,
+    low: float | None = None
+    high: float | None = None
+    median: float | None = None
+    if present:
+        low, high = min(present), max(present)
+        # rounded to four decimals, and never past the extremes the rounding could carry it over
+        # (a share of 0.00004 and 0.00006 has the median 0.0001 rounded, above both)
+        middle = rounded(statistics.median(present), 4)
+        median = high if middle is None else min(max(middle, low), high)
+    summary: dict[str, Any] = {
+        "n": len(present),
+        "unit": unit,
+        "min": low,
+        "median": median,
+        "max": high,
         "histogram": {
             "edges": list(edges),
             "counts": counts,
             "underflow": underflow,
             "overflow": overflow,
+            "missing": missing,
         },
     }
+    if description is not None:
+        summary["description"] = description
+    return summary
+
+
+def recipe_metrics(
+    metrics: Sequence[tuple[RecipeMetric, Any]], recipe_id: str, recipe_version: str
+) -> dict[str, dict[str, Any]]:
+    """``extensions.nemar.metrics``: each recipe metric with its value as a neuroschema
+    ``qualityMetric`` whose producer is the recipe (ADR 0137 C6).
+
+    A value is a finite number or None (could not be computed); a bool, a text, a non-finite number
+    or a value outside the metric's bounds is a fault of the recipe (``ValueError``), and so is a
+    name given twice.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    for metric, value in metrics:
+        if metric.name in found:
+            raise ValueError("{} is given twice".format(metric.name))
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("{} is not a number".format(metric.name))
+            if not math.isfinite(value):
+                raise ValueError("{} is not finite".format(metric.name))
+            low, high = metric.bounds if metric.bounds is not None else (None, None)
+            if (low is not None and value < low) or (high is not None and value > high):
+                raise ValueError("{} is outside its bounds".format(metric.name))
+        entry: dict[str, Any] = {
+            "value": value,
+            "unit": metric.unit,
+            "description": metric.description,
+            "recipe": {"name": recipe_id, "version": recipe_version},
+        }
+        if metric.bounds is not None:
+            entry["bounds"] = {"min": metric.bounds[0], "max": metric.bounds[1]}
+        found[metric.name] = entry
+    return found
+
+
+def metrics_problems(record: Mapping[str, Any]) -> list[str]:
+    """What is wrong with a record's recipe metrics (``extensions.nemar.metrics``), or nothing when
+    it has none: each is a neuroschema ``qualityMetric`` under a bare name whose producer is the
+    record's recipe, name and version (the record checks' ``metric_producer_mismatch`` and more)."""
+    nemar = record.get("extensions", {}).get("nemar", {})
+    if "metrics" not in nemar:
+        return []
+    metrics = nemar["metrics"]
+    if not isinstance(metrics, dict):
+        return ["metrics is not an object"]
+    recipe = nemar.get("recipe", {})
+    producer = {"name": recipe.get("id"), "version": recipe.get("version")}
+    problems: list[str] = []
+    for name, metric in metrics.items():
+        if not isinstance(name, str) or not BARE_METRIC_RE.fullmatch(name) or len(name) > 128:
+            problems.append("metric {!r} is not a bare metric name".format(name))
+        elif contract.quality_metric_errors(metric):
+            problems.append("metric {} is not a quality metric".format(name))
+        elif metric.get("recipe") != producer:
+            problems.append("metric_producer_mismatch at metrics/{}".format(name))
+    return problems
 
 
 def skipped_by_step(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
@@ -350,8 +508,8 @@ def _summary(recipe: Recipe, rows: Sequence[Mapping[str, Any]], counts: Mapping[
     }
     succeeded = [row for row in rows if row["status"] == "succeeded"]
     for spec in recipe.distributions:
-        values = [row[spec.column] for row in succeeded if row.get(spec.column) is not None]
-        metrics[spec.name] = distribution(values, spec.edges)
+        values = [row.get(spec.column) for row in succeeded]
+        metrics[spec.name] = distribution(values, spec.edges, spec.unit, spec.description)
     return metrics
 
 

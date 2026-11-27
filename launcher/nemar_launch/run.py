@@ -8,6 +8,7 @@ real runtime:
     exec --containall --cleanenv --no-home --pwd /work
          --bind <out>/work:/work  --bind <out>/work/tmp:/tmp
          [--bind <scratch>/code:/code:ro]  [--bind <dataset dir>:/data/<id>:ro ...]
+         [--bind <scratch>/serving-index:/data/serving-index:ro]
          [--nv]  --env <allowlisted>=<value> ...  --env NEMAR_OUT=/work/outputs
          [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
          <sif>  <entry or command> <args>
@@ -56,6 +57,7 @@ from .codes import (
     CONTAINER_CODE,
     CONTAINER_DATA,
     CONTAINER_OUTPUTS,
+    CONTAINER_SERVING_INDEX,
     CONTAINER_WORK,
     ENGINE_RUNTIMES,
     ENV_CONTAINER_RUNTIME,
@@ -70,7 +72,7 @@ from .codes import (
     Failure,
     Stopped,
 )
-from .provenance import Log
+from .provenance import Log, image_missing
 from .settings import Device, Limits, check_device, read_settings
 from .stage import Staged
 
@@ -124,30 +126,43 @@ def find_runtime(env: Env, names: tuple[str, ...] = RUNTIME_BINARIES) -> tuple[s
     )
 
 
-def resolve_sif(job: spec.Spec, env: Env) -> str:
+def resolve_sif(job: spec.Job, env: Env, log: Log) -> str:
     """The image file: ``image.sif`` (the digest-named basename) under ``NEMAR_SIF_ROOT``.
 
-    There is no fallback: an unset or empty root is ``image_missing``, a working directory is never
-    searched. The resolved file must stay under the real root (``realpath`` containment), so a
-    symlink cannot lead out of it.
+    There is no fallback: an unset or empty root is ``image_missing`` (``sif_root_unset`` in the log),
+    a working directory is never searched. The resolved file must stay under the real root
+    (``realpath`` containment), so a symlink cannot lead out of it (``sif_outside_root``), and be a
+    file (``sif_absent``).
     """
     root = env.get(ENV_SIF_ROOT)
     if not root:
-        raise Failure("runtime_error", "image_missing", "NEMAR_SIF_ROOT is not set")
+        raise image_missing(log, "sif_root_unset")
     path = os.path.join(root, job.image["sif"])
     real_root = os.path.realpath(root)
     real = os.path.realpath(path)
-    if os.path.commonpath([real_root, real]) != real_root or not os.path.isfile(real):
-        raise Failure("runtime_error", "image_missing", "the image file is not under the root")
+    if os.path.commonpath([real_root, real]) != real_root:
+        raise image_missing(log, "sif_outside_root")
+    if not os.path.isfile(real):
+        raise image_missing(log, "sif_absent")
     return path
 
 
-def runtime_version(path: str, env: Env, python_version: str) -> str:
-    """Free text for humans: the runtime's own version line and the host Python. Never parsed."""
+def runtime_version(
+    path: str,
+    env: Env,
+    python_version: str,
+    argv: list[str] | None = None,
+    environment: dict[bytes, bytes] | None = None,
+) -> str:
+    """Free text for humans: the runtime's own version line and the host Python. Never parsed.
+
+    ``argv`` and ``environment``, when given, are the engine's own call (Podman's ``--version``
+    carries its prevention, ``runtime.Engine``); otherwise ``<path> --version`` with
+    ``runtime_environment``."""
     try:
         done = subprocess.run(
-            [path, "--version"],
-            env=runtime_environment(env),
+            argv if argv is not None else [path, "--version"],
+            env=environment if environment is not None else runtime_environment(env),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
@@ -178,7 +193,7 @@ def runtime_environment(env: Env) -> dict[bytes, bytes]:
 # ---- the command line -----------------------------------------------------------------------------
 
 
-def entry_argv(job: spec.Spec) -> list[str]:
+def entry_argv(job: spec.Job) -> list[str]:
     """What runs inside the container, as the runtime receives it."""
     if job.command is not None:
         return list(job.command) + list(job.args)
@@ -210,20 +225,23 @@ class Bind(NamedTuple):
 
 
 def build_binds(
-    job: spec.Spec,
+    job: spec.Job,
     work: str,
     tmp_dir: str,
     code_dir: str | None,
     staged: list[Staged],
+    serving_index_dir: str | None = None,
 ) -> list[Bind]:
     """The whole bind table. ``work`` is the ONLY archived directory in it: ``/tmp`` is node-local
-    scratch (user temporary files must not count against the shared account's quota), code and
-    datasets are read-only, and nothing else of the host is mounted."""
+    scratch (user temporary files must not count against the shared account's quota), code,
+    datasets and the staged serving index are read-only, and nothing else of the host is mounted."""
     binds = [Bind(work, CONTAINER_WORK, False), Bind(tmp_dir, "/tmp", False)]  # noqa: S108
     if code_dir is not None:
         binds.append(Bind(code_dir, CONTAINER_CODE, True))
-    for dataset, held in zip(job.datasets, staged):
-        binds.append(Bind(held.source, "{}/{}".format(CONTAINER_DATA, dataset["id"]), True))
+    for name, held in zip(job.data_names, staged):
+        binds.append(Bind(held.source, "{}/{}".format(CONTAINER_DATA, name), True))
+    if serving_index_dir is not None:
+        binds.append(Bind(serving_index_dir, CONTAINER_SERVING_INDEX, True))
     return binds
 
 
@@ -257,7 +275,7 @@ ISOLATION_FLAGS = ("--containall", "--cleanenv", "--no-home", "--no-mount", "bin
 
 def build_argv(
     runtime: str,
-    job: spec.Spec,
+    job: spec.Job,
     sif: str,
     binds: list[Bind],
     cuda: str | None = None,
@@ -422,7 +440,7 @@ def own_pid_namespace() -> str | None:
 def require_pid_namespace(
     runtime_path: str,
     sif: str,
-    job: spec.Spec,
+    job: spec.Job,
     layout: Layout,
     tmp_dir: str,
     env: Env,
@@ -573,21 +591,28 @@ def end_group(child: subprocess.Popen[bytes]) -> int:
 class Terminator:
     """Records a SIGTERM, passes it to the container, and asks running phases to stop."""
 
-    def __init__(self) -> None:
+    def __init__(self, own_deadline_only: bool = False) -> None:
+        """``own_deadline_only`` (the standalone entry): only the launcher's own stop at the job's end
+        time is ``time_limit``, and a signal is ``terminated`` whenever it comes (a person's Ctrl-C is
+        never a time limit). The service default reads a SIGTERM near the end time as the scheduler's
+        time limit."""
         self.stop = threading.Event()
         self.received: float | None = None
+        self.by_deadline = False
+        self.own_deadline_only = own_deadline_only
         self.child: subprocess.Popen[bytes] | None = None
         self._previous: dict[int, Any] = {}
 
     def _handle(self, _signum: int, _frame: Any) -> None:
         self.terminate(time.time())
 
-    def terminate(self, now: float) -> None:
+    def terminate(self, now: float, deadline: bool = False) -> None:
         """What a SIGTERM is, taken at ``now`` (and what the job's end time is, when the launcher
-        reaches it itself): the first moment is the one recorded, the stop event is set, and the
-        signal goes to the container."""
+        reaches it itself, ``deadline``): the first moment is the one recorded, the stop event is set,
+        and the signal goes to the container."""
         if self.received is None:
             self.received = now
+            self.by_deadline = deadline
         self.stop.set()
         self._forward()
 
@@ -607,11 +632,20 @@ class Terminator:
     def detach(self) -> None:
         self.child = None
 
-    def install(self) -> None:
+    def install(
+        self, signals: tuple[int, ...] = (int(signal.SIGTERM),), keep_ignored: bool = False
+    ) -> None:
+        """Handle each of ``signals`` as a SIGTERM: the service's launcher takes SIGTERM only (Slurm's
+        and the runner's); the standalone entry also takes SIGINT, SIGHUP and SIGQUIT (a person's
+        Ctrl-C, a closed terminal, Ctrl-\\), which stop the job the same way. With ``keep_ignored``
+        (standalone) a signal ignored when the launcher started stays ignored, as ``nohup`` asks."""
         try:
-            self._previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, self._handle)
+            for number in signals:
+                if keep_ignored and signal.getsignal(number) is signal.SIG_IGN:
+                    continue
+                self._previous[number] = signal.signal(number, self._handle)
         except ValueError:  # not the main thread: nothing to install
-            self._previous.clear()
+            self.restore()
 
     def restore(self) -> None:
         for number, handler in self._previous.items():
@@ -624,7 +658,13 @@ def end_time(env: Env) -> float | None:
 
 
 def terminated_failure(terminator: Terminator, env: Env) -> Failure:
-    """The failure a SIGTERM is: ``time_limit`` within 120 s of the job's end, else a cancellation."""
+    """The failure a SIGTERM is: ``time_limit`` within 120 s of the job's end, else a cancellation. For a
+    terminator that counts only its own deadline (standalone), ``time_limit`` exactly when the launcher
+    itself stopped the job at its end time."""
+    if terminator.own_deadline_only:
+        if terminator.by_deadline:
+            return Failure("time_limit", None, "stopped at the job's time limit")
+        return Failure("runtime_error", "terminated", "terminated by a signal")
     ends = end_time(env)
     if (
         ends is not None
@@ -714,11 +754,15 @@ def _child_setup(death: Callable[[], None] | None) -> Callable[[], None]:
 
 
 def _spawn(
-    argv: list[str], env: Env, work: str, death: Callable[[], None] | None
+    argv: list[str],
+    env: Env,
+    work: str,
+    death: Callable[[], None] | None,
+    environment: dict[bytes, bytes] | None = None,
 ) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         argv,
-        env=runtime_environment(env),
+        env=environment if environment is not None else runtime_environment(env),
         cwd=work,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
@@ -732,7 +776,13 @@ def _runtime_not_started() -> Failure:
     )
 
 
-def start_container(argv: list[str], env: Env, work: str, log: Log) -> subprocess.Popen[bytes]:
+def start_container(
+    argv: list[str],
+    env: Env,
+    work: str,
+    log: Log,
+    environment: dict[bytes, bytes] | None = None,
+) -> subprocess.Popen[bytes]:
     """Start the container runtime in a session of its own, tied to the launcher's life.
 
     On Linux the kernel signals the child when the launcher dies (``parent_death_signal``), so a
@@ -743,25 +793,28 @@ def start_container(argv: list[str], env: Env, work: str, log: Log) -> subproces
     Only the main thread may call this: the kernel's signal follows the thread that created the
     child, and any other thread can end while the launcher goes on, which would end the container
     with it. ``RuntimeError`` otherwise (a launcher bug, recorded as ``internal_error``).
+
+    ``environment``, when given, is the engine process's environment (Podman's, which carries its
+    prevention); otherwise ``runtime_environment``.
     """
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("the container must be started from the main thread")
     death = parent_death_hook(parent_death_signal(env), os.getpid())
     if death is not None:
         try:
-            return _spawn(argv, env, work, death)
+            return _spawn(argv, env, work, death, environment)
         except subprocess.SubprocessError:  # the prctl failed in the child: nothing has run
             pass
         except OSError:
             raise _runtime_not_started() from None
     log.warning("pdeathsig_unavailable: the container will not follow the launcher if it is killed")
     try:
-        return _spawn(argv, env, work, None)
+        return _spawn(argv, env, work, None, environment)
     except OSError:
         raise _runtime_not_started() from None
 
 
-def cuda_visible_devices(job: spec.Spec, env: Env) -> str | None:
+def cuda_visible_devices(job: spec.Job, env: Env) -> str | None:
     """``CUDA_VISIBLE_DEVICES`` for the container: the scheduler's own value, only for a GPU job and
     only when it is plain (digits, letters, comma, colon, dash, dot, underscore: ids, UUIDs,
     MIG names); anything else is dropped rather than passed on."""
@@ -780,6 +833,7 @@ def run_container(
     terminator: Terminator,
     log: Log,
     oom_check: Callable[[], bool] | None = None,
+    environment: dict[bytes, bytes] | None = None,
 ) -> Outcome:
     """Start the container, wait for it, and map how it ended (the first failure wins).
 
@@ -799,10 +853,10 @@ def run_container(
     once user code could have run, and refunding 255 would let any entry end itself that way.
     ``runtime_unusable`` is only for a runtime that cannot be started at all or whose preflight
     failed (before any user code). A SIGTERM received while it ran is ``time_limit`` or
-    ``runtime_error`` (detail ``terminated``).
+    ``runtime_error`` (detail ``terminated``). ``environment`` is ``start_container``'s.
     """
     log.info("run: starting the container with {}".format(os.path.basename(argv[0])))
-    child = start_container(argv, env, work, log)
+    child = start_container(argv, env, work, log, environment)
     terminator.attach(child)
     ends = end_time(env)
     killed = False
@@ -814,7 +868,7 @@ def run_container(
                 # stops the container, exactly as the SIGTERM the scheduler or the runner would send
                 # (the same record, the same grace), so the end time does not depend on either.
                 log.warning("deadline reached; stopping the container")
-                terminator.terminate(now)
+                terminator.terminate(now, deadline=True)
             received = terminator.received
             if received is not None and not killed and time.time() - received >= TERM_GRACE_SECONDS:
                 killed = True

@@ -92,7 +92,7 @@ def test_the_schema_copy_is_the_pinned_bytes():
     data = (ROOT / PIN["schema"]["copy"]).read_bytes()
     assert len(data) == PIN["schema"]["bytes"]
     assert hashlib.sha256(data).hexdigest() == PIN["schema"]["sha256"]
-    assert PIN["schema"]["copy"] == "launcher/schema/launch-spec.v1.json"
+    assert PIN["schema"]["copy"] == "launcher/schema/launch-spec.v2.json"
 
 
 def test_the_copies_match_nemar_cli_at_the_pinned_ref():

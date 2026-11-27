@@ -171,7 +171,7 @@ def run(config_path: str, out: TextIO, tuning: Tuning | None = None) -> int:
     if config is not None:
         binary = images.runtime_binary(config, tuning)
         if binary is not None:
-            version = images.runtime_version(binary, tuning)
+            version = images.runtime_version(binary, tuning, config)
         add(
             "runtime {}".format(config.runtime),
             version is not None,

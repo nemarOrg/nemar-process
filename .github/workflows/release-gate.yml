@@ -35,6 +35,9 @@ env:
   APPTAINER_DEB_SHA256: "25095d3711504b3e8657dbb2e172ef8db9db43c4503d940c9c36b105db8dce77"
   TEST_IMAGE: "docker://public.ecr.aws/docker/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
   TEST_IMAGE_KEY: "e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
+  # The same digest on Docker Hub, tried when public.ecr.aws refuses the anonymous pull (a quota per
+  # source address, which a runner shares); the SIF cache key stays the digest.
+  TEST_IMAGE_MIRROR: "docker://docker.io/library/python@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
   UV_VERSION: "0.13.4"
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
@@ -74,8 +77,10 @@ jobs:
         run: |
           mkdir -p .cache
           for attempt in 1 2 3; do
-            apptainer build --force .cache/runtime.sif "$TEST_IMAGE" && exit 0
-            echo "build attempt $attempt failed" >&2
+            for source in "$TEST_IMAGE" "$TEST_IMAGE_MIRROR"; do
+              apptainer build --force .cache/runtime.sif "$source" && exit 0
+              echo "build attempt $attempt from $source failed" >&2
+            done
             sleep 10
           done
           exit 1
@@ -118,7 +123,9 @@ jobs:
           uv run --frozen --group runtime --extra cpu pytest -q tests/recipes
           uv run --frozen --group runtime --extra cpu pytest -q tests/e2e -m "not apptainer and not docker and not runner_stack"
 
+      # The test image's pull ends inside tests/docker_support.py's 12-minute deadline, well inside this.
       - name: The Docker end to end, which may not be skipped
+        timeout-minutes: 20
         env:
           NEMAR_REQUIRE_DOCKER: "1"
         run: uv run --frozen pytest tests/e2e/test_docker_launch.py -m docker

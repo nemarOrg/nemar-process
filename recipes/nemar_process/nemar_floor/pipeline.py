@@ -123,11 +123,14 @@ def process(
     *,
     recipe_id: str = steps.RECIPE_ID,
     recipe_version: str = steps.RECIPE_VERSION,
+    embedding: steps.Embedding = steps.FLOOR,
 ) -> FloorResult:
     """Run the floor on a loaded recording. Consumes ``loaded.eeg``.
 
     A recipe that embeds the floor passes its own ``recipe_id`` and ``recipe_version``, which name
-    the plan; the steps and their parameters are the floor's either way.
+    the plan; the steps are the floor's either way, and their parameters are the floor's but for
+    what the ``embedding`` sets in their place (the drift step's high-pass, RANSAC's correlation
+    threshold: ``steps.Embedding``).
 
     Every step, the bookkeeping that records it included, runs inside ``guarded(step)``: whatever
     it raises is that step's failure, with the step named, and never an anonymous internal error.
@@ -205,17 +208,42 @@ def process(
             quality={"nRemoved": len(flat), "removedChannels": flat},
         )
 
-    # 4 drift
+    # 4 drift: the floor's clean_drifts, or the embedding's FIR high-pass
     with guarded("drift"):
-        work = clean_drifts(work, **steps.DRIFT_CALL)
-        kernel = np.asarray(work["etc"]["clean_drifts_kernel"], dtype="<f8")
-        kernel_sha256 = hashlib.sha256(kernel.tobytes()).hexdigest()
+        drift_function, drift_parameters = steps.drift_step(embedding)
+        if embedding.highpass_hz is None:
+            work = clean_drifts(work, **steps.DRIFT_CALL)
+            kernel = np.asarray(work["etc"]["clean_drifts_kernel"], dtype="<f8")
+            kernel_sha256 = hashlib.sha256(kernel.tobytes()).hexdigest()
+            drift_quality: dict[str, Any] = {
+                "kernelLength": int(kernel.size),
+                "kernelSha256": kernel_sha256,
+            }
+            drift_filter: dict[str, Any] = {
+                "function": steps.DRIFT_FUNCTION,
+                "transitionHz": list(steps.DRIFT_CALL["transition"]),
+                "attenuationDb": steps.DRIFT_CALL["attenuation"],
+                "method": steps.DRIFT_CALL["method"],
+                "zeroPhase": True,
+                "kernelLength": int(kernel.size),
+                "kernelSha256": kernel_sha256,
+            }
+        else:
+            work = pop_eegfiltnew(work, **steps.highpass_call(embedding.highpass_hz))
+            design = plans.recorded_highpass(srate, embedding.highpass_hz)
+            drift_quality = dict(design)
+            drift_filter = {
+                "function": steps.HIGHPASS_FUNCTION,
+                "passbandHz": embedding.highpass_hz,
+                "zeroPhase": True,
+                **design,
+            }
         recipe.add_step(
             "drift",
-            steps.DRIFT_FUNCTION,
-            steps.DRIFT_CALL,
+            drift_function,
+            drift_parameters,
             description=steps.DESCRIPTIONS["drift"],
-            quality={"kernelLength": int(kernel.size), "kernelSha256": kernel_sha256},
+            quality=drift_quality,
         )
 
     # 5 line noise: measure
@@ -261,8 +289,9 @@ def process(
             "removedHz": removed_hz,
         }
 
-    # the robust amplitude of every channel that passed the flatline step, before bad channels go
-    with guarded("qc"):
+    # the robust amplitude of every channel that passed the flatline step, before bad channels go; its
+    # own step id (steps.PRE_CHECKS, counted at `preprocess`), because the qc step runs last
+    with guarded("qc_amplitude"):
         robust = qc.robust_amplitude(work["data"])
         robust_names = names_where(signal_names, kept_after_flatline)
 
@@ -287,8 +316,11 @@ def process(
             if guard.usable:
                 branch = "ransac"
                 recipe.add_rule("locations-usable")
-                work = clean_channels(work, **steps.RANSAC_CALL)
-                function, parameters = steps.RANSAC_FUNCTION, steps.ransac_parameters()
+                # the channels the guard counted as unlocated carry no position for RANSAC
+                work = clean_channels(
+                    qc.unlocated_cleared(work, located), **steps.ransac_call(embedding)
+                )
+                function, parameters = steps.RANSAC_FUNCTION, steps.ransac_parameters(embedding)
             elif srate > steps.MIN_NOLOCS_SRATE_HZ:
                 branch = "nolocs"
                 work, flagged = clean_channels_nolocs(work, **steps.NOLOCS_CALL)
@@ -394,15 +426,7 @@ def process(
         )
 
     filters = {
-        "drift": {
-            "function": steps.DRIFT_FUNCTION,
-            "transitionHz": list(steps.DRIFT_CALL["transition"]),
-            "attenuationDb": steps.DRIFT_CALL["attenuation"],
-            "method": steps.DRIFT_CALL["method"],
-            "zeroPhase": True,
-            "kernelLength": int(kernel.size),
-            "kernelSha256": kernel_sha256,
-        },
+        "drift": drift_filter,
         "lineNoise": {
             "thresholdDb": qc.LINE_THRESHOLD_DB,
             "candidatesHz": list(qc.LINE_FREQUENCIES),

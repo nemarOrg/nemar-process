@@ -56,10 +56,6 @@ PRODUCT = (
     "qc.json",
     "signalJourney.json",
 )
-SERVING_SENTENCE = (
-    "QC describes NEMAR's Zarr serving copy (EEG capped at 250 Hz, 16-bit), "
-    "not the archived recordings."
-)
 
 
 def live_index() -> tuple[bytes, dict]:
@@ -238,23 +234,17 @@ def test_the_demo_dataset_is_processed_from_the_public_serving_copy(tmp_path, ca
             assert "{:.6f}".format((int(stop) - int(start)) / grid["rate"]) == duration
             assert int(stop) <= grid["n_samples"]
 
-    # the QC summary: valid for its schema, serving, the Zarr sentence, and no sampling rate in it
-    from jsonschema import Draft202012Validator
+    # the dataQuality document: valid for the bundle and its writer rules, serving, no sampling rate
+    from nemar_process.common import dataquality
 
-    schema = json.loads((ROOT / "docs" / "schemas" / "qc-summary.v1.json").read_text())
-    summary_file = out / "desc-nemarfloor_qcsummary.json"
-    summary = json.loads(summary_file.read_text())
-    assert list(Draft202012Validator(schema).iter_errors(summary)) == []
+    summary_file = out / "desc-nemarfloor_dataquality.json"
+    document = json.loads(summary_file.read_text())
+    assert dataquality.problems(document) == []
+    summary = document["recipes"]["nemar-floor"]
     assert summary_file.stat().st_size <= 65_536
     assert (summary["input_kind"], summary["profile"]) == ("zarr", "serving")
-    assert summary["describes"] == SERVING_SENTENCE
-    assert (summary["dataset_id"], summary["dataset_version"]) == (DATASET, VERSION)
-    assert summary["counts"] == {
-        "discovered": STORES,
-        "succeeded": STORES,
-        "failed": 0,
-        "skipped": 0,
-    }
+    assert summary["dataset_version"] == VERSION
+    assert summary["counts"] == {"passed": STORES, "failed": 0, "skipped": 0, "total": STORES}
     assert summary["not_processed"] == []
     assert summary["not_processed_truncated"] == 0
     assert (

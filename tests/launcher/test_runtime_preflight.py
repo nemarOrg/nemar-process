@@ -31,10 +31,13 @@ from test_runtime_docker import (
 
 
 @pytest.fixture(autouse=True)
-def podman_code_paths_are_tested_behind_the_refusal(monkeypatch):
-    """Podman is refused by default (`runtime.UNSUPPORTED_ENGINES`); its argv and checks stay tested
-    here with the refusal lifted. `test_runtime_podman_refused.py` tests the refusal itself."""
-    monkeypatch.setattr(runtime, "UNSUPPORTED_ENGINES", ())
+def user_runtime_dir(tmp_path, monkeypatch):
+    """`engine_preflight` reads this process's environment: Podman needs the user's runtime directory
+    there (the user's own, mode 0700), which a developer's macOS does not set."""
+    path = tmp_path / "xdg-runtime"
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(path))
 
 
 @pytest.fixture(params=["docker", "podman"])
@@ -107,8 +110,7 @@ def test_a_cancel_ends_the_info_call_at_once(rig, docker):
     started = time.monotonic()
     with pytest.raises(Stopped):
         runtime.preflight(
-            "docker",
-            str(rig.bin_dir / "docker"),
+            runtime.Engine("docker", str(rig.bin_dir / "docker")),
             settings.Limits(1, 64),
             Env({b"PATH": str(rig.bin_dir).encode()}),
             stop,
@@ -325,25 +327,27 @@ def uri(host: str) -> str:
     ],
 )
 def test_a_registry_that_is_not_on_the_allowlist_is_refused(host):
+    log = Log(None)
     with pytest.raises(Failure) as caught:
-        runtime.check_registry(uri(host), Env({}))
+        runtime.check_registry(uri(host), Env({}), log)
     assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    assert b" ERROR image_missing reason=registry_not_allowed\n" in log.snapshot(log.size())
 
 
 def test_ghcr_io_is_the_default_and_the_only_one():
-    runtime.check_registry(uri("ghcr.io"), Env({}))
+    runtime.check_registry(uri("ghcr.io"), Env({}), Log(None))
     with pytest.raises(Failure):
-        runtime.check_registry(uri("public.ecr.aws"), Env({}))
+        runtime.check_registry(uri("public.ecr.aws"), Env({}), Log(None))
 
 
 def test_the_allowlist_is_comma_separated_exact_and_may_be_empty():
     names = Env({b"NEMAR_ALLOWED_REGISTRIES": b" ghcr.io , public.ecr.aws,,127.0.0.1:5000 "})
     for host in ("ghcr.io", "public.ecr.aws", "127.0.0.1:5000"):
-        runtime.check_registry(uri(host), names)
+        runtime.check_registry(uri(host), names, Log(None))
     with pytest.raises(Failure):
-        runtime.check_registry(uri("127.0.0.1:5001"), names)
+        runtime.check_registry(uri("127.0.0.1:5001"), names, Log(None))
     with pytest.raises(Failure):
-        runtime.check_registry(uri("ghcr.io"), Env({b"NEMAR_ALLOWED_REGISTRIES": b""}))
+        runtime.check_registry(uri("ghcr.io"), Env({b"NEMAR_ALLOWED_REGISTRIES": b""}), Log(None))
 
 
 def test_a_launch_with_a_registry_off_the_list_pulls_and_runs_nothing(rig, engine):
@@ -355,7 +359,9 @@ def test_a_launch_with_a_registry_off_the_list_pulls_and_runs_nothing(rig, engin
             "sif": harness.SIF_NAME,
         },
     )
-    refused(rig, engine, launch(rig, engine, job), "image_missing")
+    result = launch(rig, engine, job)
+    refused(rig, engine, result, "image_missing")
+    assert "ERROR image_missing reason=registry_not_allowed\n" in result.log
     assert engine._read(".inspects") == []
 
 
@@ -457,7 +463,9 @@ def test_a_registry_entry_is_a_host(entry, ok):
 @pytest.mark.parametrize("volumes", ['{"/data": {}}', '{"/a": {}, "/b": {}}', "garbage", ""])
 def test_an_image_that_declares_a_volume_is_refused(rig, engine, volumes):
     Path(str(engine.record) + ".volumes").write_text(volumes)
-    refused(rig, engine, launch(rig, engine), "image_missing")
+    result = launch(rig, engine)
+    refused(rig, engine, result, "image_missing")
+    assert "ERROR image_missing reason=volumes_declared\n" in result.log
 
 
 @pytest.mark.parametrize("volumes", ["null", "{}"])
@@ -506,6 +514,7 @@ def test_podman_pins_every_namespace_against_the_site_configuration(rig):
         "--cgroupns=private",
         "--env-host=false",
         "--read-only-tmpfs=false",
+        "--systemd=false",
     ):
         assert flag in argv, flag
 
@@ -520,7 +529,12 @@ def test_a_job_without_gpus_hides_every_gpu_and_a_gpu_job_does_not(rig, engine):
     assert "NVIDIA_VISIBLE_DEVICES=void" in engine.run_argv()
     rig.reset_out()
     Path(str(engine.record)).unlink()
-    assert launch(rig, engine, entry_spec(rig, resources={"gpus": 2})).exit == 0
+    gpu_job = launch(rig, engine, entry_spec(rig, resources={"gpus": 2}))
+    if engine.name == "podman":  # Podman hands over no GPU: refused before anything is created
+        assert gpu_job.result["detail"] == "runtime_unusable"
+        assert engine.runs() == []
+        return
+    assert gpu_job.exit == 0
     argv = engine.run_argv()
     assert "NVIDIA_VISIBLE_DEVICES=void" not in argv
     assert value_after(argv, "--gpus") == "2"
@@ -554,7 +568,9 @@ def test_the_removal_and_inspect_waits_are_the_termination_grace():
 
 def test_removing_a_container_with_no_engine_never_raises(rig, docker):
     # A binary that does not exist stands for an engine that is gone: the removal returns.
-    runtime.remove_container(str(rig.tmp / "no-such-engine"), "n", Env({b"PATH": b"/usr/bin"}))
+    runtime.remove_container(
+        runtime.Engine("docker", str(rig.tmp / "no-such-engine")), "n", Env({b"PATH": b"/usr/bin"})
+    )
     assert docker.removals() == []
 
 
@@ -646,10 +662,45 @@ def test_the_standin_refuses_what_a_real_engine_would(rig, argv):
     assert standin(rig, "docker", *argv)[1] == 125
 
 
+def podman_standin(rig, *argv, prevention=True, environ=None):
+    """The stand-in under the name ``podman``, given the prevention (flags and environment) or not."""
+    Engine(rig, "podman", present=True)
+    xdg = rig.tmp / "xdg-runtime"
+    xdg.mkdir(mode=0o700, exist_ok=True)
+    base = rig.tmp / "podman"
+    held = runtime.Prevention(
+        str(base / "containers.conf"), str(base / "hooks.d"), str(rig.tmp), str(xdg)
+    )
+    if not base.exists():
+        runtime.prepare_prevention(str(rig.tmp), Env({b"XDG_RUNTIME_DIR": bytes(xdg)}))
+    env = {"PATH": "/usr/bin:/bin", "HOME": held.home, "XDG_RUNTIME_DIR": str(xdg)}
+    env["CONTAINERS_CONF"] = held.conf
+    env.update(environ or {})
+    done = subprocess.run(
+        [str(rig.bin_dir / "podman"), *(held.flags() if prevention else []), *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd="/",
+        env=env,
+    )
+    return done.returncode
+
+
 def test_the_standin_takes_the_podman_only_flags_under_that_name_only(rig):
     flags = with_args(("--userns=keep-id", None), ("--read-only-tmpfs=false", None))
-    assert standin(rig, "podman", *flags)[1] == 0
+    assert podman_standin(rig, "create", *flags[1:]) == 0
     assert standin(rig, "docker", *flags)[1] == 125
+
+
+def test_the_podman_standin_runs_nothing_without_the_prevention_and_never_runs_run(rig):
+    created = with_args(("--userns=keep-id", None))[1:]
+    assert podman_standin(rig, "--version") == 0
+    assert podman_standin(rig, "--version", prevention=False) == 125
+    assert podman_standin(rig, "--version", environ={"CONTAINERS_CONF": "/nonexistent"}) == 125
+    assert podman_standin(rig, "run", *created) == 125
+    (rig.tmp / "podman" / "hooks.d" / "a.json").write_text("{}")
+    assert podman_standin(rig, "--version") == 125  # a hook in the hooks directory
 
 
 def test_the_standin_refuses_a_duplicate_mount_point(rig):

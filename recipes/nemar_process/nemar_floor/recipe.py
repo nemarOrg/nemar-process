@@ -9,11 +9,14 @@ from __future__ import annotations
 from typing import Any
 
 from nemar_process.common import qc
-from nemar_process.common.recipe import INPUT_OPTION, Column, DatasetStep, Distribution, Recipe
+from nemar_process.common.recipe import (
+    INPUT_OPTION,
+    Column,
+    DatasetStep,
+    Recipe,
+    distributions_of,
+)
 from nemar_process.nemar_floor import outputs, steps
-
-PERCENT_EDGES = tuple(range(0, 101, 10))
-DB_EDGES = (-10, -5, 0, 5, 10, 15, 20, 30, 40)
 
 COLUMNS = (
     Column("path", "text"),
@@ -39,30 +42,35 @@ COLUMNS = (
     Column("record_content_sha256", "str"),
 )
 
-DISTRIBUTIONS = (
-    Distribution("percentGoodChannels", "pct_good_channels", PERCENT_EDGES),
-    Distribution("percentGoodSamples", "pct_good_samples", PERCENT_EDGES),
-    Distribution("lineNoiseBeforeDb", "line_db_before", DB_EDGES),
-    Distribution("lineNoiseAfterDb", "line_db_after", DB_EDGES),
+# The recipe metrics the dataset record and the dataset dataQuality document summarize.
+DISTRIBUTIONS = distributions_of(
+    outputs.RECIPE_METRICS,
+    ("percentGoodChannels", "percentGoodSamples", "lineNoiseBeforeDb", "lineNoiseAfterDb"),
 )
 
 
-def steps_with_load(load_function: str, load_parameters: dict[str, Any]) -> list[DatasetStep]:
+def steps_with_load(
+    load_function: str,
+    load_parameters: dict[str, Any],
+    embedding: steps.Embedding = steps.FLOOR,
+) -> list[DatasetStep]:
     """The recipe's steps with their recipe-level parameters: a constant, never read from a recording.
 
     Only the load step differs between the floor on a dataset directory and the floor on a Zarr
     serving copy (``--input zarr``), which passes its own. The bad-channel step is the RANSAC
-    branch (the other is ``clean_channels_nolocs``); each recording's record says which ran.
+    branch (the other is ``clean_channels_nolocs``); each recording's record says which ran. A
+    recipe that embeds the floor with another ``embedding`` states its drift step and threshold.
     """
+    drift_function, drift_parameters = steps.drift_step(embedding)
     table = [
         ("load", load_function, load_parameters),
         ("signal_channels", steps.SELECT_FUNCTION, {"channel_types": steps.SIGNAL_CHANNEL_TYPES}),
         ("flatline", steps.FLATLINE_FUNCTION, steps.FLATLINE_CALL),
-        ("drift", steps.DRIFT_FUNCTION, steps.DRIFT_CALL),
+        ("drift", drift_function, drift_parameters),
         ("line_noise_measure", steps.MEASURE_FUNCTION, qc.line_noise_parameters()),
         ("line_noise_50", steps.BAND_STOP_FUNCTION, steps.band_stop_parameters(50)),
         ("line_noise_60", steps.BAND_STOP_FUNCTION, steps.band_stop_parameters(60)),
-        ("bad_channels", steps.RANSAC_FUNCTION, steps.ransac_parameters()),
+        ("bad_channels", steps.RANSAC_FUNCTION, steps.ransac_parameters(embedding)),
         ("bad_windows", steps.WINDOWS_FUNCTION, steps.windows_parameters()),
         ("qc", steps.QC_FUNCTION, steps.qc_parameters()),
     ]
@@ -89,4 +97,5 @@ BIDS_RECIPE = Recipe(
     dataset_steps=dataset_steps,
     run_recording=outputs.run_recording,
     options=(INPUT_OPTION,),
+    checkpoints=steps.CHECKPOINTS,
 )

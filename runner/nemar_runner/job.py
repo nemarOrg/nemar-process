@@ -31,6 +31,7 @@ import contextlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -50,6 +51,10 @@ BOOT = (
 )
 
 RESULT_RELATIVE = os.path.join("launcher", "result.json")
+# the launcher's live progress object (ADR 0134), which the heartbeat carries
+PROGRESS_RELATIVE = ("launcher", "progress.json")
+PROGRESS_MAX_FILE_BYTES = 16 * 1024
+PROGRESS_READ_SECONDS = 15.0  # how often the reader refreshes the snapshot the heartbeat carries
 _RESULT_MAX_BYTES = 65_536
 
 
@@ -106,6 +111,11 @@ def launch_environment(
     }
     if config.runtime in ENGINES and runner_label is not None:
         env["NEMAR_RUNNER_LABEL"] = runner_label  # labels every container the launcher starts
+    runtime_dir = containers.user_runtime_dir() if config.runtime == containers.PODMAN else None
+    if runtime_dir is not None:
+        # Podman only: the user's run state, which the launcher's Podman calls must share with the
+        # runner's (docs/runner.md); without it the launcher refuses Podman as `runtime_unusable`
+        env["XDG_RUNTIME_DIR"] = runtime_dir
     memory = effective_memory_mb(job, config)
     if memory is not None:
         env["NEMAR_MEMORY_MB"] = str(memory)
@@ -200,6 +210,48 @@ def completion_body(job: contract.ClaimedJob, outcome: Outcome, discarded: bool)
     }
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _no_constant(_name: str) -> Any:
+    raise ValueError("not a JSON constant")
+
+
+def read_private_file(base: str, relative: tuple[str, ...], limit: int) -> bytes | None:
+    """The bytes of ``base/<relative...>``, walking each component without following a link, opening
+    the last one without blocking, and only when it is a regular file of at most ``limit`` bytes; None
+    when it is not there. Any other refusal is an ``OSError`` (``ValueError`` for an oversized file)."""
+    fds: list[int] = []
+    try:
+        try:
+            fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+            fds.append(fd)
+            for part in relative[:-1]:
+                fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                fds.append(fd)
+            fd = os.open(relative[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            fds.append(fd)
+        except FileNotFoundError:
+            return None
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError("not a small regular file")
+        data = os.read(fd, limit + 1)
+        if len(data) > limit:
+            raise ValueError("too large")
+        return data
+    finally:
+        for opened in reversed(fds):
+            with contextlib.suppress(OSError):
+                os.close(opened)
+
+
 class Heartbeat(threading.Thread):
     """Renews the lease every `heartbeat_seconds`, reports the phase, and records what NEMAR answers:
     a cancel, or that the lease is gone."""
@@ -212,6 +264,7 @@ class Heartbeat(threading.Thread):
         tuning: Tuning,
         cancel: threading.Event,
         lease_lost: threading.Event,
+        out_dir: str | None = None,
     ) -> None:
         super().__init__(name="heartbeat-" + job.id, daemon=True)
         self._api, self._job, self._log, self._tuning = api, job, log, tuning
@@ -219,6 +272,17 @@ class Heartbeat(threading.Thread):
         self._done = threading.Event()
         self._wake = threading.Event()
         self._uploading = False
+        # live progress (ADR 0134): read from the job's `launcher/progress.json` and carried on a
+        # `started` heartbeat at most once in PROGRESS_MIN_INTERVAL_SECONDS; turned off for the job
+        # after the Worker refuses one (an older Worker, or a mirror that let a bad object through)
+        self._out_dir = out_dir
+        self._progress_off = False
+        self._progress_sent_at: float | None = None
+        self._snapshot: dict[str, Any] | None = None
+        self._snapshot_lock = threading.Lock()
+        self._reader_halt = threading.Event()  # set when the job ends or progress goes off
+        self._reader_thread: threading.Thread | None = None
+        self._drop_said = False
 
     def uploading(self) -> None:
         """The launcher's result exists: the next heartbeat says `uploading`, now."""
@@ -231,16 +295,102 @@ class Heartbeat(threading.Thread):
 
     def finish(self) -> None:
         self._done.set()
+        self._reader_halt.set()
         self._wake.set()
         if self.is_alive():
             self.join(self._tuning.http_timeout_seconds + 5)
+        reader = self._reader_thread
+        if reader is not None and reader.is_alive():
+            reader.join(
+                1.0
+            )  # bounded: a read stuck on a network file system is a daemon left behind
+
+    def _read_progress(self) -> None:
+        """Refresh the snapshot from the job's ``launcher/progress.json``: read, parsed strictly and
+        checked, or None. Runs on its own thread (``_reader``), never on the heartbeat's: a read that
+        hangs (a network file system) can never delay a lease renewal. A dropped object is logged once
+        per job with a fixed word and the check's path word or the exception's class, never a value."""
+        if self._out_dir is None:
+            return
+        value: Any = None
+        reason: str | None = None
+        try:
+            data = read_private_file(self._out_dir, PROGRESS_RELATIVE, PROGRESS_MAX_FILE_BYTES)
+            if data is not None:
+                value = json.loads(
+                    data.decode("utf-8"),
+                    object_pairs_hook=_no_duplicate_keys,
+                    parse_constant=_no_constant,
+                )
+                reason = contract.check_progress(value)
+        except (OSError, ValueError, RecursionError) as error:
+            value, reason = None, type(error).__name__
+        if reason is not None:
+            value = None
+            if not self._drop_said:
+                self._drop_said = True
+                self._log.warn("heartbeat_progress_dropped", job=self._job.id, reason=reason)
+        with self._snapshot_lock:
+            self._snapshot = value
+
+    def _reader(self) -> None:
+        while not self._reader_halt.is_set():
+            try:
+                self._read_progress()
+            except Exception as error:  # noqa: BLE001 - a reader fault only means no progress
+                self._log.error(
+                    "progress_reader_error", job=self._job.id, error=type(error).__name__
+                )
+            self._reader_halt.wait(min(PROGRESS_READ_SECONDS, self._tuning.heartbeat_seconds))
+
+    def _progress(self, phase: str) -> dict[str, Any] | None:
+        """The last checked snapshot to carry on this heartbeat, or None. No I/O: it never blocks."""
+        if phase != "started" or self._progress_off or self._out_dir is None:
+            return None
+        sent = self._progress_sent_at
+        if sent is not None and time.monotonic() - sent < contract.PROGRESS_MIN_INTERVAL_SECONDS:
+            return None
+        with self._snapshot_lock:
+            return self._snapshot
+
+    def _beat(self, phase: str) -> bool:
+        """One heartbeat, with progress when there is a snapshot to carry.
+
+        If a heartbeat that carried progress fails with anything but a lease, fatal or drain word, the same
+        heartbeat goes again at once WITHOUT progress (the lease never waits a cycle for it); a refusal
+        that will not change (any status below 500 but 429) also turns progress off for the job. A failed
+        plain resend is handled as any failed heartbeat."""
+        progress = self._progress(phase)
+        try:
+            stop = self._api.heartbeat(self._job.id, self._job.lease_id, phase, progress)
+        except ApiError as error:
+            if progress is None or error.lease_lost or error.fatal or error.drain:
+                raise
+            if not error.transient:
+                self._progress_off = True
+                self._reader_halt.set()
+                self._log.warn("heartbeat_progress_refused", job=self._job.id, **error.fields())
+            return self._api.heartbeat(self._job.id, self._job.lease_id, phase)
+        if progress is not None:
+            self._progress_sent_at = time.monotonic()
+        return stop
 
     def run(self) -> None:
+        if self._out_dir is not None:
+            reader = threading.Thread(
+                target=self._reader, name="progress-" + self._job.id, daemon=True
+            )
+            try:
+                reader.start()
+                self._reader_thread = reader
+            except RuntimeError:  # no thread to be had: the heartbeat goes on, without progress
+                self._progress_off = True
+                self._log.warn("progress_reader_not_started", job=self._job.id)
         while not self._done.is_set():
             phase = "uploading" if self._uploading else "started"
             pause = self._tuning.heartbeat_seconds
             try:
-                if self._api.heartbeat(self._job.id, self._job.lease_id, phase):
+                if self._beat(phase):
                     first = not self._cancel.is_set()
                     self._cancel.set()  # act first, say so after
                     if first:
@@ -596,7 +746,10 @@ class JobRunner:
             "reason": decision.reason,
         }
         if decision.cuda:
-            fields.update(gpu=decision.gpu_index, cap_mb=decision.memory_mb)
+            # the cap the check held room for, and the limit the job is told (the cap less the reserve)
+            fields.update(
+                gpu=decision.gpu_index, cap_mb=decision.cap_mb, limit_mb=decision.memory_mb
+            )
         if decision.why is not None:
             fields["why"] = decision.why
         self.log.info("device_chosen", job=job.id, **fields)
@@ -649,7 +802,7 @@ class JobRunner:
         if not pids.write(self.config.root, job.id, proc.pid, proc.pid):
             self.log.warn("pid_record_failed", job=job.id)
         self._heartbeat = Heartbeat(
-            self.api, job, self.log, self.tuning, self.cancel, self.lease_lost
+            self.api, job, self.log, self.tuning, self.cancel, self.lease_lost, dirs.out
         )
         self._heartbeat.start()
         self.log.info("job_started", job=job.id, pid=proc.pid, enforce_limits=enforce)

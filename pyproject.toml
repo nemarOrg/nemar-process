@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nemar-process"
-version = "0.1.1"
+version = "0.1.2-dev9"
 description = "NEMAR's processing repository: the launcher, runtime images, recipes and Tapis definitions."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -44,18 +44,25 @@ signaljourney = [
 ]
 
 # The runtime image's packages (`images/nemar-python/`). Exact pins for what NEMAR chose; NumPy and
-# SciPy are left to the lock. eegprep takes four extras and never `eeglab` (it installs the Octave
+# SciPy are left to the lock. eegprep takes six extras and never `eeglab` (it installs the Octave
 # bridge `oct2py`) or `full` and `all` (they include it): there is no MATLAB path in the image.
 runtime = [
-    # eegprep at the `develop` merge commit of sccn/eegprep#617 (pAMICA through `pop_runica`), which
-    # holds #621 (the ASR state) and #616 (eegprep-lean). No eegprep release holds them, and
-    # `develop` still says 0.5.0 like the PyPI release that has none, so every record, stamp and
-    # `nemar-recipe version` names the commit too (`eegprep@0.5.0+<commit>`, docs/recipes.md). The
-    # next move is to the eegprep release that contains them, by the card that pins that release.
-    # The `pamica` extra asks for the `pamica==0.4.0` pinned below.
-    "eegprep[mne,pybids,picard,torch,pamica] @ git+https://github.com/sccn/eegprep@edf694c8344b9c4c68672eac3acf9a819f1462a8",
+    # eegprep at the `develop` merge commit of sccn/eegprep#698 (`eeg_mir`, the mutual information
+    # reduction nemar-quality reports), which holds #617 (pAMICA through `pop_runica`), #621 (the ASR
+    # state), #616 (eegprep-lean), #386 (ICLabel on ONNX) and #693 (BIDS frames read by their
+    # orientation). No eegprep release holds them, and `develop` still says 0.5.0 like the PyPI
+    # release that has none, so every record, stamp and `nemar-recipe version` names the commit too
+    # (`eegprep@0.5.0+<commit>`, docs/recipes.md). The next move is to the eegprep release that
+    # contains them, by the card that pins that release.
+    # The `pamica` extra asks for the `pamica==0.4.0` pinned below; the `iclabel` extra is
+    # onnxruntime, which ICLabel's packaged network runs on (without it `pop_iclabel` raises).
+    "eegprep[mne,pybids,picard,torch,pamica,iclabel] @ git+https://github.com/sccn/eegprep@871bc7f8a03b6d925330c598e8dcd18b835614d3",
     "mne==1.13.2",
     "pamica==0.4.0",
+    # The runtime ICLabel's packaged network runs on (the `iclabel` extra asks for `>=1.20`): its
+    # probabilities depend on it, so it is pinned, stamped in every record (`determinism.OPTIONAL_ENGINES`)
+    # and stood for by nemar-ica's recipe version (`steps.ONNXRUNTIME_VERSION`).
+    "onnxruntime==1.32.0",
     # The Zarr reader of the Zarr input of `nemar-floor` and `nemar-ica` (docs/recipes.md). A
     # separate distribution from eegprep (the engine the records name) installed from the `develop`
     # merge commit of sccn/eegprep#627, which holds #626 and #616, fills `chanlocs` from the
@@ -120,6 +127,7 @@ markers = [
     "docker: needs a real Docker daemon (or Podman) and the registry; skipped where there is none, required in the docker CI job",
     "runner_stack: starts nemar-cli's local stack from a full checkout (NEMAR_CLI_DIR) and runs the runner against it; skipped where the checkout, bun or Apptainer is absent, required in ci.yml's `launcher (python 3.12)` leg",
     "network: reads NEMAR's public Zarr serving copy over the internet; skipped unless selected with `-m network`",
+    "podman: needs a real rootless Podman 4.x; runs only with NEMAR_REQUIRE_PODMAN=1, which ci.yml's `podman (rootless)` job sets, and is skipped elsewhere",
 ]
 
 [tool.coverage.run]
@@ -148,8 +156,10 @@ include = ["images", "launcher", "observer", "runner", "recipes", "scripts", "te
 include = [
     "images/nemar-python/smoke.py",
     "scripts/make_smoke_fixture.py",
+    "scripts/measure_ica_time.py",
     "recipes/nemar_process/**",
     "tests/recipes/**",
+    "tests/plugin_fixtures/**",
     "tests/recipe_plugin.py",
     "tests/recipe_support.py",
     "tests/zarr_support.py",

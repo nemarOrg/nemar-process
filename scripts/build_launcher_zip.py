@@ -3,10 +3,12 @@
 Layout (``tapisjob_app.sh`` at the root, as Tapis expects)::
 
     tapisjob_app.sh
+    nemar-launch-local
     lib/nemar_launch/*.py
-    lib/schema/launch-spec.v1.json
+    lib/schema/*.json
 
-Only ``lib/`` goes on the launcher's import path (``tapisjob_app.sh`` runs it with ``python -I -S``),
+``nemar-launch-local`` is the standalone entry (``docs/standalone.md``): the same ``lib/``, run on a
+person's own machine. Only ``lib/`` goes on the launcher's import path (``tapisjob_app.sh`` runs it with ``python -I -S``),
 so nothing else Tapis puts beside the script, or the job leaves there, can shadow a module.
 
 Two builds of the same tree are byte-identical: members are sorted, every timestamp is
@@ -37,6 +39,8 @@ from pathlib import Path
 
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 SCRIPT = "tapisjob_app.sh"
+LOCAL_SCRIPT = "nemar-launch-local"
+SCRIPTS = (SCRIPT, LOCAL_SCRIPT)
 DEFAULT_OUT = "dist/nemar-launch.zip"
 
 
@@ -47,7 +51,7 @@ def sha256(data: bytes) -> str:
 def members(root: Path) -> list[tuple[str, Path, int]]:
     """(name in the zip, source file, mode) for everything the zip holds, sorted by name."""
     launcher = root / "launcher"
-    found = [(SCRIPT, launcher / SCRIPT, 0o755)]
+    found = [(name, launcher / name, 0o755) for name in SCRIPTS]
     for path in sorted((launcher / "nemar_launch").rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
@@ -73,22 +77,23 @@ def check_layout(data: bytes, root: Path) -> list[str]:
     problems = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = archive.namelist()
-        if SCRIPT not in names:
-            problems.append("{} is not at the root of the zip".format(SCRIPT))
-        elif (archive.getinfo(SCRIPT).external_attr >> 16) & 0o111 == 0:
-            problems.append("{} is not executable".format(SCRIPT))
+        for script in SCRIPTS:
+            if script not in names:
+                problems.append("{} is not at the root of the zip".format(script))
+            elif (archive.getinfo(script).external_attr >> 16) & 0o111 == 0:
+                problems.append("{} is not executable".format(script))
         if names != sorted(names):
             problems.append("members are not sorted")
         if any("__pycache__" in n or n.endswith(".pyc") for n in names):
             problems.append("the zip holds bytecode")
         if not any(n.startswith("lib/nemar_launch/") for n in names):
             problems.append("the nemar_launch package is missing from lib/")
-        if any(n != SCRIPT and not n.startswith("lib/") for n in names):
-            problems.append("something other than lib/ and the script is at the root")
-        schema = root / "launcher" / "schema" / "launch-spec.v1.json"
+        if any(n not in SCRIPTS and not n.startswith("lib/") for n in names):
+            problems.append("something other than lib/ and the scripts is at the root")
+        schema = root / "launcher" / "schema" / "launch-spec.v2.json"
         if (
-            "lib/schema/launch-spec.v1.json" not in names
-            or archive.read("lib/schema/launch-spec.v1.json") != schema.read_bytes()
+            "lib/schema/launch-spec.v2.json" not in names
+            or archive.read("lib/schema/launch-spec.v2.json") != schema.read_bytes()
         ):
             problems.append("the schema in the zip is not the repository's copy")
     return problems

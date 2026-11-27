@@ -26,17 +26,17 @@ PIN = json.loads((ts.ROOT / "tests" / "contract" / "nemar-cli-tapis-pin.json").r
 BRANCH = "feature/issue-2005-epic-compute-core"
 
 
-def job() -> dict:
-    return yaml.safe_load(CI.read_text(encoding="utf-8"))["jobs"][JOB]
+def job(name: str = JOB) -> dict:
+    return yaml.safe_load(CI.read_text(encoding="utf-8"))["jobs"][name]
 
 
-def script() -> str:
-    steps = [s for s in job()["steps"] if "run" in s]
+def script(name: str = JOB) -> str:
+    steps = [s for s in job(name)["steps"] if "run" in s]
     assert len(steps) == 1
     return steps[0]["run"]
 
 
-def run_job(tmp_path: Path, *, stdout: str = "", fails: bool = False):
+def run_job(tmp_path: Path, *, stdout: str = "", fails: bool = False, name: str = JOB):
     """Run the job's script with a ``gh`` that prints ``stdout`` or fails the way the API does."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -52,7 +52,7 @@ def run_job(tmp_path: Path, *, stdout: str = "", fails: bool = False):
     # The script reads the pin with python3, which is this interpreter.
     (bin_dir / "python3").symlink_to(sys.executable)
     done = subprocess.run(
-        ["bash", "-c", script()],
+        ["bash", "-c", script(name)],
         cwd=str(ts.ROOT),
         capture_output=True,
         text=True,
@@ -114,4 +114,67 @@ def test_the_job_stays_advisory_read_only_and_pinned():
     assert len(checkout[0]["uses"].split("@")[1]) == 40
     # Values reach the script as shell variables, never as ${{ }} text pasted into it.
     assert "${{" not in script()
+    assert spec["env"] == {"GH_TOKEN": "${{ github.token }}"}
+
+
+# ---- the same checks for nemar-cli-progress-latest (the live progress contract, ADR 0134) ---------------
+
+PROGRESS_JOB = "nemar-cli-progress-latest"
+PROGRESS_PIN = json.loads(
+    (ts.ROOT / "tests" / "contract" / "nemar-cli-progress-pin.json").read_text()
+)
+PROGRESS_BRANCH = "dev"
+
+
+def test_the_progress_job_says_a_failed_comparison_and_never_unchanged(tmp_path):
+    done, _args = run_job(tmp_path, fails=True, name=PROGRESS_JOB)
+    assert done.returncode == 0, done.stderr
+    assert "could not be compared" in done.stdout
+    assert "unchanged" not in done.stdout + done.stderr
+    assert PROGRESS_PIN["ref"][:12] in done.stdout
+
+
+def test_the_progress_job_says_unchanged_for_other_files(tmp_path):
+    done, args = run_job(
+        tmp_path,
+        stdout="README.md\nshared/contract/compute.ts\nshared/contract/compute-progress.tsx",
+        name=PROGRESS_JOB,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "unchanged since the pin" in done.stdout
+    assert "::warning" not in done.stdout
+    assert (
+        "repos/nemarOrg/nemar-cli/compare/{}...{}".format(PROGRESS_PIN["ref"], PROGRESS_BRANCH)
+        in args
+    )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "shared/contract/compute-progress.schema.json",
+        "shared/contract/compute-progress-vectors.json",
+        "shared/contract/compute-progress.ts",
+        "shared/contract/compute-runner.schema.json",
+        "shared/compute-checkpoints.ts",
+        "shared/compute-recipes.ts",
+    ],
+)
+def test_the_progress_job_warns_naming_a_changed_contract_file(tmp_path, changed):
+    done, _args = run_job(
+        tmp_path, stdout="README.md\n{}\nelsewhere.ts".format(changed), name=PROGRESS_JOB
+    )
+    assert done.returncode == 0, done.stderr
+    assert "moved past the pin" in done.stdout
+    assert changed in done.stdout
+    assert "unchanged" not in done.stdout
+
+
+def test_the_progress_job_stays_advisory_read_only_and_pinned():
+    spec = job(PROGRESS_JOB)
+    assert spec["continue-on-error"] is True
+    checkout = [s for s in spec["steps"] if "uses" in s]
+    assert len(checkout) == 1
+    assert len(checkout[0]["uses"].split("@")[1]) == 40
+    assert "${{" not in script(PROGRESS_JOB)
     assert spec["env"] == {"GH_TOKEN": "${{ github.token }}"}

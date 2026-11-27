@@ -64,7 +64,8 @@ Nothing else that runs jobs, or that you do not trust, may run as that account.
 At start the runner also refuses a `launcher_dir` with any file or directory that is a link, is owned by someone other than the user or root, or that group or others can write; a `sif_root` that is not the user's own directory or that group or others can write; and a `python3` on the launch PATH (the first of `/usr/local/bin:/usr/bin:/bin`) that, or whose directory, group or others can write, that is owned by someone else, or that is older than Python 3.9.
 Every directory of the launch PATH up to the one holding `python3` (and the runtime) must be the user's or root's and not writable by group or others, the `python3` path is resolved once at start and pinned for every job, and the runtime binary gets the same check.
 With `verify_images` true the runner also refuses to start without a `cosign` it can trust, found as `self-update` finds its own: when `cosign_path` is set it is the cosign (and any cosign on the launch PATH is ignored), and it must be an absolute path to a regular file, not a link, owned by the user or root, with neither it nor its directory writable by group or others; when it is not set the cosign is the first `cosign` on the launch PATH, which gets the `python3` check (every directory of the PATH up to it, and the program, the user's or root's and not writable by group or others).
-Engine helpers (`ps`, `inspect`, `rm`, `--version`, the preflight) run with `PATH` and `LANG` only, so the engine's default socket is the one used; a rootless engine, a non-default `DOCKER_HOST` or `XDG_RUNTIME_DIR` is unsupported (the launcher does not support a rootless daemon either).
+Engine helpers (`ps`, `inspect`, `rm`, `--version`, the preflight) run with `PATH` and `LANG` only under Docker, so the daemon's default socket is the one used; a rootless Docker or a non-default `DOCKER_HOST` is unsupported (the launcher refuses rootless Docker too).
+Under Podman, which runs rootless only, they also carry the prevention ([Containers (Docker and Podman)](#containers-docker-and-podman)): the account's `HOME`, the user's checked `XDG_RUNTIME_DIR`, an empty `CONTAINERS_CONF` and the two global flags.
 
 ## What a job gets
 
@@ -96,10 +97,11 @@ The launcher is started as `python3 -I -S -c '<boot line>' <launcher directory>`
 | `NEMAR_MEMORY_MB` | the job's `memory_mb`; under Docker or Podman always, `default_job_memory_mb` when the claim's is null (the log line is `memory_default_applied job=<id> mb=<n>`); under Apptainer only when the claim's is not null | the claim answer, the configuration |
 | `NEMAR_RUNNER_LABEL` | Docker and Podman only: the runner's registration id, `rnr_` and 24 lowercase hexadecimal digits, which the launcher puts on every container as `nemar.runner` | `GET /compute/runners/me`, read at start |
 | `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` | only for a job whose claim has `gpus` above zero: `cpu` or `cuda`, and the reason, one of the fixed words of [A GPU, only when it is idle](#a-gpu-only-when-it-is-idle); a job with no GPUs gets neither | the GPU check |
-| `NEMAR_GPU_ID`, `NEMAR_GPU_INDEX`, `NEMAR_GPU_MEMORY_MB` | only for a `cuda` decision: the one GPU's identifier as `nvidia-smi` prints it, its index, and the most of its memory the job may take | the GPU check |
+| `NEMAR_GPU_ID`, `NEMAR_GPU_INDEX`, `NEMAR_GPU_MEMORY_MB` | only for a `cuda` decision: the one GPU's identifier as `nvidia-smi` prints it, its index, and the limit of the job's allocator, the cap less `cuda_reserve_mb` (not the job's whole use of the GPU, which is at most the cap) | the GPU check |
 | `HOME` | `<job>/home` | the runner |
 | `PATH` | `/usr/local/bin:/usr/bin:/bin` | fixed |
 | `LANG` | `C.UTF-8` | fixed |
+| `XDG_RUNTIME_DIR` | Podman only: the runner's own `XDG_RUNTIME_DIR`, only when it is a directory the user owns with mode 0700; without it the launcher refuses Podman as `runtime_unusable` | the runner's environment |
 
 The launch specification carries no cores or memory, by design, so the runner passes both from the claim answer; the launcher fails closed when `NEMAR_ENFORCE_LIMITS=1` has no usable `NEMAR_CPUS`.
 The launcher fails closed under an engine without `NEMAR_MEMORY_MB`, because the runner's watchdog sees only the engine's client process there.
@@ -180,6 +182,12 @@ The readiness probe of [`doctor`](#doctor) runs `apptainer exec --containall --c
   A thread starts only after the launcher process is spawned (never before or during an image pull: the contract has no other phase), sends `started` at once and then renews the lease every 60 seconds; `uploading` is sent at once when the launcher has written `<job>/out/launcher/result.json` (the path the launcher uses, `launcher/` under its output directory).
   It goes on until the completion is sent or given up: removing containers, deleting the directory and retrying the completion can outlast the 600-second lease.
   A heartbeat that fails is retried and the job goes on, and the thread survives any error.
+- **Live progress** (ADR 0134).
+  A `started` heartbeat carries the job's live progress, `nemar.progress.v1`, when the launcher has written one to `<job>/out/launcher/progress.json` ([launcher.md](launcher.md)), at most once in 50 seconds (the Worker ignores a report sooner than that).
+  The file is read on a thread of its own, every 15 seconds, never on the heartbeat's: a read that hangs (a network file system) can never delay a lease renewal; the heartbeat only attaches the last snapshot that passed the checks. If that thread cannot be started, the job runs without progress and the log says `progress_reader_not_started`.
+  Because the Worker parses a heartbeat strictly, and one whose progress breaks the schema renews no lease, that reader opens the file without following a link and without blocking (a regular file of at most 16 KiB), parses it strictly, and checks it with `contract.check_progress`, a mirror of the schema at least as strict; anything wrong means no snapshot, logged once per job as `heartbeat_progress_dropped` with the check's path word or the error's class, never a value.
+  If a heartbeat that carried progress fails with anything but a lease, fatal or drain word (an `invalid_body`, a wordless 403 from a proxy, a 413, a 5xx), the same heartbeat is sent again at once without progress, so the lease never waits a cycle for it; a refusal that will not change (any status below 500 but 429) also turns progress off for the rest of the job (`heartbeat_progress_refused`). A heartbeat is never retried with progress after one that carried it failed.
+  An `uploading` heartbeat never carries progress.
 - **Deadline.**
   SIGTERM to the process group at `NEMAR_JOB_END_TIME` plus 60 seconds, SIGKILL 30 seconds after any SIGTERM.
   The launcher stops its own container at `NEMAR_JOB_END_TIME` itself (SIGTERM, and SIGKILL 10 seconds later), so the runner's signal 60 seconds after normally finds the container gone and is the backstop for a launcher that is stuck outside its container.
@@ -230,7 +238,11 @@ Ids the engine prints are checked to be hexadecimal before they reach `rm`; a fa
 Under Apptainer nothing is done.
 Each container `ps` lists is inspected and removed only if its labels, read back, include every one asked for, so an engine that ORs repeated `--filter label=` cannot get another runner's container removed.
 Run ONE runner process per registration: two processes on one registration (with different roots) share the label and remove each other's containers at start.
-The launcher refuses Podman for now (`podman_unsupported`), so `doctor` answers no on both engine lines under it.
+Under Podman every one of these calls, and `doctor`'s `--version`, carries the prevention the launcher's Podman calls carry ([launcher.md](launcher.md#podman-one-verified-path)): the global flags `--default-mounts-file=/dev/null --hooks-dir=<root>/podman/hooks.d` first, and an environment of `PATH`, `LANG`, `HOME` (the account's home directory from the password database), the user's `XDG_RUNTIME_DIR` (only when it is a directory the user owns with mode 0700) and `CONTAINERS_CONF=<root>/podman/containers.conf`, and nothing else.
+`<root>/podman/containers.conf` is an empty file (mode 0600) and `<root>/podman/hooks.d` an empty directory (mode 0700), made without following a link and checked right before each call to be the user's, not links and empty, and none of these paths (nor `HOME` or `XDG_RUNTIME_DIR`) may hold a comma, a double quote or a line break; when any of that does not hold, Podman is not run and the log says `container_cleanup_failed` with `reason=podman_unusable`.
+The launcher's own Podman calls use the same account home and runtime directory, with an empty file and directory of their own in the job's scratch.
+So Podman's state lives in the account's one rootless store (under the account's home directory, with its run state under `XDG_RUNTIME_DIR`), never in a job's `home/`: the runner's labeled removal sees every container a launcher made, and nothing Podman writes is left in a job directory, whose deletion could not remove files owned by subordinate ids.
+`doctor`'s two engine lines under Podman are the launcher's preflight run with the prevention, so they answer yes only where the launcher would run Podman; the child that asks is given the user's checked `XDG_RUNTIME_DIR` as well.
 
 ### Usage
 
@@ -369,7 +381,7 @@ Nothing about the accounting changes: the Worker counted the job's `resources.gp
 **When.**
 The decision is made for each claimed job whose `gpus` is above zero, just before it starts: after its image is proven and made, and after the start check of [Just before a claimed job starts](#just-before-a-claimed-job-starts) found room.
 A job whose `gpus` is zero gets no decision, no variable, and no call of `nvidia-smi`.
-Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `gpus` the claim allowed, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index and `cap_mb`, and, when the reason is `gpu_check_failed`, a fixed word `why`.
+Launcher variables name the decision (the table in [The launcher's environment](#the-launchers-environment)), and the log line is `device_chosen` with the job, the `gpus` the claim allowed, the `device`, the `reason`, and for `cuda` the GPU's `gpu` index, `cap_mb` (the cap) and `limit_mb` (what the job is told, below), and, when the reason is `gpu_check_failed`, a fixed word `why`.
 A GPU is never named in the log by its identifier.
 
 **The reason.**
@@ -382,7 +394,7 @@ The CPU is chosen with the first of these that applies:
 | `gpu_reserved` | an entry named `gpu<i>` or `gpu-all` is in a reservation directory (below), for the GPU with index `i` |
 | `gpu_check_failed` | `nvidia-smi` is missing, is not trusted, does not answer within 10 seconds a call, exits non-zero, or prints anything that cannot be read (no GPU, a field that is `[N/A]`, a process on a GPU the other call did not name, a GPU that appeared or went between samples); or the whole window cannot end before the time the lease leaves before the launcher starts (`lease_abandon_seconds` after the claim) or before the job's own deadline (below), or the runner is stopping |
 | `gpu_busy` | in some sample a compute process lists the GPU, or `memory.used` is above `max_used_mb` (memory held by a process that is quiet counts), or `utilization.gpu` is above `max_utilization_pct` |
-| `gpu_memory_short` | in some sample `memory.total` less `memory.used` is under the cap plus `headroom_mb`, where the cap is `floor(memory_fraction * memory.total)`; a cap under one megabyte is short too |
+| `gpu_memory_short` | in some sample `memory.total` less `memory.used` is under the cap plus `headroom_mb`, where the cap is `floor(memory_fraction * memory.total)`; or the cap less `cuda_reserve_mb` is under one megabyte |
 | `gpu_in_use` | the GPU passed and another job of this runner holds it |
 
 A GPU is granted, with reason `gpu_idle`, only when `samples` readings taken `sample_seconds` apart ALL pass every rule, and the reservation is looked for in every one of them: one failing sample is the CPU.
@@ -421,12 +433,16 @@ An optional `gpu` object in the configuration file, its keys checked as the top 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | `true` turns the GPU on: without it every GPU job runs on the CPU, reason `gpu_disabled` |
-| `memory_fraction` | `0.5` | the most of one GPU's memory a job may take, as a fraction above 0 and at most 1; the cap is told to the recipe |
-| `headroom_mb` | `2048` | memory that must remain free on top of the cap |
+| `memory_fraction` | `0.5` | the most of one GPU's memory a job may take in all, as a fraction above 0 and at most 1: the cap |
+| `headroom_mb` | `2048` | memory that must remain free on top of the cap, and stays free while the job runs |
+| `cuda_reserve_mb` | `1024` | the memory a job takes on its GPU outside its allocator's limit (the CUDA context and the CUDA libraries' own memory), 0 to 16777216; the job is told the cap less this |
 | `max_used_mb` | `1024` | the memory other processes may hold on a GPU that still counts as idle (a desktop's), megabytes |
 | `max_utilization_pct` | `10` | the busiest `utilization.gpu` that still counts as idle, 0 to 100 |
 | `samples` | `6` | readings that must all pass, 2 to 120 |
 | `sample_seconds` | `5` | the gap between readings, above 0 and at most 60 |
+
+The idle rule asks for the cap plus `headroom_mb`, and does not change with `cuda_reserve_mb`: the reserve is taken out of the cap, never out of the headroom.
+The default reserve is a conservative choice until it is measured on a real GPU.
 
 ```json
 "gpu": {
@@ -439,16 +455,18 @@ An optional `gpu` object in the configuration file, its keys checked as the top 
 `python3 -m nemar_runner gpu-check` (with `--config <file>` before or after the command) takes the check once, every sample, whether or not `enabled` is true (a note on standard error says when it is not, so that a host can look before it turns the GPU on), and prints one line per GPU, `gpu<i>: idle` or `gpu<i>: busy reason=<word>`, then the sizes and, per sample, the number of compute processes, `memory.used` and `utilization.gpu`:
 
 ```text
-gpu0: idle total_mb=24576 cap_mb=12288 processes=0,0,0,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
-gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 processes=1,1,1,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
+gpu0: idle total_mb=24576 cap_mb=12288 limit_mb=11264 processes=0,0,0,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
+gpu1: busy reason=gpu_busy total_mb=24576 cap_mb=12288 limit_mb=11264 processes=1,1,1,0,0,0 used_mb=312,312,312,312,312,312 utilization_pct=0,0,0,0,0,0
 ```
 
 It exits 0 when a GPU is idle and 1 when none is; when the check cannot be made the one line is `gpu: unavailable reason=gpu_check_failed why=<word>`.
 `doctor` adds an informational `gpu` line: `no (disabled)`, `no (gpu_unsupported_runtime)`, `no (gpu_check_failed (<word>))`, `no (tool found, GPUs seen: <n>, but <k> of <m> reservation directories do not exist)` (a reservation can only be made in a directory that is there, and a mistyped one would silently turn reservations off; the default one beside the configuration file is never created by the runner), or `yes (tool found, GPUs seen: <n>, reservations: <names>)`; it never changes the exit status.
 
 **What the recipe is told.**
-`NEMAR_DEVICE` (`cpu` or `cuda`), `NEMAR_DEVICE_REASON`, and for `cuda` `NEMAR_GPU_MEMORY_MB` (the cap), inside the container ([the launcher](launcher.md#the-device)).
-A recipe keeps to the cap, and a Compute Unified Device Architecture (CUDA) out-of-memory error or another process taking memory moves the recipe to the CPU for good and is recorded; that is the recipe's rule, not the runner's.
+`NEMAR_DEVICE` (`cpu` or `cuda`), `NEMAR_DEVICE_REASON`, and for `cuda` `NEMAR_GPU_MEMORY_MB`, inside the container ([the launcher](launcher.md#the-device)).
+`NEMAR_GPU_MEMORY_MB` is the cap less `cuda_reserve_mb`: the recipe limits its allocator to it, and the CUDA context and libraries, which that limit does not count, take the reserve, so the job's whole use stays within the cap and the `headroom_mb` the check found on top of the cap stays free while it runs.
+On a 24576 MiB GPU with the defaults the cap is 12288 and the job is told 11264.
+A recipe keeps to the number it is told, and a Compute Unified Device Architecture (CUDA) out-of-memory error or another process taking memory moves the recipe to the CPU for good and is recorded; that is the recipe's rule, not the runner's.
 
 **What is not guaranteed.**
 `nvidia-smi` lists compute processes of other accounts only where the host lets it (a container or `hidepid` can hide them), and `memory.used` and `utilization.gpu` are the backstop that still sees their use; the check is a reading of a moment, so a person who starts work a second after the window is not seen until the next one, and nothing stops the job then.
@@ -639,10 +657,11 @@ The tests run real child processes and real HTTP; NEMAR's Worker is a recording 
 `tests/runner/test_verify_image.py` runs cosign and Apptainer as stand-in executables and the registry as a stand-in HTTP server on loopback, for everything the runner decides (the reference, the identity constant against the workflow, the answers cosign can give, the manifest and layer checks, the cache, the refusal, `doctor`), and then, against the real cosign and the public registry, checks that the demo image's digest verifies, that the same digest with another identity or issuer does not, that a tag is refused, that a corrupted file in `sif_root` is `layer_mismatch`, and (with Apptainer) that the signed SIF artifact is pulled by its digest and hashes to its signed layer.
 The tests that need the real cosign skip where it is absent; with `NEMAR_REQUIRE_COSIGN=1` (the `launcher` CI job, which installs the pinned cosign) a skip is a failure.
 The one exception is `tests/e2e/test_runner_stack.py`, described next, which runs against NEMAR's real routes and a real container runtime.
-The runner against NEMAR's real routes is `tests/e2e/test_runner_stack.py` (marker `runner_stack`): it starts nemar-cli's local stack (`backend/scripts/compute-local-stack.ts serve --seed-fixture`) from a full checkout named by `NEMAR_CLI_DIR` (at the pinned commit, with `bun install --frozen-lockfile --ignore-scripts` run in its root and in `backend/`), registers a runner with the stored owner key, dispatches `nemar-floor-zarr` (the name nemar-cli's registry has at the pinned commit; the recipe is `nemar-floor --input zarr` in this repository, and the test dispatches `nemar-floor` with input `zarr` once the pin passes the registry's change) with `executor: "runner"` with the stored administrator key, runs `once`, and asserts what the Worker's own job record says.
+The runner against NEMAR's real routes is `tests/e2e/test_runner_stack.py` (marker `runner_stack`): it starts nemar-cli's local stack (`backend/scripts/compute-local-stack.ts serve --seed-fixture`) from a full checkout named by `NEMAR_CLI_DIR` (at the pinned commit, with `bun install --frozen-lockfile --ignore-scripts` run in its root and in `backend/`), registers a runner with the stored owner key, dispatches `nemar-floor` (the runner reads the Zarr input, the recipe `nemar-floor --input zarr` in this repository) with `executor: "runner"` with the stored administrator key, runs `once`, and asserts what the Worker's own job record says.
 One case takes the job to `finished` in a real Apptainer container (the tiny image of `tests/images/tiny-recipe`, built into `<NEMAR_E2E_SIF_DIR>/<image id>.sif`, default `.cache/runner-stack-sif`); the other, with an empty `sif_root`, ends `failed` with `image_missing` before any container starts.
 Without Apptainer the first skips with "apptainer absent"; with `NEMAR_REQUIRE_APPTAINER=1` (the runner-against-the-stack steps of the `launcher (python 3.12)` CI job) a skip is a failure.
 The variable keeps the name of the Apptainer gate of the other tests but gates every way this module can fail to run: a missing Apptainer, SIF, bun, nemar-cli checkout or checkout dependency is a failure under it, never a skip.
 The runner is given a private launch PATH holding `python3` and an `apptainer` wrapper that executes the real binary: the runner's trust check vets the wrapper, not the real Apptainer binary or its directory, and the default launch PATH is not exercised by this test.
 The other jobs deselect the marker.
 The drift test needs a nemar-cli checkout that has the pinned commit (`NEMAR_CLI_RUNNER_DIR`, or a `nemar-cli` directory beside this checkout), and fails instead of skipping when `NEMAR_REQUIRE_RUNNER_DRIFT=1`.
+The `launcher` CI job sets it, with the sparse checkout it makes for the progress pin: the runner schema's heartbeat refers to the live progress schema by its `$id` (ADR 0134), so the two pins name the same nemar-cli commit (`tests/contract/test_progress_drift.py` holds them equal).

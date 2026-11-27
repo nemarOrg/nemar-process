@@ -16,9 +16,12 @@ Cloudflare R2 object storage is called R2.
 
 ```text
 tapisjob_app.sh                  # the entry point Tapis runs
+nemar-launch-local               # the standalone entry: a job on a person's own machine (standalone.md)
 lib/nemar_launch/*.py            # standard library only, Python 3.9 or newer
-lib/schema/launch-spec.v1.json   # the launch specification schema (see contracts.md)
+lib/schema/*.json                # the launch specification schema and the other copied contracts (contracts.md)
 ```
+
+The standalone entry runs the same container phase from a local launch specification file, with no NEMAR service involved; [standalone.md](standalone.md) is its page.
 
 ```bash
 uv run python scripts/build_launcher_zip.py            # write dist/nemar-launch.zip and print its sha256
@@ -86,10 +89,10 @@ A runner decides, for a job whose `resources.gpus` is above zero, whether the jo
 | `NEMAR_DEVICE_REASON` | for `cuda` exactly `gpu_idle`; for `cpu` one of `gpu_disabled`, `gpu_unsupported_runtime`, `gpu_reserved`, `gpu_check_failed`, `gpu_busy`, `gpu_memory_short`, `gpu_in_use` |
 | `NEMAR_GPU_ID` | `cuda` only: the one GPU, as `nvidia-smi` prints its identifier (`GPU-` and 36 characters of hexadecimal digits and hyphens) |
 | `NEMAR_GPU_INDEX` | `cuda` only: the GPU's index, 0 to 999 with no leading zero |
-| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the most of the GPU's memory the job may take, a whole number from 1 to 999999999 |
+| `NEMAR_GPU_MEMORY_MB` | `cuda` only: the limit of the job's allocator, a whole number from 1 to 999999999; a runner sets it below the job's whole share of the GPU, to leave room for the CUDA context and libraries that the limit does not count |
 
 With none of them set (a Tapis or SLURM launch, and any job with no GPU) the command line is exactly what it always was.
-Any malformed value, an inconsistent set (`cuda` with a reason that is not `gpu_idle`, `cpu` with `gpu_idle`, a GPU identifier, index or cap without `cuda`, `cuda` without all three, or any of them without `NEMAR_DEVICE`) ends the launch at the start as `runtime_error` with detail `invalid_spec`, as a malformed lease does: one fixed line on standard error, the four launcher files written, and nothing fetched, run or uploaded.
+Any malformed value, an inconsistent set (`cuda` with a reason that is not `gpu_idle`, `cpu` with `gpu_idle`, a GPU identifier, index or limit without `cuda`, `cuda` without all three, or any of them without `NEMAR_DEVICE`) ends the launch at the start as `runtime_error` with detail `invalid_spec`, as a malformed lease does: one fixed line on standard error, the four launcher files written, and nothing fetched, run or uploaded.
 A `cuda` decision for a specification whose `resources.gpus` is 0 is `invalid_spec` too: the runner may use fewer GPUs than the specification allows and never more.
 It is checked once before anything is fetched or run (the launcher's own files are then uploaded as for any failure) and again by each command-line builder, so no path can hand over a GPU the specification did not allow.
 The container then gets exactly that GPU, or none:
@@ -97,24 +100,88 @@ The container then gets exactly that GPU, or none:
 - Docker: `cuda` passes `--gpus device=<GPU id>` in place of `--gpus <n>`, so one GPU is handed over whatever count the specification allowed; `cpu` passes no `--gpus` and sets `NVIDIA_VISIBLE_DEVICES=void`, once, whatever the count was.
 - Apptainer: `cuda` passes `--nv` and `CUDA_VISIBLE_DEVICES=<GPU id>` (the scheduler's own value is not read); `cpu` passes neither.
   Apptainer's `--nv` binds the host's NVIDIA device files, and `CUDA_VISIBLE_DEVICES` is what picks the one GPU: a request the CUDA runtime honors, not a wall.
-- Podman is refused for now ([Docker and Podman](#docker-and-podman)); a runner never sends it a `cuda` decision.
+- Podman: no GPU is handed over ([Podman](#podman-one-verified-path)), and `--gpus` is never passed.
+  A launch that would hand one over (a GPU job without a decision, or a `cuda` decision) ends at the start as `runtime_unusable`, logged `podman_gpu_unsupported`, before any engine call; a `cpu` decision, which is what a runner sends under Podman, runs on the CPU.
 - The container's environment gets `NEMAR_DEVICE`, `NEMAR_DEVICE_REASON` and, for `cuda`, `NEMAR_GPU_MEMORY_MB`, after `NEMAR_OUT`: launcher-owned, because the specification's `env` allowlist is closed and cannot name them.
-  The GPU's identifier and index are not passed in: the recipe is told the device and the cap.
-- `provenance.json` gets a `device` object only when a decision was made and the container was about to start: `{"device", "reason", "gpu_index", "memory_mb"}`, the index and the cap null for `cpu`, and never the GPU's identifier or a host name.
+  The GPU's identifier and index are not passed in: the recipe is told the device and the limit.
+- `provenance.json` gets a `device` object only when a decision was made and the container was about to start: `{"device", "reason", "gpu_index", "memory_mb"}`, the index and the limit null for `cpu`, and never the GPU's identifier or a host name.
 
 ## Docker and Podman
 
 With `NEMAR_CONTAINER_RUNTIME=docker` the launcher runs the same image digest through Docker instead of Apptainer, for a host that has a rootful Docker daemon and no Apptainer.
-Docker is the supported second engine.
+With `NEMAR_CONTAINER_RUNTIME=podman` it runs it through rootless Podman, and only through the one verified path of [Podman](#podman-one-verified-path).
 Unset or `apptainer` is the path described everywhere else on this page, byte for byte unchanged.
-Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing`, before anything is fetched.
+Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing` (`runtime_unsupported` in the log), before anything is fetched.
+On a shared host, where only rootless engines are allowed, rootless Docker is refused, so Apptainer and rootless Podman through that path are the engines there.
 
-**Podman is unsupported until it is verified.**
-`NEMAR_CONTAINER_RUNTIME=podman` is refused before the binary is looked for, asked its version or anything else: exit 13, `runtime_error` with detail `runtime_unusable` (the preflight's own refusal, no new word), and the log line `podman_unsupported`.
-`runtime.engine_preflight('podman', ...)` answers `(False, False)` without running the binary.
-The reason: Podman's site-wide `containers.conf` entries for `volumes` and `devices`, and its `mounts.conf` entries, reach every container, and the launcher can neither disable them nor detect them.
-The Podman flags, checks and tests below stay in the code behind that refusal (`runtime.UNSUPPORTED_ENGINES`), and a later step lifts it once those entries have been inspected on a real rootless Podman host; the Podman parts of this page describe that code, not something that runs today.
-On a shared host, where only rootless engines are allowed, rootless Docker is refused and Podman is unsupported, so Apptainer is the only engine there today.
+### Podman, one verified path
+
+Podman reads configuration the launcher does not write: a site's or a user's `containers.conf` can add `volumes`, `devices` and `mounts` to every container, a `mounts.conf` adds subscription mounts, and an OCI hook in a hooks directory runs a program on the host when a container is created.
+`podman container inspect` does not show all of it: on rootless Podman 4.9.3 it omits a configured device, a `tmpfs` mount and a `mounts.conf` entry, which the OCI configuration (`config.json`) the runtime is given does hold.
+So Podman runs only with that configuration shut out (prevention), and only after the OCI configuration has been read and checked (verification).
+
+**Prevention, on every Podman call.**
+Every call the launcher makes (`--version`, `info`, `image inspect`, `pull`, `create`, `init`, `container inspect`, `unshare`, `start`, `rm`) and every call the runner makes ([the runner](runner.md#containers-docker-and-podman)) starts with the global flags `--default-mounts-file=/dev/null --hooks-dir=<scratch>/podman/hooks.d` and runs with this environment and nothing else:
+
+- the engine allowlist (`run.HOST_PASSTHROUGH`), with `HOME` set to the account's home directory from the password database (never the job's `home/`: the launcher and the runner share the account's one rootless store);
+- `XDG_RUNTIME_DIR`, the user's, passed only when it is a directory the user owns with mode 0700 (otherwise Podman is `runtime_unusable`);
+- `CONTAINERS_CONF=<scratch>/podman/containers.conf`, an empty file of the launch's own: with it set, Podman reads that file only, and no `containers.conf` of the site, the user or a drop-in directory;
+- never `CONTAINERS_CONF_OVERRIDE` (which Podman would still read), `CONTAINERS_STORAGE_CONF`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` or `CONTAINER_HOST`.
+
+`--default-mounts-file=/dev/null` replaces every `mounts.conf`, and `--hooks-dir` replaces the built-in hooks directory (`/usr/share/containers/oci/hooks.d`), which applies even with an empty `CONTAINERS_CONF`.
+The file and the directory are made in the launch's scratch with mode 0600 and 0700 without following a link, and are checked right before each call to be the user's, not links, and empty; anything else is `runtime_unusable` and nothing runs.
+No path of the prevention (the file, the directory, `HOME`, `XDG_RUNTIME_DIR`) may hold a comma, a double quote or a line break, which Podman could read as a list or a record: such a path is `runtime_unusable` too, and nothing is made.
+`--systemd=false` is among the Podman flags: systemd mode, which Podman turns on by itself for a command named like an init system, adds tmpfs mounts and more.
+A Podman call made any other way is refused before anything runs (`runtime.Engine` holds no call without its prevention): `runtime.UNSUPPORTED_ENGINES` is empty, and `tests/launcher/test_runtime_podman.py` pins every other path with a stand-in `podman` that records no call.
+
+**The sequence.**
+`podman create` with the command line below (`create` in place of `run`); `podman init`; `podman container inspect --format '{{json .}}'`, whose `State.Status` must be `initialized` (`start` writes `config.json` again for a configured, stopped or exited container) and whose `OCIConfigPath` must be `StaticDir` plus `/config.json`; `podman unshare cat -- <OCIConfigPath>` (the file belongs to a subordinate id, which the user cannot read from outside), at most 1 MiB, parsed as JSON; the check below; then `podman start --attach`, which passes signals to the container as `run` does and exits with the entry's own status.
+What was read is what runs: the runtime read that same file during `init`, and `start` of an initialized container does not write it again (the end-to-end test compares its SHA-256 after `init` and after `start`).
+A refusal removes the container (`rm --force --volumes`) and ends the launch as `runtime_error` with detail `runtime_unusable` before the entry ran, with the log line `podman_config_refused reason=<word> destination=<container path>` (`-` when there is none; never a host path).
+A `create` or `init` that fails is `runtime_unusable` too.
+
+**The check** of the parsed `config.json`; the first failure names the reason:
+
+- `config_unreadable`: the inspect document or `config.json` cannot be read or parsed, the container's `State.Status` is not `initialized`, or `OCIConfigPath` is not `StaticDir` plus `/config.json`;
+- `hook`: `config.json` has a `hooks` key at all, even an empty one;
+- `extra_device`: `linux.devices` is present and not empty;
+- then each mount entry, in order: at a declared bind's destination it must be type `bind`, its source's real path the launcher's, `ro` in its options exactly when declared read-only, and no option outside `bind`, `rbind`, `rprivate`, `private`, `ro`, `rw`, `nosuid`, `nodev`, `noexec` (`declared_bind`); at a destination of the allowlist below it must match that row by type, source rule and option set, compared as sets (`missing_default` for a required row, `extra_mount` for the others); anywhere else it is `extra_mount`;
+- `duplicate_mount`: a destination appears twice;
+- `missing_default`: a required row is absent; `declared_bind`: a declared bind is absent.
+
+The paths of the container's own directories are resolved in Podman's user namespace (`podman unshare realpath -e -z` and `podman unshare stat`), since `StaticDir` belongs to a subordinate id.
+
+**The engine defaults** Podman 4.9.3 adds, rootless, with the launcher's flags (`--userns=keep-id`, private PID, IPC, UTS and cgroup namespaces, `--network=bridge`, `--read-only`, `--read-only-tmpfs=false`) on cgroup v2, read from Podman's source and pinned by `tests/launcher/fixtures/podman-4.9.3-clean-config.json`, each beside Docker's equivalent:
+
+| Destination | Type | Source | Options (as a set) | Required | Docker's equivalent |
+|---|---|---|---|---|---|
+| `/proc` | `proc` | `proc` | `nosuid`, `noexec`, `nodev` | yes | the same |
+| `/dev` | `tmpfs` | `tmpfs` | `nosuid`, `strictatime`, `mode=755`, `size=65536k`, `ro` | yes | the same without `ro` |
+| `/dev/pts` | `devpts` | `devpts` | `nosuid`, `noexec`, `newinstance`, `ptmxmode=0666`, `mode=0620`, and either `gid=5` or (when fewer than five group ids are mapped) `rprivate` | yes | the `gid=5` set |
+| `/dev/mqueue` | `mqueue` | `mqueue` | `nosuid`, `noexec`, `nodev` | yes | the same |
+| `/dev/shm` | `bind` | the container's own `shm` directory (`StaticDir` plus `/shm`), a tmpfs Podman mounted | `bind`, `rprivate`, `ro`, `nosuid`, `noexec`, `nodev` | yes | a writable `tmpfs` `shm` with `nosuid`, `noexec`, `nodev`, `mode=1777`, `size=65536k` |
+| `/sys` | `sysfs` | `sysfs` | `nosuid`, `noexec`, `nodev`, `ro` | yes | the same |
+| `/sys/fs/cgroup` | `cgroup` | `cgroup` | `rprivate`, `nosuid`, `noexec`, `nodev`, `relatime`, `ro` | yes | `cgroup` with `ro`, `nosuid`, `noexec`, `nodev` |
+| `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` | `bind` | a regular file directly in this container's own directories (`StaticDir`, or the run directory that holds `HostsPath`), compared after resolving links | `bind`, `rprivate`, `ro`, `nosuid`, `noexec`, `nodev` | no, at most once each | the same three files from the container's own directory |
+| `/etc/passwd`, `/etc/group` | `bind` | as above | as above | no | none (Podman writes them for `--userns=keep-id`) |
+| `/run/.containerenv` | `bind` | as above | as above | no | none (Podman's marker file) |
+
+- **tmpfs.** No `tmpfs` is allowed but `/dev`.
+  Podman adds `/run`, `/tmp` or `/var/tmp` as tmpfs only with read-only tmpfs, which the launcher turns off (`--read-only-tmpfs=false`), or in systemd mode, which Podman turns on by itself for a command named `/sbin/init`, `/usr/sbin/init`, `/usr/local/sbin/init` or ending in `systemd`, and which the launcher turns off (`--systemd=false`), so such an entry runs as any other; Docker adds none.
+  A configured tmpfs cannot appear under the prevention, and any tmpfs that does appear is refused (`extra_mount`).
+- **Devices.** `linux.devices` must be empty.
+  Rootless Podman turns a configured device into a bind at its destination (listed twice in `mounts`, never in `linux.devices`), which the mount rule refuses as `extra_mount`.
+  No GPU is passed under Podman: `--gpus` is never given, and a launch that would hand one over is refused before any engine call (`podman_gpu_unsupported`), which also keeps out the device hooks a newer Podman adds for a GPU.
+- **A host with `/etc/system-fips` cannot run Podman jobs.**
+  Podman 4.9.3 adds `/run/secrets` there (and `/etc/crypto-policies/back-ends` when the image has the FIPS back-end) whatever its configuration says, and no flag removes it; the check refuses it (`extra_mount` at `/run/secrets`), so Podman is unsupported on a FIPS-mode host.
+
+Residuals, stated plainly:
+
+- `/dev/shm` is read-only under these flags, where Docker's and Apptainer's are writable, so a recipe that needs POSIX shared memory fails under Podman; `/dev` is read-only too.
+- The runtime itself adds the standard device nodes (`/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`) and the masked and read-only paths of `linux.maskedPaths` and `linux.readonlyPaths`; they are not `config.json` mounts.
+- Hooks are guarded by the prevention, not by the check.
+  A `createRuntime` hook runs on the host during `init`, before the check can look, and Podman's own `precreate` and `poststop` hooks are never written into `config.json` at all; the check refuses any `hooks` key, but were the prevention bypassed, a hook would have run already, and a `precreate` or `poststop` hook would not show.
+- SELinux relabeling is unverified.
 
 ### Before anything runs
 
@@ -124,6 +191,7 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Detail `runtime_unusable`.
 - The engine answers `info`: a dead daemon, a binary that cannot start, or an answer that is not the document asked for is `runtime_unusable` (never `image_missing`); a cancel ends the call at once.
 - Docker is not rootless and has no user-namespace remapping (`SecurityOptions` names `rootless` or `userns`; in both the launcher's `--user <uid>:<gid>` maps to a sub-user that cannot write the bind directories): `runtime_unusable`.
+  Podman is rootless (`host.security.rootless`): `runtime_unusable` otherwise.
 - The engine can enforce the limits.
   Docker reports `MemoryLimit`, `CpuCfsQuota` and `PidsLimit` as true; a daemon without a controller discards the flag with a warning and the job would run unlimited.
   Podman reports cgroup v2 with the `cpu`, `memory` and `pids` controllers available to it; a rootless Podman on cgroup v1 ignores the limits.
@@ -141,18 +209,19 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Each entry must be a host: it holds a dot or a colon, or is `localhost`, and has no `/`, `@` or white space.
   A bare word such as `myorg` is a Docker Hub namespace to Docker and a short name resolved through search registries to Podman, so it ends the launch at the start with exit 13 and detail `invalid_spec`.
   A loopback address, an IP literal, a name with user information and a bare Docker Hub name are refused unless named.
-  Detail `image_missing`.
+  Detail `image_missing` (`registry_not_allowed` in the log).
 - The image is present or can be pulled, and its configuration declares no `VOLUME`: an image volume is a writable mount outside the declared binds.
   The launcher asks `image inspect` (a pull only when the image is absent, with the digest verified by the engine), and a pull that fails or takes longer than 30 minutes, or an image with a declared volume, is `image_missing`.
   A cancel ends a pull at once, and the engine's own words are never copied into the log.
+  The log names the reason in their place, as `image_missing reason=<word>`: `pull_failed (exit <status>)` (the engine ran and refused: a registry that refused the pull, an anonymous pull quota per source address for one, a digest the registry does not serve, or no network), `pull_timeout`, `pull_not_started` (the engine could not be started), `not_inspectable` (pulled, but `image inspect` cannot find it), `volumes_declared`, or, for the standalone entry without `--pull`, `absent`.
 
 ### For a runner's doctor
 
 `runtime.engine_preflight(engine_path, engine_name)` returns `(limits_enforceable, mode_accepted)` and never raises: an engine that cannot be run, does not answer, or answers with something else is `(False, False)`.
 `limits_enforceable` is False for a missing controller and for an engine that does not say its CPU count (a launch needs that number to check `NEMAR_CPUS`).
-`mode_accepted` is False for rootless Docker, for Docker with user-namespace remapping and for a launcher running as root.
-Podman answers `(False, False)` without being run.
+`mode_accepted` is False for rootless Docker, for Docker with user-namespace remapping, for a Podman that is not rootless and for a launcher running as root.
 It runs only the engine's read-only `info`; the launcher's own checks are the same code.
+For Podman that `info` carries the prevention, made in a private temporary directory that is removed after the call; without a usable `XDG_RUNTIME_DIR` in its environment Podman is not run and the answer is `(False, False)`.
 
 ### What differs from the Apptainer path
 
@@ -186,15 +255,16 @@ It runs only the engine's read-only `info`; the launcher's own checks are the sa
 - There is no PID namespace preflight, because the launcher never passes a host namespace flag; the log says so.
 - The engine process gets the same short environment allowlist as Apptainer (`run.HOST_PASSTHROUGH`).
   `DOCKER_HOST` and `CONTAINER_HOST` are not passed on, so the engine's default socket is the one used.
+  Podman's adds only its prevention ([Podman](#podman-one-verified-path)).
 - The container's environment is exactly the job's allowlisted variables and `NEMAR_OUT` (and `NVIDIA_VISIBLE_DEVICES=void`, and the device variables when a runner decided the device), plus what the engine and the image add: the image's own `ENV`, `HOSTNAME` and `HOME`.
 
-The command line, `<name>` being the container's name:
+The command line, `<name>` being the container's name (under Podman, after the prevention's global flags, `create` in place of `run`, then `init`, the check and `start --attach <name>`):
 
 ```text
-run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --pull=missing
+run|create --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --pull=missing
     --network=bridge --user <uid>:<gid>
     [podman: --userns=keep-id --pid=private --ipc=private --uts=private --cgroupns=private
-             --env-host=false --read-only-tmpfs=false --image-volume=ignore]
+             --env-host=false --read-only-tmpfs=false --image-volume=ignore --systemd=false]
     --cap-drop ALL --security-opt no-new-privileges --read-only --workdir /work
     [docker: --entrypoint ""]  --no-healthcheck  [docker: --log-driver=none]
     --cpus <NEMAR_CPUS> [--cpu-shares 2] --memory <NEMAR_MEMORY_MB>m --memory-swap <NEMAR_MEMORY_MB>m
@@ -202,6 +272,7 @@ run --name <name> --label nemar.job=<job id> --label nemar.runner=<runner id> --
     --mount type=bind,src=<out>/work,dst=/work  --mount type=bind,src=<scratch>/tmp,dst=/tmp
     [--mount type=bind,src=<scratch>/code,dst=/code,readonly]
     [--mount type=bind,src=<dataset dir>,dst=/data/<id>,readonly ...]
+    [--mount type=bind,src=<scratch>/serving-index,dst=/data/serving-index,readonly]
     [--gpus <n>|device=<GPU id>]  --env <allowlisted>=<value> ...  [--env NVIDIA_VISIBLE_DEVICES=void]
     --env NEMAR_OUT=/work/outputs
     [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
@@ -217,7 +288,7 @@ Every Apptainer isolation flag has a counterpart, and the engine adds restrictio
 | `--containall` (private PID and inter-process communication namespaces, `/tmp` and home not shared) | the engine's defaults, with no `--pid=host`, `--ipc=host`, `--uts=host`, `--userns=host`, `--privileged`, `--device` or `-v` ever passed; Podman also gets `--pid=private --ipc=private --uts=private --cgroupns=private` | a test fails if a weakening flag appears |
 | `--cleanenv` | `--env NAME=value` for the allowlisted variables and `NEMAR_OUT` only; no `--env-file`; Podman also gets `--env-host=false`; the engine process gets the allowlist | the engines read `--env` as it is, not as the comma-separated record Apptainer reads, so a value is not quoted |
 | `--no-home` | no home mount: the engine mounts none by default | |
-| `--no-mount bind-paths` | no counterpart flag: Docker has no site-wide mount list. Podman's `containers.conf` can list default `volumes`, `devices` and a `mounts.conf` of secrets, which a run cannot turn off | a residual: a Podman host must not set them (unverified on a real Podman) |
+| `--no-mount bind-paths` | no counterpart flag: Docker has no site-wide mount list. Podman's site and user configuration is shut out on every call (an empty `CONTAINERS_CONF`, `--default-mounts-file=/dev/null`, an empty `--hooks-dir`), and the OCI configuration is checked before the container starts | [Podman](#podman-one-verified-path); verified on rootless Podman 4.9.3 in CI |
 | `--pwd /work` | `--workdir /work` | |
 | `--bind <src>:<dst>[:ro]` | `--mount type=bind,src=<src>,dst=<dst>[,readonly]` | exactly the four binds; `--mount` fails on a missing source instead of creating it, and a source holding `"`, a comma, a colon or a line break is refused as `bind_source_unsafe`; an image `VOLUME` is refused before the run, and Podman is also given `--image-volume=ignore` |
 | `--nv` | `--gpus <n>`, only when `resources.gpus` is above zero; otherwise `NVIDIA_VISIBLE_DEVICES=void`; with a runner's decision, `--gpus device=<GPU id>` for `cuda` and `NVIDIA_VISIBLE_DEVICES=void` for `cpu` ([the device](#the-device)) | |
@@ -234,22 +305,27 @@ Residuals, stated plainly:
 - The default bridge network keeps traffic between containers on the same host on, and the demo recipe needs egress to reach its registry and NEMAR.
   A dedicated network with inter-container communication off (`--opt com.docker.network.bridge.enable_icc=false`) is the alternative if a host runs other containers next to the launcher's.
 - Podman on SELinux: a bind mount may need relabeling (`:z` or `:Z` in a volume, `relabel=` in a mount) for the container to read it; this is unverified and not done.
-- Rootless Docker, and Docker with user-namespace remapping, are refused, not supported; so a shared host that allows only rootless engines has Apptainer only.
-- Podman is refused (see the top of this section); its code is untested against a real engine: CI runs Docker only.
+- Rootless Docker, and Docker with user-namespace remapping, are refused, not supported; so a shared host that allows only rootless engines has Apptainer and rootless Podman.
+- Podman's own residuals are in [Podman](#podman-one-verified-path).
 
 ### Tests
 
 `tests/launcher/test_device.py` pins the command lines of every device decision under Docker and Apptainer, the settings that are refused, and the refusal of a GPU the specification did not allow; the Docker end-to-end test runs a `cpu` decision for a GPU job in a real container on a daemon with no GPU, in CI.
 `tests/launcher/test_runtime_docker.py` and `tests/launcher/test_runtime_preflight.py` run the real launcher against a strict stand-in for the engine binary (`tests/standin/fake_docker.py`), which refuses the values a real engine refuses (a CPU count above its own, a memory below 6 MB, a malformed `--user`, an `--env` without `=`, a Podman-only flag under the name `docker`, a `--cpu-shares` below 2, a duplicate mount point).
-`tests/launcher/test_runtime_podman_refused.py` shows Podman failing closed with a stand-in `podman` on `PATH` recording no call, and `tests/launcher/test_group_kill.py` the group kill with a real child and grandchild.
-`tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`.
+`tests/launcher/test_runtime_podman.py` runs Podman's sequence against the same stand-in, which refuses any call without the prevention and writes the CI fixture's OCI configuration on `init`, and shows a refused configuration removing the container before the entry runs and every other Podman path recording no call; `tests/launcher/test_podman_oci_config.py` runs the check on the fixture and on copies of it with one change each (no Podman needed); and `tests/launcher/test_group_kill.py` shows the group kill with a real child and grandchild.
+`tests/launcher/test_podman_e2e.py` (marker `podman`) runs against a real rootless Podman in CI's `podman (rootless)` job (`NEMAR_REQUIRE_PODMAN=1`; site files are written through `sudo -n` only there, with `NEMAR_PODMAN_E2E_SUDO=1`): the clean case, each configuration path prevented through the launcher and refused by the check when the prevention is bypassed, and the FIPS mounts refused; elsewhere it is skipped with that reason.
+`tests/e2e/test_docker_launch.py` (marker `docker`) starts a real container from an image pinned by digest and shows the data bind read-only, the root and the code not writable, no capabilities, the limits in force as the container reads them from its own control group, and a container killed at its memory limit recorded as `out_of_memory`; a digest no registry serves shows the launcher's own pull refused by the real engine as `image_missing reason=pull_failed`.
 It skips where there is no usable daemon and fails in the CI job that sets `NEMAR_REQUIRE_DOCKER=1`.
+The test image is pulled once per session, before the launches, by the `docker_image` fixture of `tests/docker_support.py` (a plugin of `tests/conftest.py`), from the first registry that serves its digest (`public.ecr.aws`, then Docker Hub), in up to four rounds with a growing wait between them: anonymous pulls are capped per source address (public.ecr.aws answers "Data limit exceeded" past 500 GB a month), and a CI runner shares its address with other tenants.
+Each pull gets at most 3 minutes and the whole of it 12, well inside the docker job's 30 and the release gate step's 20.
+A pull no registry serves fails the test with each registry's words, never a skip.
+The Apptainer tests' SIF of the same digest is built the same way, `public.ecr.aws` then Docker Hub, in the workflows' "Build the test image" steps (on a cache miss: the cache key is the digest) and in `tests/conftest.py`.
 
 ## The launch specification
 
 The Worker hands the launcher one document, in the environment variable `NEMAR_LAUNCH_SPEC`.
 The document is JSON text, printable ASCII only (every byte is 0x20 to 0x7E: a control character is a JSON escape, and every character at or above U+007F, DEL included, is a `\uXXXX` escape), at most 64 KiB.
-`launcher/schema/launch-spec.v1.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
+`launcher/schema/launch-spec.v2.json` is its JSON Schema, shared byte for byte with nemar-cli (see [contracts.md](contracts.md)).
 The launcher validates against it with a small validator of its own, because it may use only the standard library; a schema keyword the validator does not implement is an error, never ignored.
 
 ### The environment value: base64url
@@ -310,6 +386,7 @@ No job with a real token is to be submitted before then either ([unverified.md](
 | `entry` or `command` | exactly one: a path inside the bundle, or an argument vector for an image job |
 | `args` | arguments, after the entry or the command |
 | `bundle` | `{sha256, size}` of the code archive; required with `entry`, optional with `command`; no URL |
+| `serving_index` | `{sha256, size}` of the serving index the Worker staged for the job (version 2; [serving index](#serving-index)); optional; no URL |
 | `datasets` | `[{id, version, include?}]`, each id at most once; `version` is the data-plane tag; `include` is a list of globs |
 | `api_base` | NEMAR's API; the launcher calls it with `job_token`; HTTPS, or HTTP on loopback only |
 | `image` | `{uri, digest, sif}`; `sif` is `<64 hex digits of the digest>.sif`, relative to `NEMAR_SIF_ROOT` |
@@ -328,7 +405,7 @@ The local copy and the data plane's routes use the same string.
 
 **The image file is named by the image digest.**
 `image.sif` must equal the 64 hexadecimal digits of `image.digest`, then `.sif`, and `image.uri` must end with `image.digest`; any other value is `invalid_spec` (NEMAR's encoder never writes one).
-The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it).
+The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (`sif_root_unset` in the log; there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it: `sif_outside_root`) and be a file (`sif_absent`).
 The launcher does not hash the image: only its name ties it to the digest.
 
 The launcher reads the environment value as bytes (`os.environb`), decodes it, hashes the JSON text it decodes to before it parses that text, and records the SHA-256 as `launch_spec_digest` in `provenance.json`, even for a text it then refuses.
@@ -375,6 +452,7 @@ The arguments are built in one function (`run.build_argv`) and pinned by tests:
 exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
      --bind <out>/work:/work  --bind <scratch>/tmp:/tmp
      [--bind <scratch>/code:/code:ro]  [--bind <dataset>:/data/<id>:ro ...]
+     [--bind <scratch>/serving-index:/data/serving-index:ro]
      [--nv]  --env <name>=<value> ... [--env CUDA_VISIBLE_DEVICES=<ids>]  --env NEMAR_OUT=/work/outputs
      [--env NEMAR_DEVICE=<cpu|cuda> --env NEMAR_DEVICE_REASON=<word> [--env NEMAR_GPU_MEMORY_MB=<n>]]
      <image> <entry or command> <args>
@@ -388,7 +466,7 @@ exec --containall --cleanenv --no-home --no-mount bind-paths --pwd /work
   The runtime reads each `--env` argument as a CSV record, so a value with a comma or a double quote is passed quoted as CSV (`"NAME=a,b"`, the quote doubled); the tests run that against a real runtime.
 - The runtime process itself gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR` and `XDG_RUNTIME_DIR`, because `APPTAINERENV_*` and `SINGULARITY_BIND` style variables in the launcher's environment would otherwise be honoured.
 - `launcher/` is a sibling of `work/` and is not mounted, so the container can neither read nor forge the result, the provenance or the manifest.
-- `/code` and `/data/<id>` are read-only.
+- `/code`, `/data/<id>` and `/data/serving-index` are read-only.
 - The container is started in a session of its own, with `oom_score_adj` raised to 1000, so the kernel's OOM killer ends the entry rather than the launcher that has to record it.
   After a SIGTERM the container gets 10 seconds to stop, and the whole process group is then killed (a process that is PID 1 of its namespace ignores a SIGTERM it has no handler for); whatever the entry left running in the group is killed when the container exits.
 - **The launcher enforces the end time itself.**
@@ -428,6 +506,13 @@ An archive is refused whole when a member is absolute, contains `..` or an empty
 Reading is bounded: more than 100,000 members (counted while the headers are read), more than 4 GiB of file data, a decompressed stream past that plus 128 MiB, or a long-name or pax header over 1 MiB is `archive_too_large`.
 Extraction is hand-written, creates regular files and directories only, and removes the setuid, setgid, sticky and group and world write bits.
 
+## Serving index
+
+A specification of version 2 (`nemar.launch-spec.v2`) may carry `serving_index`, the SHA-256 and size of the serving copy's `index.json` that NEMAR's Worker staged for a recipe run of the archive copy (nemar-cli ADR 0141); every version 1 document is a version 2 document.
+After the datasets are staged, `POST <api_base>/compute/jobs/<job_id>/serving-index` with the token returns a ten-minute presigned address of that copy, which the launcher downloads to scratch with the same retry, size and SHA-256 checks as a dataset file, before the container runs and so before the job's network is fenced.
+The file is placed at `<scratch>/serving-index/index.json`, read-only, in a read-only directory that is bound read-only at `/data/serving-index`: the Worker names `/data/serving-index/index.json` after `--serving-index` in the job's arguments.
+Any failure ends the job `dataset_fetch_failed` before the container runs: `serving_index_mismatch`, the platform's, for a size or SHA-256 that differs, and `fetch_failed`, `bad_response` or `disk_error` as for the bundle.
+
 ## Datasets
 
 For each dataset the launcher reads `GET <api_base>/data/<id>/<version>/manifest.json` (entries `{path, size, checksum?, checksum_algorithm?, bytes_url, url}`, at most 38,000), where `<version>` is the tag from the specification.
@@ -464,6 +549,25 @@ A regular expression, or a glob that backs up to an earlier `*`, can take expone
 
 A manifest path that could leave the dataset directory is refused before anything is downloaded.
 A SIGTERM during staging stops it: the entry does not run and the staging record does not claim files were staged.
+
+## Live progress
+
+While the entry runs, the launcher reports the job's live progress (ADR 0134 decision 3), the closed `nemar.progress.v1` object of the pinned contract ([contracts.md](contracts.md)): which checkpoint the run is at, and, per checkpoint, how many recordings passed, failed and were skipped of all the run found, with the ten most recent failures (path, code, step, checkpoint).
+It is built from two files the recipe writes under `NEMAR_OUT` (the host's `work/outputs`): the recipe's progress file, `.nemar-progress/progress.json` ([recipes.md](recipes.md)), and its recordings table.
+The counts follow nemar-cli's counting rules, ported in `nemar_launch/checkpoints.py` and replayed against nemar-cli's vectors, over the recordings that have ended; the total is every recording the run found.
+
+Both files are written by the container, so neither is trusted: each is opened one path component at a time without following a link, starting at the launcher's own `work` directory and going through `outputs` (the container can replace `outputs`, which is inside its mount, with a link; that is refused, on every read), the last one without blocking (a FIFO is refused, never waited on), it must be a regular file, its JSON is read strictly, and only the table's complete lines are read. The progress file is at most 64 KiB; the table is streamed line by line, keeping only the `path`, `status`, `code` and `step` columns and no path longer than the contract carries (256 characters; such a row still counts, but names no failure), and is refused past 64 KiB on one line, past 1,000,000 rows (the contract's cap on recordings) or past 256 MiB read (`too_large`). A report built after the reporter was stopped (the container has exited) is written but never posted.
+Nothing read from them is logged; a recording path the contract cannot carry is left out of the failures and still counted; and before anything is written or sent the object must pass the schema copy and the rules no schema can state.
+When there is no progress file (an entry that is not a recipe that declares checkpoints), there is no report and the job's states are as before (ADR 0134 decision 8).
+
+A thread beside the container builds the object once a minute (the first as soon as it can be built) and writes it to `launcher/progress.json`, replacing the file in one step.
+On Tapis (no lease), it also posts it to `POST <api_base>/compute/jobs/<job_id>/progress` with the job token, never following a redirect, with a 15-second timeout.
+A 429 waits what its `Retry-After` asks (ASCII digits only, between 1 and 600 seconds, 60 when it says nothing); a 408, a 425, a 5xx, a timeout or a network fault tries again at the next report; a 2xx is accepted, a body that is not JSON (a proxy's page) included, and does not stop the posts; any other refusal stops the posts for the rest of the job. If the reporter's thread cannot be started, the job runs without live progress and the log says `progress_reporter_not_started`.
+Under a runner (a lease) nothing is posted: the runner reads `launcher/progress.json` and carries it on its heartbeat ([runner.md](runner.md)).
+A report never fails the job: every fault is caught and logged once, as a fixed word.
+`launcher/progress.json` is not one of the four launcher files and is never uploaded.
+
+Deploy order: the Worker that accepts the route and the heartbeat's `progress` field (nemar-cli's Phase 2 of epic nemarOrg/nemar-cli#2324) goes out before a launcher or runner that sends them; an older Worker refuses the route (the posts stop) and the heartbeat field (the runner then sends plain heartbeats).
 
 ## After the entry exits
 
@@ -517,7 +621,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 |---|---|---|
 | 0 | none | nothing failed |
 | 10 | `code_fetch_failed` | the bundle route refused, the download failed, the digest or size differs, the archive is unsafe |
-| 11 | `dataset_fetch_failed` | a manifest, file, checksum, size, path or cap failure while staging |
+| 11 | `dataset_fetch_failed` | a manifest, file, checksum, size, path or cap failure while staging, or a staged serving index that cannot be fetched or is not the one named |
 | 12 | `entry_not_found` | the entry is not a file in the bundle |
 | 13 | `runtime_error` | the entry exited non-zero; an unsupported runtime or invalid specification; the output directory, bind sources, PID namespace, runtime or image refused; an output that cannot be read; a SIGTERM before the time limit |
 | 14 | `out_of_memory` | exit status 137 (SIGKILL) |
@@ -529,7 +633,7 @@ Exactly these seven codes, in nemar-cli's order; the first failure wins.
 | Code | Details |
 |---|---|
 | `code_fetch_failed` | `unsafe_archive`, `archive_too_large`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `digest_mismatch`, `size_mismatch`, `content_missing`, `disk_error` |
-| `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error` |
+| `dataset_fetch_failed` | `bad_include`, `too_many_files`, `too_many_bytes`, `dataset_not_found`, `bad_manifest`, `manifest_too_large`, `unsafe_path`, `bad_response`, `fetch_failed`, `checksum_mismatch`, `size_mismatch`, `content_missing`, `file_not_found`, `disk_error`, `serving_index_mismatch` |
 | `runtime_error` | `entry_failed`, `terminated`, `outputs_unreadable`, `invalid_spec`, `unsupported_runtime`, `scratch_in_output`, `scratch_unavailable`, `no_container_runtime`, `image_missing`, `image_unverified`, `runtime_unusable`, `internal_error`, `output_dir_not_empty`, `bind_source_unsafe`, `pid_namespace_unavailable` |
 | `result_upload_failed` | `results_too_large`, `results_quota_exceeded`, `too_many_outputs`, `outputs_unreadable`, `bad_response`, `fetch_failed`, `incomplete_plan`, `upload_failed`, `outputs_refused`, `complete_refused`, `internal_error` |
 | `entry_not_found`, `out_of_memory`, `time_limit` | none |
@@ -540,6 +644,27 @@ The three results refusals `results_too_large`, `results_quota_exceeded` and `to
 
 Who pays: a detail is the platform's, and the job is refunded, if and only if a submitter cannot cause it with a valid specification and bundle (`codes.PLATFORM_LAUNCHER_DETAILS`): everything above except `unsafe_archive`, `archive_too_large`, `bad_include`, `too_many_files`, `too_many_bytes`, `entry_failed`, `terminated`, `outputs_unreadable`, `results_too_large`, `results_quota_exceeded` and `too_many_outputs`, which are the submitter's and are charged, even under a fetch code.
 A signal death of the entry is reported as 128 plus the signal, as a shell does, in `entry_exit_code`.
+
+**Every `image_missing` names its reason in the log**, as `image_missing reason=<word>` with at most a number in brackets, from a closed list (`provenance.IMAGE_MISSING_REASONS`); the words are log words only, and the detail stays `image_missing` for every one:
+
+| Reason | When |
+|---|---|
+| `runtime_unsupported` | `NEMAR_CONTAINER_RUNTIME` names no runtime the launcher drives |
+| `registry_not_allowed` | the image's registry is not on `NEMAR_ALLOWED_REGISTRIES` |
+| `absent` | the standalone entry without `--pull`: the engine does not have the image |
+| `pull_failed (exit <status>)` | the engine ran the pull and refused: a registry that refused it (an anonymous pull quota per source address, for one), a digest it does not serve, or no network |
+| `pull_timeout` | the engine's pull did not finish in 30 minutes, and was killed |
+| `pull_not_started` | the engine could not be started to pull |
+| `not_inspectable` | pulled, but `image inspect` cannot find it |
+| `volumes_declared` | the image's configuration declares a `VOLUME` |
+| `sif_root_unset` | `NEMAR_SIF_ROOT` is unset or empty |
+| `sif_root_missing` | the standalone entry with `--pull`: `NEMAR_SIF_ROOT` is not a directory |
+| `sif_absent` | no image file named by the digest under `NEMAR_SIF_ROOT` |
+| `sif_outside_root` | the image file resolves outside `NEMAR_SIF_ROOT` |
+| `sif_pull_failed (exit <status>)` | the standalone entry with `--pull`: Apptainer ran the pull of the signed SIF artifact and refused |
+| `sif_pull_timeout` | that pull did not finish in 30 minutes, and was killed |
+| `sif_pull_not_started` | Apptainer could not be started to pull |
+| `sif_pull_empty` | that pull exited 0 and wrote no file, or an empty one |
 
 ## Environment
 
@@ -552,7 +677,8 @@ A signal death of the entry is reported as 128 plus the signal, as a shell does,
 | `NEMAR_SIF_ROOT` | the application definition | the directory `image.sif` is looked up in; required, except under Docker or Podman |
 | `NEMAR_RUNNER_LABEL` | a runner, required under Docker or Podman | the runner's registration id (`rnr_` and 24 lowercase hexadecimal digits), put on every container as `nemar.runner`; ignored under Apptainer ([Docker and Podman](#docker-and-podman)) |
 | `NEMAR_ALLOWED_REGISTRIES` | a runner, optional | under Docker or Podman, the registries an image may come from, comma-separated; unset is `ghcr.io` only ([Docker and Podman](#docker-and-podman)) |
-| `NEMAR_CONTAINER_RUNTIME` | a runner, optional | `docker` runs the image through Docker (`podman` is refused for now); unset or `apptainer` is the Apptainer path ([Docker and Podman](#docker-and-podman)) |
+| `NEMAR_CONTAINER_RUNTIME` | a runner, optional | `docker` runs the image through Docker, `podman` through rootless Podman's verified path; unset or `apptainer` is the Apptainer path ([Docker and Podman](#docker-and-podman)) |
+| `XDG_RUNTIME_DIR` | the system, or a runner under Podman | under Podman, passed to Podman only when it is a directory the user owns with mode 0700, else Podman is `runtime_unusable` ([Podman](#podman-one-verified-path)) |
 | `SLURM_TMPDIR`, `NEMAR_SCRATCH_DIR`, `TMPDIR` | Slurm, a runner, the system | where scratch goes, in that order |
 | `SLURM_JOB_END_TIME`, `NEMAR_JOB_END_TIME`, `SLURM_JOB_ID` | Slurm, a runner, Slurm | the time limit rule (the first valid of the two), and the job id in provenance |
 | `NEMAR_OUTPUT_DIR` | a runner | the output directory when Tapis's is unset |
