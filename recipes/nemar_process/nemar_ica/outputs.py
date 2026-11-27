@@ -233,7 +233,7 @@ def facts(
         "reference": steps.REREF_REFERENCE,
         "versions": {
             "eegprep": versions.distribution_version("eegprep"),
-            **installed_versions(("pamica", "torch")),
+            **installed_versions(("pamica", "torch", "onnxruntime")),
         },
         # the binary reads the 32-bit data file eegprep writes for it, so it sees the data rounded
         # to float32 (about 1e-7 relative); the weights it gives back are float64

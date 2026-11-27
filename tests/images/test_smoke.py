@@ -93,6 +93,7 @@ def test_the_expectation_names_every_package_the_issue_pins():
     assert expected["eegprep"] == {PINNED_EEGPREP_VERSION}
     assert expected["mne"] == {"1.13.2"}
     assert expected["pamica"] == {"0.4.0"}
+    assert expected["onnxruntime"] == {"1.32.0"}
     for name in ("numpy", "scipy", "torch", "signaljourney", "python-picard", "pybids"):
         assert expected[name], name
     assert expected["signaljourney"] == {"0.2.0"}
@@ -274,7 +275,17 @@ def test_smoke_in_the_locks_environment_prints_the_pinned_versions(runtime_pytho
         "nemar-ica": ["bids", "zarr"],
     }
     # every pinned package was imported, not only installed
-    for module in ("eegprep", "mne", "pamica", "numpy", "scipy", "torch", "picard", "bids"):
+    for module in (
+        "eegprep",
+        "mne",
+        "pamica",
+        "onnxruntime",
+        "numpy",
+        "scipy",
+        "torch",
+        "picard",
+        "bids",
+    ):
         assert document["imports"][module], module
     assert "nemar_process" in document["imports"]
     assert "signaljourney_validator" in document["imports"]

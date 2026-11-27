@@ -7,10 +7,10 @@ two cannot drift apart. Values eegprep applies without being asked are read from
 run time, never copied here.
 
 The constants below are what ``RECIPE_VERSION`` stands for. A change of any of them, of the pamica
-pin, of the CUDA flavor's torch or of the ``amica15`` binary is a new recipe version: the derivative
-key names eegprep alone (ADR 0123), so the version is the only thing that tells two products apart
-(``tests/recipes/test_nemar_ica.py`` fails when the lock or the image pins differ from the three
-constants at the end).
+pin, of the onnxruntime pin ICLabel runs on, of the CUDA flavor's torch or of the ``amica15`` binary
+is a new recipe version: the derivative key names eegprep alone (ADR 0123), so the version is the
+only thing that tells two products apart (``tests/recipes/test_nemar_ica.py`` fails when the lock or
+the image pins differ from the four constants at the end).
 """
 
 from __future__ import annotations
@@ -152,6 +152,7 @@ AMICA15_SHA256_FILE = "/opt/amica/amica15.sha256"
 
 # What a change of RECIPE_VERSION stands for (see the module docstring).
 PAMICA_VERSION = "0.4.0"
+ONNXRUNTIME_VERSION = "1.32.0"  # ICLabel's network runs on it (sccn/eegprep#386)
 CUDA_TORCH_VERSION = "2.12.1+cu129"
 AMICA15_SHA256 = "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a"
 

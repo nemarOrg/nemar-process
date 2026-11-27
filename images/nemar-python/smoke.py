@@ -55,6 +55,7 @@ IMPORTS = {
     "eegprep": "eegprep",
     "mne": "mne",
     "pamica": "pamica",
+    "onnxruntime": "onnxruntime",
     "numpy": "numpy",
     "scipy": "scipy",
     "torch": "torch",

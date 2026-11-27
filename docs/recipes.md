@@ -315,7 +315,7 @@ Both records state the nemar-process build that made them, in `extensions.nemar`
 
 - `process`: `{"version", "commit", "build"}`, where `build` is `release` (a plain `X.Y.Z`), `dev` (an `X.Y.Z-devN`) or `source` (a run from a working tree, with the `pyproject.toml` version and `commit: null`);
 - `image`: `{"digest", "tag"}`, the tag being `<version>-<flavor>` for a release image (the flavor is the word in the image's `/opt/nemar/flavor`, `cpu` or `cuda`) and null otherwise;
-- the recipe's id and version (also `pipelineInfo.name` and `pipelineInfo.version`) and the engine versions, now including `torch` and `pamica` when installed.
+- the recipe's id and version (also `pipelineInfo.name` and `pipelineInfo.version`) and the engine versions, now including `torch`, `pamica` and `onnxruntime` (ICLabel's runtime) when installed.
 
 The image carries `/opt/nemar/build.json`; `nemar_process.common.build.build_info()` reads it with no network call, refuses a file that contradicts itself (a `release` with a `-devN` version, a `dev` without one), and never takes an unreadable file for a source run.
 A refusal ends the run before anything is written (exit 1, with the message `the build file was refused: ` and the part that is wrong, never a path or a value; the engine stamp is where the file is first read).

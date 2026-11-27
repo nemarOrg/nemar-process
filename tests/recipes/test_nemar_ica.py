@@ -1402,10 +1402,13 @@ def lock_packages() -> list[dict]:
     return tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]
 
 
-def test_the_lock_holds_the_pamica_and_the_cuda_torch_the_recipe_version_stands_for():
+def test_the_lock_holds_the_pamica_onnxruntime_and_cuda_torch_the_recipe_version_stands_for():
     packages = lock_packages()
     pamica = [p for p in packages if p["name"] == "pamica"]
     assert [p["version"] for p in pamica] == [steps.PAMICA_VERSION]
+    onnxruntime = [p["version"] for p in packages if p["name"] == "onnxruntime"]
+    assert onnxruntime == [steps.ONNXRUNTIME_VERSION]
+    assert metadata.version("onnxruntime") == steps.ONNXRUNTIME_VERSION
     cuda = [
         p["version"]
         for p in packages

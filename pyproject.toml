@@ -59,6 +59,10 @@ runtime = [
     "eegprep[mne,pybids,picard,torch,pamica,iclabel] @ git+https://github.com/sccn/eegprep@871bc7f8a03b6d925330c598e8dcd18b835614d3",
     "mne==1.13.2",
     "pamica==0.4.0",
+    # The runtime ICLabel's packaged network runs on (the `iclabel` extra asks for `>=1.20`): its
+    # probabilities depend on it, so it is pinned, stamped in every record (`determinism.OPTIONAL_ENGINES`)
+    # and stood for by nemar-ica's recipe version (`steps.ONNXRUNTIME_VERSION`).
+    "onnxruntime==1.32.0",
     # The Zarr reader of the Zarr input of `nemar-floor` and `nemar-ica` (docs/recipes.md). A
     # separate distribution from eegprep (the engine the records name) installed from the `develop`
     # merge commit of sccn/eegprep#627, which holds #626 and #616, fills `chanlocs` from the

@@ -41,8 +41,9 @@ THREAD_ENVIRONMENT = (
 )
 RECORDED_ENVIRONMENT = ("PYTHONHASHSEED", *THREAD_ENVIRONMENT)
 # Engine distributions an ICA recipe runs on; each is recorded when it is installed, so such a recipe
-# needs no change of its own to record them.
-OPTIONAL_ENGINES = ("torch", "pamica")
+# needs no change of its own to record them. onnxruntime runs ICLabel's network (sccn/eegprep#386), so
+# the classification's probabilities depend on its version.
+OPTIONAL_ENGINES = ("torch", "pamica", "onnxruntime")
 
 
 @contextlib.contextmanager

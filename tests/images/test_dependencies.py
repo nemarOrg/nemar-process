@@ -25,7 +25,7 @@ from packaging.tags import compatible_tags, cpython_tags, mac_platforms
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from repo_paths import LOCK, PYPROJECT, ROOT
 
-EXACT_PINS = {"mne": "1.13.2", "pamica": "0.4.0"}
+EXACT_PINS = {"mne": "1.13.2", "pamica": "0.4.0", "onnxruntime": "1.32.0"}
 # `iclabel` is onnxruntime, which ICLabel's packaged network runs on since sccn/eegprep#386: without it
 # `pop_iclabel` raises `ImportError` and nemar-ica classifies nothing.
 EEGPREP_EXTRAS = {"mne", "pybids", "picard", "torch", "pamica", "iclabel"}
