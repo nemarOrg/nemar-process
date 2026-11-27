@@ -144,7 +144,7 @@ The image is pushed without provenance or SBOM (software bill of materials) atte
 
 A tag `image-nemar-python-vMAJOR.MINOR.PATCH` runs the whole chain, using the workflow file at the tagged commit, but only for a commit that is reachable from `main`: the first step of `publish` fails otherwise.
 It publishes and signs both flavors in the one run.
-The first publication therefore happens from `main`, after the epic branch has merged: a dispatch from `main`, or a tag on a commit of `main`.
+Every publication therefore happens from `main`: a dispatch from `main`, or a tag on a commit of `main`.
 A manual dispatch runs it from `main` only, with the version as an input; it attaches the digest files to the workflow run (one artifact per flavor, `nemar-python-digests-cpu` and `nemar-python-digests-cuda`), not to a release.
 A version is published once per flavor: a second run for the same version stops at the existing `<version>-cpu` or `<version>-cuda` tag.
 The version is the tag or the input, and the `publish` job refuses it unless it is also the `[project].version` of `pyproject.toml` at the built commit, has no `-devN` suffix, and the git tag `v<version>` exists and points at that commit.
