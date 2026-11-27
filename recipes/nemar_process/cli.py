@@ -698,6 +698,9 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
             return EXIT_DATASET_UNREADABLE
     try:
         identity = identity_of(args, dataset_dir if recipe.input == "bids" else None)
+        # options that must agree with the identity (nemar-ica's attested serving index), checked
+        # before anything is created: a contradiction is the caller's, a usage error
+        options = recipe.bind_options(options, identity)
     except ValueError as error:
         parser.error(str(error))
     validator = (

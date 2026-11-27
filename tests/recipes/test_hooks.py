@@ -16,7 +16,7 @@ import pytest
 from nemar_process import cli as command
 from nemar_process.common import determinism
 from nemar_process.common.errors import EngineUnavailable
-from nemar_process.common.recipe import INPUT_OPTION, TIME_BUDGET_S, Option
+from nemar_process.common.recipe import INPUT_OPTION, TIME_BUDGET_S, Identity, Option
 from nemar_process.nemar_floor import RECIPE, outputs
 from nemar_process.nemar_ica.options import ENGINE as ICA_ENGINE
 from nemar_process.recipes import REGISTRY
@@ -108,6 +108,9 @@ def test_the_floor_asks_for_nothing_extra():
     assert RECIPE.threads_for({}) == 1
     assert RECIPE.engine_extra({}) == {}
     assert RECIPE.preflight({}) is None
+    identity = Identity("xx000001", None, "a" * 40, None, "run")
+    given = {"input": "bids"}
+    assert RECIPE.bind_options(given, identity) == given  # taken as given
 
 
 def test_a_floor_run_states_the_engine_and_seeds_it_always_did(tmp_path, cli):
@@ -194,6 +197,48 @@ def test_two_recipes_may_share_an_option_but_not_define_it_differently(monkeypat
     register(monkeypatch, "three", options=(replace(ENGINE, default="amica15"),))
     with pytest.raises(ValueError, match="--ica-engine"):
         command.build_parser()
+
+
+# ---- options bound to the run's identity -------------------------------------------------------------------
+
+TAG = "a" * 40
+
+
+def test_the_bound_options_are_the_ones_every_hook_and_recording_gets(
+    tmp_path, cli, monkeypatch, clock
+):
+    seen, preflights, identities = [], [], []
+
+    def bind(options, identity):
+        identities.append(identity.source_commit)
+        return {**options, "ica_engine": "amica15"}
+
+    register(
+        monkeypatch,
+        options=(ENGINE,),
+        bind_options=bind,
+        preflight=lambda options: preflights.append(dict(options)),
+        run_recording=timed(clock, 1, seen),
+    )
+    code, _, _, _ = run_toy(cli, tmp_path, dataset_of(tmp_path / "d", 2), "--source-commit", TAG)
+    assert code == 0
+    assert identities == [TAG]  # bound once, with the run's identity
+    assert preflights == [{"ica_engine": "amica15"}]
+    assert seen == [{"ica_engine": "amica15"}] * 2
+
+
+def test_options_that_contradict_the_run_are_a_usage_error_before_anything_is_made(
+    tmp_path, cli, capsys, monkeypatch, clock
+):
+    def bind(options, identity):
+        raise ValueError("the options contradict --source-commit")
+
+    register(monkeypatch, options=(ENGINE,), bind_options=bind, run_recording=timed(clock, 1))
+    with pytest.raises(SystemExit) as caught:
+        run_toy(cli, tmp_path, dataset_of(tmp_path / "d", 1), "--source-commit", TAG)
+    assert caught.value.code == 2
+    assert "the options contradict --source-commit" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
 
 
 # ---- threads, seeds and engine fields ------------------------------------------------------------------------
