@@ -575,6 +575,7 @@ def test_any_other_runtime_value_is_the_image_missing_exit(rig, value):
     assert result.exit == 13
     assert result.result["failure_code"] == "runtime_error"
     assert result.result["detail"] == "image_missing"
+    assert "ERROR image_missing reason=runtime_unsupported\n" in result.log
     assert engine.runs() == []
     assert engine.pulls() == []
     assert rig.runtime_calls() == []
@@ -890,12 +891,15 @@ def test_assess_reads_cpu_shares_from_each_engines_own_document():
 
 
 def test_selected_names_the_runtime():
-    assert runtime.selected(Env({})) == "apptainer"
-    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"apptainer"})) == "apptainer"
-    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"podman"})) == "podman"
+    log = Log(None)
+    assert runtime.selected(Env({}), log) == "apptainer"
+    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"apptainer"}), log) == "apptainer"
+    assert runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"podman"}), log) == "podman"
+    assert log.size() == 0
     with pytest.raises(Failure) as caught:
-        runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}))
+        runtime.selected(Env({b"NEMAR_CONTAINER_RUNTIME": b"x"}), log)
     assert caught.value.detail == "image_missing"
+    assert b" ERROR image_missing reason=runtime_unsupported\n" in log.snapshot(log.size())
 
 
 def test_without_pull_an_absent_image_is_image_missing_and_nothing_is_pulled(rig):

@@ -26,7 +26,10 @@ import json
 import os
 import sys
 import threading
+import time
 from typing import Any
+
+from .codes import Failure
 
 PLACEHOLDER_IMAGE = {"uri": "unknown", "digest": "sha256:" + "0" * 64}
 # The log is kept in memory as well, for the upload; past this size it stops growing.
@@ -102,6 +105,61 @@ class Log:
                 with contextlib.suppress(OSError):
                     self._handle.close()
                 self._handle = None
+
+
+# Why an image is ``image_missing``, named in the log as ``image_missing reason=<word>`` (and at most a
+# number in brackets). Log words only: the detail every one of them ends with stays ``image_missing``,
+# nemar-cli's word. docs/launcher.md lists each (tests/launcher/test_image_missing.py holds it to this).
+IMAGE_MISSING_REASONS = (
+    "runtime_unsupported",  # NEMAR_CONTAINER_RUNTIME names no runtime the launcher drives
+    "registry_not_allowed",  # the image's registry is not on NEMAR_ALLOWED_REGISTRIES
+    "absent",  # the standalone entry without --pull: the engine does not have the image
+    "pull_failed",  # the engine ran the pull and refused (exit N): a registry refusal, an unknown digest, no network
+    "pull_timeout",  # the pull did not finish in time, and was killed
+    "pull_not_started",  # the engine could not be started to pull
+    "not_inspectable",  # pulled, but `image inspect` cannot find it
+    "volumes_declared",  # the image's configuration declares a VOLUME
+    "sif_root_unset",  # NEMAR_SIF_ROOT is unset or empty
+    "sif_root_missing",  # the standalone entry with --pull: NEMAR_SIF_ROOT is not a directory
+    "sif_absent",  # no image file named by the digest under NEMAR_SIF_ROOT
+    "sif_outside_root",  # the image file resolves outside NEMAR_SIF_ROOT (a symbolic link out of it)
+    "sif_pull_failed",  # Apptainer ran the pull of the signed SIF artifact and refused (exit N)
+    "sif_pull_timeout",  # that pull did not finish in time, and was killed
+    "sif_pull_not_started",  # Apptainer could not be started to pull
+    "sif_pull_empty",  # that pull exited 0 and wrote no file, or an empty one
+)
+
+
+def image_missing(log: Log, reason: str, why: str = "") -> Failure:
+    """``runtime_error``, ``image_missing``, with its reason in the log as ``image_unverified`` has its
+    own: ``image_missing reason=<word>``, and at most a number in brackets. The detail is one word for
+    every cause, and the log is where an operator tells a registry that refused the pull from a slow
+    pull or a missing file. Nothing an engine printed is copied: it can hold a registry's reply."""
+    if reason not in IMAGE_MISSING_REASONS:
+        raise ValueError("not an image_missing reason")
+    log.error("image_missing reason={}{}".format(reason, " ({})".format(why) if why else ""))
+    return Failure("runtime_error", "image_missing", "the image is missing: " + reason)
+
+
+def pull_failure(
+    status: int | None, started: float, seconds: float, log: Log, what: str = "pull"
+) -> Failure:
+    """The ``image_missing`` of a pull (``what``: ``pull`` for an engine's, ``sif_pull`` for the signed
+    SIF artifact's) that did not exit 0, ``status`` as the runner of the command returned it for a call
+    started at ``started`` (``time.monotonic``) with ``seconds`` to finish, None meaning not started or
+    killed:
+
+    * ``<what>_failed (exit N)``: the command ran and refused: a registry that refused the pull (an
+      anonymous pull quota per source address, for one), a digest the registry does not serve, no
+      network;
+    * ``<what>_timeout``: no answer in ``seconds``, and the command was killed;
+    * ``<what>_not_started``: the command could not be started.
+    """
+    if status is not None:
+        return image_missing(log, what + "_failed", "exit {}".format(status))
+    if time.monotonic() - started >= seconds:
+        return image_missing(log, what + "_timeout")
+    return image_missing(log, what + "_not_started")
 
 
 def encode(document: dict[str, Any]) -> bytes:

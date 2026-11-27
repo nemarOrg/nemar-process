@@ -137,8 +137,8 @@ class Image:
     under an engine ``runtime.ensure_image``, which pulls a missing image (``acquire``, after the
     preflight and before anything is fetched). The standalone entry gives its own (``local.py``)."""
 
-    def locate(self, job: spec.Job, env: Env) -> str:
-        return run.resolve_sif(job, env)
+    def locate(self, job: spec.Job, env: Env, log: Log) -> str:
+        return run.resolve_sif(job, env, log)
 
     def acquire(
         self,
@@ -255,14 +255,14 @@ def _do_work(
         tmp_dir = os.path.join(scratch, "tmp")
         os.mkdir(tmp_dir, 0o700)
 
-        engine = runtime.selected(env)
+        engine = runtime.selected(env, log)
         runtime.refuse_unsupported(engine, log)  # before any engine call, `--version` included
         runtime.refuse_podman_gpu(engine, job, settings.device, log)  # Podman hands over no GPU
         sif = ""
         handle: runtime.Engine | None = None
         if engine == runtime.APPTAINER:
             runtime_name, runtime_path = run.find_runtime(env)
-            sif = steps.image.locate(job, env)
+            sif = steps.image.locate(job, env, log)
             state.runtime_version = run.runtime_version(
                 runtime_path, env, platform.python_version()
             )
@@ -284,7 +284,7 @@ def _do_work(
         engine_found: runtime.Assessment | None = None
         if handle is not None:  # like the image file: before anything is fetched
             assert settings.limits is not None  # read_settings refuses a launch without them
-            runtime.check_registry(reference, env)
+            runtime.check_registry(reference, env, log)
             engine_found = runtime.preflight(handle, settings.limits, env, terminator.stop, log)
         sif = steps.image.acquire(
             runtime_path, handle, job, reference, sif, env, scratch, terminator, log

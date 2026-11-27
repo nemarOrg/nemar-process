@@ -21,6 +21,7 @@ import pytest
 from local_support import calls, control, install_cosign
 from nemar_launch import verify
 from nemar_launch.codes import Failure, Stopped
+from nemar_launch.provenance import Log
 from server import Response, StandinServer
 
 HEX = "a" * 64
@@ -320,6 +321,7 @@ def test_the_sif_is_pulled_by_digest_hashed_and_renamed(tmp_path):
         str(scratch),
         STOP,
         allowed.append,
+        log=Log(None),
     )
     assert final == str(sif_root / (HEX + ".sif"))
     assert Path(final).read_bytes() == content
@@ -340,6 +342,7 @@ def test_a_pull_that_is_not_the_layer_or_fails_leaves_nothing(tmp_path, case):
     for d in (bin_dir, sif_root, scratch):
         d.mkdir()
     apptainer = install_apptainer(bin_dir, b"something else", fails=case == "fails")
+    log = Log(None)
     with pytest.raises((verify.Unverified, Failure)) as caught:
         verify.pull_sif(
             apptainer,
@@ -349,11 +352,54 @@ def test_a_pull_that_is_not_the_layer_or_fails_leaves_nothing(tmp_path, case):
             "",
             str(scratch),
             STOP,
+            log=log,
         )
     if case == "fails":
         assert isinstance(caught.value, Failure)
         assert caught.value.detail == "image_missing"
+        assert b" ERROR image_missing reason=sif_pull_failed (exit 1)\n" in log.snapshot(log.size())
     else:
         assert isinstance(caught.value, verify.Unverified)
         assert caught.value.reason == "layer_mismatch"
+    assert list(sif_root.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("empty", "sif_pull_empty"),
+        ("hang", "sif_pull_timeout"),
+        ("not_started", "sif_pull_not_started"),
+    ],
+)
+def test_a_pull_that_writes_nothing_hangs_or_cannot_start_names_its_reason(
+    tmp_path, monkeypatch, case, reason
+):
+    _body, manifest, layers = sif_manifest(b"the signed image file")
+    bin_dir, sif_root, scratch = tmp_path / "bin", tmp_path / "sif", tmp_path / "scratch"
+    for d in (bin_dir, sif_root, scratch):
+        d.mkdir()
+    apptainer = install_apptainer(bin_dir, b"")  # exits 0 having written an empty file
+    if case == "hang":
+        Path(apptainer).write_text(
+            "#!{}\nimport time\ntime.sleep(30)\n".format(sys.executable), encoding="utf-8"
+        )
+        monkeypatch.setattr(verify, "PULL_SECONDS", 0.5)
+    elif case == "not_started":
+        Path(apptainer).write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
+    log = Log(None)
+    with pytest.raises(Failure) as caught:
+        verify.pull_sif(
+            apptainer,
+            str(sif_root),
+            HEX,
+            verify.SifProof(manifest, layers[0]),
+            "",
+            str(scratch),
+            STOP,
+            log=log,
+        )
+    assert (caught.value.code, caught.value.detail) == ("runtime_error", "image_missing")
+    line = " ERROR image_missing reason={}\n".format(reason).encode()
+    assert line in log.snapshot(log.size())
     assert list(sif_root.iterdir()) == []

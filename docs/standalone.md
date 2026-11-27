@@ -105,7 +105,7 @@ Without `--pull` the launcher starts no pull at all.
 
 ## `--pull`
 
-Without `--pull` nothing is pulled or verified: Apptainer needs `<sif-root>/<hex>.sif` (`image_missing` otherwise), and under Docker an image that is not present is `image_missing`.
+Without `--pull` nothing is pulled or verified: Apptainer needs `<sif-root>/<hex>.sif` (`image_missing` otherwise), and under Docker an image that is not present is `image_missing` (`absent` in the log).
 
 With `--pull` the image must be NEMAR's own, `ghcr.io/nemarorg/nemar-python@sha256:<the specification's digest>` (a third-party image must already be present, and `--pull` refuses it before anything starts: `image_unverified`, reason `reference_refused`).
 Then, once, after the runtime's checks and before the code, the PID namespace probe, the datasets and any user code, the fence opens one window around the verification and the pull and closes it however they end:
@@ -115,7 +115,7 @@ Then, once, after the runtime's checks and before the code, the PID namespace pr
 
 The window allows exactly the command lines computed when it opens (`cosign version --json`, `cosign verify ...`, the `docker pull`, and the `apptainer pull` once cosign has passed) and, under Apptainer, a lookup of the registry's host, IPv4 and IPv6 stream sockets, and one connection to a public address (NAT64 and 6to4 are not) for each request the launcher makes to the token or the manifest address.
 cosign (3 or later) runs with `PATH` and a `HOME` inside the scratch, removed at the end, so the Sigstore trust root is fetched on every `--pull`; nothing is cached.
-A failed verification is `runtime_error`, `image_unverified` (exit 13), with the reason in the log (`reference_refused`, `cosign_missing`, `cosign_failed`, `cosign_timeout`, `digest_mismatch`, `manifest_mismatch`, `layer_mismatch`); a pull that fails is `image_missing`.
+A failed verification is `runtime_error`, `image_unverified` (exit 13), with the reason in the log (`reference_refused`, `cosign_missing`, `cosign_failed`, `cosign_timeout`, `digest_mismatch`, `manifest_mismatch`, `layer_mismatch`); a pull that fails is `image_missing`, with its reason in the log (`pull_failed`, `sif_pull_failed`, `sif_pull_empty` and the others of [the launcher's list](launcher.md#failure-codes-exit-numbers-and-details)).
 Nothing runs after either.
 
 ## What is left in `<out>/launcher/`

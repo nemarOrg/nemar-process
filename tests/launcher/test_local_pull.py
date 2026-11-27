@@ -368,6 +368,7 @@ def test_apptainer_failures_leave_no_part_file_and_run_nothing(sif_rig, case):
     launch = sif_rig.run()
     if case == "pullfail":
         assert (launch.exit, launch.result["detail"]) == (13, "image_missing")
+        assert "ERROR image_missing reason=sif_pull_failed (exit 1)\n" in launch.log
     else:
         unverified(launch, {"layer": "layer_mismatch", "manifest": "manifest_mismatch"}[case])
     assert list(sif_rig.rig.sif_root.iterdir()) == []

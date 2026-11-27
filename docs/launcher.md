@@ -111,7 +111,7 @@ The container then gets exactly that GPU, or none:
 With `NEMAR_CONTAINER_RUNTIME=docker` the launcher runs the same image digest through Docker instead of Apptainer, for a host that has a rootful Docker daemon and no Apptainer.
 With `NEMAR_CONTAINER_RUNTIME=podman` it runs it through rootless Podman, and only through the one verified path of [Podman](#podman-one-verified-path).
 Unset or `apptainer` is the path described everywhere else on this page, byte for byte unchanged.
-Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing`, before anything is fetched.
+Any other value (`Docker`, an empty one, `singularity`) ends the launch with `runtime_error`, detail `image_missing` (`runtime_unsupported` in the log), before anything is fetched.
 On a shared host, where only rootless engines are allowed, rootless Docker is refused, so Apptainer and rootless Podman through that path are the engines there.
 
 ### Podman, one verified path
@@ -209,7 +209,7 @@ Each of these ends the launch at the start, before the bundle is fetched or user
   Each entry must be a host: it holds a dot or a colon, or is `localhost`, and has no `/`, `@` or white space.
   A bare word such as `myorg` is a Docker Hub namespace to Docker and a short name resolved through search registries to Podman, so it ends the launch at the start with exit 13 and detail `invalid_spec`.
   A loopback address, an IP literal, a name with user information and a bare Docker Hub name are refused unless named.
-  Detail `image_missing`.
+  Detail `image_missing` (`registry_not_allowed` in the log).
 - The image is present or can be pulled, and its configuration declares no `VOLUME`: an image volume is a writable mount outside the declared binds.
   The launcher asks `image inspect` (a pull only when the image is absent, with the digest verified by the engine), and a pull that fails or takes longer than 30 minutes, or an image with a declared volume, is `image_missing`.
   A cancel ends a pull at once, and the engine's own words are never copied into the log.
@@ -403,7 +403,7 @@ The local copy and the data plane's routes use the same string.
 
 **The image file is named by the image digest.**
 `image.sif` must equal the 64 hexadecimal digits of `image.digest`, then `.sif`, and `image.uri` must end with `image.digest`; any other value is `invalid_spec` (NEMAR's encoder never writes one).
-The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it).
+The file is looked up under `NEMAR_SIF_ROOT` and nowhere else: an unset or empty `NEMAR_SIF_ROOT` is `runtime_error` with detail `image_missing` (`sif_root_unset` in the log; there is no fallback to the working directory), and the resolved file must stay under the real root (no symlink out of it: `sif_outside_root`) and be a file (`sif_absent`).
 The launcher does not hash the image: only its name ties it to the digest.
 
 The launcher reads the environment value as bytes (`os.environb`), decodes it, hashes the JSON text it decodes to before it parses that text, and records the SHA-256 as `launch_spec_digest` in `provenance.json`, even for a text it then refuses.
@@ -644,6 +644,27 @@ Who pays: a detail is the platform's, and the job is refunded, if and only if a 
 A signal death of the entry is reported as 128 plus the signal, as a shell does, in `entry_exit_code`.
 
 ## Environment
+
+**Every `image_missing` names its reason in the log**, as `image_missing reason=<word>` with at most a number in brackets, from a closed list (`provenance.IMAGE_MISSING_REASONS`); the words are log words only, and the detail stays `image_missing` for every one:
+
+| Reason | When |
+|---|---|
+| `runtime_unsupported` | `NEMAR_CONTAINER_RUNTIME` names no runtime the launcher drives |
+| `registry_not_allowed` | the image's registry is not on `NEMAR_ALLOWED_REGISTRIES` |
+| `absent` | the standalone entry without `--pull`: the engine does not have the image |
+| `pull_failed (exit <status>)` | the engine ran the pull and refused: a registry that refused it (an anonymous pull quota per source address, for one), a digest it does not serve, or no network |
+| `pull_timeout` | the engine's pull did not finish in 30 minutes, and was killed |
+| `pull_not_started` | the engine could not be started to pull |
+| `not_inspectable` | pulled, but `image inspect` cannot find it |
+| `volumes_declared` | the image's configuration declares a `VOLUME` |
+| `sif_root_unset` | `NEMAR_SIF_ROOT` is unset or empty |
+| `sif_root_missing` | the standalone entry with `--pull`: `NEMAR_SIF_ROOT` is not a directory |
+| `sif_absent` | no image file named by the digest under `NEMAR_SIF_ROOT` |
+| `sif_outside_root` | the image file resolves outside `NEMAR_SIF_ROOT` |
+| `sif_pull_failed (exit <status>)` | the standalone entry with `--pull`: Apptainer ran the pull of the signed SIF artifact and refused |
+| `sif_pull_timeout` | that pull did not finish in 30 minutes, and was killed |
+| `sif_pull_not_started` | Apptainer could not be started to pull |
+| `sif_pull_empty` | that pull exited 0 and wrote no file, or an empty one |
 
 | Variable | Who sets it | Meaning |
 |---|---|---|

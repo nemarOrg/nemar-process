@@ -119,7 +119,7 @@ from .codes import (
     Failure,
     Stopped,
 )
-from .provenance import Log
+from .provenance import Log, image_missing, pull_failure
 from .run import (
     TERM_GRACE_SECONDS,
     Bind,
@@ -181,14 +181,15 @@ CPU_SHARES = 2
 PULL_POLICIES = ("missing", "never")
 
 
-def selected(env: Env) -> str:
-    """``apptainer`` (unset, or said), ``docker`` or ``podman``; anything else is ``image_missing``."""
+def selected(env: Env, log: Log) -> str:
+    """``apptainer`` (unset, or said), ``docker`` or ``podman``; anything else is ``image_missing``
+    (``runtime_unsupported`` in the log)."""
     value = env.get(ENV_CONTAINER_RUNTIME)
     if value is None or value == APPTAINER:
         return APPTAINER
     if value in ENGINE_RUNTIMES:
         return value
-    raise Failure("runtime_error", "image_missing", "the container runtime named is not supported")
+    raise image_missing(log, "runtime_unsupported")
 
 
 def refuse_unsupported(engine: str, log: Log | None = None) -> None:
@@ -421,13 +422,14 @@ def allowed_registries(env: Env) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def check_registry(reference: str, env: Env) -> None:
+def check_registry(reference: str, env: Env, log: Log) -> None:
     """The reference's registry (everything before the first ``/``) must be on the allowlist, by
     exact match: a loopback address, an IP literal, a name with user information (``a@b``) or a
-    bare Docker Hub name is refused unless it is named. ``image_missing``, before anything is pulled."""
+    bare Docker Hub name is refused unless it is named. ``image_missing`` (``registry_not_allowed`` in
+    the log), before anything is pulled."""
     registry = reference.split("/", 1)[0]
     if registry not in allowed_registries(env):
-        raise Failure("runtime_error", "image_missing", "the image registry is not allowed")
+        raise image_missing(log, "registry_not_allowed")
 
 
 def check_mount_sources(binds: list[Bind]) -> None:
@@ -777,32 +779,6 @@ def _volumes_declared(output: bytes) -> bool:
     return bool(volumes)
 
 
-def image_missing(log: Log, reason: str, why: str = "") -> Failure:
-    """``image_missing``, with its reason in the log as ``image_unverified`` has its own:
-    ``image_missing reason=<word>``, and at most a number in brackets. The detail is one word for every
-    cause, and the log is where an operator tells a registry that refused the pull from a slow pull or
-    an image with volumes. Nothing the engine printed is copied: it can hold a registry's reply."""
-    log.error("image_missing reason={}{}".format(reason, " ({})".format(why) if why else ""))
-    return Failure("runtime_error", "image_missing", "the image is missing: " + reason)
-
-
-def pull_failure(status: int | None, started: float, seconds: float, log: Log) -> Failure:
-    """The ``image_missing`` of a pull that did not exit 0, ``status`` as ``_run`` returned it for a
-    call started at ``started`` (``time.monotonic``) with ``seconds`` to finish:
-
-    * ``pull_failed (exit N)``: the engine ran and refused: a registry that refused the pull (an
-      anonymous pull quota per source address, for one), a digest the registry does not serve, no
-      network;
-    * ``pull_timeout``: no answer in ``seconds``, and the engine was killed;
-    * ``pull_not_started``: the engine could not be started.
-    """
-    if status is not None:
-        return image_missing(log, "pull_failed", "exit {}".format(status))
-    if time.monotonic() - started >= seconds:
-        return image_missing(log, "pull_timeout")
-    return image_missing(log, "pull_not_started")
-
-
 def ensure_image(
     engine: Engine,
     reference: str,
@@ -819,7 +795,7 @@ def ensure_image(
     with the image already cached never needs the registry). An image whose configuration declares
     a ``VOLUME`` is ``image_missing`` too: the engine would mount a writable volume that is none of
     the declared binds. A set ``stop`` event (SIGTERM) ends any of these at once with ``Stopped``.
-    Each ``image_missing`` names its reason in the log (``image_missing``, ``pull_failure``).
+    Each ``image_missing`` names its reason in the log (``provenance.image_missing``).
 
     ``pull`` False (the standalone entry) never pulls: an absent image is ``image_missing`` at once.
     """

@@ -72,7 +72,7 @@ from .codes import (
     Failure,
     Stopped,
 )
-from .provenance import Log
+from .provenance import Log, image_missing
 from .settings import Device, Limits, check_device, read_settings
 from .stage import Staged
 
@@ -126,21 +126,24 @@ def find_runtime(env: Env, names: tuple[str, ...] = RUNTIME_BINARIES) -> tuple[s
     )
 
 
-def resolve_sif(job: spec.Job, env: Env) -> str:
+def resolve_sif(job: spec.Job, env: Env, log: Log) -> str:
     """The image file: ``image.sif`` (the digest-named basename) under ``NEMAR_SIF_ROOT``.
 
-    There is no fallback: an unset or empty root is ``image_missing``, a working directory is never
-    searched. The resolved file must stay under the real root (``realpath`` containment), so a
-    symlink cannot lead out of it.
+    There is no fallback: an unset or empty root is ``image_missing`` (``sif_root_unset`` in the log),
+    a working directory is never searched. The resolved file must stay under the real root
+    (``realpath`` containment), so a symlink cannot lead out of it (``sif_outside_root``), and be a
+    file (``sif_absent``).
     """
     root = env.get(ENV_SIF_ROOT)
     if not root:
-        raise Failure("runtime_error", "image_missing", "NEMAR_SIF_ROOT is not set")
+        raise image_missing(log, "sif_root_unset")
     path = os.path.join(root, job.image["sif"])
     real_root = os.path.realpath(root)
     real = os.path.realpath(path)
-    if os.path.commonpath([real_root, real]) != real_root or not os.path.isfile(real):
-        raise Failure("runtime_error", "image_missing", "the image file is not under the root")
+    if os.path.commonpath([real_root, real]) != real_root:
+        raise image_missing(log, "sif_outside_root")
+    if not os.path.isfile(real):
+        raise image_missing(log, "sif_absent")
     return path
 
 
