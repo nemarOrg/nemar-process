@@ -7,8 +7,9 @@ release that lacks what it holds). A record, an engine stamp and ``nemar-recipe 
 only that text would give two builds one engine string, one stamp tuple and one derivative key, so
 ``distribution_version`` appends the commit: ``0.5.0+871bc7f8...`` (the 40 hexadecimal digits, which
 ``direct_url.json`` of the installed distribution names under ``vcs_info.commit_id``). A distribution
-installed from an index has no such file and keeps its bare version, so a released image's records
-read as they always did.
+installed from an index has no such file and keeps its bare version. Only index installs read bare:
+the release image installs eegprep from the git commit ``pyproject.toml`` pins, so its records carry
+``0.5.0+<commit>``.
 
 Standard library only.
 """
