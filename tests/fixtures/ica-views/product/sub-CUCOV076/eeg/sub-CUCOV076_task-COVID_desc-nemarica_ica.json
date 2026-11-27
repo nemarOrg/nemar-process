@@ -598,6 +598,7 @@
   "reorder": "on",
   "seed": 5489,
   "serving_index": {
+    "attestation": null,
     "dataset_id": "on007823",
     "reason": null,
     "row": {

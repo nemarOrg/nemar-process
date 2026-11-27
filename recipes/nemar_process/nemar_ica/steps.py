@@ -262,7 +262,8 @@ NO_GOOD_WINDOW = "no_good_window"  # views.OWN_SKIP_REASONS
 # ``midsegment``): the run was given no serving index (``--serving-index``); the index it was given has no
 # row for the recording (``serving_index.ServingIndex.resolve``: another dataset's index, no store at the
 # recording's path, or not exactly one EEG group); or the index was built from another commit than the
-# run's ``--source-commit``, or one of them names none (the commit must match exactly, the lead's ruling).
+# run's ``--source-commit``, or than the one the caller attests (``--serving-index-commit``), or one of
+# them names none (the commit must match exactly, the lead's ruling and the owner's of 2026-11-27).
 # The serving copy's channel group is read from its index, never guessed from a naming rule (the lead's
 # ruling, 2026-11-24). Words of nemar-process's own; the last two are ``serving_index``'s.
 NO_SERVING_INDEX = "no_serving_index"  # views.OWN_SKIP_REASONS

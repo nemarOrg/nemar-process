@@ -336,6 +336,10 @@ def _no_record_extras(context: RunContext) -> dict[str, Any]:
     return {}
 
 
+def _options_as_given(options: Mapping[str, Any], identity: Identity) -> dict[str, Any]:
+    return dict(options)
+
+
 @dataclass(frozen=True)
 class Recipe:
     """A registered recipe: its identity, its table, and the function that processes a recording.
@@ -365,6 +369,10 @@ class Recipe:
     * ``checkpoints``: the coarse stages the recipe reports live progress at (ADR 0134 decision 2),
       each with the steps that belong to it (``check_checkpoints``). Empty: the recipe writes no
       progress file and its jobs report job-level states only. A variant carries the same map.
+    * ``bind_options``: the options as the run takes them, given the run's identity, for options
+      that must agree with it (nemar-ica's attestation of its serving index names the commit after
+      ``--source-commit``); raises ``ValueError`` when they contradict it, which the command reports
+      as a usage error (exit 2) before anything is created. The default takes them as given.
     """
 
     info: RecipeInfo
@@ -381,6 +389,7 @@ class Recipe:
     dataset_extras: Callable[[RunContext], dict[str, Any]] = _no_record_extras
     variants: tuple[Recipe, ...] = ()
     checkpoints: Checkpoints = ()
+    bind_options: Callable[[Mapping[str, Any], Identity], dict[str, Any]] = _options_as_given
 
     def __post_init__(self) -> None:
         if self.checkpoints:

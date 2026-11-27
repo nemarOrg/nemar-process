@@ -20,21 +20,36 @@ group, or two) has no row for the recording (``not_in_serving_index``). Without 
 serving copy are skipped with the word, never declared on a guess. ``ServingRow`` is made here only, and a
 row is used only with the index it was read from (``ServingIndex.lists``), so a caller has nothing to
 pass but a row of the index the run read.
+
+The one exception is the caller's attestation (``attest``, the owner's rulings of 2026-11-27, nemar-cli
+ADR 0144): NEMAR changes its own metadata without a new tag, so the serving copy is often built at a
+commit S a few commits after the version's tag commit T. The run is still handed T (``--source-commit``,
+one digest per version: the copy of version T, which is what the records say), and the caller adds S
+(``--serving-index-commit``) and the paths that changed between the two
+(``--serving-index-delta-path``), after it checked with GitHub's compare that S is ahead of T and that
+every changed path is NEMAR-owned metadata (``delta_path``). The invariant the caller attests is that
+every file the serving copy was built from (the recordings, their events and every other BIDS file) is
+the same, byte for byte, at S as at T. A row is then used when the index names S, and the record keeps
+the copy as having the tag: the index's ``source_commit`` reads T, the version it stands for
+(``ServingIndex.stands_for``), and S appears only as the attestation's ``index_commit``
+(``Attestation.facts``). The run cannot make the check (its network reaches no host at all), so it
+checks the attestation's shape only and records it as the caller's (``attested_by_caller``).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from nemar_process.common import zarr_input
 
 # Why a recording has no row (``Resolution.reason``): the index lists no single EEG store of the run's
-# dataset at its path, or it was built from another commit than the run's (or one of them names none).
+# dataset at its path, or it was built from another commit than the run's, or than the one the caller
+# attested (or one of them names none).
 NOT_LISTED = "not_in_serving_index"
 STALE = "serving_index_stale"
 # Why no recording has a row: the file the run was handed is not a serving index it can use (not strict
@@ -43,9 +58,92 @@ STALE = "serving_index_stale"
 # the Worker never stages such an index and the recipe never ends a run over one).
 UNUSABLE = "serving_index_unusable"
 
+# The paths a commit after the version tag may change for an index built at that commit to be attested
+# as the tag's (the owner's rulings of 2026-11-27): NEMAR's own records (``.nemar/``), its CI
+# configuration (``.github/``), both the Zarr input's ``DELTA_ROOTS``, and a ``.gitattributes`` file at
+# any depth, which NEMAR's annex policy rewrites across the fleet. The Zarr input admits the first two
+# only: widening its rule is a change on both sides that was not ruled on (docs/recipes.md).
+DELTA_ROOTS = zarr_input.DELTA_ROOTS
+GITATTRIBUTES = ".gitattributes"
+MAX_DELTA_PATHS = zarr_input.MAX_DELTA_PATHS
+# What an attestation is called and what it says, as the record states it (``Attestation.facts``): the
+# Zarr input's word for a delta of metadata only, the invariant the caller attests (every file the
+# serving copy was built from is the same at the index's commit as at the tag's), and who checked it.
+METADATA_ONLY = zarr_input.METADATA_ONLY
+INVARIANT = "same_files_as_tag"
+COMMIT_CHECK = zarr_input.COMMIT_CHECK
+
 
 class IndexUnusable(ValueError):
     """The file cannot serve as a serving index: the message is a fixed phrase, naming no path."""
+
+
+def delta_path(text: str) -> str:
+    """A path changed between the version tag and the index's commit that is NEMAR-owned metadata:
+    under ``.nemar/`` or ``.github/``, or a ``.gitattributes`` file at any depth, and a plain path
+    (``zarr_input.plain_path``: no empty, ``.`` or ``..`` segment, no control character, at most 512
+    characters), compared case and all; else ``ValueError``."""
+    if not zarr_input.plain_path(text) or not (
+        text.startswith(DELTA_ROOTS) or text.split("/")[-1] == GITATTRIBUTES
+    ):
+        raise ValueError("not a path under .nemar/ or .github/, nor a .gitattributes file")
+    return text
+
+
+@dataclass(frozen=True)
+class Attestation:
+    """The caller's statement that the serving index, built at ``index_commit``, describes the data of
+    the version whose tag commit is ``tag_commit`` (the run's ``--source-commit``): the caller found, with
+    GitHub's compare of the two, that ``index_commit`` is ahead of ``tag_commit`` and that every path
+    changed between them, ``delta_paths`` (sorted, each once; none when the commits change no file), is
+    NEMAR-owned metadata (``delta_path``). Checked when made (``ValueError``)."""
+
+    tag_commit: str
+    index_commit: str
+    delta_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("--source-commit", self.tag_commit),
+            ("--serving-index-commit", self.index_commit),
+        ):
+            if not isinstance(value, str) or not zarr_input.COMMIT.fullmatch(value):
+                raise ValueError("{} is not a 40-digit commit hash".format(name))
+        if self.index_commit == self.tag_commit:
+            raise ValueError(
+                "--serving-index-commit is --source-commit, {}: an index of the tag's own commit "
+                "is used as it is, with no attestation".format(self.tag_commit)
+            )
+        if len(self.delta_paths) > MAX_DELTA_PATHS:
+            raise ValueError("at most {} --serving-index-delta-path values".format(MAX_DELTA_PATHS))
+        for path in self.delta_paths:
+            delta_path(path)
+        if list(self.delta_paths) != sorted(set(self.delta_paths)):
+            raise ValueError("the delta paths are sorted and each is named once")
+
+    def facts(self) -> dict[str, Any]:
+        """The attestation as the record states it (``extensions.nemar.ica.serving_index.attestation``):
+        the tag's commit (the run's), the index's (its provenance only), what changed between them, the
+        kind of delta, the invariant attested, and who checked it."""
+        return {
+            "tag_commit": self.tag_commit,
+            "index_commit": self.index_commit,
+            "equivalence": METADATA_ONLY,
+            "delta_paths": list(self.delta_paths),
+            "invariant": INVARIANT,
+            "commit_check": COMMIT_CHECK,
+        }
+
+
+def attest(tag_commit: str, index_commit: str, delta_paths: Iterable[str] = ()) -> Attestation:
+    """The caller's attestation of an index built at ``index_commit`` for a run of ``tag_commit``, or
+    ``ValueError`` (a usage error) when it contradicts itself: a commit that is not 40 lower-case
+    hexadecimal digits, the two commits equal, more than ``MAX_DELTA_PATHS`` paths (counted as given),
+    or a path that is not NEMAR-owned metadata. A path named twice is then kept once."""
+    paths = tuple(delta_paths)
+    if len(paths) > MAX_DELTA_PATHS:
+        raise ValueError("at most {} --serving-index-delta-path values".format(MAX_DELTA_PATHS))
+    return Attestation(tag_commit, index_commit, tuple(sorted(set(paths))))
 
 
 @dataclass(frozen=True)
@@ -89,7 +187,8 @@ class Resolution:
 @dataclass(frozen=True)
 class ServingIndex:
     """A serving index read from a file: its digest, the dataset and commit it names (None when it names
-    none), and each store's EEG groups by the store's source path, ``(name, rate, n_samples)``."""
+    none), and each store's EEG groups by the store's source path, ``(name, rate, n_samples)``; and the
+    caller's attestation of the commit it was built from, when there is one (``attested``)."""
 
     sha256: str | None
     dataset_id: str | None
@@ -98,20 +197,38 @@ class ServingIndex:
     # The file could not serve as an index (``unusable``): no recording has a row, each with ``UNUSABLE``;
     # ``sha256`` is then the digest of the bytes read, or None when none could be read.
     unusable: bool = False
+    attestation: Attestation | None = None
+
+    def attested(self, attestation: Attestation) -> ServingIndex:
+        """This index with the caller's attestation of the commit it was built from (``attest``)."""
+        if type(attestation) is not Attestation:
+            raise ValueError("an attestation is made by attest")
+        return replace(self, attestation=attestation)
 
     def resolve(self, path: str, dataset_id: str | None, source_commit: str | None) -> Resolution:
         """The row of the recording at ``path`` of the run's dataset ``dataset_id`` and commit
         ``source_commit``, or why there is none: an index that names no dataset or another one is
-        ``not_in_serving_index``; then an index built from another commit, or a run or an index that
-        names none, is ``serving_index_stale``; then no store at the path or more than one, or a store
-        with no EEG group or more than one, is ``not_in_serving_index``."""
+        ``not_in_serving_index``; then an index built from another commit than the one it must name,
+        or a run or an index that names none, is ``serving_index_stale``; then no store at the path or
+        more than one, or a store with no EEG group or more than one, is ``not_in_serving_index``.
+
+        The commit the index must name is the run's own, or, with an attestation of the run's commit
+        as the tag's, the attested ``index_commit``, and only that one: an index of the tag's own
+        commit then disagrees with what the caller attested of it, and an attestation of another tag
+        commit than the run's attests nothing here, so both are stale."""
         if self.unusable:
             return Resolution(None, UNUSABLE)
         if self.dataset_id is None or dataset_id is None or self.dataset_id != dataset_id:
             return Resolution(None, NOT_LISTED)
+        if self.attestation is None:
+            expected = source_commit
+        elif self.attestation.tag_commit == source_commit:
+            expected = self.attestation.index_commit
+        else:
+            expected = None
         # another commit, or a run that names none; an index that names none never matches, even a
         # run that names none
-        if self.source_commit is None or self.source_commit != source_commit:
+        if expected is None or self.source_commit is None or self.source_commit != expected:
             return Resolution(None, STALE)
         found = self.stores.get(path, ())
         if len(found) != 1 or len(found[0]) != 1:
@@ -128,16 +245,37 @@ class ServingIndex:
         found = self.stores.get(row.path, ())
         return len(found) == 1 and found[0] == ((row.group, row.rate_hz, row.n_samples),)
 
-    def facts(self, resolved: Resolution) -> dict[str, Any]:
-        """What a record says of the index it was given (``extensions.nemar.ica.serving_index``): its
-        digest, the dataset and commit it names, and the recording's row, or null with the word for
-        why there is none."""
+    def stands_for(self, dataset_id: str | None) -> str | None:
+        """The commit of the version this index stands for in a run of the dataset ``dataset_id``, as a
+        record states it: the tag's commit when the index is of the run's dataset and names the commit
+        the caller attested (the copy of version T, kept as having the tag: the owner's rulings of
+        2026-11-27), else the commit the index names, or None when it names none. An attested index of
+        another dataset, or that names another commit than the one attested, stands for nothing
+        attested, so its record keeps the dataset and commit it names, which say why it gave no row."""
+        attestation = self.attestation
+        if (
+            attestation is not None
+            and self.dataset_id is not None
+            and self.dataset_id == dataset_id
+            and self.source_commit == attestation.index_commit
+        ):
+            return attestation.tag_commit
+        return self.source_commit
+
+    def facts(self, resolved: Resolution, dataset_id: str | None) -> dict[str, Any]:
+        """What a record of the run's dataset ``dataset_id`` says of the index it was given
+        (``extensions.nemar.ica.serving_index``): its digest, the dataset it names and the commit of the
+        version it stands for (``stands_for``: the tag's under an attestation it matches, the index's
+        own otherwise), the recording's row, or null with the word for why there is none, and the
+        caller's attestation (``Attestation.facts``, where the commit the index was built from is
+        ``index_commit``), or null without one."""
         return {
             "sha256": self.sha256,
             "dataset_id": self.dataset_id,
-            "source_commit": self.source_commit,
+            "source_commit": self.stands_for(dataset_id),
             "row": None if resolved.row is None else resolved.row.facts(),
             "reason": resolved.reason,
+            "attestation": None if self.attestation is None else self.attestation.facts(),
         }
 
 

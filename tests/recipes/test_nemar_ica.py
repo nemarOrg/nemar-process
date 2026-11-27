@@ -152,10 +152,19 @@ def test_the_recipe_is_one_recipe_with_two_inputs_and_the_options_the_card_names
         "--ica-max-iter": 4000,
         "--time-budget-s": None,
         "--serving-index": None,
+        "--serving-index-commit": None,
+        "--serving-index-delta-path": (),
     }
     # the serving index is a dataset directory's: on the serving copy the store read is named
     zarr_flags = {option.flag for option in RECIPE.reading("zarr").options}
-    assert "--serving-index" not in zarr_flags
+    assert (
+        not {
+            "--serving-index",
+            "--serving-index-commit",
+            "--serving-index-delta-path",
+        }
+        & zarr_flags
+    )
     assert RECIPE.reading("zarr").id == "nemar-ica"
     assert RECIPE.seeds == ()
 

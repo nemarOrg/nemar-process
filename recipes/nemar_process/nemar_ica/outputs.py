@@ -200,9 +200,10 @@ def facts(
     """The block ``extensions.nemar.ica`` and ``_ica.json`` hold.
 
     ``served`` is what the run says of the serving index it was given on a dataset directory
-    (``serving_index.ServingIndex.facts``: its digest, the dataset and commit it names, and the
-    recording's row, or null with the word for why there is none); null on the serving copy, and on a
-    dataset directory given no index.
+    (``serving_index.ServingIndex.facts``: its digest, the dataset it names and the commit of the version
+    it stands for (the tag's under an attestation it matches), the recording's
+    row, or null with the word for why there is none, and the caller's attestation of its commit, or
+    null); null on the serving copy, and on a dataset directory given no index.
 
     For pAMICA the settings and the account of the fit are ``EEG['etc']['pamica']`` as eegprep wrote
     it, copied whole under ``pamica``, and the top-level ``seed``, ``n_models``, ``n_mix``,
@@ -1072,14 +1073,15 @@ def write_product(
     is never written (``ValueError``).
 
     The record declares the recipe's views (``recipe_views``) over the files written, by their bytes.
-    ``serving`` is the serving index a run of a dataset directory was given (``--serving-index``): the
-    row it lists for the recording (``ServingIndex.resolve``, in an index of the run's dataset built
-    from the run's ``--source-commit``) names the serving copy's channel group, rate and length, and
-    the views of the serving copy are declared on it (``signal_store``, ``serving_window``); with no
-    index they are skipped with ``no_serving_index``, and with no row with ``not_in_serving_index`` or
-    ``serving_index_stale`` (another commit, or none named), and the record says what the index was and
-    why it gave no row (``extensions.nemar.ica.serving_index``). A run of the serving copy takes none
-    (``ValueError``).
+    ``serving`` is the serving index a run of a dataset directory was given (``--serving-index``),
+    bound to the caller's attestation of its commit when there is one (``options.bind``): the row it
+    lists for the recording (``ServingIndex.resolve``, in an index of the run's dataset built from the
+    run's ``--source-commit``, or from the commit attested for it) names the serving copy's channel
+    group, rate and length, and the views of the serving copy are declared on it (``signal_store``,
+    ``serving_window``); with no index they are skipped with ``no_serving_index``, and with no row with
+    ``not_in_serving_index`` or ``serving_index_stale`` (another commit, or none named), and the record
+    says what the index was, what was attested of it and why it gave no row
+    (``extensions.nemar.ica.serving_index``). A run of the serving copy takes none (``ValueError``).
 
     Then the recipe's quality plugins run at ``quality`` on a copy of the plan (``quality_plugins``,
     ``plugin_inputs``, ``plugins.run_checkpoint``) with the host the recipe's views were built on: their
@@ -1109,7 +1111,9 @@ def write_product(
         profile,
         browser_transform(recording, fit, written),
         browser_unavailable(fit),
-        None if serving is None or resolved is None else serving.facts(resolved),
+        None
+        if serving is None or resolved is None
+        else serving.facts(resolved, identity.dataset_id),
     )
     values = (
         block["rank"],
