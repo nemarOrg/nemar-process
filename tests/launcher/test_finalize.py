@@ -316,7 +316,7 @@ def test_the_cap_is_the_most_the_workers_limit_can_be():
     assert worker_limit(25_000) == 8192 + 25_000 * 1700  # nemar-ica's and nemar-floor's maxFiles
 
 
-def test_a_request_of_twenty_five_thousand_outputs_is_built_and_sent_whole(rig):
+def test_a_request_of_twenty_five_thousand_outputs_is_built_and_encoded_once(rig):
     """nemar-ica's and nemar-floor's result limit (25,000 files) is about 12 MiB of request, three
     times the old 1 MiB cap: the body passes the launcher's checks and is encoded once."""
     uploader = make_uploader(rig)

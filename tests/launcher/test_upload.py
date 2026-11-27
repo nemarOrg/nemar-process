@@ -89,7 +89,8 @@ def test_an_expired_address_is_requested_once_more_and_then_works(rig):
     rig.callbacks.expire_urls_once = True
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 0, launch.log
-    assert len(requests_to(rig, "/outputs")) == 2
+    first, second = requests_to(rig, "/outputs")
+    assert first.body == second.body  # the request is encoded once and sent again as it was
     assert any(e.startswith("put-403:") for e in rig.callbacks.events)
     assert len(uploaded_outputs(rig)) == 3
     assert rig.callbacks.events[-1] == "complete"
