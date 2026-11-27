@@ -108,15 +108,25 @@ def commit(text: str) -> str:
     return text
 
 
+def plain_path(text: str) -> bool:
+    """Whether ``text`` is a repository path as git names one: not empty, at most
+    ``MAX_DELTA_PATH_LENGTH`` characters, no control character, a UTF-8 form (an argument that is not
+    UTF-8 reaches Python as lone surrogates, which a record cannot be written with), and no empty,
+    ``.`` or ``..`` segment (so no leading ``/`` or ``./``, no trailing ``/`` and nothing that climbs).
+    The shape a delta path has for either attestation (``delta_path`` here, ``serving_index.delta_path``),
+    compared as given: case and all."""
+    return (
+        bool(text)
+        and len(text) <= MAX_DELTA_PATH_LENGTH
+        and not any(ord(character) < 32 or ord(character) == 127 for character in text)
+        and _encodable(text)
+        and not any(part in ("", ".", "..") for part in text.split("/"))
+    )
+
+
 def delta_path(text: str) -> str:
     """A path a post-tag commit changed, under ``.nemar/`` or ``.github/``, or ``ValueError``."""
-    if (
-        not text
-        or len(text) > MAX_DELTA_PATH_LENGTH
-        or not text.startswith(DELTA_ROOTS)
-        or any(ord(character) < 32 or ord(character) == 127 for character in text)
-        or any(part in ("", ".", "..") for part in text.split("/"))
-    ):
+    if not plain_path(text) or not text.startswith(DELTA_ROOTS):
         raise ValueError("not a path under .nemar/ or .github/")
     return text
 
