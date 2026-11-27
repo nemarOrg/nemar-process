@@ -529,11 +529,12 @@ class LocalImage(service.Image):
             verify.verified_digests(out, "sha256:" + digest_hex)
             if present != 0:
                 log.info("image: pulling the verified digest")
+                started = time.monotonic()
                 pulled, _ = runtime._run_argv(
                     pull, engine.environment(env), runtime.PULL_SECONDS, stop
                 )
                 if pulled != 0:
-                    raise Failure("runtime_error", "image_missing", "the image could not be pulled")
+                    raise runtime.pull_failure(pulled, started, runtime.PULL_SECONDS, log)
         self.verification = {"by": "cosign", "kind": "image", "cosign_version": version}
 
     def _pull_sif(

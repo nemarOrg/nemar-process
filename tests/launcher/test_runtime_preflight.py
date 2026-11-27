@@ -459,7 +459,9 @@ def test_a_registry_entry_is_a_host(entry, ok):
 @pytest.mark.parametrize("volumes", ['{"/data": {}}', '{"/a": {}, "/b": {}}', "garbage", ""])
 def test_an_image_that_declares_a_volume_is_refused(rig, engine, volumes):
     Path(str(engine.record) + ".volumes").write_text(volumes)
-    refused(rig, engine, launch(rig, engine), "image_missing")
+    result = launch(rig, engine)
+    refused(rig, engine, result, "image_missing")
+    assert "ERROR image_missing reason=volumes_declared\n" in result.log
 
 
 @pytest.mark.parametrize("volumes", ["null", "{}"])

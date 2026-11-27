@@ -23,7 +23,8 @@ What it does (``<rec>`` is the record file baked into the wrapper):
 * ``image inspect --format ... <ref>``: exit 0 when ``<ref>`` is in the "present" list (``install(...,
   present=...)``, or after a ``pull``), printing ``<rec>.volumes`` or ``null``; else exit 1.
 * ``pull --quiet <ref>``: records the call; exit 1 when ``<rec>.pullfail`` exists, sleeps while
-  ``<rec>.pullhang`` exists, else adds ``<ref>`` to the present list.
+  ``<rec>.pullhang`` exists, exits 0 without adding ``<ref>`` when ``<rec>.pullnoimage`` exists (a pull
+  that reports success and leaves nothing to inspect), else adds ``<ref>`` to the present list.
 * ``container inspect --format ... <name>``: prints ``true`` when ``<rec>.oom`` exists, else ``false``.
 * ``rm --force --volumes <name>``: records the call; exit 1 ("no such container").
 * ``run [options] <image> <command...>``: appends ``{"argv": [...], "environ": {...}}`` to ``<rec>``,
@@ -432,6 +433,8 @@ def main(argv: list[str], record_path: str, name: str = "docker") -> int:
         if os.path.exists(record_path + ".pullfail"):
             print("Error: pull access denied", file=sys.stderr)
             return 1
+        if os.path.exists(record_path + ".pullnoimage"):
+            return 0
         with open(record_path + ".images", "a", encoding="utf-8") as handle:
             handle.write(argv[2] + "\n")
         return 0

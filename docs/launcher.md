@@ -213,6 +213,7 @@ Each of these ends the launch at the start, before the bundle is fetched or user
 - The image is present or can be pulled, and its configuration declares no `VOLUME`: an image volume is a writable mount outside the declared binds.
   The launcher asks `image inspect` (a pull only when the image is absent, with the digest verified by the engine), and a pull that fails or takes longer than 30 minutes, or an image with a declared volume, is `image_missing`.
   A cancel ends a pull at once, and the engine's own words are never copied into the log.
+  The log names the reason in their place, as `image_missing reason=<word>`: `pull_failed (exit <status>)` (the engine ran and refused: a registry that refused the pull, an anonymous pull quota per source address for one, a digest the registry does not serve, or no network), `pull_timeout`, `pull_not_started` (the engine could not be started), `not_inspectable` (pulled, but `image inspect` cannot find it), `volumes_declared`, or, for the standalone entry without `--pull`, `absent`.
 
 ### For a runner's doctor
 
