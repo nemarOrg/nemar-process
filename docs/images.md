@@ -319,9 +319,9 @@ These are the repository owner's to set, and none exists today (no ruleset, no b
 - branch protection or a ruleset on `main` that requires review, and
 - optionally an environment with required reviewers (and a deployment rule limited to `main` and those tags) on the `publish` and `sign` jobs; the workflow names no environment today, so using one needs a one-line change to each job.
 
-Also the owner's, before the first release:
+Also the owner's (the first release image, 0.1.2, has been published; whether each item is done is not recorded here):
 
-- confirm that GHCR publishing is enabled for the repository;
+- confirm that GHCR publishing is enabled for the repository (done: run 46053848809 pushed both images);
 - set the packages `nemar-python` and `nemar-python-sif` public (a new GHCR package starts private) so a node can pull without credentials;
 - link `nemar-python-sif` to this repository and give the workflow write access to it (see above).
 
