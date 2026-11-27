@@ -106,26 +106,26 @@ jobs:
           fi
 
   nemar-cli-progress-latest:
-    # Advisory: says, without failing, when nemar-cli's pipeline progress epic branch has changed the live
+    # Advisory: says, without failing, when nemar-cli's dev branch has changed the live
     # progress contract (the schema, the counting vectors and rules, the recipe checkpoint maps, the
     # runner schema that carries it) or a file pinned beside it (the plugin manifest schema and vectors,
     # the neuroschema bundle, views registry and the three view vectors the views writer's tests replay,
     # the naming port and its vectors, the standalone contracts) since the commit the pin
     # `tests/contract/nemar-cli-progress-pin.json` names, so the copies here are moved deliberately.
-    # Move the branch name to `dev` once the epic merges.
+    # The pipeline progress epic (nemar-cli #2324) merged into `dev`, so the job compares with `dev`.
     runs-on: ubuntu-24.04
     continue-on-error: true
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compare the pin with the epic branch
+      - name: Compare the pin with dev
         run: |
           set -euo pipefail
           ref=$(python3 -c 'import json; print(json.load(open("tests/contract/nemar-cli-progress-pin.json"))["ref"])')
-          branch=feature/issue-2324-epic-pipeline-progress
-          # The API call comes first and on its own: a failure of it (the branch is gone once the epic
-          # merges, or the commit is unknown) must not read as "nothing changed".
+          branch=dev
+          # The API call comes first and on its own: a failure of it (the commit is unknown, or the
+          # API is unavailable) must not read as "nothing changed".
           if ! files=$(gh api "repos/nemarOrg/nemar-cli/compare/${ref}...${branch}" --jq '.files[].filename'); then
             echo "::warning title=nemar-cli's progress contract could not be compared with the pin::The comparison of ${ref:0:12} with ${branch} failed, so nothing is known about changes; check by hand, or move the branch name in this job."
             exit 0
