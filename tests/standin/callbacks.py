@@ -108,7 +108,7 @@ class Callbacks:
         # the live progress route (ADR 0134)
         self.progress_floor = 0.0  # seconds after an accepted report before another is accepted
         self.progress_retry_after: str | None = "1"  # the Retry-After header of a 429
-        self.progress_queue: list[tuple] = []  # (status, code) answered in order first
+        self.progress_queue: list[tuple] = []  # (status, code or exact bytes) answered first
         self.progress_reports: list[tuple[float, dict]] = []  # accepted: (time, body)
         self.progress_requests: list[float] = []  # every request's time
         # records -------------------------------------------------------------------------------
@@ -179,6 +179,10 @@ class Callbacks:
                     if self.progress_retry_after is not None:
                         headers["Retry-After"] = self.progress_retry_after
                     return _too_soon(headers)
+                if isinstance(code, bytes):  # exactly these bytes as the answer
+                    return Response(
+                        status=status, body=code, headers={"Content-Type": "application/json"}
+                    )
                 if code is None:  # a proxy's answer: a page, not the route's JSON
                     return Response(
                         status=status,

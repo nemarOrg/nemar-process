@@ -108,6 +108,7 @@ jobs:
           sparse-checkout: |
             /shared/
             /backend/src/routes/callbacks/compute-job-callbacks.ts
+            /backend/src/services/compute-records.ts
           sparse-checkout-cone-mode: false
           fetch-depth: 1
 

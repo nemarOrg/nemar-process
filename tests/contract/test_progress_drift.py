@@ -356,6 +356,52 @@ def test_the_launchers_constants_are_nemar_clis():
     assert ts_words(counting, "PROGRESS_PROBLEMS") == rules.PROGRESS_PROBLEMS
 
 
+def ts_product(source: str, name: str) -> int:
+    """A constant written as a whole number or a product of them (`64 * 1024 * 1024`), exported or
+    module-private."""
+    found = re.search(
+        r"^(?:export )?const {} = ([0-9_]+(?: \* [0-9_]+)*);$".format(re.escape(name)),
+        source,
+        re.MULTILINE,
+    )
+    assert found, name
+    product = 1
+    for factor in found.group(1).split(" * "):
+        product *= int(factor.replace("_", ""))
+    return product
+
+
+def test_ts_product_reads_a_number_and_a_product():
+    source = "export const A = 1_700;\nconst B = 64 * 1024 * 1024;\nconst C = 2 + 3;\n"
+    assert ts_product(source, "A") == 1700
+    assert ts_product(source, "B") == 64 * 1024 * 1024
+    with pytest.raises(AssertionError):
+        ts_product(source, "C")
+
+
+def test_the_outputs_request_caps_are_the_workers():
+    """The four constants of the Worker's `outputsBodyLimitBytes` that the launcher's cap on the
+    outputs request is derived from (issue #75): the launcher caps at the ceiling, the most the
+    Worker's limit can be."""
+    from nemar_launch import codes
+
+    records = ts_source("outputs_body_limit")
+    for name in (
+        "OUTPUT_ENTRY_BYTES_MAX",
+        "OUTPUTS_BODY_BASE_BYTES",
+        "OUTPUTS_BODY_FLOOR_BYTES",
+        "OUTPUTS_BODY_CEILING_BYTES",
+    ):
+        assert ts_product(records, name) == getattr(codes, name), name
+    formula = re.search(
+        r"const wanted = OUTPUTS_BODY_BASE_BYTES \+ maxFiles \* OUTPUT_ENTRY_BYTES_MAX;\s*"
+        r"return Math\.min\(OUTPUTS_BODY_CEILING_BYTES, Math\.max\(OUTPUTS_BODY_FLOOR_BYTES, wanted\)\);",
+        records,
+    )
+    assert formula, "outputsBodyLimitBytes is no longer min(ceiling, max(floor, base + n * entry))"
+    assert codes.OUTPUTS_REQUEST_MAX_BYTES == codes.OUTPUTS_BODY_CEILING_BYTES
+
+
 def test_the_recipes_standard_checkpoints_are_nemar_clis():
     """The recipe layer's list is the contract's without `stored`, which only the backend sets."""
     import importlib.util

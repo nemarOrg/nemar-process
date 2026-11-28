@@ -416,7 +416,8 @@ def poster(api_base: str, job_id: str, token: str) -> Callable[[dict[str, Any]],
     """Post one report to the job-token route (a Tapis job: no lease, no redirect, a short timeout).
 
     A 2xx is accepted whatever its body: the route answers with JSON, but a 2xx whose body is not JSON
-    (a proxy's page) still means the report arrived, and must not stop the posts."""
+    (a proxy's page) or is over ``post_json``'s limit still means the report arrived, and must not
+    stop the posts."""
     from . import net
 
     url = route_url(api_base, job_id)
@@ -426,7 +427,8 @@ def poster(api_base: str, job_id: str, token: str) -> Callable[[dict[str, Any]],
             net.post_json(url, document, token, timeout=POST_TIMEOUT_SECONDS)
         except net.HttpFailure as failure:
             status = failure.status
-            if failure.word == "bad_response" and status is not None and 200 <= status < 300:
+            accepted = failure.word in ("bad_response", "too_large")
+            if accepted and status is not None and 200 <= status < 300:
                 return
             raise
 

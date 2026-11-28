@@ -241,17 +241,21 @@ def encode_json(body: dict[str, Any]) -> bytes:
 
 def post_json(
     url: str,
-    body: dict[str, Any],
+    body: dict[str, Any] | bytes,
     token: str,
     lease: str | None = None,
     timeout: float = TIMEOUT,
+    response_limit: int = MAX_JSON_RESPONSE,
 ) -> tuple[int, dict[str, Any]]:
     """POST ``body`` as JSON with the job token header (and the lease header, when ``lease`` is
     given); return (status, JSON object).
 
-    Never follows a redirect. A refusal is an ``HttpFailure`` with the response's ``code`` word.
+    ``body`` may be bytes ``encode_json`` already wrote, so a large body is encoded once and every
+    attempt sends the same bytes. At most ``response_limit`` bytes of the answer are read; a longer
+    answer is ``too_large`` (never cut short and read as ``bad_response``). Never follows a
+    redirect. A refusal is an ``HttpFailure`` with the response's ``code`` word.
     """
-    data = encode_json(body)
+    data = body if isinstance(body, bytes) else encode_json(body)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -263,10 +267,12 @@ def post_json(
     request = urllib.request.Request(url, data=data, method="POST", headers=headers)
     try:
         with open_url(request, follow=False, timeout=timeout) as response:
-            raw = response.read(MAX_JSON_RESPONSE)
+            raw = response.read(response_limit + 1)
             status = response.status
     except BaseException as exc:  # noqa: BLE001 - classified, or re-raised when it is not ours
         raise classify(exc) from None
+    if len(raw) > response_limit:
+        raise HttpFailure("too_large", status=status)
     try:
         parsed = json.loads(raw.decode("utf-8")) if raw.strip() else {}
     except (ValueError, RecursionError):  # not JSON, or nested too deep to read

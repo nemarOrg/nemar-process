@@ -144,12 +144,12 @@ The image is pushed without provenance or SBOM (software bill of materials) atte
 
 A tag `image-nemar-python-vMAJOR.MINOR.PATCH` runs the whole chain, using the workflow file at the tagged commit, but only for a commit that is reachable from `main`: the first step of `publish` fails otherwise.
 It publishes and signs both flavors in the one run.
-The first publication therefore happens from `main`, after the epic branch has merged: a dispatch from `main`, or a tag on a commit of `main`.
+Every publication therefore happens from `main`: a dispatch from `main`, or a tag on a commit of `main`.
 A manual dispatch runs it from `main` only, with the version as an input; it attaches the digest files to the workflow run (one artifact per flavor, `nemar-python-digests-cpu` and `nemar-python-digests-cuda`), not to a release.
 A version is published once per flavor: a second run for the same version stops at the existing `<version>-cpu` or `<version>-cuda` tag.
 The version is the tag or the input, and the `publish` job refuses it unless it is also the `[project].version` of `pyproject.toml` at the built commit, has no `-devN` suffix, and the git tag `v<version>` exists and points at that commit.
 The image tag, the git tag and the version every record names are therefore one version.
-At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0.
+The source releases `v0.1.1` and `v0.1.2` are tagged, and image 0.1.2 passed the version step at `v0.1.2` (commit `715f4545`).
 No image can pass the version step until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
 To publish image `X.Y.Z` after `main` has moved past `vX.Y.Z`, push the tag `image-nemar-python-vX.Y.Z` on the `vX.Y.Z` commit (a dispatch from `main` would build the newer commit and be refused).
 The tag trigger, the "not on `main`" guard, the signing identity and the job permissions are unchanged by this check, so existing signatures stay valid: the identity names the workflow path and the ref, not the file's content.
@@ -277,13 +277,17 @@ The `cuda` leg runs one tiny `nemar-ica` run in its image with no GPU visible, a
 
 ## Published images
 
-No release image yet.
+Image 0.1.2 is the first release image.
+It was published by a manual dispatch from `main` at commit `715f4545` (source release `v0.1.2`), in [run 46053848809](https://github.com/nemarOrg/nemar-process/actions/runs/46053848809); both flavors published and signed their image and their SIF in that one run.
+As for every dispatch, the digest records are attached to the run (`nemar-python-digests-cpu` and `nemar-python-digests-cuda`), not to a release.
+It carries `nemar-floor` `1.0.0-b2` and `nemar-ica` `1.0.0-b2` (common layer `1.0.0-b2`), eegprep `0.5.0+871bc7f8`, pamica `0.4.0` and torch `2.12.1`.
+NEMAR's backend pins the CUDA flavor as its runtime image; with no GPU visible it runs the CPU engine.
 The image `0.1.0-cpu` in the registry is a demonstration build, published from `main` before the version step existed: it is not a release, its records name `nemar-floor` `1.0.0` and carry no `process` block, and no recipe or common version counts it (the version rule of `docs/recipes.md`).
-The first images are published from `main` (a manual dispatch, or a version tag on a commit of `main`) once the epic branch has merged, which the maintainers decide; both flavors publish and sign their image and their SIF in that one run, and their digests are recorded here when they exist.
 
 | Version | Flavor | Image digest | SIF artifact digest | Run |
 |---|---|---|---|---|
-| none | none | none | none | none |
+| 0.1.2 | cpu | `sha256:21a6a7b7778c26b7544de175c5f79986e161b6f2159aca7f840d01fa544c7994` | `sha256:42f08e01a3e76a4b5f9408d3858b2c39fde7d4363f755e46ca891f4dff240a74` | [46053848809](https://github.com/nemarOrg/nemar-process/actions/runs/46053848809) |
+| 0.1.2 | cuda | `sha256:3b61e40e33a446b4b8e4cc917c4a43f1531bfb11e69c1d7bc6ae0b5154fbf559` | `sha256:8e572073ec74ec9480de1113b3073682b5e94a8e9213714d1b1a484c1b47fdc7` | [46053848809](https://github.com/nemarOrg/nemar-process/actions/runs/46053848809) |
 
 ## What is not verified
 
@@ -292,19 +296,19 @@ The first images are published from `main` (a manual dispatch, or a version tag 
 - **The hosted runner's disk.** The CUDA build frees disk space first and keeps no cache; if a run still runs out of disk, a larger runner is the owner's to provide.
   On pull request 87 (run 45436618601) the `cuda` leg of `test` read, on the root filesystem of 145G (the only large one; there was no `/mnt`): 86G available before the free-disk step and 104G after it, 69G after the image build and before Apptainer was installed, and 50G after the SIF build with the exported archive (7.5G), Apptainer's cache (7.5G) and the SIF (4.2G) still on disk.
   The SIF build took about 6 minutes and the whole leg about 17, within its 60.
-  The `sign` leg builds from the pushed digest instead and prints `du -sh` of its SIF and Apptainer's cache and `df -h /` after the build, so its disk is first read in the first release's log.
+  The `sign` leg builds from the pushed digest instead and prints `du -sh` of its SIF and Apptainer's cache and `df -h /` after the build.
+  On run 46053848809 its `cuda` leg read 88G available before the free-disk step, 107G after it, and 91G after the SIF build, with the SIF (4.2G) and Apptainer's cache (4.3G) on disk.
 - **The CUDA SIF's size and push time.** On the same run the `test` job's SIFs were 4,458,627,072 bytes (`cuda`) and 473,722,880 bytes (`cpu`), built from the local images, both under the size gate.
-  A SIF built in `sign` from the pushed digest, its size and its push's wall time are first read in the first release's `sign` log (`SIF size (cuda)` and `SIF push (cuda)`).
+  The SIFs built in `sign` from the pushed digests of run 46053848809 were 4,509,130,752 bytes (`cuda`, pushed in 123 seconds) and 524,222,464 bytes (`cpu`, 11 seconds), read from `SIF size` and `SIF push` in its log; a later image's sizes are read in its own run.
 - **The registry's two limits.** 10 GB per layer and 10 minutes for an upload are GitHub's documentation, not observations; no SIF near either has been pushed, and the size gate stops one of 9,000,000,000 bytes or more before the push.
 - **Whether `--nv` finds a workstation's driver.** No hosted runner has a GPU, so no SIF has run with `--nv`; the launcher passes it only for a job the runner put on the GPU. Whether Apptainer's `--nv` binds a workstation's driver into the CUDA SIF, and whether that driver runs the CUDA 12.9 wheels, is an operator's reading on that machine.
 - **Nothing in the signature ties the CUDA SIF to its image digest either.** As for the CPU SIF ("Installing the SIF"), the tie is the workflow's naming; the check before the signature closes the window between the push and the signature, and what is left is a tag moved after it. Both legs run the one signing step, so a signed annotation, once added, covers both.
-- **The git tag the version step needs does not exist yet.** At the time of writing the repository has no `vX.Y.Z` tags and `main` is at 0.1.0, so the `publish` job refuses every version until the release process (the release bot, or the repository owner) has cut `vX.Y.Z` at the commit to publish.
-- **The sign-time build record check has not run against a pushed image.** It runs only on a tag or a dispatch. Until the first release the same script, with the same two reads, runs in every pull request's `test` job against the image built there, and `tests/images/test_image_build_check.py` runs both steps against a stand-in `docker` that serves real files; that the registry's digest answers the same two reads with the labels and the file the pushed image carries is expected, not observed.
-- **The push, sign and release path has not run.** It runs only on a tag or a dispatch; the pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
+- **The sign-time build record check has run against one pushed release only (0.1.2).** It runs only on a tag or a dispatch. On run 46053848809 both `sign` legs read the pushed digest's labels and build file and reported `build record agrees with the version step: build=release version=0.1.2 commit=715f4545014f427bb099fa20c76da697fa417f45`. Between releases the same script, with the same two reads, runs in every pull request's `test` job against the image built there, and `tests/images/test_image_build_check.py` runs both steps against a stand-in `docker` that serves real files.
+- **The release attachment has not run.** The push and sign path ran once, on the dispatch of run 46053848809. The job that attaches the digest record to a release runs only on a tag, and was skipped there, so no release carries a digest record yet. The pull-request path (build, container smoke test, SIF, SIF smoke test) is what continuous integration exercises.
 - **SIF compatibility with the cluster's Apptainer variant is unverified** until the operator tests a SIF from this image there. CI builds and runs the SIF with the community Apptainer 1.5.5; the cluster may run a commercial Singularity.
 - **Image environment under `--cleanenv`: observed once, with a limited scope.** On pull request 8 the `test` job of run 41909394410 built the image, built a SIF from the local image archive, and ran `smoke.py --image` under `apptainer exec --containall --cleanenv --no-home --no-mount bind-paths`; it passed, which shows the Dockerfile's `PATH`, thread counts, `PYTHONHASHSEED` and the `/opt/venv` prefix survive there. That is the community Apptainer 1.5.5 on a hosted runner, a SIF from a local archive and not from the pushed digest, and not the cluster's variant.
-- **cosign and GHCR.** The signing commands have not run against GHCR; the `cosign verify` in the same job is the check that they worked. The existence checks for the `<version>-<flavor>` tags (`<version>-cpu` and `<version>-cuda`, one per leg) and the SIF tag rely on two things that nothing has confirmed: that GHCR answers a manifest `HEAD` for an absent tag, including one in a package that does not exist yet, with exactly 404, and that its token endpoint accepts the actor and the workflow's token as basic authentication for the `pull` scope. Any other answer stops the run before anything is pushed, so the failure mode is a first release that stops at the check, not one that overwrites; if that happens the check needs a change, and it is not to be bypassed.
-- **`apptainer push` and the SIF package.** Both legs push to the one package, `nemar-python-sif`. The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release works, is unconfirmed: the first release creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. The second release is the likely point of failure; "When a run fails after the image was pushed" says what to do then.
+- **cosign and GHCR: observed once.** On run 46053848809 the signing commands ran against GHCR, and the `cosign verify` in the same job passed for both image digests and both SIF artifact digests. The existence checks for the `<version>-<flavor>` tags (`<version>-cpu` and `<version>-cuda`, one per leg) and the SIF tag rely on GHCR answering a manifest `HEAD` for an absent tag with exactly 404, and on its token endpoint accepting the actor and the workflow's token as basic authentication for the `pull` scope. That run observed both: each of the four checks answered `is absent (HTTP 404)`. Whether the `nemar-python-sif` package existed before that run is not recorded here, so a 404 from a package that does not exist yet is not separately confirmed. Any other answer stops the run before anything is pushed, so the failure mode is a first release that stops at the check, not one that overwrites; if that happens the check needs a change, and it is not to be bypassed.
+- **`apptainer push` and the SIF package.** Both legs push to the one package, `nemar-python-sif`. The SIF repository is created by `apptainer push`, which cannot set `org.opencontainers.image.source`, so GHCR does not link that package to this repository by itself. Whether the workflow's token may write to it, and so whether the second release image works, is unconfirmed: the first release image creates the package with the workflow's token, and a later push needs the package linked to the repository (package settings) with write access for it. On run 46053848809 both legs pushed to it with the workflow's token (the `cpu` leg first), but no later run has. The second release image is the likely point of failure; "When a run fails after the image was pushed" says what to do then.
 
 ### The owner's controls (not in place)
 
@@ -315,9 +319,9 @@ These are the repository owner's to set, and none exists today (no ruleset, no b
 - branch protection or a ruleset on `main` that requires review, and
 - optionally an environment with required reviewers (and a deployment rule limited to `main` and those tags) on the `publish` and `sign` jobs; the workflow names no environment today, so using one needs a one-line change to each job.
 
-Also the owner's, before the first release:
+Also the owner's (the first release image, 0.1.2, has been published; whether each item is done is not recorded here):
 
-- confirm that GHCR publishing is enabled for the repository;
+- confirm that GHCR publishing is enabled for the repository (done: run 46053848809 pushed both images);
 - set the packages `nemar-python` and `nemar-python-sif` public (a new GHCR package starts private) so a node can pull without credentials;
 - link `nemar-python-sif` to this repository and give the workflow write access to it (see above).
 

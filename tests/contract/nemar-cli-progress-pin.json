@@ -95,6 +95,7 @@
     "local_launch_contract": "shared/contract/compute-local-launch.ts",
     "recipe_progress_contract": "shared/contract/compute-recipe-progress.ts",
     "results_report_contract": "shared/contract/compute-results-report.ts",
-    "launch_contract": "shared/contract/compute-launch.ts"
+    "launch_contract": "shared/contract/compute-launch.ts",
+    "outputs_body_limit": "backend/src/services/compute-records.ts"
   }
 }

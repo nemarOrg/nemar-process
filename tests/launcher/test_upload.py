@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
 from callbacks import PRESIGN_SIGNATURE
 from harness import JOB_ID, TOKEN, wire_encode
 from jsonschema import Draft202012Validator
+from nemar_launch import net, upload
 from nemar_launch import spec as spec_mod
 
 WRITE = (
@@ -87,7 +89,8 @@ def test_an_expired_address_is_requested_once_more_and_then_works(rig):
     rig.callbacks.expire_urls_once = True
     launch = rig.launch(rig.script_spec(WRITE))
     assert launch.exit == 0, launch.log
-    assert len(requests_to(rig, "/outputs")) == 2
+    first, second = requests_to(rig, "/outputs")
+    assert first.body == second.body  # the request is encoded once and sent again as it was
     assert any(e.startswith("put-403:") for e in rig.callbacks.events)
     assert len(uploaded_outputs(rig)) == 3
     assert rig.callbacks.events[-1] == "complete"
@@ -304,3 +307,39 @@ def test_other_refusals_of_complete_are_not_retried(rig):
     assert launch.exit == 16
     assert launch.result["detail"] == "complete_refused"
     assert rig.callbacks.events.count("complete") == 1
+
+
+# ---- the outputs answer is read up to a bound, never cut short -----------------------------------
+
+
+def outputs_url(rig):
+    return "{}/compute/jobs/{}/outputs".format(rig.server.base_url, JOB_ID)
+
+
+def test_post_json_reads_an_answer_of_exactly_its_limit_and_refuses_one_byte_more(rig):
+    answer = b'{"uploads":[]}'
+    rig.callbacks.outputs_raw = answer + b" " * 100
+    status, parsed = net.post_json(outputs_url(rig), b"{}", TOKEN, response_limit=len(answer) + 100)
+    assert (status, parsed) == (200, {"uploads": []})
+    with pytest.raises(net.HttpFailure) as info:
+        net.post_json(outputs_url(rig), b"{}", TOKEN, response_limit=len(answer) + 99)
+    assert (info.value.word, info.value.status, info.value.retryable) == ("too_large", 200, False)
+
+
+def test_the_outputs_answers_bound_grows_with_the_files():
+    assert upload.outputs_response_limit(0) == net.MAX_JSON_RESPONSE
+    assert upload.outputs_response_limit(100_004) == net.MAX_JSON_RESPONSE + 100_004 * 8192
+
+
+def test_an_outputs_answer_over_its_bound_fails_the_upload_as_too_large(rig):
+    # Three outputs and the four launcher files: the answer may take 64 MiB and 7 x 8 KiB.
+    over = upload.outputs_response_limit(7) + 1
+    rig.callbacks.outputs_raw = b'{"uploads":[]}' + b" " * (over - 14)
+    launch = rig.launch(rig.script_spec(WRITE))
+    assert launch.exit == 16
+    assert launch.result["failure_code"] == "result_upload_failed"
+    assert launch.result["detail"] == "fetch_failed"
+    assert "too_large" in launch.log
+    assert (
+        len(requests_to(rig, "/outputs")) == 2
+    )  # not retried: the outputs request, then the launcher's own

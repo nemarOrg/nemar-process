@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import json
 import os
 import re
 import signal
@@ -931,9 +930,10 @@ def output_path_ok(relative: str, job_id: str) -> bool:
 
 
 def _request_entry_bytes(relative: str, size: int) -> int:
-    """The bytes one output takes in the outputs request: its compact JSON entry and a comma."""
+    """The bytes one output takes in the outputs request: its entry as ``net.encode_json`` writes
+    the request (``Uploader`` measures the same encoding) and a comma."""
     entry = {"path": relative, "size": size, "sha256": "0" * 64}
-    return len(json.dumps(entry, separators=(",", ":"))) + 1
+    return len(net.encode_json(entry)) + 1
 
 
 def _output_path_schema() -> dict[str, Any]:
@@ -1122,11 +1122,12 @@ def finalize_outputs(
             if info.st_size > max_file_bytes:
                 block(Failure("result_upload_failed", "results_too_large", "outputs too large"))
                 continue
-            # The outputs request lists every file, and the Worker refuses one over 1 MiB: count the
-            # entries as they come (the size and hash have fixed widths, so an estimate is exact
-            # enough) and refuse the moment they cannot fit, before hashing up to 100,000 files only
-            # for the upload to refuse them. The launcher's own files are not counted here, so this
-            # only ever refuses what could not be sent anyway; `Uploader` checks the whole body.
+            # The outputs request lists every file, and the launcher sends none over
+            # OUTPUTS_REQUEST_MAX_BYTES (the Worker's ceiling): count the entries as they come (the
+            # size and hash have fixed widths, so an estimate is exact enough) and refuse the moment
+            # they cannot fit, before hashing up to 100,000 files only for the upload to refuse
+            # them. The launcher's own files are not counted here, so this only ever refuses what
+            # could not be sent anyway; `Uploader` checks the whole body against the same cap.
             request_bytes += _request_entry_bytes(relative, info.st_size)
             if request_bytes > OUTPUTS_REQUEST_MAX_BYTES:
                 block(Failure("result_upload_failed", "too_many_outputs", "the request is too big"))

@@ -358,6 +358,17 @@ def test_a_2xx_that_is_not_json_is_accepted_and_the_posts_go_on(tmp_path, routes
     assert not any("posts_stopped" in line for line in log.lines)
 
 
+def test_a_2xx_over_the_answer_limit_is_accepted_and_the_posts_go_on(tmp_path, routes, fast):
+    callbacks, server = routes
+    callbacks.progress_queue = [(200, b"{" + b" " * net.MAX_JSON_RESPONSE + b"}")] * 2
+    log = Lines()
+    reporter, _launcher = reporter_for(tmp_path, server.base_url, log)
+    run_for(reporter, 0.9)
+    assert len(callbacks.progress_requests) >= 3
+    assert reporter.posted >= 3
+    assert not any("posts_stopped" in line for line in log.lines)
+
+
 def test_a_reporter_that_cannot_start_leaves_the_launch_to_finish(rig, fast, monkeypatch):
     """No thread to be had (``RuntimeError: can't start new thread``): one word, and the job runs."""
 
