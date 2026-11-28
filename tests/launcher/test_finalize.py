@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from harness import JOB_ID, encode_spec, make_bundle
-from nemar_launch import run, upload
+from nemar_launch import codes, net, run, upload
 from nemar_launch import spec as spec_mod
 from nemar_launch.provenance import Documents, Log
 
@@ -299,12 +299,50 @@ def make_uploader(rig):
     return upload.Uploader(job, docs, log, lambda s: None, threading.Event(), None)
 
 
-def test_an_outputs_request_over_one_mebibyte_is_refused_before_it_is_sent(rig):
+def test_the_cap_is_the_most_the_workers_limit_can_be():
+    """The launcher caps at the Worker's ceiling, so its cap is never below the Worker's own limit
+    (``outputsBodyLimitBytes``, replayed here from the constants nemar-cli's are compared with) for
+    any result limit a job can have, and it is above the 1 MiB that held the launcher to about 8,000
+    entries."""
+
+    def worker_limit(max_files):
+        wanted = codes.OUTPUTS_BODY_BASE_BYTES + max_files * codes.OUTPUT_ENTRY_BYTES_MAX
+        return min(codes.OUTPUTS_BODY_CEILING_BYTES, max(codes.OUTPUTS_BODY_FLOOR_BYTES, wanted))
+
+    assert codes.OUTPUTS_REQUEST_MAX_BYTES == 64 * 1024 * 1024
+    assert max(worker_limit(n) for n in range(1, codes.MAX_OUTPUT_FILES + 1)) == (
+        codes.OUTPUTS_REQUEST_MAX_BYTES
+    )
+    assert worker_limit(25_000) == 8192 + 25_000 * 1700  # nemar-ica's and nemar-floor's maxFiles
+
+
+def test_a_request_of_twenty_five_thousand_outputs_is_built_and_encoded_once(rig):
+    """nemar-ica's and nemar-floor's result limit (25,000 files) is about 12 MiB of request, three
+    times the old 1 MiB cap: the body passes the launcher's checks and is encoded once."""
     uploader = make_uploader(rig)
-    files = [{"path": "f{}".format(i), "size": 1, "sha256": "a" * 64} for i in range(12000)]
+    files = [
+        {"path": "sub-{:05d}/eeg/{}".format(i, "x" * 60), "size": 1, "sha256": "a" * 64}
+        for i in range(25_000)
+    ]
+    uploader._set_body(files)
+    assert len(uploader._body["outputs"]) == 25_000
+    assert 8_000 * 160 < len(uploader._data) < codes.OUTPUTS_REQUEST_MAX_BYTES
+    assert json.loads(uploader._data) == uploader._body
+    assert rig.server.requests == []
+
+
+def test_an_outputs_request_over_the_cap_is_refused_before_it_is_sent(rig):
+    # 24,000 entries of 500 non-ASCII characters: each is written as a 6-byte escape, so an entry
+    # is about 3,100 bytes and the request about 71 MiB, over the 64 MiB cap.
+    uploader = make_uploader(rig)
+    files = [
+        {"path": "{:05d}{}".format(i, "\u00e9" * 495), "size": 1, "sha256": "a" * 64}
+        for i in range(24_000)
+    ]
     with pytest.raises(upload.UploadFailed) as info:
         uploader._set_body(files)
     assert info.value.detail == "too_many_outputs"
+    assert uploader._data == b""
     assert rig.server.requests == []
 
 
@@ -414,7 +452,14 @@ def long_named_tree(work, count, unreadable=0):
         victim.chmod(0o000)
 
 
-def test_outputs_that_cannot_fit_the_request_are_refused_before_any_is_hashed(tmp_path):
+def test_outputs_that_cannot_fit_the_request_are_refused_before_any_is_hashed(
+    tmp_path, monkeypatch
+):
+    # Filling the real 64 MiB cap takes over 40,000 files of the longest names a path can carry,
+    # which is slow to create; the walk's comparison is the same at any cap, so the cap is lowered
+    # to 1 MiB here (the constant, not the code that counts against it). The request's own check
+    # at the real cap is test_an_outputs_request_over_the_cap_is_refused_before_it_is_sent.
+    monkeypatch.setattr(run, "OUTPUTS_REQUEST_MAX_BYTES", 1024 * 1024)
     work = tmp_path / "work"
     long_named_tree(work, 2300, unreadable=2)
     try:
@@ -428,12 +473,30 @@ def test_outputs_that_cannot_fit_the_request_are_refused_before_any_is_hashed(tm
     assert (done.failure.code, done.failure.detail) == ("result_upload_failed", "too_many_outputs")
 
 
-def test_a_request_that_fits_is_not_refused_early(tmp_path):
+def test_the_walks_estimate_is_the_requests_own_size(tmp_path, rig):
+    """The walk counts each entry as the request will carry it, so its running total and the
+    request's length differ only by the launcher's four files and the braces."""
     work = tmp_path / "work"
-    long_named_tree(work, 1500)  # about 750 KB of request
+    long_named_tree(work, 50)
+    done = finalize(work, max_files=100_000)
+    estimate = sum(run._request_entry_bytes(f["path"], f["size"]) for f in done.files)
+    uploader = make_uploader(rig)
+    uploader._set_body(done.files)
+    outputs_only = len(net.encode_json({"outputs": uploader._body["outputs"]}))
+    assert estimate == outputs_only - len('{"outputs":[]}') + 1
+    assert estimate < len(uploader._data)
+
+
+def test_twenty_five_thousand_outputs_are_not_refused_early(tmp_path):
+    """nemar-ica's and nemar-floor's result limit: 25,000 files of about 500-byte entries is about
+    12 MiB of request, which the old 1 MiB cap (about 8,000 entries) refused in the walk."""
+    work = tmp_path / "work"
+    long_named_tree(work, 25_000)
     done = finalize(work, max_files=100_000)
     assert done.failure is None
-    assert len(done.files) == 1500
+    assert len(done.files) == 25_000
+    estimate = sum(run._request_entry_bytes(f["path"], f["size"]) for f in done.files)
+    assert 1024 * 1024 < estimate < run.OUTPUTS_REQUEST_MAX_BYTES
 
 
 # ---- a SIGTERM during finalization --------------------------------------------------------------------
