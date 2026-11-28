@@ -198,7 +198,7 @@ Its entry script writes the program's exit status to `tapisjob.exitcode` in the 
 What it promises: it never invents (a command that fails, is missing or times out is reported as that, and what it would have said is `null`, never zero); it never prints the token, never gives it to a child process and never follows a redirect; it posts at most 1 MiB, cutting the daily accounting rows from the end and saying so; and it tries three times, only for a failure that may clear.
 The accounting export carries a job's id, partition, state, elapsed time, allocated resources and times, and no user names.
 
-The NEMAR route it posts to is built in the gateway epic and does not exist yet.
+The NEMAR route it posts to, `POST /compute/observer`, exists in nemar-cli's code (built in the gateway epic) and takes a token an administrator mints for one run.
 If the site does not allow a `FORK` application to run these commands on a login node, the observer cannot run as designed; that is question 6 of the design page, and an escalation, not something to work around.
 
 ## Validating `nemar-ica` on a graphics processing unit by hand
