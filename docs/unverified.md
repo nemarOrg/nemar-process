@@ -68,7 +68,8 @@ None of this has been observed on the node's runtime, which may be a commercial 
 - **What the presigned addresses require.** The launcher PUTs with `Content-Type: application/octet-stream`, a `Content-Length`, and no token; if the Worker signs other headers, the PUT fails with a 403 and the address is re-requested (up to 2 times for each file).
   It sends a `nemar-launch/<version>` `User-Agent` on every request, in case a content delivery network rejects the default.
 - **A per-object checksum header (deferred).** A `x-amz-checksum-sha256` header on each output PUT would let storage verify the bytes, but it has to be signed by the Worker together with the address, so the launcher does NOT send it. Decide it with a real R2 check in the gateway epic.
-- **The Worker's responses.** The outputs and bundle routes do not exist yet; the stand-ins follow the schema's `$defs`.
+- **The Worker's responses.** The bundle, outputs and complete routes exist in nemar-cli's code (`POST /compute/jobs/:id/bundle`, `POST /compute/jobs/:id/outputs`, `POST /compute/jobs/:id/outputs/complete`), behind its compute switch (`COMPUTE_ENABLED`, which the owner sets); this does not mean they are live.
+  The stand-ins follow the schema's `$defs`.
   The error body is read for a `code` word only, and only the three results refusals (`results_too_large`, `results_quota_exceeded`, `too_many_outputs`) are recorded as they are; any other refusal is `outputs_refused` or `complete_refused`.
   The launcher posts `{}` as the body of the bundle and complete routes, retries `complete` on a 409 `results_incomplete`, and so may call it more than once: it must be idempotent.
 - **A body over a job's own outputs limit.** The launcher caps the outputs request at 64 MiB, the most the Worker's `outputsBodyLimitBytes(maxFiles)` can be, because the launch specification does not carry the job's result limit; so for any job whose `maxFiles` is under about 39,000 (where the Worker's limit is below 64 MiB) the launcher can send a body the Worker will not read.
@@ -99,24 +100,33 @@ None of this has been observed on the node's runtime, which may be a commercial 
 
 [images.md](images.md) says what the image is and how a consumer refers to it.
 CI builds the image, builds a SIF from it and smoke-tests both, with the community Apptainer 1.5.5.
-These are the facts that nothing has confirmed yet.
+These are the facts that nothing has confirmed yet, and what the first release run observed.
 
-- **The push, sign and release path has not run.** Pushing to GHCR, `cosign sign`, `cosign verify`, the SIF built from a digest, its push as an OCI artifact and the release asset all run only on a version tag or a dispatch from `main`, and only for a commit reachable from `main`.
+- **The release attachment has not run.** The push and sign path ran once, on the dispatch from `main` of run 46053848809 (image 0.1.2).
+  The job that attaches the digest record to a release runs only on a tag, and was skipped there, so no release carries a digest record yet.
 - **SIF compatibility with the cluster's Apptainer variant is unverified.** The cluster may run a commercial Singularity; a SIF from this image has not been run there. It is the operator's test, with `--containall --cleanenv --no-home --no-mount bind-paths` and the smoke test.
 - **The image's environment under `--cleanenv`: observed once, with a limited scope.** The Dockerfile sets `PATH` (the virtual environment first), the thread counts and `PYTHONHASHSEED`; the launcher runs the entry with `python` from the image's `PATH`, so the launcher depends on them surviving `apptainer exec --containall --cleanenv`. The `test` job of run 41909394410 (pull request 8) passed that check: the community Apptainer 1.5.5 on a hosted runner, with a SIF built from a local image archive, not from the pushed digest, and not the cluster's variant.
 - **A SIF's content hash is not verified by the launcher** (see above); the release's digest file records the file's SHA-256, but it is an unsigned release asset, so it guards only against a corrupted copy.
-- **The existence checks rely on GHCR answering with exactly 404.** `scripts/check_tag_absent.py` lets a publication go on only when a manifest `HEAD` for the tag answers 404, and stops on every other answer. Unconfirmed: that GHCR answers 404 for an absent tag, including in a package that does not exist yet, and that its token endpoint accepts the actor and the workflow's token as basic authentication. If the first release stops at this check, the check needs a change; it is not bypassed.
+- **cosign and GHCR: observed once.** On run 46053848809 the signing commands ran against GHCR, and the `cosign verify` in the same job passed for both image digests and both SIF artifact digests.
+  The existence checks (`scripts/check_tag_absent.py`) rely on GHCR answering a manifest `HEAD` for an absent tag with exactly 404, and on the token endpoint accepting the actor and the workflow's token as basic authentication for the `pull` scope; that run observed both, and each of the four checks answered `is absent (HTTP 404)`.
+  Unconfirmed: a 404 from a package that does not exist yet, since whether `nemar-python-sif` existed before that run is not recorded.
+  Any other answer stops the run before anything is pushed; if that happens the check needs a change, and it is not bypassed.
 - **Signature verification** needs cosign 3 or newer; older versions may not read signatures made by cosign 3. What a passing check proves, and what it does not, is in [images.md](images.md).
 - **Build requirements are pinned by version, not by hash.** `docopt` and `eegprep-lean` are built from source during the image build, in an isolated environment; their build backend (`setuptools`) is pinned to the locked version, but PyPI is still trusted for the bytes of that version.
 - **Thread counts.** The image pins one thread per math library; a recipe that wants more must set them, and what is right on a node is unmeasured.
 
 ### Owner items for the image
 
-None of these is in place; each needs a repository setting, not a code change.
+Each needs a repository setting, not a code change.
+The protection below is not in place; the first release image (0.1.2) has been published, and whether each GHCR item is done is not recorded here ([images.md](images.md)).
 
-- **Protect publication.** The workflow refuses a commit that is not reachable from `main`, but that check lives in a file the tagged commit supplies. A tag ruleset on `image-nemar-python-v*`, branch protection or a ruleset on `main`, or an environment with required reviewers on the `publish` and `sign` jobs (which the workflow does not name today) would stop a person with write access who edits the file and pushes a tag. Until one exists, a signature that passes the documented check does not mean the commit was reviewed.
-- **GHCR.** Confirm that publishing is enabled for the repository and set `nemar-python` and `nemar-python-sif` public so a node can pull without credentials.
-- **The SIF package.** `apptainer push` creates `nemar-python-sif`, and it cannot set `org.opencontainers.image.source`, so GHCR does not link the package to this repository by itself. The first release creates it with the workflow's token; link the package to the repository and give the workflow write access before the first release. The second release is the likely point of failure; [images.md](images.md) says what to do when a run fails after the image was pushed (re-run only the failed jobs, never use an unsigned tag, publish a new version if the SIF tag already exists).
+- **Protect publication.** The workflow refuses a commit that is not reachable from `main`, but that check lives in a file the tagged commit supplies.
+  A tag ruleset on `image-nemar-python-v*`, branch protection or a ruleset on `main`, or an environment with required reviewers on the `publish` and `sign` jobs (which the workflow does not name today) would stop a person with write access who edits the file and pushes a tag.
+  Until one exists, a signature that passes the documented check does not mean the commit was reviewed.
+- **GHCR.** Publishing is enabled for the repository (run 46053848809 pushed both images); set `nemar-python` and `nemar-python-sif` public (a new GHCR package starts private) so a node can pull without credentials.
+- **The SIF package.** `apptainer push` creates `nemar-python-sif`, and it cannot set `org.opencontainers.image.source`, so GHCR does not link the package to this repository by itself.
+  The first release image created it with the workflow's token: on run 46053848809 both legs pushed to it, and no later run has.
+  A later push needs the package linked to the repository with write access for the workflow, so the second release image is the likely point of failure; [images.md](images.md) says what to do when a run fails after the image was pushed (re-run only the failed jobs, never use an unsigned tag, publish a new version if the SIF tag already exists).
 
 ## The recipes (`nemar-floor`)
 
